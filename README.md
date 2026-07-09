@@ -79,15 +79,18 @@ you're using that day, rather than a feature bolted onto one product.
   mangled technical vocabulary — under evaluation, not assumed necessary.
   See Status.
 
-**Reviewing this codebase?** `.tours/` has two [CodeTour](https://marketplace.visualstudio.com/items?itemName=vsls-contrib.codetour)
+**Reviewing this codebase?** `.tours/` has three [CodeTour](https://marketplace.visualstudio.com/items?itemName=vsls-contrib.codetour)
 walkthroughs (VS Code will prompt to install the extension via
 `.vscode/extensions.json`): *1. Architecture & Data Flow* follows one
 utterance through every pipeline stage with the data handoff called out at
-each boundary, and *2. Review Findings: Security & Performance* visits the
-concrete bugs a review pass found and fixed, in place. Each step is
-anchored by both a line number and a text pattern so the tour stays
-accurate as the code around it changes — see the comment at the top of
-either `.tour` file if you're adding a new step.
+each boundary; *2. Review Findings: Security & Performance* visits the
+concrete bugs a review pass found and fixed, in place; *3. Extension
+Points: Modularity & Pluggability* shows collaborators exactly where to
+plug in a new backend adapter or TTS engine, and — just as important —
+which modules are deliberately single-implementation, not extension
+points. Each step is anchored by both a line number and a text pattern so
+the tour stays accurate as the code around it changes — see the comment
+at the top of any `.tour` file if you're adding a new step.
 
 ## Prior art
 

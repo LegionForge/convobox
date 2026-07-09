@@ -1,0 +1,69 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "3. Extension Points: Modularity & Pluggability",
+  "description": "Where collaborators can plug in their own modules (a new backend adapter, a new TTS engine), how the two real extension points are shaped, and — just as important — which modules are deliberately NOT pluggable and why, so effort isn't wasted fighting the existing design. Companion to '1. Architecture & Data Flow'.",
+  "steps": [
+    {
+      "title": "Start here",
+      "description": "**Only two things in this codebase are actually designed to be pluggable: the backend adapter and the TTS engine.** Everything else — audio capture/playback, VAD, STT, safeword detection — is a single concrete class with no interface, on purpose.\n\nThat's a deliberate, hard-won design choice, not an oversight: an earlier related project (`voice-opencode`) built a multi-engine STT/TTS factory with cloud fallback *before* a single local engine actually worked end to end — pluggability was built before there was anything real to abstract over. See `README.md` → \"Lessons from an earlier attempt\" for the full story.\n\nSo: this tour shows you exactly where to plug in, using the two `ABC`s that exist specifically because multiple implementations were anticipated — and calls out where NOT to add one."
+    },
+    {
+      "file": "src/convobox/adapters/base.py",
+      "line": 32,
+      "pattern": "class BackendAdapter\\(ABC\\):",
+      "description": "**Extension point 1: `BackendAdapter`.** One implementation per target CLI. Today: OpenCode. Documented as intended, not yet built: Claude Code, Codex.\n\nThe contract is 5 methods: `send_text`, `send_interject`, `send_hard_stop`, `is_busy`, `events`. Read the class docstring here carefully before implementing a new one — it's not just a method list, it draws hard semantic lines (interject vs. hard-stop must never collapse into one \"interrupt\" concept) and an honesty clause about what `send_hard_stop` can actually guarantee if the target backend has no real cancel endpoint."
+    },
+    {
+      "file": "src/convobox/adapters/opencode.py",
+      "line": 27,
+      "pattern": "class OpenCodeAdapter\\(BackendAdapter\\):",
+      "description": "**The reference implementation — your template for a new adapter.** `OpenCodeAdapter` is a thin typed client over OpenCode's HTTP+SSE API: `POST /api/sessions`, `GET /api/sessions/:id/events` (streamed), `POST /api/sessions/:id/messages`.\n\nA Claude Code or Codex adapter would follow the same shape: translate the 5-method contract into whatever that tool's headless/structured interface actually looks like, preferring that over PTY/keystroke scraping (see `README.md` → Direction). Look at `_ensure_session`, `_post_message`, and `events()` here as the pattern to copy — including the `warn_if_insecure` treatment if the new backend also talks over a network."
+    },
+    {
+      "file": "src/convobox/config.py",
+      "line": 40,
+      "pattern": "class BackendConfig\\(BaseModel\\):",
+      "description": "**The config-side selector — declared, not yet wired.** `BackendConfig.name` (default `\"opencode\"`) is clearly meant to select which adapter gets constructed, the same way a plugin registry would. Worth knowing honestly: **nothing currently reads this field to construct an adapter** — there's no factory function mapping `name -> AdapterClass` anywhere yet. `OpenCodeAdapter` is always constructed directly wherever it's used today.\n\nIf you're adding a second adapter, this is the natural place to also add that factory — don't assume it already exists just because the config field does."
+    },
+    {
+      "file": "src/convobox/tts/base.py",
+      "line": 24,
+      "pattern": "class TTSEngine\\(ABC\\):",
+      "description": "**Extension point 2: `TTSEngine`.** One implementation per local TTS backend. Today: Piper. Named as a future candidate in `README.md` → Component software: Kokoro.\n\nThe contract: `sample_rate` (property), `synthesize_stream` (the one concrete engines must implement), `stop`, `is_speaking`. Read the docstring here too — it states a hard requirement: **every concrete engine must call `sanitize_text` before synthesizing**, since the input text originates from untrusted LLM output. That's not optional style guidance, it's the security boundary this whole TTS layer exists to enforce (see the '2. Review Findings' tour for why)."
+    },
+    {
+      "file": "src/convobox/tts/piper.py",
+      "line": 16,
+      "pattern": "class PiperTTSEngine\\(TTSEngine\\):",
+      "description": "**The reference implementation — your template for a new TTS engine.** Notice the shape a new engine (e.g. Kokoro) would need to match: load whatever voice/model once at construction, expose `sample_rate` from it, and implement `synthesize_stream` as a true async generator — bridging a blocking/sync synthesis call through a background thread + queue if the underlying library isn't natively async (see `synthesize_stream` a bit further down, and the '1. Architecture & Data Flow' tour for why that bridge pattern matters for time-to-first-audio)."
+    },
+    {
+      "file": "src/convobox/config.py",
+      "line": 29,
+      "pattern": "class TTSConfig\\(BaseModel\\):",
+      "description": "**Same honest gap on the TTS side.** `TTSConfig.engine` (default `\"piper\"`) is the declared selector, but — same caveat as `BackendConfig` a few steps back — nothing wires it to actual construction yet. Also worth noting: `TTSConfig`'s fields (`voice`, `rate`, `volume`) don't actually match `PiperTTSEngine`'s real constructor (`model_path`, `config_path`) — this config shape was written before the concrete engine's real API was pinned down. If you're the one wiring the factory, reconciling this mismatch is part of that work, not a pre-solved problem."
+    },
+    {
+      "file": "src/convobox/orchestrator/orchestrator.py",
+      "line": 30,
+      "pattern": "tts: TTSEngine \\| None = None,",
+      "description": "**The extension point that actually works today, proven by tests.** `Orchestrator` takes `tts`/`player` as optional constructor arguments — plain dependency injection, no factory needed here. Anything satisfying the `TTSEngine` ABC (or, for `player`, a real `AudioPlayer` subclass — see the next step for why that one isn't an ABC) can be passed in without touching a single line of `Orchestrator`'s internals.\n\nThis is exactly how the test suite substitutes fakes for real audio hardware — not a theoretical claim, see the next step."
+    },
+    {
+      "file": "tests/test_orchestrator.py",
+      "line": 40,
+      "pattern": "class FakeTTSEngine\\(TTSEngine\\):",
+      "description": "**Proof the injection point works.** `FakeTTSEngine` is a real subclass of the `TTSEngine` ABC (it has to be — mypy rejects a duck-typed stand-in, see `TESTING.md` → Type checking) substituted straight into `Orchestrator`'s constructor in place of `PiperTTSEngine`. No real audio hardware, no model downloads, and the orchestrator's routing/speaking logic is exercised exactly as it would be with a real engine.\n\n`FakePlayer` a few lines down does the same for `AudioPlayer` — but subclasses the concrete class rather than an ABC, since `AudioPlayer` has none (see the next two steps for why that's deliberate, not a gap to fix)."
+    },
+    {
+      "file": "src/convobox/audio/capture.py",
+      "line": 21,
+      "pattern": "class MicrophoneStream:",
+      "description": "**What's deliberately NOT pluggable, part 1.** `MicrophoneStream` (and `AudioPlayer`, `UtteranceSegmenter`, `LocalTranscriber`, `SafewordDetector` — none of them) has no ABC, no factory, no \"engine\" config field. Each is a single concrete class doing one job.\n\nThis is a design choice, not a TODO: this codebase currently needs exactly one working implementation per role, and building a plugin abstraction for a role with only one real implementation adds real complexity (an interface to maintain, a factory to keep in sync, a config schema to reconcile) for zero present benefit. If you have a second real, working implementation of one of these (a different VAD library, a Windows-native audio backend, etc.), that's the moment to introduce an ABC here — not before."
+    },
+    {
+      "title": "Adding a new adapter or TTS engine: checklist",
+      "description": "**New `BackendAdapter`** (e.g. Claude Code, Codex):\n1. Subclass `BackendAdapter`, implement all 5 methods against that tool's actual headless/structured interface.\n2. Be honest in `send_hard_stop`'s docstring about what it can/can't guarantee — copy `OpenCodeAdapter`'s pattern if the backend has no real cancel endpoint, don't imply a guarantee you can't keep.\n3. Add a factory (`BackendConfig.name -> AdapterClass`) if one still doesn't exist by the time you do this.\n4. Test against a real server over a real loopback socket, the way `tests/test_opencode_adapter.py` does — not just mocks of your own HTTP client.\n\n**New `TTSEngine`** (e.g. Kokoro):\n1. Subclass `TTSEngine`, implement `sample_rate` and `synthesize_stream`.\n2. Call `sanitize_text` on the input **before** synthesizing — non-negotiable, see step 5 of this tour.\n3. If the underlying library's synthesis call is blocking/sync, bridge it through a background thread + queue the way `PiperTTSEngine` does — don't buffer the whole response before yielding anything (see the '2. Review Findings' tour for why that was a real, measured regression when it happened here).\n4. Test with a fake voice object (see `tests/test_tts.py`'s `_FakeVoice`) — no real model download needed for unit tests.\n\nFor either: run `pytest tests/` and `mypy src/ scripts/ tests/ --ignore-missing-imports` (see `TESTING.md`) before considering it done."
+    }
+  ]
+}
