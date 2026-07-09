@@ -280,7 +280,7 @@ orchestrator→TTS wiring uses `synthesize()` (whole-utterance) rather than
 streaming synthesized audio straight into playback as it arrives.
 
 A security + performance pass (8 independent finder angles, each claim
-verified against the actual code before acting) found and fixed 6 real
+verified against the actual code before acting) found and fixed 7 real
 bugs — worth knowing about even though they're fixed, since a couple were
 subtle:
 
@@ -315,25 +315,53 @@ subtle:
   host for the scheme, so the `scheme == "http"` check never fired —
   confirmed both that this parse behavior is real and that `httpx` accepts
   such a URL without complaint. Now warns on any non-http/https scheme too.
+- **`MicrophoneStream.read()` and `.stream()` disagreed on end-of-stream.**
+  After `close()`, `.stream()`'s async generator ended cleanly but `.read()`
+  raised `RuntimeError` — and since it re-enqueues the close-sentinel before
+  raising, every call after `close()` raises again rather than reaching a
+  quiet terminal state. Both now documented/behave consistently (clean
+  return for the async path, an explicit `RuntimeError` for the sync path
+  — a deliberate difference, not an oversight, since a sync consumer can't
+  just "stop iterating" the way an async-for can).
 - Two small cleanups: an unused `MicrophoneStream.chunks()` method and a
   redundant `OpenCodeAdapter._sse_source` instance field (only ever used
   immediately after assignment) were removed.
 
-One finding was investigated and refuted rather than fixed: a concern that
-`MicrophoneStream.close()` doesn't join the sounddevice callback thread
-before enqueueing its close-sentinel, risking a real chunk landing after
-it. `sounddevice`'s `stream.stop()` is documented to block until pending
-processing completes, and `close()`/the sentinel-enqueue happen strictly
-after — so the ordering is already guaranteed correct by the underlying
-library, no fix needed.
+One finding came back **PLAUSIBLE rather than cleanly refuted**, and an
+earlier draft of this section overstated it as refuted — corrected here:
+whether a real audio chunk could land in the queue *after*
+`MicrophoneStream.close()`'s sentinel (because `_callback` has no lock
+against `close()`) rests entirely on `sounddevice`/PortAudio's documented
+guarantee that `stop()` blocks until pending callbacks finish — a
+guarantee this code trusts but does not itself enforce with any lock or
+flag. If that external contract ever doesn't hold, a stray chunk could be
+stranded behind the sentinel (harmless — it's just never read, not a
+correctness hazard beyond that). Not fixed: adding internal synchronization
+to guard against a well-established, actively-relied-upon PortAudio
+guarantee breaking would be defending against a scenario with no evidence
+it occurs, at the cost of real complexity.
+
+**Confirmed but deliberately not fixed, low practical impact:**
+`UtteranceSegmenter` runs Silero inference on every 32ms window regardless
+of triggered state (verified: `_process_window`'s model call happens before
+the triggered check) — but this is inherent to how VAD works, not
+avoidable waste: the model has to run continuously to detect speech onset
+in the first place, and Silero's per-window cost is small enough that it
+hasn't shown up as a bottleneck in any measurement so far. Separately, the
+`np.concatenate` of ~32ms window slices at utterance end happens
+synchronously on the STT hand-off path — real, but the absolute data size
+involved (hundreds of KB for a several-second utterance) makes this a
+sub-millisecond operation, not a meaningful latency contributor next to
+STT's ~150–200ms. Worth revisiting with actual profiling data if latency
+ever becomes a measured problem, not worth speculatively optimizing now.
 
 Known, deliberately deferred (not wrong, just lower-value-per-effort right
 now): `AudioPlayer.play()` opens a fresh `OutputStream` per call instead of
 reusing one — real but modest overhead (tens of ms device-open latency per
 spoken response, not a hot per-window cost), and fixing it would require
 reworking a test suite that deliberately asserts today's open/close-per-call
-contract. Revisit once the orchestrator actually drives TTS end to end and
-real latency numbers are available to justify the rework.
+contract. Revisit once real latency numbers from the now-wired
+orchestrator→TTS path are available to justify the rework.
 
 ## Open questions
 
