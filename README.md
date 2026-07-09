@@ -284,12 +284,17 @@ synthesis doesn't stall draining the next backend event, and a hard stop
 now also stops in-progress TTS/playback. 63 automated tests pass
 (`pytest tests/`), mypy is clean across the tree, and `scripts/spike.py`'s
 own async wiring (not just its components) has been run end-to-end with a
-faked mic feed of real synthesized speech. See [TESTING.md](TESTING.md)
-for how to run any of this, including a known blocker: **this development
-machine has no microphone input device**, so the live mic → VAD → STT path
-is unverified on real hardware. Also untested anywhere but macOS —
-`scripts/bootstrap_windows.ps1` is ready for a first Windows run
-(`TESTING.md` → "Testing on Windows"), Linux hasn't been attempted at all.
+faked mic feed of real synthesized speech. Playback has also now run
+against real speaker hardware, not just a mocked `OutputStream` — including
+barge-in genuinely cutting off in-progress audio (see
+[TESTING.md](TESTING.md) for the measured stop-latency number). See
+[TESTING.md](TESTING.md) for how to run any of this, including the one
+remaining hardware gap: **this development machine has no microphone
+input device**, so live mic capture specifically (everything downstream
+of it is now real-hardware-tested) is unverified. Also untested anywhere
+but macOS — `scripts/bootstrap_windows.ps1` is ready for a first Windows
+run (`TESTING.md` → "Testing on Windows"), Linux hasn't been attempted at
+all.
 Nothing here is stable — no Claude Code/Codex adapters yet, config isn't
 threaded through the CLI, and the orchestrator→TTS wiring uses
 `synthesize()` (whole-utterance) rather than streaming synthesized audio

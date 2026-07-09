@@ -122,6 +122,29 @@ hardware (real ambient noise, real mic gain/latency, `sounddevice.InputStream`
 actually opening a real device) — `scripts/spike.py` itself, not just its
 components, needs a real mic attached to close that last gap.
 
+## Real TTS playback through real speakers (barge-in included)
+
+```bash
+.venv/bin/python scripts/playback_smoketest.py
+```
+
+`AudioPlayer` was previously only tested against a mocked `OutputStream`.
+This plays real Piper-synthesized speech through whatever real output
+device is available — this machine has no mic but does have real speaker
+output — and separately tests barge-in against real hardware timing
+instead of a scripted fake delay.
+
+Observed on this machine: a short phrase played to completion with
+`is_playing()` correctly `False`/`True`/`False` before/during/after; a
+12s phrase was cut off by `stop()` after only 0.79s of real playback
+(called at the 0.5s mark) — barge-in genuinely silences audio, not just
+sets a flag. The ~0.29s gap between calling `stop()` and audio actually
+stopping is real measured driver/buffering latency (CoreAudio here) that
+the mocked-`OutputStream` unit tests can't surface, since fake writes
+return instantly. Worth re-measuring if `AudioPlayer`'s block size (1024
+samples) or the persistent-stream-reuse deferral (see README → Status)
+ever changes — that latency number is exactly what'd move.
+
 ## Testing on Windows
 
 Everything above has only ever run on macOS (Apple Silicon). Nothing here
@@ -167,10 +190,12 @@ real input device attached to whatever Windows machine you're testing on.
 
 ## What's not tested at all yet
 
-- TTS playback through real speakers (`AudioPlayer` is unit-tested against
-  a mocked `OutputStream` only).
 - The orchestrator wired to a live OpenCode server (only tested against
-  the in-repo fake server).
-- Barge-in (interrupting TTS playback mid-utterance) end to end.
+  the in-repo fake server) — a real `opencode serve` instance was not
+  reachable in this environment (its npm postinstall failed here) to
+  test against.
+- Live mic input specifically (see the mic → VAD → STT section above) —
+  everything downstream of capture is now real-hardware-tested, capture
+  itself still isn't.
 - Everything on Linux, and everything on Windows until the bootstrap
   script above has actually been run there.
