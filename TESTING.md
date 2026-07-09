@@ -96,12 +96,31 @@ been run against live audio. To actually test it:
    exit cleanly (exercises the safeword path for real).
 
 The VAD segmentation logic itself has been validated against real
-synthesized speech (not live mic, not mocked) — see the "real Silero VAD"
-check referenced in project notes: piped Piper-synthesized audio plus
-silence padding through the actual `UtteranceSegmenter`, correctly
-returning exactly one utterance. What's unverified is the live capture
-path specifically (real ambient noise, real mic gain/latency,
-`sounddevice.InputStream` actually opening on real hardware).
+synthesized speech (not live mic, not mocked): piped Piper-synthesized
+audio plus silence padding through the actual `UtteranceSegmenter`,
+correctly returning exactly one utterance.
+
+**`scripts/spike.py` itself — the actual script's async wiring — has now
+been run for real, end to end, without physical hardware:**
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/spike_smoketest.py
+```
+
+This synthesizes two real utterances with Piper ("Run the test suite
+please." and "Stop stop stop.", with real silence gaps between them),
+feeds that audio through a fake `sounddevice.InputStream` that drives
+`MicrophoneStream`'s real capture callback from a background thread — the
+only thing substituted is the physical hardware — and then runs
+`spike.run()` completely for real: real Silero VAD segmentation, real
+faster-whisper transcription, real safeword detection, real clean exit.
+Observed: both utterances correctly segmented and transcribed, safeword
+correctly matched on the second one, `run()` exited cleanly with no hang.
+
+What's still unverified is specifically the **live capture path** on real
+hardware (real ambient noise, real mic gain/latency, `sounddevice.InputStream`
+actually opening a real device) — `scripts/spike.py` itself, not just its
+components, needs a real mic attached to close that last gap.
 
 ## What's not tested at all yet
 
