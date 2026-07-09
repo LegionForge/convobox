@@ -18,6 +18,15 @@ you're using that day, rather than a feature bolted onto one product.
   a turn.
 - **Local-first.** Speech-to-text and text-to-speech run on-device by
   default. No audio has to leave the machine for the core loop to work.
+  This isn't just a privacy preference: it avoids metered cloud STT/TTS
+  billing, keeps the raw voice-processing step out of the token budget of
+  whatever coding agent you're actually talking to, and gives you a local
+  pipeline you can tune to your own voice. "Local" doesn't mean "hardcoded
+  to the device in front of you," though — the capture/indicator layer and
+  the actual STT/TTS compute should stay decoupled, so the heavy
+  processing can later run on a beefier machine on your own private
+  network (e.g. via Tailscale) with a thin client on a laptop or phone,
+  without leaving infrastructure you control.
 - **Backend-agnostic by design.** A thin adapter interface
   (`send_text`, `send_interject`, `send_hard_stop`, `is_busy`) is
   implemented per backend, preferring each tool's native structured/headless
@@ -89,6 +98,26 @@ projects, and where this one differs:
 None of the above are both backend-agnostic *and* local-first *and*
 full-duplex. That combination is the gap ConvoBox is trying to fill.
 
+## Listening states & indicators
+
+Hands-free use means there's no screen focus to rely on for feedback, so
+state changes need both a visual and (where noted) an auditory indicator,
+Alexa-style. Modeled as an explicit state machine rather than ad hoc flags:
+
+| State | Description | Indicator |
+| --- | --- | --- |
+| Off | Not running | none |
+| Idle (wake-word only) | Passively spotting the wake word; not transcribing general speech | dim visual, no sound |
+| Active listening | Woken; capturing and transcribing speech | visual change + activation earcon |
+| Command captured | Utterance finalized, STT complete | brief distinct acknowledgment cue |
+| Backend working | Target CLI is executing; visually distinct from "listening" since you can still interject | visual only |
+| Responding (TTS playback) | Speaking a response; interruptible at any point (barge-in returns to Active listening) | visual only |
+| **Hard stop (safeword heard)** | Safeword detected; execution is being halted | **its own unmistakable audio/visual class — never a louder variant of another state** |
+| Stopped / muted | Explicitly told to stop; no wake-word spotting either | fully dim, no sound |
+
+Inbound/outbound profanity filtering (what you say vs. what TTS speaks
+back) is planned as a configurable option, off by default.
+
 ## Component software
 
 Current candidate stack for the local pipeline:
@@ -110,6 +139,13 @@ Early design stage. The first concrete artifact is a standalone
 measurement spike — mic → VAD → local STT → logged transcript and latency,
 no backend wiring yet — to get real accuracy and latency numbers before
 committing to any guardrail or adapter design. Nothing here is stable.
+
+## Open questions
+
+- **Licensing model.** Currently MIT. A split model — free for personal
+  use, AGPL (or similar copyleft) for commercial use — is under
+  consideration but not decided. Revisit before this leaves early design
+  stage.
 
 ## License
 
