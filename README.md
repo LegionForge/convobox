@@ -281,16 +281,19 @@ drives TTS itself — a backend TEXT event is stripped of code
 it was constructed with (both optional; omitting them keeps the
 routing-only behavior from before), fired as a background task so a slow
 synthesis doesn't stall draining the next backend event, and a hard stop
-now also stops in-progress TTS/playback. 57 automated tests pass
-(`pytest tests/`), including a real (non-mocked) integration test of the
-OpenCode adapter against an actual HTTP+SSE server. See
-[TESTING.md](TESTING.md) for how to run any of this, including a known
-blocker: **this development machine has no microphone input device**, so
-the live mic → VAD → STT path is unverified end-to-end and needs testing
-on hardware with an input device. Nothing here is stable — no Claude
-Code/Codex adapters yet, config isn't threaded through the CLI, and the
-orchestrator→TTS wiring uses `synthesize()` (whole-utterance) rather than
-streaming synthesized audio straight into playback as it arrives.
+now also stops in-progress TTS/playback. 63 automated tests pass
+(`pytest tests/`), mypy is clean across the tree, and `scripts/spike.py`'s
+own async wiring (not just its components) has been run end-to-end with a
+faked mic feed of real synthesized speech. See [TESTING.md](TESTING.md)
+for how to run any of this, including a known blocker: **this development
+machine has no microphone input device**, so the live mic → VAD → STT path
+is unverified on real hardware. Also untested anywhere but macOS —
+`scripts/bootstrap_windows.ps1` is ready for a first Windows run
+(`TESTING.md` → "Testing on Windows"), Linux hasn't been attempted at all.
+Nothing here is stable — no Claude Code/Codex adapters yet, config isn't
+threaded through the CLI, and the orchestrator→TTS wiring uses
+`synthesize()` (whole-utterance) rather than streaming synthesized audio
+straight into playback as it arrives.
 
 A security + performance pass (8 independent finder angles, each claim
 verified against the actual code before acting) found and fixed 7 real

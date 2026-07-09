@@ -16,7 +16,7 @@ piper-tts, sounddevice, httpx, pytest) into `.venv/`.
 PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 ```
 
-52 tests, all pure logic / mocked hardware / real-server-over-loopback —
+63 tests, all pure logic / mocked hardware / real-server-over-loopback —
 no mic, no models to download. Covers: safeword matching (including that a
 phrase normalizing to empty raises at construction instead of silently
 vanishing), audio capture/playback against a mocked `sounddevice`, VAD
@@ -122,6 +122,49 @@ hardware (real ambient noise, real mic gain/latency, `sounddevice.InputStream`
 actually opening a real device) — `scripts/spike.py` itself, not just its
 components, needs a real mic attached to close that last gap.
 
+## Testing on Windows
+
+Everything above has only ever run on macOS (Apple Silicon). Nothing here
+has been verified on Windows or Linux — but every native dependency
+(`torch`, `onnxruntime`, `ctranslate2`, `sounddevice`, `piper-tts`) ships a
+prebuilt Windows wheel, and this codebase has zero platform-specific code
+(no `sys.platform`/`platform.system` branches, no subprocess/shell-outs,
+`pathlib` everywhere) — so it *should* work, but "should" and "verified"
+are different claims.
+
+```powershell
+git clone <repo-url> convobox
+cd convobox
+.\scripts\bootstrap_windows.ps1
+```
+
+That script installs `uv` if missing, runs `uv sync --extra dev`, then
+`pytest`, `mypy`, and `scripts\spike.py --list-devices` (no downloads
+needed for any of those), then optionally offers to download real models
+and run the TTS/STT round trip and the `spike.py` smoke test too (~300MB,
+a few minutes, still no microphone needed). It ends with a clear pass/fail
+table.
+
+**Two things worth knowing before you run it:**
+
+- If PowerShell refuses to run the script ("running scripts is disabled on
+  this system"), that's the default execution policy, not a problem with
+  this script — run `powershell -ExecutionPolicy Bypass -File
+  .\scripts\bootstrap_windows.ps1` instead of double-clicking or invoking
+  it directly, or set `Set-ExecutionPolicy -Scope CurrentUser
+  RemoteSigned` once if you're comfortable doing that machine-wide.
+- Unlike Linux (where `sounddevice`'s wheel is pure-Python and needs the
+  system's PortAudio installed separately, e.g. `apt install
+  libportaudio2`), Windows's `sounddevice` wheel is platform-tagged and
+  should bundle PortAudio itself — no separate system install expected,
+  but this is inferred from the wheel manifest, not confirmed by an actual
+  run yet.
+
+Whatever the bootstrap script reports, the one thing it **can't** verify
+is a real microphone through `scripts/spike.py` directly (it fakes the
+mic, same as `spike_smoketest.py` does on macOS) — that still needs a
+real input device attached to whatever Windows machine you're testing on.
+
 ## What's not tested at all yet
 
 - TTS playback through real speakers (`AudioPlayer` is unit-tested against
@@ -129,5 +172,5 @@ components, needs a real mic attached to close that last gap.
 - The orchestrator wired to a live OpenCode server (only tested against
   the in-repo fake server).
 - Barge-in (interrupting TTS playback mid-utterance) end to end.
-- Anything on Windows or Linux — everything above has only run on this
-  macOS machine.
+- Everything on Linux, and everything on Windows until the bootstrap
+  script above has actually been run there.

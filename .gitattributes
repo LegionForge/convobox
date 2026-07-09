@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.tour text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+
+*.wav binary
+*.onnx binary
