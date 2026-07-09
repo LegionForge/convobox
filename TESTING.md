@@ -80,18 +80,18 @@ PYTHONPATH=src .venv/bin/python scripts/spike.py
 ```
 
 **Known blocker on this development machine: no microphone input device.**
-`sounddevice.query_devices()` here shows only two output-only devices
-(`JetKVM v1`, `Mac mini Speakers`) — Mac Minis have no built-in
-microphone. This script has NOT been run against live audio. To actually
-test it:
+`scripts/spike.py --list-devices` (or `sounddevice.query_devices()`
+directly) here shows only two output-only devices (`JetKVM v1`, `Mac mini
+Speakers`) — Mac Minis have no built-in microphone. This script has NOT
+been run against live audio. To actually test it:
 
 1. Attach a USB mic (or any input device) to the machine you run this on.
-2. Confirm it shows up: `python -c "import sounddevice as sd; print(sd.query_devices())"`
-   — look for an entry with `max_input_channels > 0`.
-3. If it's not the system default, pass its name via `AppConfig.audio.input_device`
-   (a `convobox.yaml` config file, or wire up a `--device` CLI flag — not
-   built yet).
-4. Run `scripts/spike.py`, speak, watch for logged
+2. Confirm it shows up: `PYTHONPATH=src .venv/bin/python scripts/spike.py --list-devices`
+   — look for an entry with `> 0` in parens before "in" (input channels).
+3. If it's not the system default, pass it with `--device NAME` (or
+   `--device 2` for a numeric index — both work) — or set
+   `audio.input_device` in a `convobox.yaml` config file instead.
+4. Run `scripts/spike.py [--device ...]`, speak, watch for logged
    `transcript=... latency_ms=... rtf=...` lines. Say "stop stop stop" to
    exit cleanly (exercises the safeword path for real).
 
