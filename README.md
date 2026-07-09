@@ -262,15 +262,22 @@ safeword detector, TTS + Piper engine (streaming), an orchestrator, and an
 OpenCode adapter), plus a first real end-to-end validation:
 `scripts/roundtrip_smoketest.py` runs text → Piper TTS → faster-whisper STT
 with no mic involved, and `scripts/spike.py` is the originally-planned
-mic → VAD → local STT → logged-transcript spike. 52 automated tests pass
+mic → VAD → local STT → logged-transcript spike. The orchestrator now
+drives TTS itself — a backend TEXT event is stripped of code
+(`strip_code_for_speech`) and spoken via whatever `TTSEngine`/`AudioPlayer`
+it was constructed with (both optional; omitting them keeps the
+routing-only behavior from before), fired as a background task so a slow
+synthesis doesn't stall draining the next backend event, and a hard stop
+now also stops in-progress TTS/playback. 57 automated tests pass
 (`pytest tests/`), including a real (non-mocked) integration test of the
 OpenCode adapter against an actual HTTP+SSE server. See
 [TESTING.md](TESTING.md) for how to run any of this, including a known
 blocker: **this development machine has no microphone input device**, so
 the live mic → VAD → STT path is unverified end-to-end and needs testing
-on hardware with an input device. Nothing here is stable — no
-orchestrator ↔ TTS wiring yet, no Claude Code/Codex adapters, config isn't
-threaded through the CLI.
+on hardware with an input device. Nothing here is stable — no Claude
+Code/Codex adapters yet, config isn't threaded through the CLI, and the
+orchestrator→TTS wiring uses `synthesize()` (whole-utterance) rather than
+streaming synthesized audio straight into playback as it arrives.
 
 A security + performance pass (8 independent finder angles, each claim
 verified against the actual code before acting) found and fixed 6 real
