@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import numpy as np
 import pytest
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
@@ -31,7 +32,7 @@ class FakeBackendAdapter(BackendAdapter):
     def is_busy(self) -> bool:
         return self._busy
 
-    async def events(self) -> AsyncIterator[BackendEvent]:  # pragma: no cover
+    async def events(self) -> AsyncGenerator[BackendEvent, None]:  # pragma: no cover
         return
         yield
 
@@ -60,8 +61,17 @@ class FakeTTSEngine(TTSEngine):
         return self._speaking
 
 
-class FakePlayer:
+class FakePlayer(AudioPlayer):
+    """Overrides AudioPlayer's real playback with in-memory recording.
+
+    Subclasses the concrete AudioPlayer (rather than duck-typing) since
+    Orchestrator's player param is typed as the concrete class, matching
+    this codebase's house style of not introducing an ABC/Protocol for a
+    single-implementation role.
+    """
+
     def __init__(self) -> None:
+        super().__init__()
         self.played: list[tuple[np.ndarray, int]] = []
         self.stop_calls = 0
 

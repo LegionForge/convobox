@@ -32,6 +32,24 @@ timing-sensitive code — `test_stop_halts_in_progress_playback_promptly` in
 particular is a real concurrency test, not inherently flake-proof just
 because it passed once.
 
+## Type checking
+
+```bash
+PYTHONPATH=src .venv/bin/python -m mypy src/ scripts/ tests/ --ignore-missing-imports
+```
+
+Clean across the whole tree. Caught two real gaps worth knowing about if
+you're extending this: `BackendAdapter.events()` (and `TTSEngine`-adjacent
+code) must return an `AsyncGenerator`, not just any `AsyncIterator` — the
+orchestrator and hard-stop/shutdown paths call `.aclose()` on what it
+returns, which only `AsyncGenerator` guarantees. And a test double for
+`AudioPlayer` needs to actually subclass it (not just duck-type the same
+methods) since `Orchestrator.player` is typed as the concrete class — this
+codebase deliberately doesn't introduce an ABC/Protocol for
+single-implementation roles like audio capture/playback (see the
+Architecture section of the README on avoiding premature pluggability), so
+a test double for one of those has to be a real subclass, not a duck type.
+
 ## Real end-to-end round trip (no mic needed, downloads real models)
 
 ```bash

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -72,7 +72,7 @@ class OpenCodeAdapter(BackendAdapter):
             await self._sse_context.__aexit__(None, None, None)
             self._sse_context = None
 
-    async def events(self) -> AsyncIterator[BackendEvent]:
+    async def events(self) -> AsyncGenerator[BackendEvent, None]:
         session_id = await self._ensure_session()
         self._sse_context = aconnect_sse(
             self._client, "GET", f"/api/sessions/{session_id}/events"

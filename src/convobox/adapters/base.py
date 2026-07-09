@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from enum import Enum
 
 
@@ -61,4 +61,9 @@ class BackendAdapter(ABC):
     def is_busy(self) -> bool: ...
 
     @abstractmethod
-    def events(self) -> AsyncIterator[BackendEvent]: ...
+    def events(self) -> AsyncGenerator[BackendEvent, None]:
+        # Typed as AsyncGenerator (not the looser AsyncIterator) because
+        # callers rely on .aclose() being available on what this returns —
+        # e.g. to cancel a live SSE stream on hard stop/shutdown — which
+        # AsyncIterator doesn't guarantee but AsyncGenerator does.
+        ...

@@ -4,6 +4,7 @@ import asyncio
 import queue
 import threading
 from collections.abc import AsyncIterator
+from typing import Any
 
 import numpy as np
 
@@ -34,7 +35,11 @@ class PiperTTSEngine(TTSEngine):
         self._speaking = False
         self._stopped = False
 
-    def _load_voice(self) -> object:
+    def _load_voice(self) -> Any:
+        # Typed Any, not a real PiperVoice annotation: piper-tts ships no
+        # type stubs and its Python API surface has varied across releases
+        # (see class docstring) — importing here also keeps piper-tts as a
+        # lazy dependency rather than a module-level import.
         from piper import PiperVoice
 
         return PiperVoice.load(self._model_path, config_path=self._config_path)
