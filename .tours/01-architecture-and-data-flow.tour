@@ -1,0 +1,135 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "1. Architecture & Data Flow",
+  "description": "Full pipeline walkthrough, in call order: mic -> VAD -> STT -> safeword -> orchestrator -> backend adapter -> TTS -> playback. Each step calls out the data handoff (shape/dtype crossing the boundary) and any performance-relevant design decision at that point.",
+  "steps": [
+    {
+      "title": "Start here",
+      "description": "**ConvoBox pipeline, top to bottom.**\n\n```\n   mic  ->  VAD  ->  local STT  ->  safeword check  ->  orchestrator  ->  backend adapter\n                                        |                                    |\n                                   (deterministic,                    OpenCode /\n                                    no LLM)                           Claude Code / ...\n                                                                            |\n                                                                    local streaming TTS\n```\n\nThis tour follows one utterance through every stage in the order it actually happens at runtime, not file/directory order. Watch the **data handoff** called out at each step \u2014 the shape/dtype changes as audio becomes numbers becomes text becomes routing decisions becomes speech again.\n\nSee `README.md` \u2192 Architecture for the original design diagram this pipeline implements.\n\nEach step below is anchored by both a line number and a text pattern \u2014 if the code has moved since this tour was written, CodeTour re-locates the step by searching for the pattern rather than trusting a stale line number."
+    },
+    {
+      "file": "scripts/spike.py",
+      "line": 38,
+      "pattern": "with MicrophoneStream\\(sample_rate=config\\.audio\\.sample_rate",
+      "description": "**The whole chain in one line.** This is the actual measurement spike \u2014 mic \u2192 VAD \u2192 STT \u2192 logged transcript \u2014 with no backend/TTS wiring, useful as an orientation map before diving into each stage:\n\n```python\nwith MicrophoneStream(...) as mic:\n    async for utterance in segmenter.segment(mic.stream()):\n        result = transcriber.transcribe(utterance)\n```\n\n`mic.stream()` is an async generator of raw chunks \u2192 `segmenter.segment()` re-yields only complete utterances \u2192 `transcriber.transcribe()` turns one utterance into text. Every step below zooms into one of these three calls."
+    },
+    {
+      "file": "src/convobox/audio/capture.py",
+      "line": 21,
+      "pattern": "class MicrophoneStream:",
+      "description": "**Stage 1: audio capture.** `MicrophoneStream` wraps a single `sounddevice.InputStream` \u2014 continuous streaming, not record-then-stop, because segmentation into utterances is VAD's job downstream, not a fixed capture window.\n\nDeliberately **not** shelling out to platform tools (sox/arecord/powershell) \u2014 see README's \"Lessons from an earlier attempt\" for why that was a real command-injection bug in an earlier related project."
+    },
+    {
+      "file": "src/convobox/audio/capture.py",
+      "line": 42,
+      "pattern": "def _callback\\(",
+      "description": "**The real-time boundary.** `_callback` runs on PortAudio's own audio thread, not the asyncio event loop \u2014 it must be fast and non-blocking. It just copies the incoming buffer and pushes it onto a plain `queue.Queue`.\n\n**Data handoff:** raw device audio \u2192 `float32` numpy array, shape `(blocksize,)`, values in `[-1, 1]`. float32 (not int16) because both Silero VAD and faster-whisper consume float32 directly \u2014 int16 would force a conversion on every single chunk (see the module-level comment at the top of this file)."
+    },
+    {
+      "file": "src/convobox/audio/capture.py",
+      "line": 70,
+      "pattern": "async def stream\\(self\\) -> AsyncIterator",
+      "description": "**Bridging the sync callback thread to async consumers.** `stream()` is an async generator that pulls off the queue via `asyncio.to_thread(self._queue.get)` \u2014 blocking the queue-get in a worker thread so it never stalls the event loop.\n\nThe `_CLOSE_SENTINEL` pattern (defined near the top of this file) is what lets `close()` wake up a consumer parked in a blocking `get()` \u2014 this exact bridge pattern gets reused later for TTS streaming too (see step on `piper.py`)."
+    },
+    {
+      "file": "src/convobox/vad/segmenter.py",
+      "line": 23,
+      "pattern": "class UtteranceSegmenter:",
+      "description": "**Stage 2: voice activity detection.** `UtteranceSegmenter` turns a stream of float32 chunks into discrete utterances using Silero VAD.\n\nTwo deliberate design choices worth noting up front (both in the docstring): a speech run only ends after `min_silence_ms` of *confirmed* silence (tolerant of pauses/disfluencies), and emitted utterances **include** that trailing silence on purpose \u2014 it helps STT avoid clipping the last phoneme."
+    },
+    {
+      "file": "src/convobox/vad/segmenter.py",
+      "line": 51,
+      "pattern": "def feed\\(self, chunk: np\\.ndarray\\)",
+      "description": "**Data handoff: arbitrary-length chunks \u2192 fixed 512-sample windows.** Silero's ONNX model only accepts exactly 512 samples (32ms) at 16kHz. Incoming capture chunks can be any length (and in `feed()`'s own tests, deliberately unaligned to 512 to prove no samples are dropped/duplicated), so they're buffered in `self._carry` and consumed in exact windows here.\n\nReturns a **list** of utterances (not zero-or-one) because a single large chunk can span the end of one utterance and the start of another."
+    },
+    {
+      "file": "src/convobox/vad/segmenter.py",
+      "line": 87,
+      "pattern": "def _process_window\\(self, window: np\\.ndarray\\)",
+      "description": "**The core state machine \u2014 and where a real hang bug lived.** Every window gets a `prob` from the model (this call happens unconditionally, every ~32ms, even during silence \u2014 see the Performance tour for why that's not actually wasted work).\n\nA few lines down, `_EXIT_HYSTERESIS` creates three zones: confidently speech, confidently silent, and an **ambiguous band** in between. The `elif is_speech:` branch just below (not a plain `else:`) is the fix for a bug where ambiguous-band frames were treated as speech and reset the silence timer on every frame \u2014 a speaker trailing off gradually could keep an utterance open forever. See the code comment right below it for the full story, and the Review Findings tour for the verification trail."
+    },
+    {
+      "file": "src/convobox/vad/segmenter.py",
+      "line": 131,
+      "pattern": "async def segment\\(",
+      "description": "**Data handoff: windows \u2192 one concatenated utterance array.** `segment()` is the async-generator wrapper `spike.py` actually calls \u2014 consumes chunks, yields complete utterances via `feed()`, and on stream close calls `flush()` to emit anything still in progress.\n\nOutput: a single float32 numpy array (all the 512-sample windows for that utterance concatenated together) \u2014 this is exactly what `LocalTranscriber.transcribe()` expects next."
+    },
+    {
+      "file": "src/convobox/stt/transcriber.py",
+      "line": 24,
+      "pattern": "class LocalTranscriber:",
+      "description": "**Stage 3: local speech-to-text.** `LocalTranscriber` loads the faster-whisper `WhisperModel` **once**, at construction \u2014 model loading is expensive, so this class is meant to be built once and reused across every utterance for the life of the process."
+    },
+    {
+      "file": "src/convobox/stt/transcriber.py",
+      "line": 33,
+      "pattern": "def transcribe\\(self, audio: np\\.ndarray\\)",
+      "description": "**Data handoff: utterance array \u2192 `TranscriptResult`.** Input is the float32 mono 16kHz array from the segmenter (defensively re-contiguous'd a couple lines down, since faster-whisper needs a contiguous buffer).\n\nOutput bundles the transcript text **with timing as a first-class field** (`latency_ms`, `duration_s`) \u2014 not just logged internally \u2014 because this project's whole first milestone was proving real accuracy/latency numbers before committing to backend/adapter design. Real measured numbers on this hardware: **STT ~140\u2013200ms, RTF 0.05\u20130.13** (8\u201320x faster than real-time)."
+    },
+    {
+      "file": "src/convobox/safeword/detector.py",
+      "line": 5,
+      "pattern": "deliberately a plain normalized-substring match",
+      "description": "**Stage 4: the safeword check \u2014 deliberately dumb.** This comment says it outright: a plain normalized-substring match, **no ML, no fuzzy matching, no LLM**, on purpose. A hard stop is a safety-critical abort; a human reading this file must be able to predict exactly when it fires. That auditability guarantee is worth more here than the recall a fuzzy matcher would buy.\n\nThis runs on every transcript, in the orchestrator, **before** any busy/idle routing decision \u2014 see the next step."
+    },
+    {
+      "file": "src/convobox/orchestrator/orchestrator.py",
+      "line": 40,
+      "pattern": "async def handle_transcript\\(self, transcript: str\\)",
+      "description": "**Stage 5: the routing decision.** `handle_transcript` is where a finalized transcript becomes one of three concrete actions:\n\n1. **Hard stop** \u2014 checked first, unconditionally, and wins over everything else. It also stops any in-progress TTS/playback \u2014 if the user says stop, ConvoBox shouldn't keep talking.\n2. **Interject** \u2014 backend is busy, this is a side-comment, not a fresh task.\n3. **Fresh command** \u2014 backend is idle.\n\nThe `start_event_loop()` call near the top of this method is itself a fix: see the Review Findings tour for why `is_busy()` needs that loop running to stay accurate."
+    },
+    {
+      "file": "src/convobox/adapters/base.py",
+      "line": 32,
+      "pattern": "class BackendAdapter\\(ABC\\):",
+      "description": "**The backend adapter contract.** One implementation per target CLI (OpenCode today; Claude Code/Codex are documented as intended, not yet built). The docstring draws a hard line: `send_interject` must never derail a running task, `send_hard_stop` must abort it \u2014 these are never allowed to collapse into one \"interrupt\" action.\n\nA paragraph further down is an honesty clause added after review: a hard stop's real-world guarantee is bounded by what the backend actually exposes (see the next step for the concrete case)."
+    },
+    {
+      "file": "src/convobox/adapters/opencode.py",
+      "line": 75,
+      "pattern": "async def events\\(self\\) -> AsyncGenerator",
+      "description": "**The OpenCode backend adapter: HTTP + SSE.** `events()` opens a streaming GET and yields typed `BackendEvent`s parsed from each SSE frame in real time \u2014 not buffered until the connection closes.\n\n**Data handoff:** raw SSE `data:` frames (JSON text) \u2192 typed `BackendEvent` objects (`text | tool_call | tool_result | error | done`). The `finally` block a few lines down clears `self._busy = False` on **any** exit from this generator, not just an observed DONE \u2014 a dropped connection or exception used to leave `is_busy()` stuck `True` forever. See Review Findings for the full story."
+    },
+    {
+      "file": "src/convobox/orchestrator/orchestrator.py",
+      "line": 86,
+      "pattern": "def _on_event\\(self, event: BackendEvent\\)",
+      "description": "**Backend response \u2192 speech.** `_on_event` is where a `TEXT` event from the backend gets turned into spoken audio: strip code blocks (`strip_code_for_speech`, defined at the top of this file) so raw diffs aren't read aloud, then fire synthesis as a **background task**, not awaited inline.\n\nWhy fire-and-forget: synthesis can take noticeably longer than draining the *next* backend event (e.g. a DONE right behind this TEXT), and keeping `is_busy()` fresh matters more than serializing speech with event consumption. `AudioPlayer.play()` (next stage) is itself non-blocking, so this task's only real work is the `synthesize()` await."
+    },
+    {
+      "file": "src/convobox/tts/base.py",
+      "line": 14,
+      "pattern": "def sanitize_text\\(text: str\\)",
+      "description": "**The security boundary before any synthesis happens.** `sanitize_text` strips control characters and caps length on text that originates from **untrusted LLM output**. Every concrete `TTSEngine` must call this before synthesizing \u2014 this exists directly because of a real command-injection bug in an earlier related project (`voice-opencode`), where response text was interpolated straight into a shell command. See README \u2192 \"Lessons from an earlier attempt.\""
+    },
+    {
+      "file": "src/convobox/tts/base.py",
+      "line": 42,
+      "pattern": "def synthesize_stream\\(self, text: str\\) -> AsyncIterator",
+      "description": "**Streaming is the primary interface; `synthesize()` is the convenience wrapper.** `synthesize_stream` is the abstract method concrete engines implement. `synthesize()` just below it concatenates the stream \u2014 prefer `synthesize_stream` directly when time-to-first-audio matters, since it lets a caller start playback on the first chunk instead of waiting for the whole utterance."
+    },
+    {
+      "file": "src/convobox/tts/piper.py",
+      "line": 51,
+      "pattern": "async def synthesize_stream\\(self, text: str\\)",
+      "description": "**Stage 6: local TTS, genuinely streaming.** Piper's own `synthesize()` is a **blocking sync generator**. This bridges it to async the same way `MicrophoneStream.stream()` does \u2014 a background thread pushes converted float32 chunks onto a queue, and `synthesize_stream` yields each one via `asyncio.to_thread(chunk_queue.get)` as soon as it's ready.\n\n**Data handoff:** sanitized text \u2192 a stream of float32 PCM chunks. This used to buffer the *entire* response into one list before returning anything \u2014 measured improvement from switching to real streaming: **first chunk at ~143ms vs. ~1574ms total** on a 20-sentence passage (~11x faster time-to-first-audio)."
+    },
+    {
+      "file": "src/convobox/orchestrator/orchestrator.py",
+      "line": 104,
+      "pattern": "async def _speak\\(self, text: str\\)",
+      "description": "**Final handoff: synthesized audio \u2192 speakers.** `_speak` awaits the (currently whole-utterance) `synthesize()` call and hands the resulting float32 array straight to `AudioPlayer.play()`.\n\nNote this uses `synthesize()`, not `synthesize_stream()` directly \u2014 a known, documented next step (see README Status) would be piping stream chunks straight into playback instead of waiting for the whole utterance."
+    },
+    {
+      "file": "src/convobox/audio/playback.py",
+      "line": 9,
+      "pattern": "class AudioPlayer:",
+      "description": "**Stage 7: playback, with barge-in.** `AudioPlayer.stop()` is what makes barge-in possible \u2014 a response can be cut off the instant the user starts speaking again, rather than waiting for playback to finish. `Orchestrator.handle_transcript`'s hard-stop path (step 12 in this tour) calls exactly this.\n\n`play()` opens a fresh `sd.OutputStream` per call rather than reusing one \u2014 a real but modest overhead (tens of ms of device-open latency per response), deliberately left as-is for now since fixing it would mean reworking a test suite that deliberately asserts today's open/close-per-call behavior. See README \u2192 Status for the full reasoning."
+    },
+    {
+      "title": "End of tour",
+      "description": "That's the full loop: **mic \u2192 VAD \u2192 STT \u2192 safeword \u2192 orchestrator \u2192 adapter \u2192 TTS \u2192 playback**, with a hard-stop escape hatch that can short-circuit at the orchestrator regardless of where the rest of the pipeline is.\n\nFor a focused look at the concrete bugs a security+performance review pass found and fixed in this exact code, start the **\"2. Review Findings: Security & Performance\"** tour next (Command Palette \u2192 CodeTour: Start Tour)."
+    }
+  ]
+}
