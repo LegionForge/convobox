@@ -67,7 +67,12 @@ you're using that day, rather than a feature bolted onto one product.
 - **Orchestrator** — tracks each backend's busy/idle state and routes an
   utterance as a fresh command, a soft interject, or a hard stop.
 - **Backend adapters** — one per target CLI, translating the orchestrator's
-  intent into whatever that tool actually understands.
+  intent into whatever that tool actually understands. For a backend that
+  exposes a headless HTTP+SSE server (OpenCode does: `POST /sessions` to
+  open a session, `GET /sessions/:id/events` as an SSE stream, `POST
+  /sessions/:id/messages` to send text), the adapter is a thin typed
+  client over that API rather than PTY scraping — see
+  [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
 - **Local TTS** — streams spoken responses back, filtering out raw
   code/diff output in favor of prose summaries.
 - **Optional local LLM cleanup pass** between STT and the adapter, to fix
@@ -130,6 +135,49 @@ thin-client/server split with local STT/TTS, but it's no longer
 maintained — superseded by a newer ESPHome-based approach — so it's a
 reference for the pattern, not something to build on directly.
 
+## Lessons from an earlier attempt
+
+An earlier, unreleased project of mine (`voice-opencode`, on hold, TS/Bun,
+scoped to OpenCode only) targeted the same space and is worth mining for
+what to keep and what to avoid:
+
+- **The OpenCode HTTP+SSE client is directly reusable as a template.**
+  `POST /api/sessions` → open a session, `GET
+  /api/sessions/:id/events` (SSE) → stream typed messages (`text |
+  tool_call | tool_result | error | done`), `POST
+  /api/sessions/:id/messages` → send text. That maps cleanly onto
+  ConvoBox's `send_text`/`is_busy` adapter surface for the OpenCode
+  backend specifically, and confirms the "prefer the tool's native
+  structured interface over scraping terminal output" principle above is
+  achievable, not just aspirational.
+- **Never string-interpolate spoken/response text into a shell command.**
+  Its Windows TTS engine built a PowerShell `-Command` string by
+  interpolating the text to speak directly into it — a straightforward
+  command-injection hole, since that text can be arbitrary LLM output. The
+  fix (write text to a temp file via base64 rather than inlining it,
+  sanitize control characters, cap length) is a lesson to design in from
+  the start for ConvoBox's TTS engine, not retrofit later: LLM-response
+  text handed to any subprocess is untrusted input.
+- **Shelling out per-OS for audio capture/playback was fragile and never
+  finished.** Recording was implemented three separate times — a
+  `mciSendString` PowerShell hack on Windows, `sox` on macOS, `arecord` on
+  Linux — each spawning a subprocess and round-tripping through a temp
+  `.wav`/`.mp3` file per utterance. This is exactly why ConvoBox picks
+  [sounddevice](https://github.com/spatialaudio/python-sounddevice) (real
+  PortAudio bindings) instead of shelling out: one cross-platform audio
+  path, no per-OS subprocess maintenance burden, no file-write-then-play
+  latency added to every turn.
+- **"Local-first" was aspirational, not real, and that gap wasn't
+  visible until you looked at what actually ran.** The project was
+  designed with a pluggable local/cloud STT engine factory, but the local
+  Whisper engine was a stub (`throw new Error('Local Whisper not
+  implemented')`) — the only STT that ever worked was the paid OpenAI
+  Whisper API. Pluggability got built before the default path worked
+  offline. Lesson for ConvoBox: get faster-whisper actually transcribing
+  locally first (see [Status](#status)); treat multi-engine abstraction as
+  something to add once there's a working local baseline to abstract
+  from, not a prerequisite for one.
+
 ## Listening states & indicators
 
 Hands-free use means there's no screen focus to rely on for feedback, so
@@ -161,7 +209,10 @@ Current candidate stack for the local pipeline:
   segmentation
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — local
   speech-to-text
-- A local TTS engine (Kokoro or Piper — not yet finalized)
+- A local TTS engine (Kokoro or Piper — not yet finalized). Whatever the
+  choice, response text must never be interpolated directly into a shell
+  command to invoke it — see
+  [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
 - [Ollama](https://ollama.com) — for the optional local LLM cleanup pass,
   if testing shows it's warranted
 
@@ -205,10 +256,77 @@ regardless of how the server is packaged.
 
 ## Status
 
-Early design stage. The first concrete artifact is a standalone
-measurement spike — mic → VAD → local STT → logged transcript and latency,
-no backend wiring yet — to get real accuracy and latency numbers before
-committing to any guardrail or adapter design. Nothing here is stable.
+Scaffolding stage — an initial implementation of every pipeline stage
+exists (`src/convobox/`: audio capture/playback, VAD segmenter, local STT,
+safeword detector, TTS + Piper engine (streaming), an orchestrator, and an
+OpenCode adapter), plus a first real end-to-end validation:
+`scripts/roundtrip_smoketest.py` runs text → Piper TTS → faster-whisper STT
+with no mic involved, and `scripts/spike.py` is the originally-planned
+mic → VAD → local STT → logged-transcript spike. 52 automated tests pass
+(`pytest tests/`), including a real (non-mocked) integration test of the
+OpenCode adapter against an actual HTTP+SSE server. See
+[TESTING.md](TESTING.md) for how to run any of this, including a known
+blocker: **this development machine has no microphone input device**, so
+the live mic → VAD → STT path is unverified end-to-end and needs testing
+on hardware with an input device. Nothing here is stable — no
+orchestrator ↔ TTS wiring yet, no Claude Code/Codex adapters, config isn't
+threaded through the CLI.
+
+A security + performance pass (8 independent finder angles, each claim
+verified against the actual code before acting) found and fixed 6 real
+bugs — worth knowing about even though they're fixed, since a couple were
+subtle:
+
+- **VAD could hang indefinitely.** `UtteranceSegmenter`'s hysteresis band
+  (`[threshold-0.15, threshold)`, ambiguous — neither confidently speech
+  nor silence) was treated as speech, resetting the silence timer on every
+  ambiguous frame. A speaker trailing off gradually, or noise sitting near
+  threshold, could keep an utterance open forever — it would only end via
+  an external `flush()`, never the segmenter's own silence detection.
+- **`OpenCodeAdapter.is_busy()` could latch `True` forever.** It was only
+  ever cleared inside `events()` on an observed DONE/ERROR — a dropped
+  connection, an exception, or the consumer simply not running left every
+  later transcript silently routed to `send_interject` instead of
+  `send_text`, with no error surfaced. Now cleared on any exit from
+  `events()`, and `Orchestrator.handle_transcript` starts the event-drain
+  loop itself instead of relying on a caller to remember a separate wiring
+  step.
+- **A safeword phrase could silently do nothing.** A configured hard-stop
+  phrase that normalizes to an empty string (pure punctuation, etc.) was
+  dropped with no warning — an operator could believe their abort word was
+  active when it wasn't. Now raises at construction instead.
+- **TTS buffered the entire response before returning any audio.**
+  `PiperTTSEngine` collected every chunk into a list before returning —
+  full synthesis time was added to time-to-first-audio. Now streams
+  (`synthesize_stream`, bridging piper's blocking generator through a
+  background thread, same pattern as `MicrophoneStream`); measured ~11x
+  improvement in time-to-first-audio on a 20-sentence passage (143ms vs.
+  1574ms total). `synthesize()` still exists as a concatenating
+  convenience on top of the stream.
+- **A misconfigured backend URL could silently bypass the plaintext-HTTP
+  warning.** A schemeless `"host:port"` URL makes `urlparse` mistake the
+  host for the scheme, so the `scheme == "http"` check never fired —
+  confirmed both that this parse behavior is real and that `httpx` accepts
+  such a URL without complaint. Now warns on any non-http/https scheme too.
+- Two small cleanups: an unused `MicrophoneStream.chunks()` method and a
+  redundant `OpenCodeAdapter._sse_source` instance field (only ever used
+  immediately after assignment) were removed.
+
+One finding was investigated and refuted rather than fixed: a concern that
+`MicrophoneStream.close()` doesn't join the sounddevice callback thread
+before enqueueing its close-sentinel, risking a real chunk landing after
+it. `sounddevice`'s `stream.stop()` is documented to block until pending
+processing completes, and `close()`/the sentinel-enqueue happen strictly
+after — so the ordering is already guaranteed correct by the underlying
+library, no fix needed.
+
+Known, deliberately deferred (not wrong, just lower-value-per-effort right
+now): `AudioPlayer.play()` opens a fresh `OutputStream` per call instead of
+reusing one — real but modest overhead (tens of ms device-open latency per
+spoken response, not a hot per-window cost), and fixing it would require
+reworking a test suite that deliberately asserts today's open/close-per-call
+contract. Revisit once the orchestrator actually drives TTS end to end and
+real latency numbers are available to justify the rework.
 
 ## Open questions
 
