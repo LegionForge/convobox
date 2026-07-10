@@ -1,4 +1,4 @@
-# ConvoBox
+# LegionForge - ConvoBox
 
 A local, backend-agnostic voice frontend for CLI coding agents.
 
