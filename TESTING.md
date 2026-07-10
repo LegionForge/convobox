@@ -145,15 +145,70 @@ return instantly. Worth re-measuring if `AudioPlayer`'s block size (1024
 samples) or the persistent-stream-reuse deferral (see README → Status)
 ever changes — that latency number is exactly what'd move.
 
+## Live clarity dashboard (TUI)
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/voice_tui.py [--language en] [--min-confidence 0.4]
+```
+
+Same pipeline as `scripts/spike.py`, rendered as a live terminal dashboard
+instead of log lines: an input level meter and capture state (so mic and
+gain problems are visible before any transcript arrives), a per-utterance
+verdict, and session stats. Stdlib-only on purpose: a test utility should
+not add dependencies to the project it tests. Exit via the safeword or
+Ctrl+C; a plain-text session summary prints on exit.
+
+The verdict thresholds come from the live Windows session below: detected
+language probability >= 0.80 was consistently faithful, below ~0.40 was
+usually a hallucination (sometimes in a different script entirely), and
+rtf >= 1.0 marks Whisper's temperature-fallback re-decode. The dashboard
+also shows per-utterance queue wait separately from decode latency,
+because STT is serial and bursts of short utterances compound delay.
+
+Useful flags: `--language en` pins STT to one language (kills the
+auto-detect wander described below), `--min-confidence 0.4` drops
+low-confidence transcripts (`stt.min_language_probability` in config; the
+safeword is always checked on the raw transcript first, so the gate can
+never swallow a hard stop).
+
 ## Testing on Windows
 
-Everything above has only ever run on macOS (Apple Silicon). Nothing here
-has been verified on Windows or Linux — but every native dependency
-(`torch`, `onnxruntime`, `ctranslate2`, `sounddevice`, `piper-tts`) ships a
-prebuilt Windows wheel, and this codebase has zero platform-specific code
-(no `sys.platform`/`platform.system` branches, no subprocess/shell-outs,
-`pathlib` everywhere) — so it *should* work, but "should" and "verified"
-are different claims.
+**First verified 2026-07-09 on Windows 11 (i7-13650HX):** `uv sync`,
+63/63 tests (69 after this round's additions), mypy, PortAudio device
+enumeration, the TTS/STT round trip, both smoke tests, real speaker
+playback with barge-in (stop latency 240ms vs 290ms on the macOS
+baseline), and — for the first time on any platform — live microphone
+capture through `scripts/spike.py`, including a real spoken-safeword exit.
+`sounddevice`'s Windows wheel does bundle PortAudio; no system install was
+needed.
+
+That run also surfaced one real bug, not Windows-specific: the fake
+OpenCode server's SSE handler could outlive its client (parked on
+`event_gate.wait()` after a hard stop), and since Python 3.12.1
+`asyncio.Server.wait_closed()` genuinely waits for connection handlers
+([gh-104344](https://github.com/python/cpython/issues/104344)), so the
+`server` fixture teardown deadlocked the suite. On Python <= 3.12.0 the
+same leak existed but `wait_closed()` returned immediately, which is why
+macOS runs never saw it. Fixed in the fixture: `stop()` now wakes parked
+handlers before awaiting `wait_closed()`.
+
+Live-mic findings from that session that shaped config defaults and the
+TUI's verdict bands: language auto-detect is per-utterance with no session
+stickiness, so accented or non-native speech wanders across languages (pin
+`stt.language` for coding use); over-articulating makes language ID worse,
+not better (it strips the prosodic cues the detector relies on); detection
+confidence below ~0.4 usually means a hallucinated transcript
+(`stt.min_language_probability` gates these); single-word utterances are
+the least reliable and most expensive input shape, so spoken confirmation
+phrases should be multi-word by design; and background noise can VAD-trigger
+and transcribe to empty, which the orchestrator now drops instead of
+forwarding to the backend.
+
+To reproduce the setup from scratch, every native dependency (`torch`,
+`onnxruntime`, `ctranslate2`, `sounddevice`, `piper-tts`) ships a prebuilt
+Windows wheel, and this codebase has zero platform-specific code (no
+`sys.platform`/`platform.system` branches, no subprocess/shell-outs,
+`pathlib` everywhere).
 
 ```powershell
 git clone <repo-url> convobox
@@ -185,8 +240,9 @@ table.
 
 Whatever the bootstrap script reports, the one thing it **can't** verify
 is a real microphone through `scripts/spike.py` directly (it fakes the
-mic, same as `spike_smoketest.py` does on macOS) — that still needs a
-real input device attached to whatever Windows machine you're testing on.
+mic, same as `spike_smoketest.py` does on macOS) — that needs a real
+input device (verified on Windows 2026-07-09, see above; still unverified
+on macOS, which has no mic on the dev machine).
 
 ## What's not tested at all yet
 
@@ -194,8 +250,4 @@ real input device attached to whatever Windows machine you're testing on.
   the in-repo fake server) — a real `opencode serve` instance was not
   reachable in this environment (its npm postinstall failed here) to
   test against.
-- Live mic input specifically (see the mic → VAD → STT section above) —
-  everything downstream of capture is now real-hardware-tested, capture
-  itself still isn't.
-- Everything on Linux, and everything on Windows until the bootstrap
-  script above has actually been run there.
+- Everything on Linux.
