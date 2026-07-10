@@ -165,11 +165,32 @@ rtf >= 1.0 marks Whisper's temperature-fallback re-decode. The dashboard
 also shows per-utterance queue wait separately from decode latency,
 because STT is serial and bursts of short utterances compound delay.
 
+**`language_probability` goes blind under `--language`.** Pinning the
+language (the fix for the auto-detect wander below) makes faster-whisper
+report a hardcoded `1.0` for it — there's no detection happening to be
+confident about. Caught live: speaking Russian into a `--language en`
+session logged `GOOD en 1.00` on every utterance, none of which was
+correct English. The dashboard's verdict now also weighs a second, always-
+meaningful signal: the mean of each segment's `avg_logprob` from the
+decoder itself (shown as the `dec` column, `exp(avg_logprob)` so it reads
+0-1 like the other confidence figures; ~0.70+ solid, ~0.45-0.70 shaky,
+below that unreliable — Whisper's conventional avg_logprob cutoffs). In
+pinned mode the verdict is driven by `dec` alone; unpinned, both signals
+must agree for GOOD/FAIR. `language_probability` and `dec` are answering
+different questions — "what language is this" vs. "how sure was the
+decoder of these words" — which is why pinning silences only the first.
+
 Useful flags: `--language en` pins STT to one language (kills the
-auto-detect wander described below), `--min-confidence 0.4` drops
-low-confidence transcripts (`stt.min_language_probability` in config; the
-safeword is always checked on the raw transcript first, so the gate can
-never swallow a hard stop).
+auto-detect wander described below, but see the `dec` column note just
+above for why confidence still needs watching), `--min-confidence 0.4`
+drops low-confidence transcripts by `language_probability`
+(`stt.min_language_probability` in config; the safeword is always checked
+on the raw transcript first, so the gate can never swallow a hard stop).
+**Known gap:** this gate compares against `language_probability`, which is
+pinned to `1.0` in `--language` mode, so it never drops anything while
+pinned — watch the `dec` column yourself in that mode rather than relying
+on `--min-confidence`. Making the config-level gate decoder-confidence
+aware (so it works pinned too) is a reasonable next step, not done here.
 
 ## Testing on Windows
 

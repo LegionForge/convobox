@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 
 from convobox.audio.capture import MicrophoneStream
 from convobox.config import load_config
@@ -54,13 +55,14 @@ async def run(config_path: str | None, cli_device: str | None) -> None:
                 )
                 continue
             log.info(
-                "transcript=%r latency_ms=%.0f duration_s=%.2f rtf=%.2f lang=%s (%.2f)",
+                "transcript=%r latency_ms=%.0f duration_s=%.2f rtf=%.2f lang=%s (%.2f) dec=%.2f",
                 result.text,
                 result.latency_ms,
                 result.duration_s,
                 rtf,
                 result.language,
                 result.language_probability,
+                math.exp(result.avg_logprob),
             )
 
 

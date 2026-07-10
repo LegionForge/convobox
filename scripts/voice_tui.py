@@ -46,6 +46,13 @@ _CONF_GOOD = 0.80
 _CONF_FAIR = 0.40
 _RTF_FALLBACK = 1.0
 
+# Decoder-confidence bands: exp(avg_logprob) mapped against Whisper's
+# conventional avg_logprob quality cutoffs (~-0.35 solid, ~-0.8 shaky,
+# below that unreliable). This signal works in pinned-language mode too,
+# where language_probability is hardcoded to 1.0 and says nothing.
+_DEC_GOOD = 0.70
+_DEC_FAIR = 0.45
+
 # Level meter range: -60 dBFS (silence-ish) to 0 dBFS (clipping).
 _METER_FLOOR_DB = -60.0
 
@@ -66,6 +73,7 @@ class _Row:
     color: str
     language: str
     probability: float
+    decoder_conf: float
     latency_ms: float
     rtf: float
     queue_wait_ms: float
@@ -95,14 +103,26 @@ class _State:
     stopping: str | None = None
 
 
-def _verdict(result: TranscriptResult, rtf: float, gated: bool) -> tuple[str, str]:
+def _verdict(
+    result: TranscriptResult, rtf: float, gated: bool, pinned: bool
+) -> tuple[str, str]:
     if gated:
         return "DROP", _MAGENTA
     if not result.text:
         return "EMPTY", _DIM
-    if result.language_probability >= _CONF_GOOD and rtf < _RTF_FALLBACK:
+    # Two independent signals, verdict takes the worse: decoder confidence
+    # (always meaningful) and detected-language probability (meaningless
+    # when the language is pinned, so skipped entirely in that mode; a pin
+    # makes faster-whisper report exactly 1.0).
+    decoder_conf = math.exp(result.avg_logprob)
+    good = decoder_conf >= _DEC_GOOD and rtf < _RTF_FALLBACK
+    fair = decoder_conf >= _DEC_FAIR
+    if not pinned:
+        good = good and result.language_probability >= _CONF_GOOD
+        fair = fair and result.language_probability >= _CONF_FAIR
+    if good:
         return "GOOD", _GREEN
-    if result.language_probability >= _CONF_FAIR:
+    if fair:
         return "FAIR", _YELLOW
     return "POOR", _RED
 
@@ -137,12 +157,12 @@ def _draw(state: _State) -> None:
     ]
 
     for row in state.rows[-10:]:
-        text_width = max(10, cols - 52)
+        text_width = max(10, cols - 62)
         text = row.text if len(row.text) <= text_width else row.text[: text_width - 1] + "~"
         lines.append(
             f"{row.clock}  {row.color}{row.verdict:<5}{_RESET} "
-            f"{row.language} {row.probability:.2f}  {row.latency_ms:5.0f}ms  "
-            f"rtf {row.rtf:4.2f}  q {row.queue_wait_ms:4.0f}ms  {text}"
+            f"{row.language} {row.probability:.2f}  dec {row.decoder_conf:.2f}  "
+            f"{row.latency_ms:5.0f}ms  rtf {row.rtf:4.2f}  q {row.queue_wait_ms:4.0f}ms  {text}"
         )
     if not state.rows:
         lines.append(f"{_DIM}(no utterances yet: speak into the mic){_RESET}")
@@ -234,7 +254,7 @@ async def run(config_path: str | None, cli_device: str | None,
                 not stopped
                 and result.language_probability < stt_config.min_language_probability
             )
-            verdict, color = _verdict(result, rtf, gated)
+            verdict, color = _verdict(result, rtf, gated, stt_config.language is not None)
 
             state.total += 1
             state.latency_sum += result.latency_ms
@@ -253,6 +273,7 @@ async def run(config_path: str | None, cli_device: str | None,
                     color=color,
                     language=result.language,
                     probability=result.language_probability,
+                    decoder_conf=math.exp(result.avg_logprob),
                     latency_ms=result.latency_ms,
                     rtf=rtf,
                     queue_wait_ms=queue_wait_ms,
