@@ -28,9 +28,8 @@ class STTConfig(BaseModel):
 
 class TTSConfig(BaseModel):
     engine: str = "piper"
-    voice: str | None = None
-    rate: float = 1.0
-    volume: float = 1.0
+    model_path: str = ".models/piper/en_US-lessac-medium.onnx"
+    config_path: str | None = None
 
 
 class SafewordConfig(BaseModel):

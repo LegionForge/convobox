@@ -16,9 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
 
-from convobox.config import STTConfig
+from convobox.config import STTConfig, TTSConfig
 from convobox.stt.transcriber import LocalTranscriber
-from convobox.tts.piper import PiperTTSEngine
+from convobox.tts import create_tts_engine
 
 PHRASES = [
     "Run the test suite and show me the results.",
@@ -40,11 +40,8 @@ def resample_to_16k(audio: np.ndarray, source_rate: int) -> np.ndarray:
 
 
 async def main() -> None:
-    print("loading Piper voice...")
-    tts = PiperTTSEngine(
-        model_path=".models/piper/en_US-lessac-medium.onnx",
-        config_path=".models/piper/en_US-lessac-medium.onnx.json",
-    )
+    print("loading Piper voice via create_tts_engine(TTSConfig(...))...")
+    tts = create_tts_engine(TTSConfig(model_path=".models/piper/en_US-lessac-medium.onnx"))
     print(f"piper sample_rate={tts.sample_rate}")
 
     print("loading faster-whisper (tiny.en, cpu, int8)...")
