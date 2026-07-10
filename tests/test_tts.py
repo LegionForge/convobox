@@ -25,10 +25,12 @@ class _FakeVoice:
         self.config = _FakeConfig()
         self._chunks_per_call = chunks_per_call
         self.calls: list[str] = []
+        self.syn_configs: list[object] = []
         self.per_chunk_delay = 0.0
 
-    def synthesize(self, text: str):
+    def synthesize(self, text: str, syn_config: object = None):
         self.calls.append(text)
+        self.syn_configs.append(syn_config)
         chunks = self._chunks_per_call[len(self.calls) - 1]
         for samples in chunks:
             if self.per_chunk_delay:
@@ -36,7 +38,9 @@ class _FakeVoice:
             yield _FakeChunk(samples)
 
 
-def _make_engine(chunks_per_call: list[list[np.ndarray]]) -> tuple[PiperTTSEngine, _FakeVoice]:
+def _make_engine(
+    chunks_per_call: list[list[np.ndarray]], rate: float = 1.0, volume: float = 1.0
+) -> tuple[PiperTTSEngine, _FakeVoice]:
     engine = PiperTTSEngine.__new__(PiperTTSEngine)
     voice = _FakeVoice(chunks_per_call)
     engine._model_path = "unused"
@@ -45,6 +49,13 @@ def _make_engine(chunks_per_call: list[list[np.ndarray]]) -> tuple[PiperTTSEngin
     engine._sample_rate = voice.config.sample_rate
     engine._speaking = False
     engine._stopped = False
+    engine._syn_config = None
+    if rate != 1.0 or volume != 1.0:
+        from piper.config import SynthesisConfig
+
+        engine._syn_config = SynthesisConfig(
+            length_scale=None if rate == 1.0 else 1.0 / rate, volume=volume
+        )
     return engine, voice
 
 
@@ -116,6 +127,34 @@ async def test_stop_interrupts_mid_stream() -> None:
     # The producer thread checks _stopped between chunks, so it stops soon
     # after the 3rd chunk rather than exactly at it — but well short of all 20.
     assert 3 <= len(received) < 20
+
+
+@pytest.mark.asyncio
+async def test_default_rate_and_volume_pass_no_syn_config() -> None:
+    # rate=1.0/volume=1.0 (the default) must reach piper as syn_config=None,
+    # not an explicit SynthesisConfig(length_scale=1.0, volume=1.0) -- None
+    # means "use this voice's own trained default," which is what today's
+    # (pre-rate/volume) behavior already was and must stay byte-identical to.
+    engine, voice = _make_engine([[np.array([1], dtype=np.int16)]])
+
+    await engine.synthesize("hi")
+
+    assert voice.syn_configs == [None]
+
+
+@pytest.mark.asyncio
+async def test_custom_rate_and_volume_build_a_syn_config() -> None:
+    from piper.config import SynthesisConfig
+
+    engine, voice = _make_engine([[np.array([1], dtype=np.int16)]], rate=2.0, volume=0.5)
+
+    await engine.synthesize("hi")
+
+    assert len(voice.syn_configs) == 1
+    syn_config = voice.syn_configs[0]
+    assert isinstance(syn_config, SynthesisConfig)
+    assert syn_config.length_scale == pytest.approx(0.5)  # rate 2.0 -> half the duration
+    assert syn_config.volume == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
