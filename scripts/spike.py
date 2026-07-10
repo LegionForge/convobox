@@ -39,6 +39,20 @@ async def run(config_path: str | None, cli_device: str | None) -> None:
         async for utterance in segmenter.segment(mic.stream()):
             result = transcriber.transcribe(utterance)
             rtf = (result.latency_ms / 1000) / result.duration_s if result.duration_s else 0.0
+            # Safeword first, on the raw transcript, before the confidence
+            # gate: a hard stop must never be swallowed by a quality filter.
+            if safeword.check(result.text):
+                log.info("safeword detected, stopping")
+                break
+            if result.language_probability < config.stt.min_language_probability:
+                log.info(
+                    "dropped low-confidence transcript=%r lang=%s (%.2f < %.2f)",
+                    result.text,
+                    result.language,
+                    result.language_probability,
+                    config.stt.min_language_probability,
+                )
+                continue
             log.info(
                 "transcript=%r latency_ms=%.0f duration_s=%.2f rtf=%.2f lang=%s (%.2f)",
                 result.text,
@@ -48,9 +62,6 @@ async def run(config_path: str | None, cli_device: str | None) -> None:
                 result.language,
                 result.language_probability,
             )
-            if safeword.check(result.text):
-                log.info("safeword detected, stopping")
-                break
 
 
 def main() -> None:
