@@ -60,6 +60,13 @@ class OpenCodeAdapter(BackendAdapter):
         only disconnect the local SSE stream; it does not abort work already
         running server-side. A true server-side abort would require OpenCode to
         expose a cancel endpoint.
+
+        CORRECTION (see OPENCODE_API_NOTES.md): this whole class was built
+        against an inferred, not real, API shape, and testing against an
+        actual `opencode serve` instance found a real `POST
+        /session/:id/abort` endpoint — the claim above is false against the
+        current OpenCode API. Not yet fixed; this class's paths/bodies/event
+        parsing are wrong wholesale, not just this one method.
         """
         await self._close_sse()
         self._busy = False

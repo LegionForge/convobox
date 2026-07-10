@@ -68,11 +68,13 @@ you're using that day, rather than a feature bolted onto one product.
   utterance as a fresh command, a soft interject, or a hard stop.
 - **Backend adapters** — one per target CLI, translating the orchestrator's
   intent into whatever that tool actually understands. For a backend that
-  exposes a headless HTTP+SSE server (OpenCode does: `POST /sessions` to
-  open a session, `GET /sessions/:id/events` as an SSE stream, `POST
-  /sessions/:id/messages` to send text), the adapter is a thin typed
-  client over that API rather than PTY scraping — see
+  exposes a headless HTTP+SSE server (OpenCode does), the adapter is a
+  thin typed client over that API rather than PTY scraping — see
   [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
+  **The specific endpoint paths this project initially assumed for
+  OpenCode turned out to be wrong** when tested against a real `opencode
+  serve` instance — see [OPENCODE_API_NOTES.md](OPENCODE_API_NOTES.md) for
+  the real API shape and what's not yet fixed.
 - **Local TTS** — streams spoken responses back, filtering out raw
   code/diff output in favor of prose summaries.
 - **Optional local LLM cleanup pass** between STT and the adapter, to fix
