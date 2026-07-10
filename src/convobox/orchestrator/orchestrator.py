@@ -57,6 +57,16 @@ class Orchestrator:
             await self._adapter.send_hard_stop()
             return
 
+        # Background noise can trigger VAD yet transcribe to nothing (observed
+        # live on Windows: a movie playing in the room produced transcript='').
+        # Dropped here so noise never becomes a spurious empty command or
+        # interject to the backend. Checked after the safeword on purpose,
+        # though it could never shadow one: SafewordDetector rejects phrases
+        # that normalize to empty at construction, so a hard stop always has
+        # visible content.
+        if not transcript.strip():
+            return
+
         if self._adapter.is_busy():
             await self._adapter.send_interject(transcript)
         else:
