@@ -16,21 +16,32 @@ piper-tts, sounddevice, httpx, pytest) into `.venv/`.
 PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 ```
 
-63 tests, all pure logic / mocked hardware / real-server-over-loopback —
+98 tests, all pure logic / mocked hardware / real-server-over-loopback —
 no mic, no models to download. Covers: safeword matching (including that a
 phrase normalizing to empty raises at construction instead of silently
 vanishing), audio capture/playback against a mocked `sounddevice`, VAD
 segmentation logic against a scripted fake model (including a regression
-test for the hysteresis-band hang), TTS streaming against a mocked Piper
-voice (proves chunks are yielded incrementally, not buffered), the
+test for the hysteresis-band hang, and the `max_utterance_s` cap), TTS
+streaming against a mocked Piper voice (proves chunks are yielded
+incrementally, not buffered) plus rate/volume wiring, the
+`create_tts_engine` factory's voice resolution and error messages, the
 orchestrator's hard-stop/interject/fresh routing plus that it starts its
-own event-drain loop, and the OpenCode adapter against a real HTTP+SSE
-server on a real loopback socket (including that `is_busy()` clears when
-the stream ends without a DONE event, and that a schemeless backend URL
-still triggers the insecure-transport warning). Run 2-3x if iterating on
-timing-sensitive code — `test_stop_halts_in_progress_playback_promptly` in
-particular is a real concurrency test, not inherently flake-proof just
-because it passed once.
+own event-drain loop and drops empty transcripts, `LanguageTracker`'s
+wander-vs-genuine-switch distinction, `scripts/voice_picker.py` and
+`scripts/roundtrip_smoketest.py`'s pure CLI logic (catalog search,
+language-to-phrase mapping) imported directly as `scripts.*` the same way
+`scripts/spike.py`'s `_resolve_device` already was, and the OpenCode
+adapter against a real HTTP+SSE server on a real loopback socket
+(including that `is_busy()` clears when the stream ends without a DONE
+event, and that a schemeless backend URL still triggers the
+insecure-transport warning). Run 2-3x if iterating on timing-sensitive
+code — `test_stop_halts_in_progress_playback_promptly` in particular is a
+real concurrency test, not inherently flake-proof just because it passed
+once; `test_events_yield_typed_backend_events_from_sse` has also been
+observed to flake once under heavy concurrent load on this machine
+(passed cleanly on immediate rerun and in isolation) — a real loopback
+socket test has real scheduling variance, watch for a pattern rather than
+treating one flake as a regression.
 
 ## Type checking
 
@@ -72,6 +83,58 @@ chunk arriving well before the full response finishes synthesizing —
 iterate `tts.synthesize_stream(text)` instead of awaiting `synthesize()`;
 on a ~20-sentence passage the first chunk lands around 140ms in while
 total synthesis takes ~1.6s.
+
+`--voice KEY` runs the round trip with any installed voice instead of the
+default (`en_US-lessac-medium`), using a phrase matched to that voice's
+own language where one exists in `STT_TEST_PHRASES` (add an entry there
+for a new language), and the multilingual `base` STT model pinned to that
+language instead of the faster English-only `tiny.en`:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/roundtrip_smoketest.py --voice ru_RU-irina-medium
+```
+
+This is what actually validates a voice picked with `voice_picker.py`
+below is *intelligible*, not just that it produces audio — synthesizing
+gibberish and having STT transcribe gibberish back would look identical
+to a working round trip if the only check were "did text come out."
+
+## Picking a voice
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/voice_picker.py
+```
+
+`TTSConfig.voice`/`rate`/`volume` existed in `config.py` from the start
+but had nothing wired to them — every script constructed `PiperTTSEngine`
+by hand with a hardcoded voice. `convobox.tts.create_tts_engine(config)`
+(`src/convobox/tts/factory.py`) is that missing wiring, and every script
+below now goes through it rather than hand-building the engine.
+
+Piper's catalog has 163 voices across 44 languages
+([full list](https://huggingface.co/rhasspy/piper-voices)) — notably no
+Japanese, though Chinese, Russian, French, and most other languages
+exercised in the live-mic UAT session above are covered.
+`voice_picker.py` with no flags opens an interactive picker: `search
+TERM` browses the catalog (cached locally after the first fetch, matched
+against the voice key, language name, or language code), `get KEY`
+downloads a voice, `play KEY` auditions one through real speakers
+(offering to download it first if needed), `text ...`/`rate F`/`volume
+F` adjust what gets auditioned, and `use KEY` + `quit` prints the
+`convobox.yaml` snippet for whichever voice you land on. Flag mode does
+the same things non-interactively for scripting (`--list-installed`,
+`--search TERM`, `--download KEY`, `--audition KEY --text "..."`).
+
+**Windows console gotcha, found live testing this tool:** the default
+Windows console codepage (cp1252 etc.) can't print or read most non-Latin
+script — `--text` with Cyrillic crashed with `UnicodeEncodeError` before
+this was fixed, and typing Japanese into the interactive `text` prompt
+came back mojibake'd through stdin. `scripts/_console.py`'s
+`use_utf8_console()` reconfigures stdin/stdout/stderr to UTF-8 at startup
+and is called by both `voice_picker.py` and `roundtrip_smoketest.py` — a
+no-op on platforms/terminals already UTF-8 (most Linux/macOS terminals,
+and Windows Terminal in its default codepage), a real fix for anything
+that still defaults to a legacy codepage.
 
 ## Live mic → VAD → STT spike
 

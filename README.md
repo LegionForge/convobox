@@ -84,6 +84,8 @@ flowchart TB
         direction LR
         SPIKE["scripts/spike.py · logged transcripts"]:::tool
         TUI["scripts/voice_tui.py · live clarity dashboard"]:::tool
+        PICKER["scripts/voice_picker.py · browse/audition/pick a voice"]:::tool
+        ROUNDTRIP["scripts/roundtrip_smoketest.py · TTS to STT, any voice"]:::tool
     end
 
     MIC --> CAP --> VAD -->|"one utterance"| STT --> SW
@@ -93,6 +95,9 @@ flowchart TB
     ORCH -->|"prose only · strip_code_for_speech"| TTS --> PLAY --> SPK
     SW -.-> SPIKE
     SW -.-> TUI
+    PICKER -.->|"convobox.yaml snippet"| TTS
+    ROUNDTRIP -.-> TTS
+    ROUNDTRIP -.-> STT
 
     style HW fill:#0d1525,stroke:#4a90d9,stroke-width:2px,color:#e6edf3
     style LOCAL fill:#0a130d,stroke:#3fb950,stroke-width:2px,color:#e6edf3
@@ -365,7 +370,7 @@ drives TTS itself — a backend TEXT event is stripped of code
 it was constructed with (both optional; omitting them keeps the
 routing-only behavior from before), fired as a background task so a slow
 synthesis doesn't stall draining the next backend event, and a hard stop
-now also stops in-progress TTS/playback. 69 automated tests pass
+now also stops in-progress TTS/playback. 98 automated tests pass
 (`pytest tests/`), mypy is clean across the tree, and `scripts/spike.py`'s
 own async wiring (not just its components) has been run end-to-end with a
 faked mic feed of real synthesized speech. Playback has also now run
@@ -388,8 +393,25 @@ detection hallucinates below ~0.4 on accented or ambiguous audio; the
 safeword is always checked before the gate so a quality filter can never
 swallow a hard stop), and `scripts/voice_tui.py`, a stdlib-only live
 dashboard showing input level, capture state, and a per-utterance clarity
-verdict (see [TESTING.md](TESTING.md) → "Live clarity dashboard"). Linux
-hasn't been attempted at all.
+verdict (see [TESTING.md](TESTING.md) → "Live clarity dashboard").
+`LanguageTracker` followed from further live testing: it flags when an
+utterance's detected language breaks from the session's established one,
+without ever pinning what language STT is asked to assume — auto-detect
+stays real auto-detect always, since pinning was tried and found worse
+(it decodes non-matching speech as confident-sounding nonsense in the
+pinned language rather than surfacing the mismatch).
+
+`TTSConfig.voice`/`rate`/`volume` are wired up now too — every script
+constructed `PiperTTSEngine` by hand with a hardcoded voice before;
+`convobox.tts.create_tts_engine()` is the missing factory, and 98 tests
+pass with it in place. `scripts/voice_picker.py` browses, downloads, and
+auditions any of Piper's 163 voices (44 languages) through real speakers,
+interactively or via flags, and prints the `convobox.yaml` snippet for
+whichever one you land on; `scripts/roundtrip_smoketest.py --voice KEY`
+runs the same TTS→STT intelligibility check as before against any
+installed voice, not just the original hardcoded one. See
+[TESTING.md](TESTING.md) → "Picking a voice". Linux hasn't been attempted
+at all.
 Nothing here is stable — no Claude Code/Codex adapters yet, config isn't
 threaded through the CLI, and the orchestrator→TTS wiring uses
 `synthesize()` (whole-utterance) rather than streaming synthesized audio
