@@ -331,7 +331,14 @@ async def run(config_path: str | None, cli_device: str | None,
             _draw(state)
             await asyncio.sleep(0.1)
 
-    os.system("")  # enables ANSI escape processing in legacy Windows consoles
+    # SECURITY EXCEPTION: B605/B607 (os.system: shell exec, partial path) --
+    # the argument is a hardcoded empty string literal, never user input.
+    # This is a documented Windows idiom: the WinAPI call chain os.system("")
+    # goes through has the side effect of enabling ANSI/VT100 escape
+    # processing in legacy console hosts (same trick colorama uses
+    # internally); it does not actually execute a program.
+    # Mitigation: no interpolation, no variable, literal empty string only.
+    os.system("")  # nosec B605 B607
     sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
     try:
         worker_task = asyncio.create_task(stt_worker())

@@ -59,9 +59,12 @@ def load_catalog(voices_dir: Path, refresh: bool = False) -> Catalog:
     if not refresh and cache_path.exists():
         return json.loads(cache_path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
     print(f"fetching voice catalog from {CATALOG_URL} ...", file=sys.stderr)
-    # CATALOG_URL is a hardcoded constant, not user input -- same pattern
-    # piper.download_voices.list_voices() uses internally for this same file.
-    with urlopen(CATALOG_URL) as response:
+    # SECURITY EXCEPTION: B310 (urlopen: audit permitted schemes) --
+    # CATALOG_URL is a hardcoded https:// module constant, not user input or
+    # a variable built from one; same pattern piper.download_voices's own
+    # list_voices()/download_voice() use internally for this exact file.
+    # Mitigation: no scheme/host ever reaches this from a CLI arg or config.
+    with urlopen(CATALOG_URL) as response:  # nosec B310
         data: Catalog = json.load(response)
     voices_dir.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(data), encoding="utf-8")

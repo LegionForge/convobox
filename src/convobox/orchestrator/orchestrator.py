@@ -112,7 +112,14 @@ class Orchestrator:
             self._speak_task = asyncio.create_task(self._speak(spoken))
 
     async def _speak(self, text: str) -> None:
-        assert self._tts is not None and self._player is not None
+        # SECURITY EXCEPTION: B101 (assert stripped under python -O) -- this is
+        # a type-narrowing assertion, not a security boundary. handle_backend_event
+        # (the only caller) already returns early when either is None; _speak
+        # can't be reached otherwise. If that invariant were ever violated, -O
+        # would surface an AttributeError two lines down instead of this
+        # clearer message -- same failure, not a behavior change.
+        # Mitigation: single private call site, guarded immediately before use.
+        assert self._tts is not None and self._player is not None  # nosec B101
         audio = await self._tts.synthesize(text)
         if audio.size:
             self._player.play(audio, self._tts.sample_rate)
