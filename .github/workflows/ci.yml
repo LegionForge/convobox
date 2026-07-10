@@ -1,0 +1,79 @@
+# LegionForge dev-rig CI: test/lint/SAST/dependency-audit/SBOM/secrets.
+#
+# Consumes LegionForge/dev-rig's shared reusable workflows (shared Python CI
+# + security rig used across LegionForge projects) rather than duplicating
+# tool config here. See TESTING.md -> "CI / LegionForge dev-rig" for what
+# each job checks, why it's scoped the way it is, and how to run the same
+# checks locally before pushing.
+#
+# Pinned to a commit SHA, not a tag: LegionForge/dev-rig has cut no tagged
+# release as of this writing (confirmed via `gh api repos/LegionForge/dev-rig/tags`
+# returning empty) -- dev-rig's own README examples currently show `@main`,
+# a mutable ref this project deliberately does not consume (see
+# LegionForge/dev-rig's pipeline-hardening handoff doc: never consume
+# `@main`, use a pinned tag once one exists). SHA-pin is the correct
+# available-today choice; re-pin to a released tag once dev-rig cuts one.
+#
+# DEV_RIG_REF: 468d5a7c30f6540a472a32d8b3bea1ac381f2017 (main, 2026-07-10)
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests & Coverage
+    uses: LegionForge/dev-rig/.github/workflows/test.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
+    with:
+      coverage-source: "convobox"
+      python-version: "3.12"
+
+  lint:
+    name: Lint & Type Check
+    uses: LegionForge/dev-rig/.github/workflows/lint.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
+    with:
+      source-dirs: "src/convobox"
+      python-version: "3.12"
+      # types-PyYAML is the default already; explicit for clarity. mypy's
+      # remaining untyped third-party deps (faster-whisper, sounddevice,
+      # silero-vad -- no stub packages exist for these) are scoped out via
+      # [[tool.mypy.overrides]] in pyproject.toml, not a blanket CLI flag,
+      # so this stays real type-checking rather than a broad opt-out.
+      extra-mypy-deps: "types-PyYAML"
+
+  sast:
+    name: SAST
+    uses: LegionForge/dev-rig/.github/workflows/sast.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
+    permissions:
+      contents: read
+      security-events: write # required for the CodeQL upload-sarif step inside sast.yml
+    with:
+      source-dirs: "src/convobox"
+      # dev-rig's default is "p/python p/fastapi" -- ConvoBox has no web
+      # framework yet (see README roadmap: the Phase 2 server component
+      # doesn't exist), so p/fastapi would just be dead weight. Swapped for
+      # a broader general-purpose ruleset instead.
+      semgrep-configs: "p/python p/security-audit"
+      python-version: "3.12"
+
+  audit:
+    name: Dependency Audit
+    uses: LegionForge/dev-rig/.github/workflows/audit.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
+    with:
+      python-version: "3.12"
+
+  sbom:
+    name: SBOM
+    uses: LegionForge/dev-rig/.github/workflows/sbom.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
+    with:
+      python-version: "3.12"
+
+  secrets:
+    name: Secret Scanning
+    uses: LegionForge/dev-rig/.github/workflows/secrets.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017

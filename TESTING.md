@@ -10,6 +10,59 @@ uv sync --extra dev
 This installs the full pipeline (torch, faster-whisper/ctranslate2, silero-vad,
 piper-tts, sounddevice, httpx, pytest) into `.venv/`.
 
+## CI / LegionForge dev-rig
+
+`.github/workflows/ci.yml` runs six independent, parallel jobs on every PR
+and push to `main`, each a reusable workflow from
+[LegionForge/dev-rig](https://github.com/LegionForge/dev-rig) rather than
+tool config duplicated here. Pinned to a commit SHA
+(`468d5a7c30f6540a472a32d8b3bea1ac381f2017`), not a tag -- dev-rig has cut
+no tagged release as of this writing; see the comment at the top of
+`ci.yml` for why that's the correct choice today and what to do once one
+exists.
+
+| Job | Checks | Run locally first |
+|---|---|---|
+| **test** | pytest + coverage (`--cov=convobox --cov-fail-under=80`; actual coverage 91%) | `pytest --cov=convobox --cov-report=term-missing tests/` |
+| **lint** | ruff, bandit, mypy against `src/convobox` | `ruff check src/convobox`, `bandit -r src/convobox`, `mypy src/convobox` |
+| **sast** | semgrep (`p/python p/security-audit` -- swapped from dev-rig's `p/fastapi` default, ConvoBox has no web framework yet) + CodeQL | `semgrep --config=p/python --config=p/security-audit src/convobox --error` |
+| **audit** | pip-audit (CVEs) + pip-licenses (fails on GPL/AGPL) | `pip-audit`; `pip-licenses --fail-on="GPL;AGPL"` |
+| **sbom** | CycloneDX SBOM, uploaded as a build artifact | `cyclonedx-py environment --output-format json` |
+| **secrets** | gitleaks over full commit history | download the [gitleaks release](https://github.com/gitleaks/gitleaks/releases) for your platform, verify its checksum, `gitleaks detect --source . --log-opts="HEAD"` |
+
+All six ran clean against this repo before `ci.yml` was added, with two
+exceptions, both already fixed in this branch:
+
+- Three `bandit`/`ruff` findings in application code (not tests, which
+  `bandit`'s `exclude_dirs` in `pyproject.toml` deliberately skips --
+  `B101` on a plain pytest `assert` is bandit misapplied, not a real
+  finding). Each fix has a `# nosec`/`SECURITY EXCEPTION` comment
+  explaining why, per this project's annotation convention -- search
+  `nosec` to find all three.
+- `mypy` fails without `--ignore-missing-imports` (dev-rig's `lint.yml`
+  doesn't pass that flag) because `faster-whisper`, `sounddevice`, and
+  `silero-vad` ship no type stubs and none exist to install. Fixed with a
+  scoped `[[tool.mypy.overrides]]` in `pyproject.toml` instead of a blanket
+  flag, so everything else stays fully type-checked.
+
+**Known compliance finding, not resolved here -- needs a decision:**
+`piper-tts` (a required runtime dependency, not dev-only) is licensed
+**GPL-3.0-or-later**; ConvoBox is MIT. Confirmed with a clean isolated
+`pip install -e "."` + `pip-licenses` (no dev-tool pollution) --
+every other dependency in the real runtime tree is MIT/BSD/Apache/MPL.
+dev-rig's own `pip-licenses --fail-on="GPL;AGPL"` does **not** currently
+catch this (it matches the literal strings "GPL"/"AGPL", not SPDX
+identifiers like "GPL-3.0-or-later"), so the `audit` job will show green
+regardless -- that's a gap in dev-rig's own check, not evidence this is
+fine. Whether importing a GPL-licensed library into an MIT-licensed
+Python project is a real copyleft trigger on the combined work is a
+genuine, unsettled-in-practice question (Python "import" runs in the same
+process, which the FSF's own guidance treats similarly to dynamic
+linking) -- this needs a licensing decision, not a lint fix. See the
+README's existing "Open questions" -> Licensing model note, which is
+about ConvoBox's own license choice; this is the sharper, more concrete
+version of that same open question.
+
 ## Automated tests (no audio hardware needed)
 
 ```bash
