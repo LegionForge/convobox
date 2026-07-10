@@ -67,7 +67,7 @@ flowchart TB
         direction TB
         CAP["MicrophoneStream · sounddevice / PortAudio · continuous float32 @ 16kHz"]:::pipeline
         VAD["UtteranceSegmenter · Silero VAD · hysteresis band · max_utterance_s cap"]:::pipeline
-        STT["LocalTranscriber · faster-whisper · language pin · per-utterance confidence"]:::pipeline
+        STT["LocalTranscriber · faster-whisper · auto-detect by default · decoder + language confidence"]:::pipeline
         SW["SafewordDetector · deterministic substring match · no LLM in this path"]:::safety
         ORCH["Orchestrator · hard-stop precedence · empty-transcript guard · busy/idle routing"]:::routing
         TTS["PiperTTSEngine · sanitize_text · streaming synthesis"]:::pipeline

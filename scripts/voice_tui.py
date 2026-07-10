@@ -7,9 +7,19 @@ pipeline but renders a live terminal dashboard instead of log lines:
 - an input level meter and capture state, so mic/gain problems are visible
   before any transcript arrives;
 - a per-utterance verdict derived from live-test data (language confidence
-  bands, real-time-factor >= 1.0 marking Whisper fallback re-decodes, and
-  queue wait, which compounds under bursts of short utterances);
-- session-level stats (fallback/empty/dropped counts, language histogram).
+  bands, decoder confidence, real-time-factor >= 1.0 marking Whisper
+  fallback re-decodes, and queue wait, which compounds under bursts of
+  short utterances);
+- session-level stats (fallback/empty/dropped counts, language histogram);
+- a language-wander marker (~): auto-detect (the default -- STT is never
+  pinned to one language unless you pass --language) is real per-utterance
+  detection, so it can legitimately flip languages on a genuine switch,
+  but it can also wander mid-monologue on ONE language it can't confidently
+  place. LanguageTracker (see src/convobox/stt/language_tracker.py) tracks
+  the session's dominant confidently-detected language purely for display
+  and NEVER feeds back into what the decoder is asked to assume -- it
+  exists to help you tell "real switch" from "wander" apart, not to force
+  a language onto the decoder the way --language does.
 
 Deliberately stdlib-only (ANSI escapes, no curses/rich/textual): a test
 utility should not add dependencies to the project it is testing.
@@ -34,6 +44,7 @@ import numpy as np
 from convobox.audio.capture import MicrophoneStream
 from convobox.config import load_config
 from convobox.safeword import SafewordDetector
+from convobox.stt.language_tracker import LanguageTracker
 from convobox.stt.transcriber import LocalTranscriber, TranscriptResult
 from convobox.vad.segmenter import UtteranceSegmenter
 
@@ -78,6 +89,13 @@ class _Row:
     rtf: float
     queue_wait_ms: float
     text: str
+    # True when this utterance's language disagrees with the session's
+    # established (LanguageTracker) dominant language. Distinct from the
+    # verdict: this flags "the decoder may be wandering off the language
+    # you've actually been speaking" without ever changing what language
+    # the decoder is asked to assume -- auto-detect stays real auto-detect.
+    # Always False when a language is pinned (nothing to track).
+    wander: bool = False
 
 
 @dataclass
@@ -101,6 +119,8 @@ class _State:
     latency_max: float = 0.0
     languages: Counter[str] = field(default_factory=Counter)
     stopping: str | None = None
+    dominant_language: str | None = None
+    wanders: int = 0
 
 
 def _verdict(
@@ -147,20 +167,22 @@ def _draw(state: _State) -> None:
     else:
         status = f"{_CYAN}* LISTENING{_RESET}"
 
+    dominant = f" session-lang={state.dominant_language}" if state.dominant_language else ""
     lines = [
         f"{_BOLD}ConvoBox voice clarity monitor{_RESET}   "
         f"model={state.model} lang={state.language} gate={state.gate:.2f} "
-        f"device={state.device_label}",
+        f"device={state.device_label}{dominant}",
         f"state: {status}   level [{_meter(state.level_db, state.peak_db, 24)}] "
         f"{state.level_db:5.0f} dB   elapsed {elapsed // 60:02d}:{elapsed % 60:02d}",
         "-" * min(cols, 100),
     ]
 
     for row in state.rows[-10:]:
-        text_width = max(10, cols - 62)
+        text_width = max(10, cols - 66)
         text = row.text if len(row.text) <= text_width else row.text[: text_width - 1] + "~"
+        mark = f"{_MAGENTA}~{_RESET}" if row.wander else " "
         lines.append(
-            f"{row.clock}  {row.color}{row.verdict:<5}{_RESET} "
+            f"{row.clock}  {row.color}{row.verdict:<5}{_RESET}{mark} "
             f"{row.language} {row.probability:.2f}  dec {row.decoder_conf:.2f}  "
             f"{row.latency_ms:5.0f}ms  rtf {row.rtf:4.2f}  q {row.queue_wait_ms:4.0f}ms  {text}"
         )
@@ -171,11 +193,15 @@ def _draw(state: _State) -> None:
     avg = state.latency_sum / state.total if state.total else 0.0
     top = "  ".join(f"{lang} x{n}" for lang, n in state.languages.most_common(3))
     lines.append(
-        f"utterances {state.total} ({state.empty} empty, {state.dropped} dropped)  "
+        f"utterances {state.total} ({state.empty} empty, {state.dropped} dropped, "
+        f"{state.wanders} {_MAGENTA}~{_RESET} wander)  "
         f"avg {avg:.0f}ms  max {state.latency_max:.0f}ms  "
         f"fallbacks(rtf>={_RTF_FALLBACK:.0f}) {state.fallbacks}  langs: {top or '-'}"
     )
-    lines.append(f"{_DIM}say the safeword to exit (default: 'stop stop stop'){_RESET}")
+    lines.append(
+        f"{_DIM}say the safeword to exit (default: 'stop stop stop')   "
+        f"{_MAGENTA}~{_RESET}{_DIM} = broke from session-lang (real switch, or decoder wander){_RESET}"
+    )
 
     frame = "\x1b[H" + "\x1b[K\n".join(line[: cols + 32] for line in lines) + "\x1b[K\x1b[J"
     sys.stdout.write(frame)
@@ -203,6 +229,11 @@ async def run(config_path: str | None, cli_device: str | None,
     transcriber = LocalTranscriber(stt_config)
     segmenter = UtteranceSegmenter(config.vad)
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
+    # Purely observational (see LanguageTracker docstring): never fed back
+    # into transcribe(), so it cannot force or bias what the decoder tries.
+    # Meaningless (and skipped) when a language is pinned -- there is only
+    # ever one language to be dominant, so "wander" can't mean anything.
+    language_tracker = LanguageTracker() if stt_config.language is None else None
 
     state = _State(
         started=time.monotonic(),
@@ -266,6 +297,15 @@ async def run(config_path: str | None, cli_device: str | None,
             if rtf >= _RTF_FALLBACK:
                 state.fallbacks += 1
             state.languages[result.language] += 1
+
+            wander = False
+            if language_tracker is not None and result.text:
+                wander = not language_tracker.agrees(result.language)
+                language_tracker.observe(result.language, result.language_probability)
+                state.dominant_language = language_tracker.dominant
+                if wander:
+                    state.wanders += 1
+
             state.rows.append(
                 _Row(
                     clock=time.strftime("%H:%M:%S"),
@@ -278,6 +318,7 @@ async def run(config_path: str | None, cli_device: str | None,
                     rtf=rtf,
                     queue_wait_ms=queue_wait_ms,
                     text=result.text or "(no speech recognized)",
+                    wander=wander,
                 )
             )
             if stopped:
@@ -319,6 +360,8 @@ def _summary(state: _State) -> None:
     print(f"  latency    : avg {avg:.0f}ms, max {state.latency_max:.0f}ms")
     print(f"  fallbacks  : {state.fallbacks} (rtf >= {_RTF_FALLBACK:.0f})")
     print(f"  languages  : {langs or '-'}")
+    if state.dominant_language is not None:
+        print(f"  session-lang: {state.dominant_language}  ({state.wanders} utterance(s) broke from it)")
 
 
 def main() -> None:
@@ -330,7 +373,15 @@ def main() -> None:
     parser.add_argument(
         "--language",
         default=None,
-        help="pin the STT language (e.g. 'en'); overrides config, disables auto-detect",
+        help=(
+            "pin the STT language (e.g. 'en'); overrides config, disables "
+            "auto-detect. Default is auto-detect (recommended for "
+            "multilingual use) -- pinning forces every utterance to decode "
+            "AS that language, which can mangle non-matching speech into "
+            "false-confident nonsense rather than leaving it unrecognized. "
+            "See the language-wander (~) marker for a non-forcing way to "
+            "spot decoder confusion while staying on auto-detect."
+        ),
     )
     parser.add_argument(
         "--min-confidence",

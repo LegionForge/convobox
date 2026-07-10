@@ -215,11 +215,30 @@ handlers before awaiting `wait_closed()`.
 
 Live-mic findings from that session that shaped config defaults and the
 TUI's verdict bands: language auto-detect is per-utterance with no session
-stickiness, so accented or non-native speech wanders across languages (pin
-`stt.language` for coding use); over-articulating makes language ID worse,
-not better (it strips the prosodic cues the detector relies on); detection
+stickiness, so accented or non-native speech can wander across languages
+mid-monologue. **Pinning `stt.language` is not the recommended fix for
+this** — a pin doesn't detect and reject mismatched speech, it forces
+every utterance to decode AS that language, and does so with fake
+confidence (`language_probability` reports a hardcoded `1.0` when pinned,
+whether or not the words are real). Confirmed live: speaking Russian into
+a `--language en` session produced `GOOD en 1.00` transcripts like "I am
+not a man, I am a man" for "I don't understand Russian" — worse than
+useless, since it *hides* the mismatch instead of surfacing it. Two
+non-forcing alternatives, both left on by default: `LanguageTracker`
+(`src/convobox/stt/language_tracker.py`) tracks the session's dominant
+*confidently-detected* language purely for display — it never feeds back
+into what the decoder is asked to assume, so it can't mangle a genuine
+language switch, but it flags (the `~` marker in `voice_tui.py`) when an
+utterance breaks from that dominant language, which is what a wander
+looks like; and the decoder-confidence signal below (`avg_logprob`) stays
+meaningful with or without a pin, so low `dec` scores catch a wandering
+decoder either way. Pin only for a genuinely single-language deployment
+where you've accepted that tradeoff, not as a default fix for wander.
+Also from that session: over-articulating makes language ID worse, not
+better (it strips the prosodic cues the detector relies on); detection
 confidence below ~0.4 usually means a hallucinated transcript
-(`stt.min_language_probability` gates these); single-word utterances are
+(`stt.min_language_probability` gates these, though see the known gap
+above about it going blind while pinned); single-word utterances are
 the least reliable and most expensive input shape, so spoken confirmation
 phrases should be multi-word by design; and background noise can VAD-trigger
 and transcribe to empty, which the orchestrator now drops instead of
