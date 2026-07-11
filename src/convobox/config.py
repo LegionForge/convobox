@@ -38,7 +38,12 @@ class SafewordConfig(BaseModel):
 
 class BackendConfig(BaseModel):
     name: str = "opencode"
+    # Used by HTTP-based backends (opencode).
     url: str = "http://localhost:4096"
+    # Used by subprocess-based backends (claude-code): the base command to
+    # spawn, e.g. ["claude"] or ["claude", "--model", "claude-haiku-4-5"].
+    # The adapter appends the protocol flags it needs itself.
+    command: list[str] | None = None
 
 
 class AppConfig(BaseModel):

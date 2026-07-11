@@ -40,5 +40,5 @@ def test_create_backend_adapter_opencode() -> None:
 
 
 def test_create_backend_adapter_unknown_name_raises() -> None:
-    with pytest.raises(ValueError, match="claude-code"):
-        create_backend_adapter(BackendConfig(name="claude-code"))
+    with pytest.raises(ValueError, match="gemini-cli"):
+        create_backend_adapter(BackendConfig(name="gemini-cli"))
