@@ -4,9 +4,14 @@ import asyncio
 import queue
 from collections.abc import AsyncIterator
 from types import TracebackType
+from typing import TYPE_CHECKING
 
 import numpy as np
-import sounddevice as sd
+
+from convobox.audio._sounddevice import import_sounddevice
+
+if TYPE_CHECKING:
+    import sounddevice as sd
 
 # float32 in [-1, 1] because Silero VAD and faster-whisper both consume
 # float32 numpy arrays directly; int16 would force a conversion on every chunk.
@@ -49,6 +54,7 @@ class MicrophoneStream:
         self._queue.put(indata.copy().reshape(-1))
 
     def start(self) -> None:
+        sd = import_sounddevice()
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
             blocksize=self.blocksize,
