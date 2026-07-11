@@ -27,11 +27,14 @@ import argparse
 import asyncio
 import difflib
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
+
+import yaml
 
 # Inserted (not relied on as a package import) so this file works identically
 # run directly (`python scripts/voice_picker.py`, where it's __main__ and
@@ -152,6 +155,65 @@ def print_config_snippet(key: str, rate: float, volume: float) -> None:
         print(f"  volume: {volume}")
 
 
+def default_config_path() -> Path:
+    """The same file load_config() will read: CONVOBOX_CONFIG or ./convobox.yaml."""
+    return Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+
+
+def write_choice_to_config(
+    voice: str, rate: float, volume: float, config_path: Path | None = None
+) -> Path:
+    """Persist the chosen voice into the config file the runner actually reads.
+
+    Merges into an existing file (only the tts section is touched; backend,
+    stt, vad, ... are preserved) and keeps the file's leading comment block
+    -- a plain yaml round-trip would silently delete a user's "# Helios UAT
+    config" header, which is exactly the kind of surprise this feature
+    exists to remove, not add. Inline comments deeper in the file are not
+    preserved (safe_load drops them); leading header comments cover the
+    common case.
+    """
+    path = config_path if config_path is not None else default_config_path()
+    leading: list[str] = []
+    data: dict[str, Any] = {}
+    if path.exists():
+        raw = path.read_text(encoding="utf-8")
+        for line in raw.splitlines():
+            if line.lstrip().startswith("#") or not line.strip():
+                leading.append(line)
+            else:
+                break
+        loaded = yaml.safe_load(raw)
+        if isinstance(loaded, dict):
+            data = loaded
+    tts = data.get("tts")
+    if not isinstance(tts, dict):
+        tts = {}
+        data["tts"] = tts
+    tts["voice"] = voice
+    tts["rate"] = rate
+    tts["volume"] = volume
+    header = ("\n".join(leading) + "\n") if leading else ""
+    path.write_text(header + yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def offer_config_write(key: str, rate: float, volume: float) -> None:
+    """Interactive quit path shared by the REPL picker and the TUI."""
+    print_config_snippet(key, rate, volume)
+    path = default_config_path()
+    verb = "update" if path.exists() else "create"
+    try:
+        reply = input(f"{verb} {path} with this voice now? [Y/n] ").strip().lower()
+    except EOFError:
+        return
+    if reply in ("", "y", "yes"):
+        written = write_choice_to_config(key, rate, volume)
+        print(f"wrote {written} -- scripts/run_convobox.py will use {key} on its next start")
+    else:
+        print("not written (snippet above if you want it manually)")
+
+
 _COMMANDS = [
     "search", "list", "play", "get", "delete", "use", "text", "rate", "volume", "help", "quit",
 ]
@@ -172,7 +234,7 @@ either that number or the full voice key.
   get N|KEY       download a voice without playing it
   delete N|KEY    remove a downloaded voice's files from disk
                   (asks first; 'list' to see what's installed)
-  use N|KEY       choose the voice -- prints the convobox.yaml snippet
+  use N|KEY       choose the voice -- offers to save it to convobox.yaml
                   when you quit
   text SENTENCE   change the sample text used by 'play'.
                     text How is the weather today?
@@ -339,7 +401,7 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
             print(f"unknown command: {cmd!r}{suffix}  ('help' lists all commands)")
 
     if chosen:
-        print_config_snippet(chosen, rate, volume)
+        offer_config_write(chosen, rate, volume)
     else:
         print("no voice selected (use 'use NUMBER-or-KEY' before quitting to get a config snippet)")
 

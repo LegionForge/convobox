@@ -19,7 +19,7 @@ Keys:
   Enter   choose the highlighted voice (snippet printed on quit)
   T       edit the sample text spoken by P
   + / -   speech rate up / down       < / >   volume down / up
-  Q       quit (prints the convobox.yaml snippet for the chosen voice)
+  Q       quit (offers to save the chosen voice to convobox.yaml)
 
 No new dependencies: hand-rolled ANSI + msvcrt (Windows) / termios
 (POSIX) keyboard input, reusing scripts/voice_picker.py's catalog,
@@ -50,7 +50,7 @@ from voice_picker import (
     download,
     installed_voices,
     load_catalog,
-    print_config_snippet,
+    offer_config_write,
     search_catalog,
 )
 
@@ -372,7 +372,7 @@ def _handle_browse(state: TuiState, key: str, player: AudioPlayer) -> bool:
         chosen = state.current_key()
         if chosen is not None:
             state.chosen = chosen
-            state.status = f"chosen: {chosen} -- Q quits and prints the config snippet"
+            state.status = f"chosen: {chosen} -- Q quits and offers to save it to convobox.yaml"
     elif lowered == "t":
         state.mode = "text"
         state.edit_buffer = state.sample_text
@@ -450,7 +450,7 @@ def run_tui(voices_dir: Path, refresh: bool) -> None:
         sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")  # cursor back, clean exit
         sys.stdout.flush()
     if state.chosen:
-        print_config_snippet(state.chosen, state.rate, state.volume)
+        offer_config_write(state.chosen, state.rate, state.volume)
     else:
         print("no voice selected (highlight one and press Enter before quitting)")
 

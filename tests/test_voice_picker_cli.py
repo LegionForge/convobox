@@ -144,3 +144,58 @@ def test_delete_voice_never_touches_other_files(tmp_path: Path) -> None:
     delete_voice("aa_BB-test-low", tmp_path)
     assert (tmp_path / "voices.json").exists()
     assert (tmp_path / "zz_ZZ-other-low.onnx").exists()
+
+
+# --- persisting the chosen voice into convobox.yaml ---
+
+import yaml  # noqa: E402
+
+from scripts.voice_picker import write_choice_to_config  # noqa: E402
+
+
+def test_write_choice_creates_config_when_missing(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    write_choice_to_config("en_GB-alba-medium", 1.2, 0.9, config_path=path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["tts"] == {"voice": "en_GB-alba-medium", "rate": 1.2, "volume": 0.9}
+
+
+def test_write_choice_merges_without_touching_other_sections(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text(
+        "backend:\n  name: opencode\n  url: http://localhost:4096\n"
+        "stt:\n  model: base\n"
+        "tts:\n  voice: old-voice\n",
+        encoding="utf-8",
+    )
+    write_choice_to_config("new-voice", 1.0, 1.0, config_path=path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["tts"]["voice"] == "new-voice"
+    assert data["backend"] == {"name": "opencode", "url": "http://localhost:4096"}
+    assert data["stt"] == {"model": "base"}
+
+
+def test_write_choice_preserves_leading_comment_header(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text(
+        "# Helios UAT config -- do not lose this comment.\n"
+        "backend:\n  name: opencode\n",
+        encoding="utf-8",
+    )
+    write_choice_to_config("a-voice", 1.0, 1.0, config_path=path)
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("# Helios UAT config -- do not lose this comment.\n")
+    data = yaml.safe_load(text)
+    assert data["tts"]["voice"] == "a-voice"
+    assert data["backend"]["name"] == "opencode"
+
+
+def test_write_choice_result_loads_through_real_config_loader(tmp_path: Path) -> None:
+    from convobox.config import load_config
+
+    path = tmp_path / "convobox.yaml"
+    write_choice_to_config("en_GB-alba-medium", 1.1, 0.8, config_path=path)
+    config = load_config(path)
+    assert config.tts.voice == "en_GB-alba-medium"
+    assert config.tts.rate == 1.1
+    assert config.tts.volume == 0.8
