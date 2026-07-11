@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from types import SimpleNamespace
@@ -254,3 +255,91 @@ def test_is_playing_reflects_state() -> None:
         FakeOutputStream.write = original_write  # type: ignore[method-assign]
     player.wait()
     assert player.is_playing() is False
+
+
+# --- streaming playback (play_stream) ---
+
+
+async def _chunks_from(arrays: list[np.ndarray]):  # type: ignore[no-untyped-def]
+    for array in arrays:
+        yield array
+
+
+def test_play_stream_writes_all_chunks() -> None:
+    player = AudioPlayer()
+    chunks = [np.arange(1500, dtype=np.float32), np.arange(700, dtype=np.float32)]
+
+    asyncio.run(player.play_stream(_chunks_from(chunks), 16000))
+    player.wait()
+
+    stream = FakeOutputStream.instances[0]
+    assert stream.total_written() == 2200
+    assert stream.kwargs["samplerate"] == 16000
+    assert stream.stopped and stream.closed
+
+
+def test_play_stream_starts_audio_before_the_source_finishes() -> None:
+    # The whole point of streaming: the first chunk must be playing while
+    # later chunks are still being synthesized. The source parks on an
+    # event after chunk 1; the test only releases it once chunk 1's audio
+    # has demonstrably reached the output stream.
+    player = AudioPlayer()
+    release = asyncio.Event()
+
+    async def slow_source():  # type: ignore[no-untyped-def]
+        yield np.arange(2048, dtype=np.float32)
+        await release.wait()
+        yield np.arange(1024, dtype=np.float32)
+
+    async def scenario() -> None:
+        feed_task = asyncio.ensure_future(player.play_stream(slow_source(), 16000))
+        for _ in range(200):  # up to 2s for the playback thread to spin up
+            if FakeOutputStream.instances and FakeOutputStream.instances[0].writes:
+                break
+            await asyncio.sleep(0.01)
+        assert FakeOutputStream.instances[0].writes, "no audio before source finished"
+        assert not feed_task.done()  # source is still mid-response
+        release.set()
+        await asyncio.wait_for(feed_task, timeout=5)
+
+    asyncio.run(scenario())
+    player.wait()
+    assert FakeOutputStream.instances[0].total_written() == 3072
+
+
+def test_play_stream_stop_aborts_playback_and_pull() -> None:
+    player = AudioPlayer()
+    pulled = 0
+
+    async def endless_source():  # type: ignore[no-untyped-def]
+        nonlocal pulled
+        while True:
+            pulled += 1
+            yield np.zeros(256, dtype=np.float32)
+            await asyncio.sleep(0.01)
+
+    async def scenario() -> None:
+        feed_task = asyncio.ensure_future(player.play_stream(endless_source(), 16000))
+        await asyncio.sleep(0.15)
+        player.stop()
+        # stop() must also end the FEEDING loop (stop pulling from
+        # synthesis), not just silence the output.
+        await asyncio.wait_for(feed_task, timeout=5)
+
+    asyncio.run(scenario())
+    assert player.is_playing() is False
+    pulls_at_stop = pulled
+    time.sleep(0.05)
+    assert pulled == pulls_at_stop  # nothing kept pulling after stop
+
+
+def test_play_stream_with_no_chunks_never_touches_the_device() -> None:
+    player = AudioPlayer()
+
+    async def empty_source():  # type: ignore[no-untyped-def]
+        return
+        yield  # pragma: no cover -- makes this an async generator
+
+    asyncio.run(player.play_stream(empty_source(), 16000))
+    player.wait()
+    assert FakeOutputStream.instances == []

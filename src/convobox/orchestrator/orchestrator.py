@@ -129,6 +129,11 @@ class Orchestrator:
         # clearer message -- same failure, not a behavior change.
         # Mitigation: single private call site, guarded immediately before use.
         assert self._tts is not None and self._player is not None  # nosec B101
-        audio = await self._tts.synthesize(text)
-        if audio.size:
-            self._player.play(audio, self._tts.sample_rate)
+        # Streamed, not synthesize-then-play: audio starts on the first
+        # synthesized chunk (typically the first sentence), so
+        # time-to-first-audio is proportional to one sentence instead of
+        # the whole response. play_stream replaces any current playback,
+        # same as play() did.
+        await self._player.play_stream(
+            self._tts.synthesize_stream(text), self._tts.sample_rate
+        )

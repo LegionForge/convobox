@@ -170,6 +170,19 @@ class EchoAwarePlayer(AudioPlayer):
         super().play(samples, sample_rate)
         self.playback_ended_at = time.monotonic() + len(samples) / sample_rate
 
+    async def play_stream(self, chunks, sample_rate) -> None:  # type: ignore[no-untyped-def]
+        # Streaming playback's end is a moving target: each arriving chunk
+        # extends the estimate. max(estimate, now) restarts the clock after
+        # a synthesis stall (playback caught up and went silent, so the
+        # next chunk plays from "now", not from the stale estimate).
+        async def tracked():  # type: ignore[no-untyped-def]
+            async for chunk in chunks:
+                base = max(self.playback_ended_at, time.monotonic())
+                self.playback_ended_at = base + len(chunk) / sample_rate
+                yield chunk
+
+        await super().play_stream(tracked(), sample_rate)
+
     def stop(self) -> None:
         super().stop()
         # If stopped mid-playback the estimate is in the future; the real
@@ -186,6 +199,17 @@ class MutePlayer(EchoAwarePlayer):
 
     def play(self, samples, sample_rate) -> None:  # type: ignore[no-untyped-def]
         log.info("muted playback: %d samples @ %d Hz", len(samples), sample_rate)
+
+    async def play_stream(self, chunks, sample_rate) -> None:  # type: ignore[no-untyped-def]
+        first_at: float | None = None
+        total = 0
+        started = time.monotonic()
+        async for chunk in chunks:
+            if first_at is None:
+                first_at = time.monotonic() - started
+                log.info("muted stream: first audio chunk after %.2fs", first_at)
+            total += len(chunk)
+        log.info("muted stream: %d samples total @ %d Hz", total, sample_rate)
 
     def stop(self) -> None:
         pass
