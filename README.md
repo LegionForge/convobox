@@ -1,4 +1,4 @@
-# ConvoBox
+# LegionForge - ConvoBox
 
 A local, backend-agnostic voice frontend for CLI coding agents.
 
@@ -115,11 +115,13 @@ flowchart TB
   utterance as a fresh command, a soft interject, or a hard stop.
 - **Backend adapters** — one per target CLI, translating the orchestrator's
   intent into whatever that tool actually understands. For a backend that
-  exposes a headless HTTP+SSE server (OpenCode does: `POST /sessions` to
-  open a session, `GET /sessions/:id/events` as an SSE stream, `POST
-  /sessions/:id/messages` to send text), the adapter is a thin typed
-  client over that API rather than PTY scraping — see
+  exposes a headless HTTP+SSE server (OpenCode does), the adapter is a
+  thin typed client over that API rather than PTY scraping — see
   [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
+  **The specific endpoint paths this project initially assumed for
+  OpenCode turned out to be wrong** when tested against a real `opencode
+  serve` instance — see [OPENCODE_API_NOTES.md](OPENCODE_API_NOTES.md) for
+  the real API shape and what's not yet fixed.
 - **Local TTS** — streams spoken responses back, filtering out raw
   code/diff output in favor of prose summaries.
 - **Optional local LLM cleanup pass** between STT and the adapter, to fix
@@ -311,7 +313,11 @@ Current candidate stack for the local pipeline:
   segmentation
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — local
   speech-to-text
-- A local TTS engine (Kokoro or Piper — not yet finalized). Whatever the
+- A local TTS engine (Kokoro or Piper — not yet finalized, though licensing
+  now favors Kokoro: the current `piper-tts` package is GPL-3.0, which
+  would make ConvoBox a GPL-encumbered distribution rather than the clean
+  MIT project it's meant to be — see
+  [DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md)). Whatever the
   choice, response text must never be interpolated directly into a shell
   command to invoke it — see
   [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
@@ -501,13 +507,19 @@ reworking a test suite that deliberately asserts today's open/close-per-call
 contract. Revisit once real latency numbers from the now-wired
 orchestrator→TTS path are available to justify the rework.
 
-## Open questions
-
-- **Licensing model.** Currently MIT. A split model — free for personal
-  use, AGPL (or similar copyleft) for commercial use — is under
-  consideration but not decided. Revisit before this leaves early design
-  stage.
-
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Free for everyone, personal and commercial
+use alike, in the spirit of the mostly MIT/BSD/Apache-2.0 dependencies
+this project is built on. A split free/paid licensing model was
+researched and considered, then decided against in favor of staying a
+single, simple, unencumbered open-source project; ongoing development is
+optionally supported via Patreon/Ko-fi rather than a commercial license
+(links TBD).
+
+One outstanding technical item this decision depends on: the current
+default TTS engine, `piper-tts`, is GPL-3.0 and imported in-process,
+which would make a distributed ConvoBox a GPL-encumbered mix rather than
+cleanly MIT. See [DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md)
+for the full audit — recommended fix is swapping the default engine to
+Kokoro (Apache 2.0), not yet implemented.

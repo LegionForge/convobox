@@ -44,8 +44,12 @@ class BackendAdapter(ABC):
     that position must still fail toward safety at the adapter/orchestrator
     layer (disconnect, clear busy state, never continue routing to the
     stale in-flight task) and must document the gap in its own
-    send_hard_stop rather than implying a guarantee it can't keep — see
-    OpenCodeAdapter.send_hard_stop for the concrete case.
+    send_hard_stop rather than implying a guarantee it can't keep.
+
+    The principle above is still correct; the example that used to follow
+    it (OpenCodeAdapter.send_hard_stop, cited as a case with no cancel
+    endpoint) is not — see OPENCODE_API_NOTES.md. A real cancel endpoint
+    does exist there; the adapter just wasn't built against the real API.
     """
 
     @abstractmethod

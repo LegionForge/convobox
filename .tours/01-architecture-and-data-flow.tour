@@ -87,7 +87,7 @@
     },
     {
       "file": "src/convobox/adapters/opencode.py",
-      "line": 75,
+      "line": 82,
       "pattern": "async def events\\(self\\) -> AsyncGenerator",
       "description": "**The OpenCode backend adapter: HTTP + SSE.** `events()` opens a streaming GET and yields typed `BackendEvent`s parsed from each SSE frame in real time — not buffered until the connection closes.\n\n**Data handoff:** raw SSE `data:` frames (JSON text) → typed `BackendEvent` objects (`text | tool_call | tool_result | error | done`). The `finally` block a few lines down clears `self._busy = False` on **any** exit from this generator, not just an observed DONE — a dropped connection or exception used to leave `is_busy()` stuck `True` forever. See Review Findings for the full story."
     },
