@@ -27,13 +27,34 @@ class PiperTTSEngine(TTSEngine):
     calls marked below (_load_voice and _synthesize_int16) need adjusting.
     """
 
-    def __init__(self, model_path: str, config_path: str | None = None) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        config_path: str | None = None,
+        rate: float = 1.0,
+        volume: float = 1.0,
+    ) -> None:
         self._model_path = model_path
         self._config_path = config_path
         self._voice = self._load_voice()
         self._sample_rate = int(self._voice.config.sample_rate)
         self._speaking = False
         self._stopped = False
+        # rate is a speed multiplier (1.0 = normal, 2.0 = twice as fast) --
+        # the intuitive unit for a config file. Piper's own length_scale is
+        # the inverse (a duration multiplier: 0.5 = twice as fast), and
+        # None means "use this voice's own trained default" rather than an
+        # explicit 1.0 -- so rate=1.0 (the default) is left as None to keep
+        # today's synthesis output byte-identical to before this was wired
+        # up, instead of forcing every voice through an explicit scale.
+        self._syn_config: Any = None
+        if rate != 1.0 or volume != 1.0:
+            from piper.config import SynthesisConfig
+
+            self._syn_config = SynthesisConfig(
+                length_scale=None if rate == 1.0 else 1.0 / rate,
+                volume=volume,
+            )
 
     def _load_voice(self) -> Any:
         # Typed Any, not a real PiperVoice annotation: piper-tts ships no
@@ -79,7 +100,7 @@ class PiperTTSEngine(TTSEngine):
 
     def _produce_chunks(self, text: str, chunk_queue: queue.Queue[np.ndarray | object]) -> None:
         try:
-            for chunk in self._voice.synthesize(text):
+            for chunk in self._voice.synthesize(text, syn_config=self._syn_config):
                 if self._stopped:
                     break
                 pcm = np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16)

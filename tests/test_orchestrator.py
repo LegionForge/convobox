@@ -116,6 +116,27 @@ async def test_busy_normal_transcript_sends_interject_not_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_transcript_is_dropped() -> None:
+    # VAD can trigger on background noise that STT then transcribes to
+    # nothing (seen live: a movie playing in the room produced ''). That
+    # must not reach the backend as an empty command or interject.
+    orch, adapter, _, _ = make_orchestrator(busy=False)
+    await orch.handle_transcript("")
+    await orch.handle_transcript("   ")
+    assert adapter.sent_text == []
+    assert adapter.sent_interject == []
+    assert adapter.hard_stops == 0
+
+
+@pytest.mark.asyncio
+async def test_empty_transcript_is_dropped_when_busy() -> None:
+    orch, adapter, _, _ = make_orchestrator(busy=True)
+    await orch.handle_transcript("")
+    assert adapter.sent_interject == []
+    assert adapter.hard_stops == 0
+
+
+@pytest.mark.asyncio
 async def test_hard_stop_when_idle() -> None:
     orch, adapter, _, _ = make_orchestrator(busy=False)
     await orch.handle_transcript("stop stop stop")

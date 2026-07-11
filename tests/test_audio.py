@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -43,7 +44,13 @@ class FakeInputStream:
 @pytest.fixture(autouse=True)
 def patch_input_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeInputStream.instances = []
-    monkeypatch.setattr("convobox.audio.capture.sd.InputStream", FakeInputStream)
+    # Substitutes the deferred-import seam rather than the real module's
+    # attribute: the real sounddevice can't even be imported on hosts
+    # without PortAudio (e.g. Linux CI runners).
+    monkeypatch.setattr(
+        "convobox.audio.capture.import_sounddevice",
+        lambda: SimpleNamespace(InputStream=FakeInputStream),
+    )
 
 
 def test_start_constructs_input_stream_with_config() -> None:
@@ -177,7 +184,10 @@ class FakeOutputStream:
 def patch_output_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeOutputStream.instances = []
     FakeOutputStream.default_per_write_delay = 0.0
-    monkeypatch.setattr("convobox.audio.playback.sd.OutputStream", FakeOutputStream)
+    monkeypatch.setattr(
+        "convobox.audio.playback.import_sounddevice",
+        lambda: SimpleNamespace(OutputStream=FakeOutputStream),
+    )
 
 
 def test_play_writes_all_samples_without_blocking() -> None:
