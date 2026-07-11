@@ -77,3 +77,42 @@ def test_installed_voices_lists_onnx_stems_sorted(tmp_path: Path) -> None:
 
 def test_installed_voices_on_nonexistent_dir_is_empty(tmp_path: Path) -> None:
     assert installed_voices(tmp_path / "does-not-exist") == []
+
+
+# --- numbered-reference resolution and command suggestions ---
+
+from scripts.voice_picker import resolve_key, suggest_command  # noqa: E402
+
+
+def test_resolve_key_number_picks_from_last_list() -> None:
+    key, error = resolve_key("2", ["a-voice", "b-voice", "c-voice"])
+    assert key == "b-voice"
+    assert error is None
+
+
+def test_resolve_key_number_without_a_list_explains() -> None:
+    key, error = resolve_key("2", [])
+    assert key is None
+    assert error is not None and "search" in error
+
+
+def test_resolve_key_number_out_of_range_explains_bounds() -> None:
+    key, error = resolve_key("9", ["a-voice", "b-voice"])
+    assert key is None
+    assert error is not None and "between 1 and 2" in error
+
+
+def test_resolve_key_passes_literal_keys_through() -> None:
+    key, error = resolve_key("en_GB-alba-medium", [])
+    assert key == "en_GB-alba-medium"
+    assert error is None
+
+
+def test_suggest_command_catches_near_misses() -> None:
+    assert suggest_command("serach") == "search"
+    assert suggest_command("paly") == "play"
+    assert suggest_command("qiut") == "quit"
+
+
+def test_suggest_command_none_for_gibberish() -> None:
+    assert suggest_command("xyzzy123") is None

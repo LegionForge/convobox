@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import sys
 import time
@@ -135,6 +136,70 @@ def print_config_snippet(key: str, rate: float, volume: float) -> None:
         print(f"  volume: {volume}")
 
 
+_COMMANDS = ["search", "list", "play", "get", "use", "text", "rate", "volume", "help", "quit"]
+
+_HELP = """\
+How this works: search the catalog, listen to candidates, then pick one.
+Search results are NUMBERED -- every command that takes a voice accepts
+either that number or the full voice key.
+
+  search TERM     find voices by language or name.
+                    search french        search spanish mexico
+                    search en_GB         search irish
+  list            show the voices already downloaded (numbered, so you
+                  can 'play 1' them too)
+  play N|KEY      hear a voice speak the sample text through your
+                  speakers (offers to download it first if needed).
+                    play 3               play en_GB-alba-medium
+  get N|KEY       download a voice without playing it
+  use N|KEY       choose the voice -- prints the convobox.yaml snippet
+                  when you quit
+  text SENTENCE   change the sample text used by 'play'.
+                    text How is the weather today?
+                  ('text' alone resets to the default sentence)
+  rate NUMBER     speech speed (1.0 normal, 1.2 faster, 0.8 slower)
+  volume NUMBER   loudness (1.0 normal, 0.5 half)
+  help            show this again
+  quit            leave (prints your chosen voice's config snippet)
+
+A typical session:
+  > search english          (see what's available, numbered)
+  > play 5                  (listen to #5 from those results)
+  > text Testing, one two.  (try your own sentence)
+  > play 5                  (hear it again with the new text)
+  > use 5                   (that's the one)
+  > quit                    (get the convobox.yaml snippet)
+"""
+
+
+def resolve_key(arg: str, numbered: list[str]) -> tuple[str | None, str | None]:
+    """Turn a command argument into a voice key.
+
+    Accepts either a number referring to the most recently displayed
+    list (search results or 'list' output) or a literal voice key.
+    Returns (key, error_message) -- exactly one is set.
+    """
+    if arg.isdigit():
+        index = int(arg)
+        if not numbered:
+            return None, "no list to pick from yet -- run 'search' or 'list' first"
+        if not 1 <= index <= len(numbered):
+            return None, f"pick a number between 1 and {len(numbered)} (from the last list shown)"
+        return numbered[index - 1], None
+    return arg, None
+
+
+def suggest_command(cmd: str) -> str | None:
+    matches = difflib.get_close_matches(cmd, _COMMANDS, n=1, cutoff=0.5)
+    return matches[0] if matches else None
+
+
+def _print_numbered(catalog: Catalog, keys: list[str], installed: list[str]) -> None:
+    for index, key in enumerate(keys, start=1):
+        marker = "*" if key in installed else " "
+        print(f" {index:>3}. {marker} {describe(catalog, key)}")
+
+
 def _interactive(voices_dir: Path, refresh: bool) -> None:
     player = AudioPlayer()
     catalog = load_catalog(voices_dir, refresh=refresh)
@@ -142,17 +207,21 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
     volume = 1.0
     text = DEFAULT_SAMPLE_TEXT
     chosen: str | None = None
+    numbered: list[str] = []  # what on-screen numbers currently refer to
 
     print(f"ConvoBox voice picker -- {len(catalog)} voices in the Piper catalog")
-    print("commands: search TERM | play KEY | get KEY | text ... | rate F | volume F | use KEY | quit")
+    print("(* marks voices already downloaded)")
+    print()
+    print(_HELP)
 
     while True:
         installed = installed_voices(voices_dir)
         print()
-        print(f"installed ({len(installed)}): " + (", ".join(installed) if installed else "(none)"))
-        print(f"sample text: {text!r}   rate={rate}  volume={volume}")
+        status = f"[sample: {text!r} | rate {rate} | volume {volume}"
+        status += f" | chosen: {chosen}]" if chosen else " | no voice chosen yet]"
+        print(status)
         try:
-            raw = input("> ").strip()
+            raw = input("voice-picker> ").strip()
         except EOFError:
             break
         if not raw:
@@ -162,63 +231,85 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
 
         if cmd in ("quit", "exit", "q"):
             break
+        elif cmd in ("help", "?"):
+            print(_HELP)
         elif cmd == "search":
+            if not arg:
+                print("what should I search for? e.g.:  search german   search en_US")
+                continue
             matches = search_catalog(catalog, arg)
-            for match_key in matches[:_SEARCH_DISPLAY_CAP]:
-                marker = "*" if match_key in installed else " "
-                print(f" {marker} {describe(catalog, match_key)}")
             if not matches:
-                print("no matches")
-            elif len(matches) > _SEARCH_DISPLAY_CAP:
+                print(f"nothing matching {arg!r} -- try a language name (e.g. 'search dutch')")
+                continue
+            numbered = matches[:_SEARCH_DISPLAY_CAP]
+            _print_numbered(catalog, numbered, installed)
+            if len(matches) > _SEARCH_DISPLAY_CAP:
                 print(f" ... and {len(matches) - _SEARCH_DISPLAY_CAP} more (narrow your search)")
+            print("next: 'play NUMBER' to hear one, 'use NUMBER' to choose it")
+        elif cmd == "list":
+            if not installed:
+                print("no voices downloaded yet -- 'search' the catalog, then 'get' or 'play' one")
+                continue
+            numbered = list(installed)
+            _print_numbered(catalog, numbered, installed)
         elif cmd == "text":
             text = arg or DEFAULT_SAMPLE_TEXT
+            print(f"sample text is now: {text!r}")
         elif cmd in ("rate", "volume"):
             try:
                 value = float(arg)
             except ValueError:
-                print(f"{cmd} must be a number")
+                example = "rate 1.2" if cmd == "rate" else "volume 0.8"
+                print(f"{cmd} needs a number, e.g.:  {example}")
                 continue
             if cmd == "rate":
                 rate = value
             else:
                 volume = value
-        elif cmd == "get":
+            print(f"{cmd} is now {value} (re-'play' a voice to hear the difference)")
+        elif cmd in ("get", "play", "use"):
             if not arg:
-                print("usage: get KEY")
+                print(f"usage: {cmd} NUMBER (from the last list) or {cmd} VOICE-KEY")
                 continue
-            try:
-                download(arg, voices_dir)
-            except Exception as exc:  # CLI: report and keep looping, not fatal
-                print(f"download failed: {exc}")
-        elif cmd == "play":
-            if not arg:
-                print("usage: play KEY")
+            key, error = resolve_key(arg, numbered)
+            if key is None:
+                print(error)
                 continue
-            if arg not in installed:
-                reply = input(f"{arg} is not downloaded -- download it now? [y/N] ").strip().lower()
-                if reply != "y":
-                    continue
+            if cmd == "get":
                 try:
-                    download(arg, voices_dir)
+                    download(key, voices_dir)
+                    print(f"downloaded -- 'play {arg}' to hear it")
                 except Exception as exc:  # CLI: report and keep looping, not fatal
                     print(f"download failed: {exc}")
-                    continue
-            try:
-                audition(arg, voices_dir, text, rate, volume, player)
-            except Exception as exc:  # CLI: report and keep looping, not fatal
-                print(f"audition failed: {exc}")
-        elif cmd == "use":
-            chosen = arg or chosen
-            if chosen:
-                print(f"selected: {chosen}")
+            elif cmd == "play":
+                if key not in installed:
+                    reply = input(
+                        f"{key} is not downloaded -- download it now? [y/N] "
+                    ).strip().lower()
+                    if reply != "y":
+                        continue
+                    try:
+                        download(key, voices_dir)
+                    except Exception as exc:  # CLI: report and keep looping, not fatal
+                        print(f"download failed: {exc}")
+                        continue
+                try:
+                    audition(key, voices_dir, text, rate, volume, player)
+                    print(f"that was {describe(catalog, key)} -- 'use {arg}' to choose it")
+                except Exception as exc:  # CLI: report and keep looping, not fatal
+                    print(f"audition failed: {exc}")
+            else:  # use
+                chosen = key
+                print(f"chosen: {chosen} -- 'quit' to get the convobox.yaml snippet")
         else:
-            print(f"unknown command: {cmd!r}")
+            hint = suggest_command(cmd)
+            suffix = f" -- did you mean {hint!r}?" if hint else ""
+            print(f"unknown command: {cmd!r}{suffix}  ('help' lists all commands)")
 
     if chosen:
         print_config_snippet(chosen, rate, volume)
     else:
-        print("no voice selected (use 'use KEY' before quitting to get a config snippet)")
+        print("no voice selected (use 'use NUMBER-or-KEY' before quitting to get a config snippet)")
 
 
 def main() -> None:
