@@ -258,3 +258,57 @@ def test_strip_code_for_speech_removes_inline_span() -> None:
     assert "run()" not in result
     assert "Call the" in result
     assert "function to start." in result
+
+
+# --- markdown decoration stripping (UAT: Piper spoke "asterisk asterisk") ---
+
+
+def test_strip_removes_bold_and_italic_asterisks() -> None:
+    assert strip_code_for_speech("**important** and *quick* note") == "important and quick note"
+
+
+def test_strip_removes_bullet_asterisks_and_dashes() -> None:
+    assert (
+        strip_code_for_speech("* first thing\n- second thing\n+ third thing")
+        == "first thing\nsecond thing\nthird thing"
+    )
+
+
+def test_strip_removes_heading_and_quote_markers() -> None:
+    assert strip_code_for_speech("## Summary\n> quoted advice") == "Summary\nquoted advice"
+
+
+def test_strip_speaks_link_text_not_url() -> None:
+    assert (
+        strip_code_for_speech("see [the docs](https://example.com/x?y=1) for details")
+        == "see the docs for details"
+    )
+
+
+def test_strip_removes_underscore_emphasis() -> None:
+    assert strip_code_for_speech("this is _really_ important") == "this is really important"
+
+
+def test_strip_keeps_snake_case_identifiers() -> None:
+    assert strip_code_for_speech("run my_func_name now") == "run my_func_name now"
+
+
+def test_strip_keeps_slashes_and_paths() -> None:
+    # UAT decision: slashes read fine; paths must survive untouched.
+    assert strip_code_for_speech("edit src/convobox/config.py") == "edit src/convobox/config.py"
+
+
+def test_strip_full_markdown_response_sounds_like_prose() -> None:
+    text = (
+        "## Plan\n"
+        "1. **Read** the [config](docs/config.md) file\n"
+        "2. Run `pytest` with *coverage*\n"
+        "```python\nprint('never spoken')\n```\n"
+        "Done."
+    )
+    result = strip_code_for_speech(text)
+    assert "*" not in result and "#" not in result and "`" not in result
+    assert "[" not in result and "(" not in result.replace("(docs", "")  # no link syntax
+    assert "never spoken" not in result
+    assert "Read the config file" in result
+    assert "Done." in result
