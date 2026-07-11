@@ -17,6 +17,12 @@ class VADConfig(BaseModel):
     threshold: float = 0.5
     min_silence_ms: int = 500
     min_speech_ms: int = 250
+    # Force-emit an utterance that exceeds this many seconds of audio even if
+    # no silence gap has occurred. None = unlimited (the pre-existing
+    # behavior). Without a cap, continuous speech means an unbounded buffer
+    # and no transcript at all until the speaker pauses; observed live as a
+    # 30.5s single utterance whose transcript only arrived after it ended.
+    max_utterance_s: float | None = None
 
 
 class STTConfig(BaseModel):
@@ -24,12 +30,21 @@ class STTConfig(BaseModel):
     device: str = "cpu"
     compute_type: str = "int8"
     language: str | None = None
+    # Drop transcripts whose detected-language probability falls below this
+    # (0.0 = disabled). Live testing showed detections under ~0.4 on accented
+    # or ambiguous audio are usually hallucinations, sometimes in an entirely
+    # different script. Only meaningful when ``language`` is None (a pinned
+    # language reports probability 1.0). Consumers must still check the
+    # safeword on the raw transcript BEFORE applying this gate: a confidence
+    # filter must never be able to swallow a hard stop.
+    min_language_probability: float = 0.0
 
 
 class TTSConfig(BaseModel):
     engine: str = "piper"
-    model_path: str = ".models/piper/en_US-lessac-medium.onnx"
-    config_path: str | None = None
+    voice: str | None = None
+    rate: float = 1.0
+    volume: float = 1.0
 
 
 class SafewordConfig(BaseModel):

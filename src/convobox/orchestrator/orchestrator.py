@@ -57,6 +57,17 @@ class Orchestrator:
             await self._adapter.send_hard_stop()
             return
 
+        # Background noise can trigger VAD yet transcribe to nothing (observed
+        # live on Windows: a movie playing in the room produced transcript='').
+        # Dropped here so noise never becomes a spurious empty command or
+        # interject to the backend. Checked after the safeword on purpose,
+        # though it could never shadow one: SafewordDetector rejects phrases
+        # that normalize to empty at construction, so a hard stop always has
+        # visible content. Also checked before wait_listening below -- no
+        # point waiting on the event subscription for input we're dropping.
+        if not transcript.strip():
+            return
+
         # Sends wait (best-effort, bounded) for the event subscription the
         # loop above just started to actually be established: events a
         # backend emits before its stream is subscribed can be lost
@@ -110,7 +121,14 @@ class Orchestrator:
             self._speak_task = asyncio.create_task(self._speak(spoken))
 
     async def _speak(self, text: str) -> None:
-        assert self._tts is not None and self._player is not None
+        # SECURITY EXCEPTION: B101 (assert stripped under python -O) -- this is
+        # a type-narrowing assertion, not a security boundary. handle_backend_event
+        # (the only caller) already returns early when either is None; _speak
+        # can't be reached otherwise. If that invariant were ever violated, -O
+        # would surface an AttributeError two lines down instead of this
+        # clearer message -- same failure, not a behavior change.
+        # Mitigation: single private call site, guarded immediately before use.
+        assert self._tts is not None and self._player is not None  # nosec B101
         audio = await self._tts.synthesize(text)
         if audio.size:
             self._player.play(audio, self._tts.sample_rate)

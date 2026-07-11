@@ -10,27 +10,91 @@ uv sync --extra dev
 This installs the full pipeline (torch, faster-whisper/ctranslate2, silero-vad,
 piper-tts, sounddevice, httpx, pytest) into `.venv/`.
 
+## CI / LegionForge dev-rig
+
+`.github/workflows/ci.yml` runs six independent, parallel jobs on every PR
+and push to `main`, each a reusable workflow from
+[LegionForge/dev-rig](https://github.com/LegionForge/dev-rig) rather than
+tool config duplicated here. Pinned to a commit SHA
+(`468d5a7c30f6540a472a32d8b3bea1ac381f2017`), not a tag -- dev-rig has cut
+no tagged release as of this writing; see the comment at the top of
+`ci.yml` for why that's the correct choice today and what to do once one
+exists.
+
+| Job | Checks | Run locally first |
+|---|---|---|
+| **test** | pytest + coverage (`--cov=convobox --cov-fail-under=80`; actual coverage 91%) | `pytest --cov=convobox --cov-report=term-missing tests/` |
+| **lint** | ruff, bandit, mypy against `src/convobox` | `ruff check src/convobox`, `bandit -r src/convobox`, `mypy src/convobox` |
+| **sast** | semgrep (`p/python p/security-audit` -- swapped from dev-rig's `p/fastapi` default, ConvoBox has no web framework yet) + CodeQL | `semgrep --config=p/python --config=p/security-audit src/convobox --error` |
+| **audit** | pip-audit (CVEs) + pip-licenses (fails on GPL/AGPL) | `pip-audit`; `pip-licenses --fail-on="GPL;AGPL"` |
+| **sbom** | CycloneDX SBOM, uploaded as a build artifact | `cyclonedx-py environment --output-format json` |
+| **secrets** | gitleaks over full commit history | download the [gitleaks release](https://github.com/gitleaks/gitleaks/releases) for your platform, verify its checksum, `gitleaks detect --source . --log-opts="HEAD"` |
+
+All six ran clean against this repo before `ci.yml` was added, with two
+exceptions, both already fixed in this branch:
+
+- Three `bandit`/`ruff` findings in application code (not tests, which
+  `bandit`'s `exclude_dirs` in `pyproject.toml` deliberately skips --
+  `B101` on a plain pytest `assert` is bandit misapplied, not a real
+  finding). Each fix has a `# nosec`/`SECURITY EXCEPTION` comment
+  explaining why, per this project's annotation convention -- search
+  `nosec` to find all three.
+- `mypy` fails without `--ignore-missing-imports` (dev-rig's `lint.yml`
+  doesn't pass that flag) because `faster-whisper`, `sounddevice`, and
+  `silero-vad` ship no type stubs and none exist to install. Fixed with a
+  scoped `[[tool.mypy.overrides]]` in `pyproject.toml` instead of a blanket
+  flag, so everything else stays fully type-checked.
+
+**Known compliance finding, not resolved here -- needs a decision:**
+`piper-tts` (a required runtime dependency, not dev-only) is licensed
+**GPL-3.0-or-later**; ConvoBox is MIT. Confirmed with a clean isolated
+`pip install -e "."` + `pip-licenses` (no dev-tool pollution) --
+every other dependency in the real runtime tree is MIT/BSD/Apache/MPL.
+dev-rig's own `pip-licenses --fail-on="GPL;AGPL"` does **not** currently
+catch this (it matches the literal strings "GPL"/"AGPL", not SPDX
+identifiers like "GPL-3.0-or-later"), so the `audit` job will show green
+regardless -- that's a gap in dev-rig's own check, not evidence this is
+fine. Whether importing a GPL-licensed library into an MIT-licensed
+Python project is a real copyleft trigger on the combined work is a
+genuine, unsettled-in-practice question (Python "import" runs in the same
+process, which the FSF's own guidance treats similarly to dynamic
+linking) -- this needs a licensing decision, not a lint fix. See the
+README's existing "Open questions" -> Licensing model note, which is
+about ConvoBox's own license choice; this is the sharper, more concrete
+version of that same open question.
+
 ## Automated tests (no audio hardware needed)
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 ```
 
-63 tests, all pure logic / mocked hardware / real-server-over-loopback —
+98 tests, all pure logic / mocked hardware / real-server-over-loopback —
 no mic, no models to download. Covers: safeword matching (including that a
 phrase normalizing to empty raises at construction instead of silently
 vanishing), audio capture/playback against a mocked `sounddevice`, VAD
 segmentation logic against a scripted fake model (including a regression
-test for the hysteresis-band hang), TTS streaming against a mocked Piper
-voice (proves chunks are yielded incrementally, not buffered), the
+test for the hysteresis-band hang, and the `max_utterance_s` cap), TTS
+streaming against a mocked Piper voice (proves chunks are yielded
+incrementally, not buffered) plus rate/volume wiring, the
+`create_tts_engine` factory's voice resolution and error messages, the
 orchestrator's hard-stop/interject/fresh routing plus that it starts its
-own event-drain loop, and the OpenCode adapter against a real HTTP+SSE
-server on a real loopback socket (including that `is_busy()` clears when
-the stream ends without a DONE event, and that a schemeless backend URL
-still triggers the insecure-transport warning). Run 2-3x if iterating on
-timing-sensitive code — `test_stop_halts_in_progress_playback_promptly` in
-particular is a real concurrency test, not inherently flake-proof just
-because it passed once.
+own event-drain loop and drops empty transcripts, `LanguageTracker`'s
+wander-vs-genuine-switch distinction, `scripts/voice_picker.py` and
+`scripts/roundtrip_smoketest.py`'s pure CLI logic (catalog search,
+language-to-phrase mapping) imported directly as `scripts.*` the same way
+`scripts/spike.py`'s `_resolve_device` already was, and the OpenCode
+adapter against a real HTTP+SSE server on a real loopback socket
+(including that `is_busy()` clears when the stream ends without a DONE
+event, and that a schemeless backend URL still triggers the
+insecure-transport warning). Run 2-3x if iterating on timing-sensitive
+code — `test_stop_halts_in_progress_playback_promptly` in particular is a
+real concurrency test, not inherently flake-proof just because it passed
+once; `test_events_yield_typed_backend_events_from_sse` has also been
+observed to flake once under heavy concurrent load on this machine
+(passed cleanly on immediate rerun and in isolation) — a real loopback
+socket test has real scheduling variance, watch for a pattern rather than
+treating one flake as a regression.
 
 ## Type checking
 
@@ -72,6 +136,58 @@ chunk arriving well before the full response finishes synthesizing —
 iterate `tts.synthesize_stream(text)` instead of awaiting `synthesize()`;
 on a ~20-sentence passage the first chunk lands around 140ms in while
 total synthesis takes ~1.6s.
+
+`--voice KEY` runs the round trip with any installed voice instead of the
+default (`en_US-lessac-medium`), using a phrase matched to that voice's
+own language where one exists in `STT_TEST_PHRASES` (add an entry there
+for a new language), and the multilingual `base` STT model pinned to that
+language instead of the faster English-only `tiny.en`:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/roundtrip_smoketest.py --voice ru_RU-irina-medium
+```
+
+This is what actually validates a voice picked with `voice_picker.py`
+below is *intelligible*, not just that it produces audio — synthesizing
+gibberish and having STT transcribe gibberish back would look identical
+to a working round trip if the only check were "did text come out."
+
+## Picking a voice
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/voice_picker.py
+```
+
+`TTSConfig.voice`/`rate`/`volume` existed in `config.py` from the start
+but had nothing wired to them — every script constructed `PiperTTSEngine`
+by hand with a hardcoded voice. `convobox.tts.create_tts_engine(config)`
+(`src/convobox/tts/factory.py`) is that missing wiring, and every script
+below now goes through it rather than hand-building the engine.
+
+Piper's catalog has 163 voices across 44 languages
+([full list](https://huggingface.co/rhasspy/piper-voices)) — notably no
+Japanese, though Chinese, Russian, French, and most other languages
+exercised in the live-mic UAT session above are covered.
+`voice_picker.py` with no flags opens an interactive picker: `search
+TERM` browses the catalog (cached locally after the first fetch, matched
+against the voice key, language name, or language code), `get KEY`
+downloads a voice, `play KEY` auditions one through real speakers
+(offering to download it first if needed), `text ...`/`rate F`/`volume
+F` adjust what gets auditioned, and `use KEY` + `quit` prints the
+`convobox.yaml` snippet for whichever voice you land on. Flag mode does
+the same things non-interactively for scripting (`--list-installed`,
+`--search TERM`, `--download KEY`, `--audition KEY --text "..."`).
+
+**Windows console gotcha, found live testing this tool:** the default
+Windows console codepage (cp1252 etc.) can't print or read most non-Latin
+script — `--text` with Cyrillic crashed with `UnicodeEncodeError` before
+this was fixed, and typing Japanese into the interactive `text` prompt
+came back mojibake'd through stdin. `scripts/_console.py`'s
+`use_utf8_console()` reconfigures stdin/stdout/stderr to UTF-8 at startup
+and is called by both `voice_picker.py` and `roundtrip_smoketest.py` — a
+no-op on platforms/terminals already UTF-8 (most Linux/macOS terminals,
+and Windows Terminal in its default codepage), a real fix for anything
+that still defaults to a legacy codepage.
 
 ## Live mic → VAD → STT spike
 
@@ -145,15 +261,110 @@ return instantly. Worth re-measuring if `AudioPlayer`'s block size (1024
 samples) or the persistent-stream-reuse deferral (see README → Status)
 ever changes — that latency number is exactly what'd move.
 
+## Live clarity dashboard (TUI)
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/voice_tui.py [--language en] [--min-confidence 0.4]
+```
+
+Same pipeline as `scripts/spike.py`, rendered as a live terminal dashboard
+instead of log lines: an input level meter and capture state (so mic and
+gain problems are visible before any transcript arrives), a per-utterance
+verdict, and session stats. Stdlib-only on purpose: a test utility should
+not add dependencies to the project it tests. Exit via the safeword or
+Ctrl+C; a plain-text session summary prints on exit.
+
+The verdict thresholds come from the live Windows session below: detected
+language probability >= 0.80 was consistently faithful, below ~0.40 was
+usually a hallucination (sometimes in a different script entirely), and
+rtf >= 1.0 marks Whisper's temperature-fallback re-decode. The dashboard
+also shows per-utterance queue wait separately from decode latency,
+because STT is serial and bursts of short utterances compound delay.
+
+**`language_probability` goes blind under `--language`.** Pinning the
+language (the fix for the auto-detect wander below) makes faster-whisper
+report a hardcoded `1.0` for it — there's no detection happening to be
+confident about. Caught live: speaking Russian into a `--language en`
+session logged `GOOD en 1.00` on every utterance, none of which was
+correct English. The dashboard's verdict now also weighs a second, always-
+meaningful signal: the mean of each segment's `avg_logprob` from the
+decoder itself (shown as the `dec` column, `exp(avg_logprob)` so it reads
+0-1 like the other confidence figures; ~0.70+ solid, ~0.45-0.70 shaky,
+below that unreliable — Whisper's conventional avg_logprob cutoffs). In
+pinned mode the verdict is driven by `dec` alone; unpinned, both signals
+must agree for GOOD/FAIR. `language_probability` and `dec` are answering
+different questions — "what language is this" vs. "how sure was the
+decoder of these words" — which is why pinning silences only the first.
+
+Useful flags: `--language en` pins STT to one language (kills the
+auto-detect wander described below, but see the `dec` column note just
+above for why confidence still needs watching), `--min-confidence 0.4`
+drops low-confidence transcripts by `language_probability`
+(`stt.min_language_probability` in config; the safeword is always checked
+on the raw transcript first, so the gate can never swallow a hard stop).
+**Known gap:** this gate compares against `language_probability`, which is
+pinned to `1.0` in `--language` mode, so it never drops anything while
+pinned — watch the `dec` column yourself in that mode rather than relying
+on `--min-confidence`. Making the config-level gate decoder-confidence
+aware (so it works pinned too) is a reasonable next step, not done here.
+
 ## Testing on Windows
 
-Everything above has only ever run on macOS (Apple Silicon). Nothing here
-has been verified on Windows or Linux — but every native dependency
-(`torch`, `onnxruntime`, `ctranslate2`, `sounddevice`, `piper-tts`) ships a
-prebuilt Windows wheel, and this codebase has zero platform-specific code
-(no `sys.platform`/`platform.system` branches, no subprocess/shell-outs,
-`pathlib` everywhere) — so it *should* work, but "should" and "verified"
-are different claims.
+**First verified 2026-07-09 on Windows 11 (i7-13650HX):** `uv sync`,
+63/63 tests (69 after this round's additions), mypy, PortAudio device
+enumeration, the TTS/STT round trip, both smoke tests, real speaker
+playback with barge-in (stop latency 240ms vs 290ms on the macOS
+baseline), and — for the first time on any platform — live microphone
+capture through `scripts/spike.py`, including a real spoken-safeword exit.
+`sounddevice`'s Windows wheel does bundle PortAudio; no system install was
+needed.
+
+That run also surfaced one real bug, not Windows-specific: the fake
+OpenCode server's SSE handler could outlive its client (parked on
+`event_gate.wait()` after a hard stop), and since Python 3.12.1
+`asyncio.Server.wait_closed()` genuinely waits for connection handlers
+([gh-104344](https://github.com/python/cpython/issues/104344)), so the
+`server` fixture teardown deadlocked the suite. On Python <= 3.12.0 the
+same leak existed but `wait_closed()` returned immediately, which is why
+macOS runs never saw it. Fixed in the fixture: `stop()` now wakes parked
+handlers before awaiting `wait_closed()`.
+
+Live-mic findings from that session that shaped config defaults and the
+TUI's verdict bands: language auto-detect is per-utterance with no session
+stickiness, so accented or non-native speech can wander across languages
+mid-monologue. **Pinning `stt.language` is not the recommended fix for
+this** — a pin doesn't detect and reject mismatched speech, it forces
+every utterance to decode AS that language, and does so with fake
+confidence (`language_probability` reports a hardcoded `1.0` when pinned,
+whether or not the words are real). Confirmed live: speaking Russian into
+a `--language en` session produced `GOOD en 1.00` transcripts like "I am
+not a man, I am a man" for "I don't understand Russian" — worse than
+useless, since it *hides* the mismatch instead of surfacing it. Two
+non-forcing alternatives, both left on by default: `LanguageTracker`
+(`src/convobox/stt/language_tracker.py`) tracks the session's dominant
+*confidently-detected* language purely for display — it never feeds back
+into what the decoder is asked to assume, so it can't mangle a genuine
+language switch, but it flags (the `~` marker in `voice_tui.py`) when an
+utterance breaks from that dominant language, which is what a wander
+looks like; and the decoder-confidence signal below (`avg_logprob`) stays
+meaningful with or without a pin, so low `dec` scores catch a wandering
+decoder either way. Pin only for a genuinely single-language deployment
+where you've accepted that tradeoff, not as a default fix for wander.
+Also from that session: over-articulating makes language ID worse, not
+better (it strips the prosodic cues the detector relies on); detection
+confidence below ~0.4 usually means a hallucinated transcript
+(`stt.min_language_probability` gates these, though see the known gap
+above about it going blind while pinned); single-word utterances are
+the least reliable and most expensive input shape, so spoken confirmation
+phrases should be multi-word by design; and background noise can VAD-trigger
+and transcribe to empty, which the orchestrator now drops instead of
+forwarding to the backend.
+
+To reproduce the setup from scratch, every native dependency (`torch`,
+`onnxruntime`, `ctranslate2`, `sounddevice`, `piper-tts`) ships a prebuilt
+Windows wheel, and this codebase has zero platform-specific code (no
+`sys.platform`/`platform.system` branches, no subprocess/shell-outs,
+`pathlib` everywhere).
 
 ```powershell
 git clone <repo-url> convobox
@@ -185,8 +396,9 @@ table.
 
 Whatever the bootstrap script reports, the one thing it **can't** verify
 is a real microphone through `scripts/spike.py` directly (it fakes the
-mic, same as `spike_smoketest.py` does on macOS) — that still needs a
-real input device attached to whatever Windows machine you're testing on.
+mic, same as `spike_smoketest.py` does on macOS) — that needs a real
+input device (verified on Windows 2026-07-09, see above; still unverified
+on macOS, which has no mic on the dev machine).
 
 ## What's not tested at all yet
 
@@ -194,8 +406,4 @@ real input device attached to whatever Windows machine you're testing on.
   the in-repo fake server) — a real `opencode serve` instance was not
   reachable in this environment (its npm postinstall failed here) to
   test against.
-- Live mic input specifically (see the mic → VAD → STT section above) —
-  everything downstream of capture is now real-hardware-tested, capture
-  itself still isn't.
-- Everything on Linux, and everything on Windows until the bootstrap
-  script above has actually been run there.
+- Everything on Linux.

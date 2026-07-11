@@ -18,6 +18,12 @@ class TranscriptResult:
     language_probability: float
     latency_ms: float
     duration_s: float
+    # Mean per-segment avg_logprob from the decoder. Unlike
+    # language_probability (hardcoded to 1.0 whenever the language is
+    # pinned), this reflects how confident the decoder was in the words
+    # themselves, so it stays meaningful in pinned-language mode.
+    # exp(avg_logprob) maps it to a (0, 1] confidence-like score.
+    avg_logprob: float
     segments: list[str] = field(default_factory=list)
 
 
@@ -39,8 +45,19 @@ class LocalTranscriber:
             audio,
             language=self._config.language,
         )
-        segment_texts = [segment.text.strip() for segment in segments]
+        # transcribe() returns a lazy generator; materializing it here is
+        # what actually runs the decode, so it must stay inside the timing.
+        segment_list = list(segments)
         latency_ms = (time.perf_counter() - start) * 1000.0
+
+        segment_texts = [segment.text.strip() for segment in segment_list]
+        # -10.0 when nothing decoded: exp(-10) ~= 0, i.e. zero confidence,
+        # without the -inf that would poison downstream arithmetic.
+        avg_logprob = (
+            sum(segment.avg_logprob for segment in segment_list) / len(segment_list)
+            if segment_list
+            else -10.0
+        )
 
         return TranscriptResult(
             text=" ".join(segment_texts).strip(),
@@ -48,5 +65,6 @@ class LocalTranscriber:
             language_probability=info.language_probability,
             latency_ms=latency_ms,
             duration_s=len(audio) / SAMPLE_RATE,
+            avg_logprob=float(avg_logprob),
             segments=segment_texts,
         )
