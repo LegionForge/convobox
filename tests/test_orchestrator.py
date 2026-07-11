@@ -47,12 +47,12 @@ class FakeTTSEngine(TTSEngine):
     def sample_rate(self) -> int:
         return 16000
 
-    async def synthesize_stream(self, text: str):  # pragma: no cover - unused by these tests
-        yield np.zeros(1, dtype=np.float32)
-
-    async def synthesize(self, text: str) -> np.ndarray:
+    async def synthesize_stream(self, text: str):
+        # The recording lives here (not in synthesize) because streaming is
+        # the path Orchestrator._speak actually uses now; the inherited
+        # synthesize() convenience still funnels through this.
         self.synthesized.append(text)
-        return np.ones(4, dtype=np.float32)
+        yield np.ones(4, dtype=np.float32)
 
     def stop(self) -> None:
         self.stop_calls += 1
@@ -77,6 +77,14 @@ class FakePlayer(AudioPlayer):
 
     def play(self, samples: np.ndarray, sample_rate: int) -> None:
         self.played.append((samples, sample_rate))
+
+    async def play_stream(self, chunks, sample_rate) -> None:  # type: ignore[no-untyped-def]
+        # Records the concatenated stream under the same attribute play()
+        # uses, so every existing "what got played" assertion keeps
+        # working unchanged against the streamed path.
+        collected = [chunk async for chunk in chunks]
+        if collected:
+            self.played.append((np.concatenate(collected), sample_rate))
 
     def stop(self) -> None:
         self.stop_calls += 1
