@@ -1,0 +1,151 @@
+"""A fake `codex app-server` speaking real JSON-RPC-over-stdio, for tests.
+
+Runs as an actual subprocess (spawned with sys.executable "<this file>
+app-server"), so CodexAdapter is exercised over genuine pipe transport --
+same discipline as fake_claude_cli.py and the real-socket OpenCodeServer.
+
+Message shapes mirror the installed CLI's own schema bundle
+(`codex app-server generate-json-schema`, codex-cli 0.144.1) and a live
+probe -- see src/convobox/adapters/codex.py's module docstring.
+Turn behavior is scripted by the prompt text:
+
+  contains "use a tool" -> commandExecution item + agentMessage + completed
+  contains "hang"       -> turn/started only; completes on turn/interrupt
+  contains "needs approval" -> server->client approval request first; echoes
+                            the decision back in the agentMessage
+  contains "fail"       -> turn/completed with status "failed"
+  contains "die"        -> exits mid-turn
+  anything else         -> echoes the prompt as agentMessage + completed
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+THREAD_ID = "thr_test"
+
+
+def emit(payload: dict) -> None:
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def respond(request_id: object, result: dict) -> None:
+    emit({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def respond_error(request_id: object, message: str) -> None:
+    emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -1, "message": message}})
+
+
+def notify(method: str, params: dict) -> None:
+    emit({"jsonrpc": "2.0", "method": method, "params": params})
+
+
+def turn_completed(turn_id: str, status: str = "completed", error: object = None) -> None:
+    notify(
+        "turn/completed",
+        {"threadId": THREAD_ID, "turn": {"id": turn_id, "status": status, "error": error}},
+    )
+
+
+def agent_message(text: str) -> None:
+    notify(
+        "item/completed",
+        {"threadId": THREAD_ID, "item": {"type": "agentMessage", "id": "msg_1", "text": text}},
+    )
+
+
+def main() -> None:
+    turn_seq = 0
+    active_turn: str | None = None
+    pending_approval_turn: str | None = None
+    approval_req_id = 900
+
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method = msg.get("method")
+        req_id = msg.get("id")
+
+        if method == "initialize":
+            respond(req_id, {"userAgent": "fake-codex/0.0.0"})
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            respond(req_id, {"thread": {"id": THREAD_ID}})
+        elif method == "turn/start":
+            turn_seq += 1
+            turn_id = f"turn_{turn_seq}"
+            text = " ".join(
+                i.get("text", "") for i in msg["params"]["input"] if i.get("type") == "text"
+            )
+            respond(req_id, {"turn": {"id": turn_id, "status": "inProgress"}})
+            notify("turn/started", {"threadId": THREAD_ID, "turn": {"id": turn_id, "status": "inProgress"}})
+            if "die" in text:
+                sys.exit(0)
+            if "hang" in text:
+                active_turn = turn_id
+                continue
+            if "fail" in text:
+                turn_completed(turn_id, status="failed", error={"message": "model exploded"})
+                continue
+            if "needs approval" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id, "command": "rm -rf /"},
+                })
+                continue
+            if "use a tool" in text:
+                notify("item/started", {
+                    "threadId": THREAD_ID,
+                    "item": {"type": "commandExecution", "id": "cmd_1", "command": "ls"},
+                })
+                notify("item/completed", {
+                    "threadId": THREAD_ID,
+                    "item": {"type": "commandExecution", "id": "cmd_1", "command": "ls",
+                             "aggregatedOutput": "file1\nfile2", "status": "completed"},
+                })
+                agent_message("the tool ran")
+                turn_completed(turn_id)
+                continue
+            agent_message(f"echo: {text}")
+            turn_completed(turn_id)
+        elif method == "turn/steer":
+            expected = msg["params"].get("expectedTurnId")
+            if active_turn is None or expected != active_turn:
+                respond_error(req_id, f"no active turn matching {expected!r}")
+                continue
+            text = " ".join(
+                i.get("text", "") for i in msg["params"]["input"] if i.get("type") == "text"
+            )
+            respond(req_id, {})
+            agent_message(f"steered: {text}")
+            turn_completed(active_turn)
+            active_turn = None
+        elif method == "turn/interrupt":
+            turn_id = msg["params"].get("turnId")
+            respond(req_id, {})
+            if active_turn == turn_id:
+                turn_completed(turn_id, status="interrupted")
+                active_turn = None
+        elif method is None and "id" in msg:
+            # A response from the client to a server->client request
+            # (the approval flow). Echo the decision and finish the turn.
+            decision = (msg.get("result") or {}).get("decision")
+            if pending_approval_turn is not None:
+                agent_message(f"approval decision was: {decision}")
+                turn_completed(pending_approval_turn)
+                pending_approval_turn = None
+
+
+if __name__ == "__main__":
+    # argv[1] is "app-server" (the adapter appends it); accepted and ignored.
+    main()
