@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -80,16 +81,27 @@ class OpenCodeAdapter(BackendAdapter):
         self._base_url = url.rstrip("/")
         self._client = client if client is not None else httpx.AsyncClient(base_url=self._base_url)
         self._session_id: str | None = None
+        self._session_lock = asyncio.Lock()
         self._busy = False
         self._sse_context: Any = None
+        self._listening = asyncio.Event()
         warn_if_insecure(self._base_url)
 
     async def _ensure_session(self) -> str:
-        if self._session_id is None:
-            resp = await self._client.post("/api/session", json={})
-            resp.raise_for_status()
-            self._session_id = resp.json()["data"]["id"]
-        return self._session_id
+        # Locked because the first send and the first events() subscription
+        # start concurrently (Orchestrator.handle_transcript spawns the
+        # event-consumer task, then immediately awaits the send): without
+        # the lock, both see _session_id None and each POSTs /api/session,
+        # so the prompt lands in one session while SSE subscribes to the
+        # other -- zero events ever arrive and is_busy() latches True
+        # forever. Found live, not hypothetically: first full
+        # Orchestrator-level run against a real server did exactly this.
+        async with self._session_lock:
+            if self._session_id is None:
+                resp = await self._client.post("/api/session", json={})
+                resp.raise_for_status()
+                self._session_id = resp.json()["data"]["id"]
+            return self._session_id
 
     async def _post_prompt(self, text: str, delivery: str) -> None:
         session_id = await self._ensure_session()
@@ -128,11 +140,41 @@ class OpenCodeAdapter(BackendAdapter):
                 resp.raise_for_status()
             except httpx.HTTPError:
                 logger.warning("OpenCode interrupt request failed", exc_info=True)
-        await self._close_sse()
+        # Deliberately does NOT tear down the SSE subscription. It is owned
+        # by whatever task is iterating events() (the Orchestrator's
+        # consumer loop), and driving its __aexit__ from this task while
+        # that one is suspended inside aiter_sse() raises "anext():
+        # asynchronous generator is already running" -- observed live on
+        # the first real hard-stop through the Orchestrator. The session
+        # also survives an interrupt (the user can issue a fresh command
+        # right after "stop stop stop"), so the subscription staying open
+        # is the desired behavior, not just crash avoidance.
         self._busy = False
 
     def is_busy(self) -> bool:
         return self._busy
+
+    async def wait_listening(self, timeout: float = 2.0) -> None:
+        """Best-effort wait until the SSE subscription is being dispatched.
+
+        Events OpenCode emits between a prompt POST and the SSE GET being
+        registered server-side are simply never delivered (no replay). A
+        sender that wants the response's events must therefore let the
+        subscription win that race -- see events() for why the signal is
+        "request dispatched" rather than "response headers received".
+        Best-effort: on timeout the send proceeds anyway (a caller that
+        never consumes events() -- e.g. a bare send_text in a test -- must
+        not deadlock here).
+        """
+        if self._listening.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._listening.wait(), timeout)
+        except TimeoutError:
+            logger.warning(
+                "proceeding to send without a confirmed SSE subscription; "
+                "response events may be missed"
+            )
 
     async def _close_sse(self) -> None:
         if self._sse_context is not None:
@@ -156,6 +198,17 @@ class OpenCodeAdapter(BackendAdapter):
             # simply unreachable); only read is disabled.
             timeout=httpx.Timeout(5.0, read=None),
         )
+        # The readiness signal is "subscription request dispatched", NOT
+        # "response headers received": confirmed live that opencode holds
+        # the SSE response headers back until it has a first event to send
+        # (a curl to an idle session's /event received zero header bytes in
+        # 5s), so a headers-based gate would burn its whole timeout on
+        # every first send and never actually confirm anything. Dispatch
+        # order is what matters in practice -- the GET hits the server (and
+        # registers the subscriber) before a prompt POSTed afterwards does;
+        # wait_listening()'s bounded timeout remains as the fallback for
+        # the tiny remaining window.
+        self._listening.set()
         sse_source = await self._sse_context.__aenter__()
         try:
             async for sse in sse_source.aiter_sse():
@@ -181,6 +234,7 @@ class OpenCodeAdapter(BackendAdapter):
             # tracking; the failure mode is the same regardless of what
             # clears busy in the normal case.
             self._busy = False
+            self._listening.clear()
             await self._close_sse()
 
     def _track_busy(self, outer: dict[str, Any]) -> None:

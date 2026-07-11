@@ -69,6 +69,19 @@ class BackendAdapter(ABC):
     @abstractmethod
     def is_busy(self) -> bool: ...
 
+    async def wait_listening(self, timeout: float = 2.0) -> None:
+        """Best-effort wait until this adapter's event stream is established.
+
+        Default is an immediate no-op: adapters whose transport can't lose
+        events to a subscribe-after-send race have nothing to wait for.
+        Adapters that CAN (e.g. OpenCode's SSE endpoint, which never
+        replays events emitted before the subscriber registered) override
+        this so Orchestrator can let the subscription win the race before
+        posting a prompt. Implementations must return (not raise) on
+        timeout -- a caller that never consumes events() must not deadlock.
+        """
+        return None
+
     @abstractmethod
     def events(self) -> AsyncGenerator[BackendEvent, None]:
         # Typed as AsyncGenerator (not the looser AsyncIterator) because

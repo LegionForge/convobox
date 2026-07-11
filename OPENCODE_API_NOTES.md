@@ -259,3 +259,45 @@ not silently left wrong:**
    install opencode` on this Windows machine) as the final check,
    including the multi-step tool-calling case specifically, the same
    discipline this investigation used throughout.
+
+## Three more real bugs, found on the first full Orchestrator-level live run (2026-07-11)
+
+Everything above was verified with the adapter driven directly (bare
+`send_text` + a manually-iterated `events()`). The first time the whole
+`Orchestrator.handle_transcript()` path ran against a real server —
+transcript in, TTS audio out — three new failures appeared that the
+adapter-level runs could not have shown:
+
+1. **`_ensure_session` raced itself and created two sessions.**
+   `handle_transcript` spawns the event-consumer task and then immediately
+   awaits the send; both reach `_ensure_session` while `_session_id` is
+   still `None`, so each `POST /api/session` created its own session. The
+   prompt landed in one, the SSE subscription in the other: **zero events
+   ever delivered, `is_busy()` latched `True` forever** (observed as a
+   90s idle-wait timeout with an empty event list). Fixed with an
+   `asyncio.Lock` around session creation.
+
+2. **`send_hard_stop` closed the SSE context from the wrong task.**
+   The stream is owned by the task suspended inside `events()`'s
+   `aiter_sse()`; driving its `__aexit__` from the hard-stop caller's task
+   raised `RuntimeError: anext(): asynchronous generator is already
+   running` — a crash *during the safety-critical abort path*. Fixed by
+   not touching the SSE subscription at all in `send_hard_stop`: the
+   session survives an interrupt, so the same subscription must keep
+   serving whatever the user says next anyway.
+
+3. **OpenCode holds SSE response headers back until the first event.**
+   A `curl` to an idle session's `/event` endpoint received zero header
+   bytes in 5s. So "response headers received" can never be the
+   subscribe-before-send readiness signal against this server — a gate on
+   it would burn its full timeout on every first send. The subscriber is
+   registered when the GET *arrives*, long before headers flush, so
+   `wait_listening()` (new, called by the Orchestrator between starting
+   the event loop and posting the prompt) signals on "subscription request
+   dispatched" instead, with a bounded timeout as fallback.
+
+The pattern for the third time running: **each integration layer you run
+for real for the first time finds bugs the layer below's tests were
+structurally incapable of showing.** Adapter-level live runs couldn't
+catch these because a single task drove everything; the Orchestrator's
+concurrency is what exposed them.

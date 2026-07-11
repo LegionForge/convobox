@@ -363,9 +363,15 @@ async def test_is_busy_stays_true_through_tool_calls_finish_reason(
 
 
 @pytest.mark.asyncio
-async def test_send_hard_stop_calls_interrupt_and_closes_sse_without_raising(
+async def test_send_hard_stop_calls_interrupt_and_leaves_sse_open(
     server: OpenCodeServer,
 ) -> None:
+    # send_hard_stop must NOT tear down the SSE subscription: the stream is
+    # owned by the task iterating events(), and closing it from the
+    # hard-stop caller's task raises "anext(): asynchronous generator is
+    # already running" (observed live on the first real Orchestrator-driven
+    # hard stop). The session also survives an interrupt, so the same
+    # subscription must keep serving whatever the user asks next.
     adapter = OpenCodeAdapter(server.base_url)
 
     stream = adapter.events()
@@ -381,17 +387,25 @@ async def test_send_hard_stop_calls_interrupt_and_closes_sse_without_raising(
         assert first.type == BackendEventType.TEXT
         assert adapter._sse_context is not None
 
+        # Park a consumer mid-__anext__ (suspended inside aiter_sse, exactly
+        # the state the Orchestrator's consumer loop lives in), then hard
+        # stop from this task -- the crash scenario.
+        next_future = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)  # let it reach the suspended-read state
+
         await adapter.send_hard_stop()
         assert adapter.is_busy() is False
-        assert adapter._sse_context is None
+        assert adapter._sse_context is not None  # subscription intact
         assert server.interrupt_count == 1
 
-        # Not asserting server.client_disconnected here: httpx.AsyncClient
-        # pools connections by default, so closing the SSE response stream
-        # doesn't reliably close the underlying TCP socket within any fixed
-        # timeout — that would test httpx's pooling behavior, not the
-        # adapter. The state asserted above is what "closes cleanly" means
-        # from the adapter's own perspective.
+        # The parked consumer survived (before the fix, send_hard_stop
+        # blew up with RuntimeError before these asserts were reached);
+        # unpark it cleanly.
+        next_future.cancel()
+        try:
+            await next_future
+        except asyncio.CancelledError:
+            pass
     finally:
         await stream.aclose()
         await adapter._client.aclose()
@@ -440,5 +454,76 @@ async def test_is_busy_clears_when_stream_ends_without_terminal_step(
         # the finish-reason path never fired, but the safety net in
         # events()'s finally block did.
         assert adapter.is_busy() is False
+    finally:
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_send_and_events_share_one_session(
+    server: OpenCodeServer,
+) -> None:
+    # The exact shape of Orchestrator.handle_transcript's first call: the
+    # event-consumer task and the first send start concurrently, and both
+    # reach _ensure_session while _session_id is still None. Without the
+    # session lock each created its own session -- the prompt landed in one,
+    # the SSE subscription in the other, and zero events were ever
+    # delivered (found live on the first real Orchestrator-level run).
+    adapter = OpenCodeAdapter(server.base_url)
+
+    async def drain() -> None:
+        async for _ in adapter.events():
+            pass
+
+    collector = asyncio.ensure_future(drain())
+    try:
+        await adapter.send_text("go")
+        await _release_all_gates(server, len(_SINGLE_STEP_FRAMES))
+        await asyncio.wait_for(collector, timeout=5)
+
+        assert server.created_sessions == 1
+    finally:
+        if not collector.done():
+            collector.cancel()
+            try:
+                await collector
+            except asyncio.CancelledError:
+                pass
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_listening_returns_once_sse_subscription_starts(
+    server: OpenCodeServer,
+) -> None:
+    adapter = OpenCodeAdapter(server.base_url)
+    stream = adapter.events()
+    try:
+        first_future = asyncio.ensure_future(stream.__anext__())
+        # Must resolve well inside its own timeout once events() has begun
+        # dispatching the SSE request -- no gates need releasing for that
+        # (frames are gated, the subscription itself is not), and no
+        # response headers are needed either: the real opencode server
+        # holds SSE headers back until the first event exists.
+        await asyncio.wait_for(adapter.wait_listening(timeout=5.0), timeout=4.0)
+
+        first_future.cancel()
+        try:
+            await first_future
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await stream.aclose()
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_listening_times_out_gracefully_without_consumer(
+    server: OpenCodeServer,
+) -> None:
+    # A caller that never consumes events() (bare send_text usage) must get
+    # a bounded wait and a clean return, never a deadlock or an exception.
+    adapter = OpenCodeAdapter(server.base_url)
+    try:
+        await asyncio.wait_for(adapter.wait_listening(timeout=0.1), timeout=2.0)
     finally:
         await adapter._client.aclose()

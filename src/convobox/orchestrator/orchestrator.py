@@ -57,6 +57,14 @@ class Orchestrator:
             await self._adapter.send_hard_stop()
             return
 
+        # Sends wait (best-effort, bounded) for the event subscription the
+        # loop above just started to actually be established: events a
+        # backend emits before its stream is subscribed can be lost
+        # entirely (OpenCode's SSE endpoint has no replay), turning the
+        # whole response silent. Deliberately NOT done for the hard-stop
+        # path above -- aborting must never wait on anything.
+        await self._adapter.wait_listening()
+
         if self._adapter.is_busy():
             await self._adapter.send_interject(transcript)
         else:
