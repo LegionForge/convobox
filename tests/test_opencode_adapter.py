@@ -10,39 +10,72 @@ import pytest_asyncio
 from convobox.adapters.base import BackendEventType
 from convobox.adapters.opencode import OpenCodeAdapter, warn_if_insecure
 
-_SESSION_ID = "sess-123"
+_SESSION_ID = "ses_test123"
 
-_EVENT_FRAMES: list[dict[str, object]] = [
-    {"type": "text", "content": "hello"},
-    {
-        "type": "tool_call",
-        "tool": "bash",
-        "toolInput": "ls -la",
-        "toolOutput": None,
-    },
-    {"type": "done"},
+
+def _frame(seq: int, event_type: str, data: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": f"evt_{seq}",
+        "type": event_type,
+        "durable": {"aggregateID": _SESSION_ID, "seq": seq, "version": 1},
+        "data": {"sessionID": _SESSION_ID, **data},
+    }
+
+
+# Real SSE event shapes, confirmed against a live opencode v1.17.18
+# instance -- see OPENCODE_API_NOTES.md's live traces. A single-step reply
+# (step.started..step.ended with finish="stop") followed by a second,
+# multi-step-shaped one (step.ended with finish="tool-calls" -- confirmed
+# live to mean "another step is coming", NOT done -- then a second
+# step.started/ended pair that IS terminal) so tests can assert on both
+# the continuing and terminal cases from the same fixed frame list.
+_SINGLE_STEP_FRAMES: list[dict[str, object]] = [
+    _frame(1, "session.next.step.started", {}),
+    _frame(2, "session.next.text.started", {"textID": "text-0"}),
+    _frame(3, "session.next.text.ended", {"textID": "text-0", "text": "hello"}),
+    _frame(4, "session.next.tool.called", {"tool": "bash", "input": {"command": "ls -la"}}),
+    _frame(5, "session.next.tool.success", {"structured": {"output": "file1\nfile2"}}),
+    _frame(6, "session.next.step.ended", {"finish": "stop"}),
+]
+
+_MULTI_STEP_FRAMES: list[dict[str, object]] = [
+    _frame(1, "session.next.step.started", {}),
+    _frame(2, "session.next.tool.called", {"tool": "read", "input": {"path": "x"}}),
+    _frame(3, "session.next.tool.success", {"structured": {"entries": []}}),
+    # Confirmed live: this finish value means another step follows --
+    # is_busy() must stay True here, not clear.
+    _frame(4, "session.next.step.ended", {"finish": "tool-calls"}),
+    _frame(5, "session.next.step.started", {}),
+    _frame(6, "session.next.text.ended", {"textID": "text-0", "text": "done"}),
+    _frame(7, "session.next.step.ended", {"finish": "stop"}),
 ]
 
 
 class OpenCodeServer:
-    """A real HTTP+SSE server on an ephemeral 127.0.0.1 port.
+    """A real HTTP+SSE server on an ephemeral 127.0.0.1 port, shaped like
+    the real /api/ surface (see OPENCODE_API_NOTES.md), not the originally
+    assumed one.
 
     Streams SSE frames one at a time, each released by ``event_gate``, so the
-    adapter is proven to parse frames as they arrive rather than after the whole
-    body has been buffered.
+    adapter is proven to parse frames as they arrive rather than after the
+    whole body has been buffered. ``frames`` is settable per test so
+    different scripted event sequences can be replayed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, frames: list[dict[str, object]] | None = None) -> None:
+        self.frames = frames if frames is not None else list(_SINGLE_STEP_FRAMES)
         self.created_sessions = 0
-        self.posted_messages: list[dict[str, object]] = []
+        self.posted_prompts: list[dict[str, object]] = []
+        self.interrupt_count = 0
         self.event_gate = asyncio.Event()
         self.client_disconnected = asyncio.Event()
         self._closing = False
         self._server: asyncio.AbstractServer | None = None
+        self._closing = False
         self.port = 0
         # When True, _events sends exactly one frame then closes the
-        # connection immediately instead of continuing to DONE — simulates
-        # a dropped connection / server crash mid-response.
+        # connection immediately instead of continuing — simulates a
+        # dropped connection / server crash mid-response.
         self.close_after_first_frame = False
 
     async def start(self) -> None:
@@ -84,12 +117,14 @@ class OpenCodeServer:
                     content_length = int(value.strip())
             body = await reader.readexactly(content_length) if content_length else b""
 
-            if method == "POST" and path == "/api/sessions":
+            if method == "POST" and path == "/api/session":
                 await self._create_session(writer)
-            elif method == "POST" and path == f"/api/sessions/{_SESSION_ID}/messages":
-                await self._post_message(writer, body)
-            elif method == "GET" and path == f"/api/sessions/{_SESSION_ID}/events":
+            elif method == "POST" and path == f"/api/session/{_SESSION_ID}/prompt":
+                await self._post_prompt(writer, body)
+            elif method == "GET" and path == f"/api/session/{_SESSION_ID}/event":
                 await self._events(reader, writer)
+            elif method == "POST" and path == f"/api/session/{_SESSION_ID}/interrupt":
+                await self._interrupt(writer)
             else:
                 await self._respond(writer, 404, b'{"error":"not found"}')
         except (asyncio.IncompleteReadError, ConnectionResetError):
@@ -111,11 +146,24 @@ class OpenCodeServer:
 
     async def _create_session(self, writer: asyncio.StreamWriter) -> None:
         self.created_sessions += 1
-        await self._respond(writer, 200, json.dumps({"id": _SESSION_ID}).encode())
+        await self._respond(writer, 200, json.dumps({"data": {"id": _SESSION_ID}}).encode())
 
-    async def _post_message(self, writer: asyncio.StreamWriter, body: bytes) -> None:
-        self.posted_messages.append(json.loads(body))
-        await self._respond(writer, 200, b'{"ok":true}')
+    async def _post_prompt(self, writer: asyncio.StreamWriter, body: bytes) -> None:
+        self.posted_prompts.append(json.loads(body))
+        response = {
+            "data": {
+                "admittedSeq": len(self.posted_prompts),
+                "id": f"msg_{len(self.posted_prompts)}",
+                "sessionID": _SESSION_ID,
+                "delivery": "queue",
+                "timeCreated": 0,
+            }
+        }
+        await self._respond(writer, 200, json.dumps(response).encode())
+
+    async def _interrupt(self, writer: asyncio.StreamWriter) -> None:
+        self.interrupt_count += 1
+        await self._respond(writer, 204, b"")
 
     async def _events(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -128,7 +176,7 @@ class OpenCodeServer:
         )
         await writer.drain()
 
-        for frame in _EVENT_FRAMES:
+        for frame in self.frames:
             await self.event_gate.wait()
             if self._closing:
                 # stop() set the gate to reap parked handlers; don't clear it,
@@ -188,8 +236,14 @@ async def server() -> AsyncIterator[OpenCodeServer]:
         await srv.stop()
 
 
+async def _release_all_gates(server: OpenCodeServer, count: int) -> None:
+    for _ in range(count):
+        server.event_gate.set()
+        await asyncio.sleep(0.05)
+
+
 @pytest.mark.asyncio
-async def test_send_text_creates_session_and_posts_message(
+async def test_send_text_creates_session_and_posts_prompt_with_queue_delivery(
     server: OpenCodeServer,
 ) -> None:
     adapter = OpenCodeAdapter(server.base_url)
@@ -199,14 +253,27 @@ async def test_send_text_creates_session_and_posts_message(
         await adapter._client.aclose()
 
     assert server.created_sessions == 1
-    assert server.posted_messages == [
-        {"messages": [{"role": "user", "content": "do the thing"}]}
+    assert server.posted_prompts == [
+        {"prompt": {"text": "do the thing"}, "delivery": "queue"}
     ]
     assert adapter.is_busy() is True
 
 
 @pytest.mark.asyncio
-async def test_events_yield_typed_backend_events_from_sse(
+async def test_send_interject_uses_steer_delivery(server: OpenCodeServer) -> None:
+    adapter = OpenCodeAdapter(server.base_url)
+    try:
+        await adapter.send_interject("oh also")
+    finally:
+        await adapter._client.aclose()
+
+    assert server.posted_prompts == [
+        {"prompt": {"text": "oh also"}, "delivery": "steer"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_events_yield_typed_backend_events_from_real_shape(
     server: OpenCodeServer,
 ) -> None:
     adapter = OpenCodeAdapter(server.base_url)
@@ -218,26 +285,27 @@ async def test_events_yield_typed_backend_events_from_sse(
 
     collector = asyncio.ensure_future(collect())
     try:
-        for _ in _EVENT_FRAMES:
-            await asyncio.sleep(0.02)
-            server.event_gate.set()
+        await _release_all_gates(server, len(_SINGLE_STEP_FRAMES))
         await asyncio.wait_for(collector, timeout=5)
     finally:
         collector.cancel()
         await adapter._client.aclose()
 
+    # step.started/step.ended and text.started carry no BackendEventType
+    # slot -- only 3 of the 6 real frames yield anything.
     assert [e.type for e in events] == [
         BackendEventType.TEXT,
         BackendEventType.TOOL_CALL,
-        BackendEventType.DONE,
+        BackendEventType.TOOL_RESULT,
     ]
     assert events[0].content == "hello"
     assert events[1].tool == "bash"
-    assert events[1].tool_input == "ls -la"
+    assert json.loads(events[1].tool_input or "{}") == {"command": "ls -la"}
+    assert json.loads(events[2].tool_output or "{}") == {"output": "file1\nfile2"}
 
 
 @pytest.mark.asyncio
-async def test_is_busy_true_after_send_text_and_false_after_done(
+async def test_is_busy_true_after_send_text_and_false_after_terminal_step_ended(
     server: OpenCodeServer,
 ) -> None:
     adapter = OpenCodeAdapter(server.base_url)
@@ -251,23 +319,126 @@ async def test_is_busy_true_after_send_text_and_false_after_done(
         assert adapter.is_busy() is True
 
         collector = asyncio.ensure_future(drain())
-        for _ in _EVENT_FRAMES:
-            await asyncio.sleep(0.02)
-            server.event_gate.set()
+        await _release_all_gates(server, len(_SINGLE_STEP_FRAMES))
         await asyncio.wait_for(collector, timeout=5)
+
         assert adapter.is_busy() is False
     finally:
         await adapter._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_is_busy_clears_when_stream_ends_without_done(
+async def test_is_busy_stays_true_through_tool_calls_finish_reason(
     server: OpenCodeServer,
 ) -> None:
-    # Regression test: a dropped connection / server crash mid-response
-    # used to leave is_busy() latched True forever, since the only place
-    # that cleared it was the DONE/ERROR branch inside events() — never hit
-    # if the stream ends any other way.
+    # The key behavior this whole design is built around: a step.ended
+    # with finish="tool-calls" means another step follows -- confirmed
+    # live -- so is_busy() must NOT clear there, only at the second,
+    # finish="stop" step.ended later in the same response. Records
+    # is_busy() at each yielded event (not by cancelling the generator
+    # mid-stream, which would trigger events()'s own last-resort
+    # safety-net clear in its finally block and give a false pass).
+    server.frames = list(_MULTI_STEP_FRAMES)
+    adapter = OpenCodeAdapter(server.base_url)
+    busy_after_each_yield: list[bool] = []
+
+    async def drain_and_record() -> None:
+        async for _ in adapter.events():
+            busy_after_each_yield.append(adapter.is_busy())
+
+    try:
+        await adapter.send_text("go")
+        collector = asyncio.ensure_future(drain_and_record())
+        await _release_all_gates(server, len(_MULTI_STEP_FRAMES))
+        await asyncio.wait_for(collector, timeout=5)
+    finally:
+        await adapter._client.aclose()
+
+    # tool.called and tool.success (frames 2, 3) are the only
+    # BackendEvent-yielding frames before the tool-calls step.ended (frame
+    # 4, non-yielding) -- is_busy() must still be True after both.
+    # text.ended (frame 6) is the only yielding frame after the second
+    # step.started -- also still True there, since the terminal step.ended
+    # (frame 7, finish="stop") hasn't happened yet.
+    assert busy_after_each_yield == [True, True, True]
+    # Only after the whole stream (including the terminal step.ended) has
+    # been processed does is_busy() actually clear.
+    assert adapter.is_busy() is False
+
+
+@pytest.mark.asyncio
+async def test_send_hard_stop_calls_interrupt_and_leaves_sse_open(
+    server: OpenCodeServer,
+) -> None:
+    # send_hard_stop must NOT tear down the SSE subscription: the stream is
+    # owned by the task iterating events(), and closing it from the
+    # hard-stop caller's task raises "anext(): asynchronous generator is
+    # already running" (observed live on the first real Orchestrator-driven
+    # hard stop). The session also survives an interrupt, so the same
+    # subscription must keep serving whatever the user asks next.
+    adapter = OpenCodeAdapter(server.base_url)
+
+    stream = adapter.events()
+    try:
+        await adapter.send_text("go")
+        # __anext__() must be in flight (opening the SSE connection) before
+        # releasing gates -- events() doesn't open the connection until
+        # first iterated, so releasing gates first sets/clears them on a
+        # server handler that isn't listening yet.
+        first_future = asyncio.ensure_future(stream.__anext__())
+        await _release_all_gates(server, 3)  # past step.started/text.started to text.ended
+        first = await asyncio.wait_for(first_future, timeout=5)
+        assert first.type == BackendEventType.TEXT
+        assert adapter._sse_context is not None
+
+        # Park a consumer mid-__anext__ (suspended inside aiter_sse, exactly
+        # the state the Orchestrator's consumer loop lives in), then hard
+        # stop from this task -- the crash scenario.
+        next_future = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)  # let it reach the suspended-read state
+
+        await adapter.send_hard_stop()
+        assert adapter.is_busy() is False
+        assert adapter._sse_context is not None  # subscription intact
+        assert server.interrupt_count == 1
+
+        # The parked consumer survived (before the fix, send_hard_stop
+        # blew up with RuntimeError before these asserts were reached);
+        # unpark it cleanly.
+        next_future.cancel()
+        try:
+            await next_future
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await stream.aclose()
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_hard_stop_is_safe_with_no_prior_prompt(server: OpenCodeServer) -> None:
+    # send_hard_stop must not require a session/prompt to already exist --
+    # e.g. a stray safeword before anything was ever sent.
+    adapter = OpenCodeAdapter(server.base_url)
+    try:
+        await adapter.send_hard_stop()
+        assert adapter.is_busy() is False
+        assert server.interrupt_count == 0  # no session was ever created to interrupt
+    finally:
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_is_busy_clears_when_stream_ends_without_terminal_step(
+    server: OpenCodeServer,
+) -> None:
+    # Regression test: if the connection drops mid-response before a
+    # terminal step.ended ever arrives, is_busy() would otherwise latch
+    # True forever with nothing left to clear it. A dropped SSE connection
+    # isn't itself proof of completion, but latching forever is the worse
+    # failure mode -- events()'s finally block clears busy as a
+    # last-resort safety net for exactly this case (on top of the normal,
+    # faster finish-reason-driven clear -- see the other is_busy tests).
     server.close_after_first_frame = True
     adapter = OpenCodeAdapter(server.base_url)
 
@@ -283,34 +454,80 @@ async def test_is_busy_clears_when_stream_ends_without_done(
         server.event_gate.set()
         await asyncio.wait_for(collector, timeout=5)
 
+        # Connection dropped after 1 frame (step.started, non-terminal) --
+        # the finish-reason path never fired, but the safety net in
+        # events()'s finally block did.
         assert adapter.is_busy() is False
     finally:
         await adapter._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_send_hard_stop_closes_sse_without_raising(
+async def test_concurrent_send_and_events_share_one_session(
+    server: OpenCodeServer,
+) -> None:
+    # The exact shape of Orchestrator.handle_transcript's first call: the
+    # event-consumer task and the first send start concurrently, and both
+    # reach _ensure_session while _session_id is still None. Without the
+    # session lock each created its own session -- the prompt landed in one,
+    # the SSE subscription in the other, and zero events were ever
+    # delivered (found live on the first real Orchestrator-level run).
+    adapter = OpenCodeAdapter(server.base_url)
+
+    async def drain() -> None:
+        async for _ in adapter.events():
+            pass
+
+    collector = asyncio.ensure_future(drain())
+    try:
+        await adapter.send_text("go")
+        await _release_all_gates(server, len(_SINGLE_STEP_FRAMES))
+        await asyncio.wait_for(collector, timeout=5)
+
+        assert server.created_sessions == 1
+    finally:
+        if not collector.done():
+            collector.cancel()
+            try:
+                await collector
+            except asyncio.CancelledError:
+                pass
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_listening_returns_once_sse_subscription_starts(
     server: OpenCodeServer,
 ) -> None:
     adapter = OpenCodeAdapter(server.base_url)
-
     stream = adapter.events()
     try:
-        server.event_gate.set()
-        first = await asyncio.wait_for(stream.__anext__(), timeout=5)
-        assert first.type == BackendEventType.TEXT
-        assert adapter._sse_context is not None
+        first_future = asyncio.ensure_future(stream.__anext__())
+        # Must resolve well inside its own timeout once events() has begun
+        # dispatching the SSE request -- no gates need releasing for that
+        # (frames are gated, the subscription itself is not), and no
+        # response headers are needed either: the real opencode server
+        # holds SSE headers back until the first event exists.
+        await asyncio.wait_for(adapter.wait_listening(timeout=5.0), timeout=4.0)
 
-        await adapter.send_hard_stop()
-        assert adapter.is_busy() is False
-        assert adapter._sse_context is None
-
-        # Not asserting server.client_disconnected here: httpx.AsyncClient
-        # pools connections by default, so closing the SSE response stream
-        # doesn't reliably close the underlying TCP socket within any fixed
-        # timeout — that would test httpx's pooling behavior, not the
-        # adapter. The state asserted above is what "closes cleanly" means
-        # from the adapter's own perspective.
+        first_future.cancel()
+        try:
+            await first_future
+        except asyncio.CancelledError:
+            pass
     finally:
         await stream.aclose()
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_listening_times_out_gracefully_without_consumer(
+    server: OpenCodeServer,
+) -> None:
+    # A caller that never consumes events() (bare send_text usage) must get
+    # a bounded wait and a clean return, never a deadlock or an exception.
+    adapter = OpenCodeAdapter(server.base_url)
+    try:
+        await asyncio.wait_for(adapter.wait_listening(timeout=0.1), timeout=2.0)
+    finally:
         await adapter._client.aclose()

@@ -63,9 +63,18 @@ class Orchestrator:
         # interject to the backend. Checked after the safeword on purpose,
         # though it could never shadow one: SafewordDetector rejects phrases
         # that normalize to empty at construction, so a hard stop always has
-        # visible content.
+        # visible content. Also checked before wait_listening below -- no
+        # point waiting on the event subscription for input we're dropping.
         if not transcript.strip():
             return
+
+        # Sends wait (best-effort, bounded) for the event subscription the
+        # loop above just started to actually be established: events a
+        # backend emits before its stream is subscribed can be lost
+        # entirely (OpenCode's SSE endpoint has no replay), turning the
+        # whole response silent. Deliberately NOT done for the hard-stop
+        # path above -- aborting must never wait on anything.
+        await self._adapter.wait_listening()
 
         if self._adapter.is_busy():
             await self._adapter.send_interject(transcript)

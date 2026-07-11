@@ -48,8 +48,13 @@ class BackendAdapter(ABC):
 
     The principle above is still correct; the example that used to follow
     it (OpenCodeAdapter.send_hard_stop, cited as a case with no cancel
-    endpoint) is not — see OPENCODE_API_NOTES.md. A real cancel endpoint
-    does exist there; the adapter just wasn't built against the real API.
+    endpoint) was not — see OPENCODE_API_NOTES.md. OpenCode does have a
+    real cancel endpoint (POST /api/session/:id/interrupt), and
+    OpenCodeAdapter now calls it. Kept as the cautionary example anyway:
+    the adapter was shipped and passed its own test suite for a while
+    before anyone ran it against a real server and found the gap between
+    "what the docs/an earlier project claimed" and "what the API actually
+    does" — the reason this class's own docstring exists.
     """
 
     @abstractmethod
@@ -63,6 +68,19 @@ class BackendAdapter(ABC):
 
     @abstractmethod
     def is_busy(self) -> bool: ...
+
+    async def wait_listening(self, timeout: float = 2.0) -> None:
+        """Best-effort wait until this adapter's event stream is established.
+
+        Default is an immediate no-op: adapters whose transport can't lose
+        events to a subscribe-after-send race have nothing to wait for.
+        Adapters that CAN (e.g. OpenCode's SSE endpoint, which never
+        replays events emitted before the subscriber registered) override
+        this so Orchestrator can let the subscription win the race before
+        posting a prompt. Implementations must return (not raise) on
+        timeout -- a caller that never consumes events() must not deadlock.
+        """
+        return None
 
     @abstractmethod
     def events(self) -> AsyncGenerator[BackendEvent, None]:
