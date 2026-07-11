@@ -116,3 +116,31 @@ def test_suggest_command_catches_near_misses() -> None:
 
 def test_suggest_command_none_for_gibberish() -> None:
     assert suggest_command("xyzzy123") is None
+
+
+# --- voice deletion ---
+
+from scripts.voice_picker import delete_voice  # noqa: E402
+
+
+def test_delete_voice_removes_onnx_and_json(tmp_path: Path) -> None:
+    (tmp_path / "aa_BB-test-low.onnx").write_bytes(b"model")
+    (tmp_path / "aa_BB-test-low.onnx.json").write_text("{}")
+    removed = delete_voice("aa_BB-test-low", tmp_path)
+    assert len(removed) == 2
+    assert not any(tmp_path.glob("aa_BB-test-low*"))
+
+
+def test_delete_voice_tolerates_missing_json(tmp_path: Path) -> None:
+    (tmp_path / "aa_BB-test-low.onnx").write_bytes(b"model")
+    removed = delete_voice("aa_BB-test-low", tmp_path)
+    assert len(removed) == 1
+
+
+def test_delete_voice_never_touches_other_files(tmp_path: Path) -> None:
+    (tmp_path / "aa_BB-test-low.onnx").write_bytes(b"model")
+    (tmp_path / "voices.json").write_text("{}")          # catalog cache
+    (tmp_path / "zz_ZZ-other-low.onnx").write_bytes(b"model")
+    delete_voice("aa_BB-test-low", tmp_path)
+    assert (tmp_path / "voices.json").exists()
+    assert (tmp_path / "zz_ZZ-other-low.onnx").exists()

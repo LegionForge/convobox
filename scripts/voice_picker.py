@@ -110,6 +110,22 @@ def download(key: str, voices_dir: Path) -> None:
     print(f"done: {voices_dir / (key + '.onnx')}")
 
 
+def delete_voice(key: str, voices_dir: Path) -> list[Path]:
+    """Remove a downloaded voice's files; returns what was deleted.
+
+    A voice is exactly two files (<key>.onnx + <key>.onnx.json); a
+    missing .json is tolerated (a half-finished download should still be
+    deletable). Never touches anything else in the directory -- notably
+    not voices.json, the catalog cache.
+    """
+    removed = []
+    for candidate in (voices_dir / f"{key}.onnx", voices_dir / f"{key}.onnx.json"):
+        if candidate.exists():
+            candidate.unlink()
+            removed.append(candidate)
+    return removed
+
+
 def audition(
     key: str, voices_dir: Path, text: str, rate: float, volume: float, player: AudioPlayer
 ) -> None:
@@ -136,7 +152,9 @@ def print_config_snippet(key: str, rate: float, volume: float) -> None:
         print(f"  volume: {volume}")
 
 
-_COMMANDS = ["search", "list", "play", "get", "use", "text", "rate", "volume", "help", "quit"]
+_COMMANDS = [
+    "search", "list", "play", "get", "delete", "use", "text", "rate", "volume", "help", "quit",
+]
 
 _HELP = """\
 How this works: search the catalog, listen to candidates, then pick one.
@@ -152,6 +170,8 @@ either that number or the full voice key.
                   speakers (offers to download it first if needed).
                     play 3               play en_GB-alba-medium
   get N|KEY       download a voice without playing it
+  delete N|KEY    remove a downloaded voice's files from disk
+                  (asks first; 'list' to see what's installed)
   use N|KEY       choose the voice -- prints the convobox.yaml snippet
                   when you quit
   text SENTENCE   change the sample text used by 'play'.
@@ -267,7 +287,7 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
             else:
                 volume = value
             print(f"{cmd} is now {value} (re-'play' a voice to hear the difference)")
-        elif cmd in ("get", "play", "use"):
+        elif cmd in ("get", "play", "use", "delete"):
             if not arg:
                 print(f"usage: {cmd} NUMBER (from the last list) or {cmd} VOICE-KEY")
                 continue
@@ -275,7 +295,19 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
             if key is None:
                 print(error)
                 continue
-            if cmd == "get":
+            if cmd == "delete":
+                if key not in installed:
+                    print(f"{key} is not downloaded ('list' shows what is)")
+                    continue
+                reply = input(f"delete {key} from disk? [y/N] ").strip().lower()
+                if reply != "y":
+                    continue
+                for removed in delete_voice(key, voices_dir):
+                    print(f"deleted {removed}")
+                if chosen == key:
+                    chosen = None
+                    print("(that was the chosen voice -- choice cleared)")
+            elif cmd == "get":
                 try:
                     download(key, voices_dir)
                     print(f"downloaded -- 'play {arg}' to hear it")
@@ -320,6 +352,7 @@ def main() -> None:
     parser.add_argument("--list-installed", action="store_true")
     parser.add_argument("--search", metavar="TERM", help="search the catalog by name/language/code")
     parser.add_argument("--download", metavar="KEY")
+    parser.add_argument("--delete", metavar="KEY", help="remove a downloaded voice's files")
     parser.add_argument("--audition", metavar="KEY", help="requires the voice to already be downloaded")
     parser.add_argument("--text", default=DEFAULT_SAMPLE_TEXT)
     parser.add_argument("--rate", type=float, default=1.0)
@@ -349,6 +382,14 @@ def main() -> None:
     if args.download:
         ran_something = True
         download(args.download, voices_dir)
+
+    if args.delete:
+        ran_something = True
+        if args.delete not in installed_voices(voices_dir):
+            print(f"{args.delete} is not downloaded in {voices_dir}")
+        else:
+            for removed in delete_voice(args.delete, voices_dir):
+                print(f"deleted {removed}")
 
     if args.audition:
         ran_something = True
