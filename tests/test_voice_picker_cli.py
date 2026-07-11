@@ -77,3 +77,125 @@ def test_installed_voices_lists_onnx_stems_sorted(tmp_path: Path) -> None:
 
 def test_installed_voices_on_nonexistent_dir_is_empty(tmp_path: Path) -> None:
     assert installed_voices(tmp_path / "does-not-exist") == []
+
+
+# --- numbered-reference resolution and command suggestions ---
+
+from scripts.voice_picker import resolve_key, suggest_command  # noqa: E402
+
+
+def test_resolve_key_number_picks_from_last_list() -> None:
+    key, error = resolve_key("2", ["a-voice", "b-voice", "c-voice"])
+    assert key == "b-voice"
+    assert error is None
+
+
+def test_resolve_key_number_without_a_list_explains() -> None:
+    key, error = resolve_key("2", [])
+    assert key is None
+    assert error is not None and "search" in error
+
+
+def test_resolve_key_number_out_of_range_explains_bounds() -> None:
+    key, error = resolve_key("9", ["a-voice", "b-voice"])
+    assert key is None
+    assert error is not None and "between 1 and 2" in error
+
+
+def test_resolve_key_passes_literal_keys_through() -> None:
+    key, error = resolve_key("en_GB-alba-medium", [])
+    assert key == "en_GB-alba-medium"
+    assert error is None
+
+
+def test_suggest_command_catches_near_misses() -> None:
+    assert suggest_command("serach") == "search"
+    assert suggest_command("paly") == "play"
+    assert suggest_command("qiut") == "quit"
+
+
+def test_suggest_command_none_for_gibberish() -> None:
+    assert suggest_command("xyzzy123") is None
+
+
+# --- voice deletion ---
+
+from scripts.voice_picker import delete_voice  # noqa: E402
+
+
+def test_delete_voice_removes_onnx_and_json(tmp_path: Path) -> None:
+    (tmp_path / "aa_BB-test-low.onnx").write_bytes(b"model")
+    (tmp_path / "aa_BB-test-low.onnx.json").write_text("{}")
+    removed = delete_voice("aa_BB-test-low", tmp_path)
+    assert len(removed) == 2
+    assert not any(tmp_path.glob("aa_BB-test-low*"))
+
+
+def test_delete_voice_tolerates_missing_json(tmp_path: Path) -> None:
+    (tmp_path / "aa_BB-test-low.onnx").write_bytes(b"model")
+    removed = delete_voice("aa_BB-test-low", tmp_path)
+    assert len(removed) == 1
+
+
+def test_delete_voice_never_touches_other_files(tmp_path: Path) -> None:
+    (tmp_path / "aa_BB-test-low.onnx").write_bytes(b"model")
+    (tmp_path / "voices.json").write_text("{}")          # catalog cache
+    (tmp_path / "zz_ZZ-other-low.onnx").write_bytes(b"model")
+    delete_voice("aa_BB-test-low", tmp_path)
+    assert (tmp_path / "voices.json").exists()
+    assert (tmp_path / "zz_ZZ-other-low.onnx").exists()
+
+
+# --- persisting the chosen voice into convobox.yaml ---
+
+import yaml  # noqa: E402
+
+from scripts.voice_picker import write_choice_to_config  # noqa: E402
+
+
+def test_write_choice_creates_config_when_missing(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    write_choice_to_config("en_GB-alba-medium", 1.2, 0.9, config_path=path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["tts"] == {"voice": "en_GB-alba-medium", "rate": 1.2, "volume": 0.9}
+
+
+def test_write_choice_merges_without_touching_other_sections(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text(
+        "backend:\n  name: opencode\n  url: http://localhost:4096\n"
+        "stt:\n  model: base\n"
+        "tts:\n  voice: old-voice\n",
+        encoding="utf-8",
+    )
+    write_choice_to_config("new-voice", 1.0, 1.0, config_path=path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["tts"]["voice"] == "new-voice"
+    assert data["backend"] == {"name": "opencode", "url": "http://localhost:4096"}
+    assert data["stt"] == {"model": "base"}
+
+
+def test_write_choice_preserves_leading_comment_header(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text(
+        "# Helios UAT config -- do not lose this comment.\n"
+        "backend:\n  name: opencode\n",
+        encoding="utf-8",
+    )
+    write_choice_to_config("a-voice", 1.0, 1.0, config_path=path)
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("# Helios UAT config -- do not lose this comment.\n")
+    data = yaml.safe_load(text)
+    assert data["tts"]["voice"] == "a-voice"
+    assert data["backend"]["name"] == "opencode"
+
+
+def test_write_choice_result_loads_through_real_config_loader(tmp_path: Path) -> None:
+    from convobox.config import load_config
+
+    path = tmp_path / "convobox.yaml"
+    write_choice_to_config("en_GB-alba-medium", 1.1, 0.8, config_path=path)
+    config = load_config(path)
+    assert config.tts.voice == "en_GB-alba-medium"
+    assert config.tts.rate == 1.1
+    assert config.tts.volume == 0.8
