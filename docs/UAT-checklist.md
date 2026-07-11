@@ -1,14 +1,24 @@
-# UAT Coverage Suggestions (ConvoBox)
+# UAT checklist
 
-Test ideas derived from reading the actual code paths. Each points at the
-module that implements the behavior so UAT can pin a pass/fail to a place.
+Per-subsystem live-testing matrix for the full voice loop. Each item
+names the module that implements the behavior so a pass/fail pins to a
+place. Derived from agent-assisted code review during the 2026-07-11
+Windows UAT, corrected and extended after log analysis (see
+DESIGN-echo-and-barge-in.md for the design rationale behind items
+marked as deliberate behavior).
 
-Subsystems: echo/overlap handling, VAD segmentation, safeword, busy/interject
-routing, speech normalization (see speechnormalization.md), TTS config, and
-mute/scriptable modes.
+Additions from the 2026-07-11 live log:
+
+- **[E6] Whisper hallucination loops on far-field echo.** Observed live
+  (one transcript repeated a clause five times). Currently caught by the
+  overlap window; any future gate reordering must keep these out.
+- **[N5] Numbered lists keep their numbers** -- deliberate: spoken
+  enumeration is natural, unlike asterisks.
+- Echo layers' live scorecard: overlap window caught ~30 echo utterances
+  with zero false drops and zero echo reaching the backend; the text
+  filter never had to fire (it remains the backstop).
 
 ---
-
 ## 1. Echo / half-duplex overlap handling
 
 Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
@@ -158,21 +168,3 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 6. Scriptable/cleanup: M1-M3, X1-X2.
 
 ---
-
-## Review notes (Claude, 2026-07-11)
-
-Matrix is sound; adopted as the UAT checklist. Corrections/additions:
-
-- [B1] endpoint list corrected in place (interject != interrupt).
-- [E2]/[E3]: the 2026-07-11 live log (uat-echo.log) provides real data:
-  the overlap window alone caught ~30 echo utterances with zero false
-  drops of real speech and zero echo reaching the backend. The text
-  filter never even had to fire -- it remains the backstop layer.
-- Add [E6]: Whisper hallucination loops on far-field echo (observed live:
-  "since you've heard it's happening" x5 in one transcript) -- these are
-  long, repetitive, low-confidence; today they're caught by the overlap
-  window, but any future gate-reordering must keep them out.
-- Add [N5]: numbered lists ("1. ...") are deliberately still spoken with
-  their numbers -- enumeration is natural speech, unlike asterisks.
-- [B3] documents current design; see bargein_suggestions.md review notes
-  for why true barge-in is blocked on acoustic echo cancellation.
