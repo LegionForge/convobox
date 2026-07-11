@@ -41,12 +41,29 @@ class UtteranceSegmenter:
         self._threshold = self._config.threshold
         self._min_silence_windows = _ms_to_windows(self._config.min_silence_ms)
         self._min_speech_windows = _ms_to_windows(self._config.min_speech_ms)
+        # In buffered windows (speech + silence + band), not speech windows:
+        # the cap bounds memory and time-to-first-transcript, both of which
+        # grow with everything buffered, not just with confident speech.
+        self._max_run_windows = (
+            None
+            if self._config.max_utterance_s is None
+            else max(1, round(self._config.max_utterance_s * _SAMPLE_RATE / _WINDOW_SAMPLES))
+        )
 
         self._carry = np.empty(0, dtype=np.float32)
         self._speech: list[np.ndarray] = []
         self._triggered = False
         self._speech_windows = 0
         self._trailing_silence_windows = 0
+
+    @property
+    def in_speech(self) -> bool:
+        """True while an utterance is being captured (speech run in progress).
+
+        Read-only observability for UIs/indicators (the listening-state table
+        in the README needs exactly this signal); no behavior depends on it.
+        """
+        return self._triggered
 
     def feed(self, chunk: np.ndarray) -> list[np.ndarray]:
         """Push one capture chunk; return any utterances it completes.
@@ -112,6 +129,13 @@ class UtteranceSegmenter:
         # and the run would only end via an external flush().
 
         if self._trailing_silence_windows >= self._min_silence_windows:
+            return self._finish_run()
+        # Cap check runs after the silence check so a natural end-of-speech
+        # always wins; the cap only fires on genuinely continuous audio.
+        # The forced emit resets state, so ongoing speech simply starts a new
+        # utterance at the next window — a long monologue arrives as several
+        # capped utterances rather than one giant one after it finally ends.
+        if self._max_run_windows is not None and len(self._speech) >= self._max_run_windows:
             return self._finish_run()
         return None
 

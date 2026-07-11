@@ -21,7 +21,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "mypy>=1.13",
+    "ruff>=0.15",
+    "bandit>=1.9",
 ]
 
 [project.scripts]
@@ -37,3 +40,31 @@ packages = ["src/convobox"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff.lint.per-file-ignores]
+# Every standalone script under scripts/ inserts src/ (and, for a few,
+# scripts/ itself) onto sys.path before importing convobox.* -- necessary
+# because these run directly (python scripts/foo.py), not through the
+# installed package, and each does this deliberately and visibly (see the
+# comment at each insert site), not by accident.
+"scripts/*.py" = ["E402"]
+
+[[tool.mypy.overrides]]
+# faster-whisper, sounddevice, and silero-vad ship no type stubs and no
+# py.typed marker -- no stub package exists to install for them (unlike
+# PyYAML, whose types-PyYAML stub package is a lint.yml default input).
+# Scoped here rather than a blanket --ignore-missing-imports CLI flag so
+# every other import stays checked; this is what makes plain `mypy
+# src/convobox` (dev-rig's lint.yml invocation, no flags) pass, matching
+# what `mypy ... --ignore-missing-imports` already did for the whole tree.
+module = ["faster_whisper", "faster_whisper.*", "sounddevice", "silero_vad", "silero_vad.*"]
+ignore_missing_imports = true
+
+[tool.bandit]
+# Test asserts are pytest's own verification mechanism (not a runtime
+# invariant that -O could silently strip away), which is why bandit's own
+# B101 rule is the wrong lens for tests/ specifically -- CI (dev-rig
+# lint.yml) is invoked with source-dirs=src/convobox for exactly this
+# reason; this exclude just keeps a local `bandit -r .` from being
+# swamped by the same non-finding.
+exclude_dirs = ["tests"]
