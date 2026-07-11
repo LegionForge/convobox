@@ -12,3 +12,4 @@ build/
 *.wav
 *.log
 .DS_Store
+convobox.yaml
