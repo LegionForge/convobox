@@ -108,3 +108,75 @@ def test_mute_player_never_marks_playback(silent_output_stream: None) -> None:
     player.play(np.zeros(22050, dtype=np.float32), sample_rate=22050)
     assert player.playback_ended_at == 0.0
     assert player.is_playing() is False
+
+
+# --- stage-1 text-level echo suppression ---
+
+from scripts.run_convobox import SpokenEchoFilter, SpokenTextRecorder  # noqa: E402
+
+
+def _filter_with(spoken: str, at: float = 100.0) -> SpokenEchoFilter:
+    f = SpokenEchoFilter()
+    f.note_spoken(spoken, now=at)
+    return f
+
+
+RESPONSE = "The pipeline works. All tests passed and the coverage threshold was reached."
+
+
+def test_exact_echo_is_detected() -> None:
+    f = _filter_with(RESPONSE)
+    assert f.is_echo("all tests passed and the coverage threshold was reached", now=105.0)
+
+
+def test_garbled_partial_echo_is_detected() -> None:
+    # STT hears a lossy far-field copy: some words wrong, most survive.
+    f = _filter_with(RESPONSE)
+    assert f.is_echo("the pipeline works all tests past the coverage", now=105.0)
+
+
+def test_novel_user_sentence_passes() -> None:
+    f = _filter_with(RESPONSE)
+    assert not f.is_echo("please refactor the audio capture module next", now=105.0)
+
+
+def test_short_confirmations_never_filtered() -> None:
+    # "the coverage" appears verbatim in the response, but 2 tokens is
+    # below MIN_TOKENS -- a real user's short reply must never be eaten.
+    f = _filter_with(RESPONSE)
+    assert not f.is_echo("the coverage", now=105.0)
+    assert not f.is_echo("yes", now=105.0)
+
+
+def test_old_speech_ages_out() -> None:
+    f = _filter_with(RESPONSE, at=100.0)
+    assert not f.is_echo(
+        "all tests passed and the coverage threshold was reached",
+        now=100.0 + SpokenEchoFilter.MAX_AGE_S + 5.0,
+    )
+
+
+def test_recorder_notes_text_and_delegates() -> None:
+    class FakeTTS:
+        sample_rate = 22050
+
+        async def synthesize(self, text: str):
+            return np.zeros(4, dtype=np.float32)
+
+        def synthesize_stream(self, text: str):
+            raise NotImplementedError
+
+        def stop(self) -> None:
+            pass
+
+        def is_speaking(self) -> bool:
+            return False
+
+    f = SpokenEchoFilter()
+    recorder = SpokenTextRecorder(FakeTTS(), f)  # type: ignore[arg-type]
+    import asyncio as _asyncio
+
+    audio = _asyncio.run(recorder.synthesize(RESPONSE))
+    assert len(audio) == 4
+    assert recorder.sample_rate == 22050
+    assert f.is_echo("all tests passed and the coverage threshold was reached")

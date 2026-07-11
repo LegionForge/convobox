@@ -32,9 +32,14 @@ import argparse
 import asyncio
 import logging
 import math
+import re
 import sys
 import time
+from collections import deque
+from collections.abc import AsyncIterator
 from pathlib import Path
+
+import numpy as np
 
 # Inserted (not relied on as a package import) so this file works identically
 # run directly (`python scripts/run_convobox.py`) and imported as
@@ -49,6 +54,7 @@ from convobox.audio.playback import AudioPlayer
 from convobox.config import load_config
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
+from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 
 log = logging.getLogger("convobox.run")
@@ -57,6 +63,89 @@ log = logging.getLogger("convobox.run")
 # Utterances that started up to this long after playback ended still count
 # as overlapping it: room reverb plus VAD/timestamp slop.
 ECHO_GRACE_S = 0.3
+
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _norm_tokens(text: str) -> set[str]:
+    return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
+
+
+class SpokenEchoFilter:
+    """Text-level echo suppression: does a transcript match our own speech?
+
+    ConvoBox knows exactly what its TTS just said -- an advantage no
+    generic echo canceller has. If most of a transcript's words appear in
+    a recently spoken response, the mic almost certainly heard US, not
+    the user, no matter when the utterance landed (this backstops the
+    playback-overlap window against long reverb, delayed audio devices,
+    and estimate slop). Token overlap rather than exact match because STT
+    garbles echo: it hears a lossy far-field copy of the response.
+
+    Deliberately NOT applied to transcripts under MIN_TOKENS words: a
+    short genuine reply like "yes" or "run it" has a decent chance of
+    appearing verbatim inside a long response, and swallowing a real
+    user confirmation is worse than passing a scrap of echo through.
+    (Short echo scraps are mostly caught by the overlap window anyway.)
+    This is stage 1 of echo handling -- signal-level cancellation (true
+    barge-in) is future work.
+    """
+
+    MIN_TOKENS = 3
+    OVERLAP_THRESHOLD = 0.7
+    MAX_AGE_S = 30.0
+
+    def __init__(self) -> None:
+        self._spoken: deque[tuple[float, set[str]]] = deque(maxlen=8)
+
+    def note_spoken(self, text: str, now: float | None = None) -> None:
+        tokens = _norm_tokens(text)
+        if tokens:
+            self._spoken.append((time.monotonic() if now is None else now, tokens))
+
+    def is_echo(self, transcript: str, now: float | None = None) -> bool:
+        tokens = _norm_tokens(transcript)
+        if len(tokens) < self.MIN_TOKENS:
+            return False
+        now = time.monotonic() if now is None else now
+        for spoken_at, spoken_tokens in self._spoken:
+            if now - spoken_at > self.MAX_AGE_S:
+                continue
+            overlap = len(tokens & spoken_tokens) / len(tokens)
+            if overlap >= self.OVERLAP_THRESHOLD:
+                return True
+        return False
+
+
+class SpokenTextRecorder(TTSEngine):
+    """Transparent TTSEngine wrapper that tells the echo filter what was said.
+
+    Wraps the engine handed to the Orchestrator, so the text recorded is
+    exactly the text spoken (post strip_code_for_speech), with no second
+    integration point in the orchestrator itself.
+    """
+
+    def __init__(self, inner: TTSEngine, echo_filter: SpokenEchoFilter) -> None:
+        self._inner = inner
+        self._filter = echo_filter
+
+    @property
+    def sample_rate(self) -> int:
+        return self._inner.sample_rate
+
+    def synthesize_stream(self, text: str) -> AsyncIterator[np.ndarray]:
+        self._filter.note_spoken(text)
+        return self._inner.synthesize_stream(text)
+
+    async def synthesize(self, text: str) -> np.ndarray:
+        self._filter.note_spoken(text)
+        return await self._inner.synthesize(text)
+
+    def stop(self) -> None:
+        self._inner.stop()
+
+    def is_speaking(self) -> bool:
+        return self._inner.is_speaking()
 
 
 class EchoAwarePlayer(AudioPlayer):
@@ -136,7 +225,8 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
 async def run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     adapter = create_backend_adapter(config.backend)
-    tts = create_tts_engine(config.tts, DEFAULT_VOICES_DIR)
+    echo_filter = SpokenEchoFilter()
+    tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
         device=config.audio.output_device
     )
@@ -190,6 +280,9 @@ async def run(args: argparse.Namespace) -> None:
                         "dropped (overlapped response playback, no echo cancellation): %r",
                         text,
                     )
+                    continue
+                if echo_filter.is_echo(text):
+                    log.info("dropped (matches ConvoBox's own recent speech): %r", text)
                     continue
                 if result.language_probability < config.stt.min_language_probability:
                     log.info(
