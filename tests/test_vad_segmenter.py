@@ -181,3 +181,80 @@ def test_reset_states_called_on_run_completion(
     seg, model = _make_segmenter(monkeypatch, probs)
     seg.feed(_windows(10 + _MIN_SILENCE_WINDOWS))
     assert model.reset_count >= 1
+
+
+def _make_capped_segmenter(
+    monkeypatch: pytest.MonkeyPatch, probs: list[float], max_utterance_s: float
+) -> tuple[UtteranceSegmenter, FakeSileroModel]:
+    model = FakeSileroModel(probs)
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    return (
+        UtteranceSegmenter(VADConfig(max_utterance_s=max_utterance_s)),
+        model,
+    )
+
+
+def test_max_utterance_cap_splits_continuous_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1 second cap = round(16000/512) = 31 windows. 70 windows of continuous
+    # speech (never a silence gap) must force-emit at the cap instead of
+    # buffering until an external flush: two full capped utterances, with the
+    # remainder still in progress.
+    cap_windows = 31
+    probs = [0.9] * 70
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    utterances = seg.feed(_windows(70))
+
+    assert len(utterances) == 2
+    assert all(u.shape[0] == cap_windows * _WINDOW for u in utterances)
+    # The remainder (70 - 62 = 8 windows) is a new in-progress run.
+    assert seg.in_speech
+    tail = seg.flush()
+    assert tail is not None
+    assert tail.shape[0] == (70 - 2 * cap_windows) * _WINDOW
+
+
+def test_natural_silence_end_wins_over_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Speech ends via min_silence well before the cap is reached: the cap
+    # must not change the emitted utterance at all.
+    speech_windows = 10
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=60.0)
+
+    total_windows = speech_windows + _MIN_SILENCE_WINDOWS
+    utterances = seg.feed(_windows(total_windows))
+
+    assert len(utterances) == 1
+    assert utterances[0].shape[0] == total_windows * _WINDOW
+
+
+def test_no_cap_preserves_unbounded_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Default config (max_utterance_s=None): continuous speech buffers
+    # indefinitely and only flush() ends it — the pre-cap contract.
+    probs = [0.9] * 100
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    assert seg.feed(_windows(100)) == []
+    assert seg.in_speech
+    tail = seg.flush()
+    assert tail is not None
+    assert tail.shape[0] == 100 * _WINDOW
+
+
+def test_in_speech_reflects_run_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    probs = [0.0] * 2 + [0.9] * 5 + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    assert not seg.in_speech
+    seg.feed(_windows(2))
+    assert not seg.in_speech
+    seg.feed(_windows(5))
+    assert seg.in_speech
+    seg.feed(_windows(_MIN_SILENCE_WINDOWS))
+    assert not seg.in_speech

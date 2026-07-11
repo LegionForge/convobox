@@ -69,6 +69,7 @@ class OpenCodeServer:
         self.interrupt_count = 0
         self.event_gate = asyncio.Event()
         self.client_disconnected = asyncio.Event()
+        self._closing = False
         self._server: asyncio.AbstractServer | None = None
         self._closing = False
         self.port = 0
@@ -84,11 +85,12 @@ class OpenCodeServer:
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
-            # Release anything still parked on event_gate so a handler
-            # coroutine can't outlive its client -- since Python 3.12.1,
-            # Server.wait_closed() genuinely waits for connection handlers
-            # to finish (CPython gh-104344), so a parked handler would
-            # otherwise deadlock teardown.
+            # Release any _events handler still parked on the gate (e.g. after
+            # a hard stop closed the client mid-stream, when no further frame
+            # is ever released). Since Python 3.12.1, Server.wait_closed()
+            # waits for connection handlers to actually finish (gh-104344), so
+            # a parked handler deadlocks teardown — on 3.11 this leak existed
+            # too but wait_closed() returned without waiting, masking it.
             self._closing = True
             self.event_gate.set()
             await self._server.wait_closed()
@@ -177,6 +179,8 @@ class OpenCodeServer:
         for frame in self.frames:
             await self.event_gate.wait()
             if self._closing:
+                # stop() set the gate to reap parked handlers; don't clear it,
+                # any other parked handler needs to wake from it too.
                 return
             self.event_gate.clear()
             if reader.at_eof():

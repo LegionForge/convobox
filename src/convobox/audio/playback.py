@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
 
 import numpy as np
-import sounddevice as sd
+
+from convobox.audio._sounddevice import import_sounddevice
+
+if TYPE_CHECKING:
+    import sounddevice as sd
 
 
 class AudioPlayer:
@@ -29,6 +34,7 @@ class AudioPlayer:
         self._thread.start()
 
     def _run(self, samples: np.ndarray, sample_rate: int) -> None:
+        sd = import_sounddevice()
         channels = 1 if samples.ndim == 1 else samples.shape[1]
         blocksize = 1024
         stream = sd.OutputStream(
