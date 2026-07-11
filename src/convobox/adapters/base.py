@@ -48,8 +48,13 @@ class BackendAdapter(ABC):
 
     The principle above is still correct; the example that used to follow
     it (OpenCodeAdapter.send_hard_stop, cited as a case with no cancel
-    endpoint) is not — see OPENCODE_API_NOTES.md. A real cancel endpoint
-    does exist there; the adapter just wasn't built against the real API.
+    endpoint) was not — see OPENCODE_API_NOTES.md. OpenCode does have a
+    real cancel endpoint (POST /api/session/:id/interrupt), and
+    OpenCodeAdapter now calls it. Kept as the cautionary example anyway:
+    the adapter was shipped and passed its own test suite for a while
+    before anyone ran it against a real server and found the gap between
+    "what the docs/an earlier project claimed" and "what the API actually
+    does" — the reason this class's own docstring exists.
     """
 
     @abstractmethod
