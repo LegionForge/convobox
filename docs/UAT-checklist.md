@@ -180,6 +180,10 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   behavior becomes undefined. Symptom: speech transcribed but no audio
   heard. Before debugging "no audio" as a code problem, check:
   `Get-CimInstance Win32_Process | ? { $_.CommandLine -match "run_convobox" }`
+  UPDATE (after the second occurrence, same evening): mic mode now takes
+  a single-instance lock (localhost port bind, auto-released on any kind
+  of process death) and a duplicate launch exits immediately with an
+  explanatory error instead of silently contending for the mic.
 - **[O2] Output device pinning.** `audio.output_device` unset means the
   system default output, which on a multi-device Windows box (onboard
   Realtek headphone/speaker endpoints, monitor audio, VR headset

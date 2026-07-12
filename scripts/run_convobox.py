@@ -33,6 +33,7 @@ import asyncio
 import logging
 import math
 import re
+import socket
 import sys
 import time
 from collections import deque
@@ -63,6 +64,28 @@ log = logging.getLogger("convobox.run")
 # Utterances that started up to this long after playback ended still count
 # as overlapping it: room reverb plus VAD/timestamp slop.
 ECHO_GRACE_S = 0.3
+
+# Cross-process mutex for mic mode: an arbitrary fixed localhost port held
+# for the process lifetime. A socket bind (unlike a lockfile) can't go
+# stale -- the OS releases it the instant the holder dies, however it dies.
+SINGLE_INSTANCE_PORT = 47613
+
+
+def acquire_single_instance_lock() -> socket.socket | None:
+    """Try to become THE listening instance; None means someone already is.
+
+    Two live-UAT incidents (docs/UAT-checklist.md [O1]) had a second
+    run_convobox.py silently contending for the microphone and splitting
+    the conversation -- symptoms confusing enough to burn an evening.
+    Mic mode now refuses to start a second instance instead.
+    """
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        lock.close()
+        return None
+    return lock
 
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
@@ -322,6 +345,23 @@ async def run(args: argparse.Namespace) -> None:
     from convobox.audio.capture import MicrophoneStream
     from convobox.stt.transcriber import LocalTranscriber
     from convobox.vad.segmenter import UtteranceSegmenter
+
+    # Guarded BEFORE the heavyweight setup: the second instance should
+    # fail in milliseconds, not after loading Whisper. Only mic mode is
+    # guarded -- a one-shot --text run alongside a listening instance is
+    # legitimate (it touches no microphone).
+    instance_lock = acquire_single_instance_lock()
+    if instance_lock is None:
+        log.error(
+            "another run_convobox.py is already listening (instance lock "
+            "127.0.0.1:%d is held). Two instances contend for the mic and "
+            "split the conversation -- this exact incident happened twice "
+            "in UAT (docs/UAT-checklist.md [O1]). Stop the other instance "
+            "first; find it with:  Get-CimInstance Win32_Process | "
+            "? { $_.CommandLine -match 'run_convobox' }",
+            SINGLE_INSTANCE_PORT,
+        )
+        raise SystemExit(2)
 
     transcriber = LocalTranscriber(config.stt)
     segmenter = UtteranceSegmenter(config.vad)
