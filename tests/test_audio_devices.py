@@ -12,6 +12,7 @@ from scripts.audio_devices import (
     _default_index,
     _input_choice_from_key,
     _qualified_name,
+    _resample_audio,
     _ync_from_key,
     collect_devices,
     format_devices,
@@ -237,3 +238,22 @@ def test_input_choice_from_key_adds_replay_and_again() -> None:
     assert _input_choice_from_key("r") == "replay"      # hear the recording again
     assert _input_choice_from_key("a") == "again"       # record a fresh sample
     assert _input_choice_from_key("z") is None          # unrecognized -> ignore
+
+
+# --- playback resampling (the mic-playback -9997 fix) ---
+
+
+def test_resample_audio_noop_when_rates_match() -> None:
+    a = np.arange(100, dtype=np.float32)
+    assert np.array_equal(_resample_audio(a, 16000, 16000), a)
+
+
+def test_resample_audio_empty_stays_empty() -> None:
+    assert len(_resample_audio(np.zeros(0, dtype=np.float32), 16000, 48000)) == 0
+
+
+def test_resample_audio_upsamples_16k_to_48k() -> None:
+    a = np.ones(1600, dtype=np.float32)   # 0.1s at 16kHz
+    out = _resample_audio(a, 16000, 48000)
+    assert len(out) == 4800               # 0.1s at 48kHz
+    assert out.dtype == np.float32

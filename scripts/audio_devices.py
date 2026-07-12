@@ -230,11 +230,7 @@ def test_input_device(
         audio = record_test(sd, index, seconds, rate)
     rms_db, peak_db = level_meter(audio)
     print(format_level(rms_db, peak_db))
-    print("playing it back ...")
-    try:
-        sd.play(audio, samplerate=rate, device=playback_device, blocking=True)
-    except Exception as exc:  # noqa: BLE001 -- diagnostic tool: report, don't crash
-        print(f"  (playback failed: {exc})")
+    _play_recording(sd, audio, rate, playback_device)
     return rms_db, peak_db
 
 
@@ -453,14 +449,52 @@ def _record_with_meter(
     return audio, rate, seen_peak
 
 
+def _resample_audio(audio: Any, src_rate: int, dst_rate: int) -> Any:
+    """Linear-interpolation resample of a mono float32 buffer (pure).
+
+    Playback-grade, like convobox.audio.playback's resampler -- and needed
+    for the same reason: a device may reject a foreign rate (WASAPI does),
+    so a 16kHz recording must be converted to the OUTPUT device's rate
+    before it can be played.
+    """
+    import numpy as np
+
+    audio = np.asarray(audio, dtype=np.float32)
+    if src_rate == dst_rate or audio.size == 0:
+        return audio
+    n_dst = int(round(len(audio) * dst_rate / src_rate))
+    if n_dst <= 0:
+        return np.zeros(0, dtype=np.float32)
+    src_x = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+    dst_x = np.linspace(0.0, 1.0, num=n_dst, endpoint=False)
+    return np.interp(dst_x, src_x, audio).astype(np.float32)
+
+
+def _output_rate(sd: Any, playback_device: int | None) -> int:
+    """The native rate of the output device a recording will play through."""
+    device = playback_device if playback_device is not None else sd.default.device[1]
+    try:
+        return int(sd.query_devices(device)["default_samplerate"])
+    except Exception:  # noqa: BLE001 -- fall back if the device can't be queried
+        return _CAPTURE_RATE
+
+
 def _play_recording(sd: Any, audio: Any, rate: int, playback_device: int | None) -> None:
-    """Play a recorded buffer back so the user can HEAR the mic's quality."""
+    """Play a recorded buffer back so the user can HEAR the mic's quality.
+
+    Resamples from the capture rate to the OUTPUT device's native rate
+    first -- otherwise a WASAPI/exclusive output rejects the 16kHz buffer
+    (PaErrorCode -9997), the same rate mismatch ConvoBox's own playback
+    resamples around.
+    """
     if getattr(audio, "size", 0) == 0:
         print("  (nothing recorded to play back)")
         return
+    out_rate = _output_rate(sd, playback_device)
+    playable = _resample_audio(audio, rate, out_rate)
     print("Playing back what your mic captured...")
     try:
-        sd.play(audio, samplerate=rate, device=playback_device, blocking=True)
+        sd.play(playable, samplerate=out_rate, device=playback_device, blocking=True)
     except Exception as exc:  # noqa: BLE001 -- setup tool: report, don't crash
         print(f"  (couldn't play back: {exc})")
 
