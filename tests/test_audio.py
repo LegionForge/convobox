@@ -343,3 +343,90 @@ def test_play_stream_with_no_chunks_never_touches_the_device() -> None:
     asyncio.run(player.play_stream(empty_source(), 16000))
     player.wait()
     assert FakeOutputStream.instances == []
+
+
+# --- output resampling (device-rate conformance; the WASAPI/DirectSound fix) ---
+
+from convobox.audio.playback import _device_output_rate, _resample  # noqa: E402
+
+
+def _resampling_sd(rate: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        OutputStream=FakeOutputStream,
+        query_devices=lambda device, kind: {"default_samplerate": rate},
+    )
+
+
+def test_resample_is_noop_when_rates_match() -> None:
+    audio = np.arange(100, dtype=np.float32)
+    assert _resample(audio, 16000, 16000) is audio
+
+
+def test_resample_empty_input_stays_empty() -> None:
+    assert len(_resample(np.zeros(0, dtype=np.float32), 22050, 44100)) == 0
+
+
+def test_resample_doubles_length_on_2x_upsample() -> None:
+    audio = np.ones(1000, dtype=np.float32)
+    out = _resample(audio, 22050, 44100)
+    assert len(out) == 2000
+    assert out.dtype == np.float32
+
+
+def test_resample_preserves_a_ramp_monotonically() -> None:
+    ramp = np.linspace(0.0, 1.0, 500, dtype=np.float32)
+    out = _resample(ramp, 22050, 48000)
+    assert len(out) == round(500 * 48000 / 22050)
+    assert out[0] == 0.0
+    assert np.all(np.diff(out) >= -1e-6)  # still monotonically non-decreasing
+
+
+def test_device_output_rate_uses_device_default() -> None:
+    sd = _resampling_sd(48000.0)
+    assert _device_output_rate(sd, "some-device", source_rate=22050) == 48000
+
+
+def test_device_output_rate_falls_back_when_query_unavailable() -> None:
+    sd = SimpleNamespace(OutputStream=FakeOutputStream)  # no query_devices
+    assert _device_output_rate(sd, None, source_rate=22050) == 22050
+
+
+def test_play_resamples_buffer_to_device_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Device wants 44100; we hand it 22050 -> must open at 44100 and write
+    # ~2x the samples. This is the exact scenario that silenced DirectSound
+    # and crashed WASAPI when we opened at the source rate.
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(44100.0))
+    player = AudioPlayer(device="pinned")
+    player.play(np.ones(2000, dtype=np.float32), sample_rate=22050)
+    player.wait()
+    stream = FakeOutputStream.instances[0]
+    assert stream.kwargs["samplerate"] == 44100
+    assert stream.total_written() == 4000  # 2000 @ 22050 -> 4000 @ 44100
+
+
+def test_play_stream_resamples_chunks_to_device_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(48000.0))
+    player = AudioPlayer(device="pinned")
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.ones(2205, dtype=np.float32)  # 0.1s at 22050
+
+    asyncio.run(player.play_stream(chunks(), sample_rate=22050))
+    player.wait()
+    stream = FakeOutputStream.instances[0]
+    assert stream.kwargs["samplerate"] == 48000
+    # 0.1s of audio at 48000 = 4800 samples (+/- rounding).
+    assert abs(stream.total_written() - 4800) <= 2
+
+
+def test_on_block_played_reference_uses_device_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The AEC far-end reference must be reported at the rate actually sent
+    # to the device (post-resample), so the canceller models what the
+    # speaker really emits.
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(44100.0))
+    player = AudioPlayer(device="pinned")
+    seen_rates: list[int] = []
+    player.on_block_played = lambda block, rate: seen_rates.append(rate)
+    player.play(np.ones(2000, dtype=np.float32), sample_rate=22050)
+    player.wait()
+    assert seen_rates and all(r == 44100 for r in seen_rates)
