@@ -47,6 +47,27 @@ you're using that day, rather than a feature bolted onto one product.
   hardcoded — the same agency a keyboard session already has should be
   available on the voice side too.
 
+## Status — tested configuration (0.2.0)
+
+ConvoBox is backend- and platform-agnostic *by design*, but "designed to
+run anywhere" is not "verified everywhere." This is what has actually been
+driven through the full voice loop (mic → STT → backend → TTS → speakers) on
+real hardware, versus what is implemented but not yet voice-validated:
+
+| Axis        | Tested end-to-end          | Implemented, not yet voice-validated |
+|-------------|----------------------------|--------------------------------------|
+| **Platform**| Windows 11                 | Linux, macOS                         |
+| **Backend** | opencode (HTTP+SSE)        | Claude Code (stream-json), Codex (app-server) |
+| **STT**     | faster-whisper             | —                                    |
+| **TTS**     | Piper                      | —                                    |
+
+The Claude Code and Codex adapters are unit- and adapter-level tested but
+have not yet had a microphone pointed at them; validating them through the
+live loop is the next milestone. Linux/macOS parity is on the roadmap
+(`docs/ROADMAP.md`). Known problems are tracked in
+[`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) — notably WASAPI audio output
+on Windows (use an **MME** output device; see the known-issues doc).
+
 ## Architecture
 
 ```mermaid
