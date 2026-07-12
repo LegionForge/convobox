@@ -1,0 +1,108 @@
+# ConvoBox configuration -- copy to convobox.yaml and edit.
+#
+#   cp convobox.example.yaml convobox.yaml
+#
+# Every section is OPTIONAL: anything you omit uses the default shown in
+# the comment. ConvoBox runs with no config file at all (all defaults).
+# Load a specific file with:  python scripts/run_convobox.py --config PATH
+# or set the CONVOBOX_CONFIG environment variable.
+
+# ---------------------------------------------------------------------------
+# backend -- which coding agent ConvoBox drives.
+# ---------------------------------------------------------------------------
+backend:
+  name: opencode          # "opencode" | "claude-code" | "codex"
+  # -- opencode: an HTTP+SSE server. Start it with `opencode serve` and
+  #    point url at it.
+  url: http://localhost:4096
+  # -- claude-code / codex: spawned as a subprocess. `command` is the base
+  #    command to launch (ConvoBox appends the flags it needs). Examples:
+  # command: ["claude"]
+  # command: ["claude", "--model", "claude-haiku-4-5"]
+  # command: ["codex"]
+
+# ---------------------------------------------------------------------------
+# tts -- how ConvoBox speaks (text-to-speech).
+# ---------------------------------------------------------------------------
+tts:
+  engine: piper           # only "piper" is implemented today
+  voice: en_US-lessac-medium   # a downloaded Piper voice key; REQUIRED to
+                          # hear anything. Browse/download/audition with:
+                          #   python scripts/voice_picker_tui.py
+                          # (it can write your choice back here for you).
+  rate: 1.0               # speech speed (1.0 normal, 1.2 faster, 0.8 slower)
+  volume: 1.0             # loudness (1.0 normal, 0.5 half)
+
+# ---------------------------------------------------------------------------
+# stt -- how ConvoBox hears you (speech-to-text, faster-whisper, all local).
+# ---------------------------------------------------------------------------
+stt:
+  model: base             # tiny.en (fastest, English-only) | base | small | ...
+  device: cpu             # "cpu" | "cuda"
+  compute_type: int8      # int8 (cpu) | float16 (gpu) | ...
+  # language: null        # null = auto-detect (recommended). Pin (e.g. "en")
+                          # only to force one language.
+  min_language_probability: 0.0   # drop transcripts whose detected-language
+                          # confidence is below this (0.0 = keep all). ~0.4
+                          # filters garbled far-field hallucinations; only
+                          # meaningful when language is auto-detected.
+
+# ---------------------------------------------------------------------------
+# audio -- devices and acoustic echo cancellation.
+# ---------------------------------------------------------------------------
+audio:
+  # input_device / output_device: leave unset to use the system default.
+  # To pin one, use the FULL name INCLUDING the host API (find it with
+  #   python scripts/audio_devices.py
+  # and test with --test). On Windows the same jack appears under several
+  # host APIs with different latency/rate behavior:
+  #   MME          resamples gracefully, highest latency -- the safe default
+  #   WASAPI       lowest latency, but needs ConvoBox's playback resampling
+  # output_device: "Headphones (Realtek(R) Audio), MME"
+  # input_device: "Microphone (USB Audio)"
+  sample_rate: 16000      # mic capture rate (Whisper + Silero want 16000)
+
+  echo_cancellation: false   # true enables acoustic echo cancellation
+                          # (WebRTC AEC3) so the mic doesn't hear the TTS.
+                          # Requires the optional extra:  pip install -e ".[aec]"
+                          # Strongly recommended for same-room speakers+mic;
+                          # unnecessary with headphones.
+  aec_delay_ms: 100       # render->capture delay hint. Auto-estimated from
+                          # the real stream latencies when you DON'T set this,
+                          # which is usually best -- leave it out to auto-tune.
+
+# ---------------------------------------------------------------------------
+# interaction -- barge-in (talking over a response).
+# ---------------------------------------------------------------------------
+interaction:
+  interrupt_mode: none    # none       = half-duplex; speech during playback
+                          #              is dropped (the safe default).
+                          # stop_audio = talking over the response stops it
+                          #              and your words are forwarded.
+                          # abort_turn = also aborts the backend's turn.
+                          # NOTE: the non-none modes need echo_cancellation
+                          # (or headphones) or the assistant interrupts ITSELF.
+  barge_in_min_speech_ms: 250   # sustained speech required before barge-in
+                          # fires, so a cough doesn't kill a response.
+
+# ---------------------------------------------------------------------------
+# safeword -- spoken phrases that hard-stop the agent (checked before every
+# other gate; can't be swallowed). Say one to abort the current work.
+# ---------------------------------------------------------------------------
+safeword:
+  hard_stop_phrases:
+    - "stop stop stop"    # the most STT-robust phrase; recommended primary
+    - "mayday mayday mayday"   # add any you like -- plosive, distinctive
+                          # phrases survive far-field STT best
+
+# ---------------------------------------------------------------------------
+# vad -- voice activity detection (Silero) segmentation. Defaults are good;
+# tune only if utterances split/merge wrong.
+# ---------------------------------------------------------------------------
+vad:
+  threshold: 0.5          # speech-probability threshold (0-1)
+  min_silence_ms: 500     # trailing silence that ends an utterance
+  min_speech_ms: 250      # shorter bursts are discarded as noise
+  # max_utterance_s: 20   # force-emit after this many seconds even without a
+                          # pause (unset = unlimited; long monologues then
+                          # yield no transcript until you stop talking)
