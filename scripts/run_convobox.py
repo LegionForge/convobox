@@ -71,6 +71,51 @@ def _norm_tokens(text: str) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
 
 
+# Prefixed to a barge-in utterance so the backend knows its previous
+# response wasn't fully heard (we can't edit backend session history the
+# way realtime APIs truncate theirs -- see docs/DESIGN-echo-and-barge-in.md,
+# "the truncation problem"). Wording provisional pending barge-in UAT.
+BARGE_IN_MARKER = "(I interrupted your spoken response midway) "
+
+
+class BargeInMonitor:
+    """Decides when sustained user speech during playback should barge in.
+
+    Pure state machine so the decision is unit-testable: feed it the
+    VAD's in_speech flag and whether audio is playing, once per mic
+    chunk; it returns True exactly once per sustained-speech episode
+    that crosses the threshold while a response is playing. The
+    threshold is what keeps a cough or chair creak from killing a
+    response (see docs/DESIGN-echo-and-barge-in.md).
+    """
+
+    def __init__(self, mode: str, min_speech_ms: int) -> None:
+        self.mode = mode
+        self._min_speech_ms = min_speech_ms
+        self._run_ms = 0.0
+        self._fired = False
+
+    def observe(self, in_speech: bool, playing: bool, chunk_ms: float) -> bool:
+        if self.mode == "none":
+            return False
+        if not in_speech:
+            # Speech episode ended: reset for the next one.
+            self._run_ms = 0.0
+            self._fired = False
+            return False
+        if not playing:
+            # Speech with nothing playing is just... talking. Track
+            # nothing; there is no response to interrupt. (Speech that
+            # STARTED during playback and outlives it already fired.)
+            self._run_ms = 0.0
+            return False
+        self._run_ms += chunk_ms
+        if self._run_ms >= self._min_speech_ms and not self._fired:
+            self._fired = True
+            return True
+        return False
+
+
 class SpokenEchoFilter:
     """Text-level echo suppression: does a transcript match our own speech?
 
@@ -293,9 +338,42 @@ async def run(args: argparse.Namespace) -> None:
         player.on_block_played = canceller.feed_reverse
         log.info("acoustic echo cancellation ON (delay hint %dms)", config.audio.aec_delay_ms)
 
+    monitor = BargeInMonitor(
+        config.interaction.interrupt_mode, config.interaction.barge_in_min_speech_ms
+    )
+    if monitor.mode != "none":
+        if canceller is None:
+            # Not refused outright -- headphones make it legitimate -- but
+            # with open speakers and no AEC the assistant's own voice trips
+            # the VAD and it interrupts itself. Loud, specific warning.
+            log.warning(
+                "interrupt_mode=%r without audio.echo_cancellation: with open "
+                "speakers the assistant will interrupt ITSELF. Only safe with "
+                "headphones. See docs/DESIGN-echo-and-barge-in.md.",
+                monitor.mode,
+            )
+        log.info(
+            "barge-in ON (%s after %dms of sustained speech)",
+            monitor.mode, config.interaction.barge_in_min_speech_ms,
+        )
+    barge_in_pending = False
+
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
+        nonlocal barge_in_pending
         async for chunk in mic.stream():
-            yield canceller.process(chunk) if canceller is not None else chunk
+            processed = canceller.process(chunk) if canceller is not None else chunk
+            # in_speech reflects the segmenter's state as of the PREVIOUS
+            # chunk (this one hasn't been fed yet) -- one chunk (~32ms) of
+            # lag, irrelevant against the sustained-speech threshold.
+            chunk_ms = 1000 * len(chunk) / config.audio.sample_rate
+            if monitor.observe(segmenter.in_speech, player.is_playing(), chunk_ms):
+                log.info("barge-in: sustained speech during playback -- stopping audio")
+                player.stop()
+                tts.stop()
+                if monitor.mode == "abort_turn":
+                    await adapter.send_hard_stop()
+                barge_in_pending = True
+            yield processed
 
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
              config.safeword.hard_stop_phrases[0])
@@ -304,16 +382,27 @@ async def run(args: argparse.Namespace) -> None:
             result = transcriber.transcribe(utterance)
             text = result.text
             is_hard_stop = safeword.check(text) is not None
+            barged_in, barge_in_pending = barge_in_pending, False
 
             # Safeword is checked on the raw transcript BEFORE any quality
             # gate or half-duplex drop: a hard stop must never be swallowed.
             if not is_hard_stop:
-                if player.is_playing() or utterance_overlapped_playback(
-                    now=time.monotonic(),
-                    duration_s=result.duration_s,
-                    stt_latency_ms=result.latency_ms,
-                    min_silence_ms=config.vad.min_silence_ms,
-                    playback_ended_at=player.playback_ended_at,
+                # A barge-in utterance overlapped playback BY DEFINITION --
+                # that's the user exercising their right to interrupt, not
+                # echo -- so the overlap gate steps aside for it. The
+                # spoken-text echo check below still applies: if what
+                # "interrupted" us matches our own words, it was self-echo
+                # that tripped the barge-in (AEC not converged / headphones
+                # assumption violated) and must not be forwarded.
+                if not barged_in and (
+                    player.is_playing()
+                    or utterance_overlapped_playback(
+                        now=time.monotonic(),
+                        duration_s=result.duration_s,
+                        stt_latency_ms=result.latency_ms,
+                        min_silence_ms=config.vad.min_silence_ms,
+                        playback_ended_at=player.playback_ended_at,
+                    )
                 ):
                     log.info(
                         "dropped (overlapped response playback, no echo cancellation): %r",
@@ -321,7 +410,12 @@ async def run(args: argparse.Namespace) -> None:
                     )
                     continue
                 if echo_filter.is_echo(text):
-                    log.info("dropped (matches ConvoBox's own recent speech): %r", text)
+                    if barged_in:
+                        log.warning(
+                            "barge-in was triggered by our own echo (dropped): %r", text
+                        )
+                    else:
+                        log.info("dropped (matches ConvoBox's own recent speech): %r", text)
                     continue
                 if result.language_probability < config.stt.min_language_probability:
                     log.info(
@@ -332,11 +426,17 @@ async def run(args: argparse.Namespace) -> None:
                     continue
 
             log.info(
-                "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s",
+                "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s%s",
                 text, result.language, result.language_probability,
                 math.exp(result.avg_logprob), adapter.is_busy(),
                 "  [HARD STOP]" if is_hard_stop else "",
+                "  [BARGE-IN]" if barged_in and not is_hard_stop else "",
             )
+            if barged_in and not is_hard_stop:
+                # The backend believes its whole response was delivered; it
+                # wasn't. The marker is our version of realtime APIs'
+                # history truncation (docs: "the truncation problem").
+                text = BARGE_IN_MARKER + text
             await orchestrator.handle_transcript(text)
 
 
