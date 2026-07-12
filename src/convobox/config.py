@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -58,6 +59,25 @@ class TTSConfig(BaseModel):
     volume: float = 1.0
 
 
+class InteractionConfig(BaseModel):
+    # What happens when the user talks while a response is playing.
+    #   none       -- half-duplex: overlapping speech is dropped (the safe
+    #                 default; the only mode that's safe WITHOUT echo
+    #                 cancellation or headphones).
+    #   stop_audio -- open barge-in: playback stops, the backend keeps
+    #                 working, and the utterance is forwarded (with an
+    #                 interruption marker) through normal routing.
+    #   abort_turn -- barge-in that also aborts the backend's turn,
+    #                 safeword-style.
+    # See docs/DESIGN-echo-and-barge-in.md for why the non-none modes
+    # require audio.echo_cancellation (or headphones): without it the
+    # assistant's own voice trips the VAD and it interrupts itself.
+    interrupt_mode: Literal["none", "stop_audio", "abort_turn"] = "none"
+    # Sustained speech required before barge-in fires, so a cough or a
+    # chair creak doesn't kill a response.
+    barge_in_min_speech_ms: int = 250
+
+
 class SafewordConfig(BaseModel):
     hard_stop_phrases: list[str] = Field(default_factory=lambda: ["stop stop stop"])
 
@@ -79,6 +99,7 @@ class AppConfig(BaseModel):
     tts: TTSConfig = Field(default_factory=TTSConfig)
     safeword: SafewordConfig = Field(default_factory=SafewordConfig)
     backend: BackendConfig = Field(default_factory=BackendConfig)
+    interaction: InteractionConfig = Field(default_factory=InteractionConfig)
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

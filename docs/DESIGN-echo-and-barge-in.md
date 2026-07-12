@@ -133,3 +133,16 @@ Spectrum note for the record: wake-word-gated barge-in (Alexa-style,
 which our safeword-only behavior resembles) is the deliberate
 false-trigger trade-off for far-field speakers; open barge-in is where
 conversational agents live. ConvoBox is a conversational agent.
+
+### Status update (2026-07-11, later): implemented
+
+`interaction.interrupt_mode` + `barge_in_min_speech_ms` shipped (still
+defaulting to "none"). The BargeInMonitor state machine fires once per
+sustained-speech episode crossing the threshold during playback;
+barge-in utterances bypass the overlap gate (they overlap by
+definition) but NOT the spoken-text echo filter -- if the "interruption"
+matches our own words, it was self-echo tripping the monitor and is
+dropped with a warning instead of forwarded. Forwarded text carries the
+truncation marker. Enabling a non-none mode without AEC logs a loud
+self-interruption warning (headphones users may proceed deliberately).
+Default flips to stop_audio only after room UAT signs off.

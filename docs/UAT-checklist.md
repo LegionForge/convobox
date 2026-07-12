@@ -168,3 +168,42 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 6. Scriptable/cleanup: M1-M3, X1-X2.
 
 ---
+
+---
+
+## Operational gotchas (from live UAT incidents)
+
+- **[O1] Exactly one runner instance.** A 2026-07-11 incident had two
+  `run_convobox.py` processes launched 88ms apart via different
+  launchers (`.venv\Scripts\python.exe` and `uv run`) -- both read the
+  mic, at most one owns the backend conversation, and audio output
+  behavior becomes undefined. Symptom: speech transcribed but no audio
+  heard. Before debugging "no audio" as a code problem, check:
+  `Get-CimInstance Win32_Process | ? { $_.CommandLine -match "run_convobox" }`
+- **[O2] Output device pinning.** `audio.output_device` unset means the
+  system default output, which on a multi-device Windows box (onboard
+  Realtek headphone/speaker endpoints, monitor audio, VR headset
+  virtual devices) may not be where the user is listening. If a single
+  clean instance is silent, pin `audio.output_device` in convobox.yaml
+  to the device actually wired to the speakers.
+- **[O3] "Two opencode instances" is usually one.** `opencode serve`
+  runs as a launcher process plus the server it spawns -- two PIDs, one
+  server. Verify by port, not by process count.
+
+## Barge-in items (interrupt_mode != "none"; requires AEC or headphones)
+
+- **[G1] Sustained speech during playback stops audio** within
+  ~barge_in_min_speech_ms + one chunk; the utterance is forwarded with
+  the interruption marker and `[BARGE-IN]` in its transcript log line.
+- **[G2] Cough test.** Sub-threshold noise bursts during playback must
+  NOT stop audio (the monitor resets between speech episodes).
+- **[G3] Echo-triggered barge-in is contained.** If self-echo trips the
+  barge-in (AEC not converged), the utterance matches the spoken-text
+  filter and is dropped with a WARNING log -- playback stops (annoying)
+  but the echo is never forwarded to the backend (safe). Persistent
+  occurrences mean AEC needs tuning or interrupt_mode should be "none".
+- **[G4] abort_turn mode** also interrupts the backend turn
+  (safeword-equivalent) -- verify against each backend.
+- **[G5] Marker delivery.** The forwarded barge-in text carries
+  BARGE_IN_MARKER so the backend knows its response wasn't fully heard
+  ("the truncation problem", DESIGN-echo-and-barge-in.md).
