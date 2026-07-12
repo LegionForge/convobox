@@ -9,13 +9,15 @@ goes wrong. This tool makes the choice visible and testable:
     python scripts/audio_devices.py --inputs        # input devices only
     python scripts/audio_devices.py --test 5        # play a test tone to device 5
     python scripts/audio_devices.py --test-input 1  # record from device 1, show a level meter
-    python scripts/audio_devices.py --setup         # GUIDED: pick + test both devices,
-                                                    # then save them to convobox.yaml
+    python scripts/audio_devices.py --setup         # GUIDED: test your default
+                                                    # speaker & mic, save to convobox.yaml
 
-Most people should just run --setup: it walks you through picking a
-speaker and a microphone, plays/records a test so you can confirm each
-one actually works, and writes the choices to convobox.yaml -- no need to
-know anything about host APIs or sample rates.
+Most people should just run --setup. It tries your system's default
+speaker and microphone first and tests each one -- a looping tone you
+either hear or don't, a live level meter you watch move when you speak --
+and only shows a list of other devices if the default doesn't work. It
+writes the working choices to convobox.yaml. No need to know anything
+about devices, host APIs, or sample rates.
 
 Or pin a device by hand in convobox.yaml -- INCLUDING the host API, so it
 resolves to exactly one device:
@@ -37,6 +39,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -299,42 +302,115 @@ def _prompt_index(prompt: str, devices: list[dict[str, Any]]) -> int | None:
         print(error)
 
 
-def guided_setup(sd: Any, config_path: Path | None = None) -> None:
-    """Interactive wizard: pick + test a speaker and a mic, then save both.
+def _default_index(sd: Any, kind: str) -> int | None:
+    """The system default device index for a direction, or None if unset."""
+    idx = sd.default.device[1 if kind == "output" else 0]
+    return idx if isinstance(idx, int) and idx >= 0 else None
 
-    The one command a regular user should ever need. Everything the week of
-    UAT fought -- host APIs, sample rates, silent endpoints -- is hidden
-    behind "did you hear it? / did that register your voice?".
+
+def _confirm_output(sd: Any, index: int) -> bool:
+    """Play a CONTINUOUS looping beep on `index`; ask whether the user hears it.
+
+    The tone loops for the whole prompt (not a one-shot clip) so the user
+    has as long as they need to notice it.
+    """
+    import numpy as np
+
+    info = sd.query_devices(index)
+    rate = int(info["default_samplerate"])
+    tone = 0.25 * np.sin(
+        2 * np.pi * 660 * np.linspace(0.0, 0.35, int(rate * 0.35), endpoint=False)
+    )
+    pattern = np.concatenate([tone.astype(np.float32), np.zeros(int(rate * 0.3), dtype=np.float32)])
+    print(f"\nPlaying a test sound on:  {info['name']}")
+    try:
+        sd.play(pattern, samplerate=rate, device=index, loop=True)
+    except Exception as exc:  # noqa: BLE001 -- setup tool: report, don't crash
+        print(f"  (couldn't play on this device: {exc})")
+        return False
+    try:
+        answer = input("Do you hear a repeating beep?  [Y]es  /  [n]o, choose another:  ")
+    finally:
+        sd.stop()
+    return answer.strip().lower() in ("", "y", "yes")
+
+
+def _confirm_input(sd: Any, index: int) -> bool:
+    """Show a CONTINUOUS live level meter for a few seconds, then confirm.
+
+    The bar updates in place while the user talks, so they can see their
+    mic register in real time before deciding.
+    """
+    info = sd.query_devices(index)
+    latest = {"rms": -120.0, "peak": -120.0}
+
+    def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+        latest["rms"], latest["peak"] = level_meter(indata[:, 0])
+
+    rate = _CAPTURE_RATE
+    try:
+        stream = sd.InputStream(samplerate=rate, channels=1, device=index, callback=callback)
+    except Exception:  # noqa: BLE001 -- fall back to the device's own rate
+        rate = int(info["default_samplerate"])
+        try:
+            stream = sd.InputStream(samplerate=rate, channels=1, device=index, callback=callback)
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n  (couldn't record on this device: {exc})")
+            return False
+    print(f"\nListening on:  {info['name']}")
+    print("Speak normally -- watch the bar move (about 6 seconds):")
+    seen_peak = -120.0
+    with stream:
+        for _ in range(60):
+            sys.stdout.write("\r  " + format_level(latest["rms"], latest["peak"]))
+            sys.stdout.flush()
+            seen_peak = max(seen_peak, latest["peak"])
+            time.sleep(0.1)
+    print()
+    if seen_peak <= -55.0:
+        print("  (no sound detected -- if you were speaking, try a different device)")
+    answer = input("Did the bar move when you spoke?  [Y]es  /  [n]o, choose another:  ")
+    return answer.strip().lower() in ("", "y", "yes")
+
+
+def _setup_direction(sd: Any, kind: str, label: str) -> int | None:
+    """Default-first: test the auto-detected device; reveal the chooser only
+    if it fails or the user declines it (progressive disclosure)."""
+    confirm = _confirm_output if kind == "output" else _confirm_input
+    default_idx = _default_index(sd, kind)
+    if default_idx is not None and confirm(sd, default_idx):
+        return default_idx
+
+    # The full device list appears ONLY now -- a regular user who confirmed
+    # the default never sees it.
+    print(f"\nLet's choose a different {label}.")
+    devices = collect_devices(sd, kind)
+    print(format_devices(devices, kind.upper()))
+    while True:
+        idx = _prompt_index(f"\n{label.capitalize()} -- number to test (blank to skip):  ", devices)
+        if idx is None:
+            return None
+        if confirm(sd, idx):
+            return idx
+        print("ok, let's try another.")
+
+
+def guided_setup(sd: Any, config_path: Path | None = None) -> None:
+    """Default-first audio setup a regular user can run without knowing
+    anything about devices, host APIs, or sample rates.
+
+    Tries the system's default speaker and mic first and tests each one
+    CONTINUOUSLY (a looping tone / a live level meter); the device chooser
+    stays hidden until the default doesn't work or the user asks for a
+    different one (the [n]o path in _setup_direction). Advanced users can
+    still use --test / --test-input and pin devices by hand.
     """
     config_path = config_path or default_config_path()
-    print("ConvoBox audio setup\n" + "=" * 20)
-    print("Let's pick a speaker and a microphone and test each one.\n")
+    print("ConvoBox audio setup")
+    print("Let's make sure your speaker and microphone work -- takes about a minute.")
 
-    outputs = collect_devices(sd, "output")
-    print(format_devices(outputs, "OUTPUT"))
-    chosen_out: int | None = None
-    while True:
-        idx = _prompt_index("\nSpeaker -- enter a number to test (blank to skip): ", outputs)
-        if idx is None:
-            break
-        play_test_tone(sd, idx, seconds=1.0)
-        if input("Did you hear the tone? [y/N] ").strip().lower() == "y":
-            chosen_out = idx
-            break
-        print("ok, let's try another.")
-
-    inputs = collect_devices(sd, "input")
-    print("\n" + format_devices(inputs, "INPUT"))
-    chosen_in: int | None = None
-    while True:
-        idx = _prompt_index("\nMicrophone -- enter a number to test (blank to skip): ", inputs)
-        if idx is None:
-            break
-        test_input_device(sd, idx, seconds=3.0, playback_device=chosen_out)
-        if input("Did that register your voice? [y/N] ").strip().lower() == "y":
-            chosen_in = idx
-            break
-        print("ok, let's try another.")
+    chosen_out = _setup_direction(sd, "output", "speaker")
+    chosen_in = _setup_direction(sd, "input", "microphone")
 
     if chosen_out is None and chosen_in is None:
         print("\nnothing selected -- convobox.yaml unchanged.")
@@ -348,10 +424,10 @@ def guided_setup(sd: Any, config_path: Path | None = None) -> None:
         name = _qualified_name(sd, chosen_in)
         write_device_to_config("input", name, config_path)
         saved.append(f"input_device: {name!r}")
-    print(f"\nsaved to {config_path}:")
+    print(f"\nAll set -- saved to {config_path}:")
     for line in saved:
         print(f"  {line}")
-    print("run  python scripts/run_convobox.py  to use it.")
+    print("\nRun  python scripts/run_convobox.py  to start talking.")
 
 
 def main() -> None:
