@@ -12,4 +12,15 @@ build/
 *.wav
 *.log
 .DS_Store
+
+# Per-machine local config (copy convobox.example.yaml to create it).
 convobox.yaml
+
+# Personal working notes kept out of the public repo -- philosophy.md is
+# JP's running voice-dialogue log (archived separately in the vault);
+# _diag.py/_tone.py were throwaway audio probes superseded by
+# scripts/audio_devices.py. Structural protection against an accidental
+# `git add -A` sweeping them in.
+philosophy.md
+scripts/_diag.py
+scripts/_tone.py
