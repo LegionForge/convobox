@@ -40,6 +40,10 @@ class AudioPlayer:
         # realtime far-end reference (acoustic echo cancellation); must be
         # fast and must not raise.
         self.on_block_played: Callable[[np.ndarray, int], None] | None = None
+        # Actual render latency reported by the host API once a stream is
+        # open (None before first playback / when unreported). Consumers:
+        # the AEC delay estimate.
+        self.output_latency_s: float | None = None
 
     def play(self, samples: np.ndarray, sample_rate: int) -> None:
         """Start playing samples. Non-blocking; replaces any current playback."""
@@ -62,6 +66,7 @@ class AudioPlayer:
         )
         self._stream = stream
         stream.start()
+        self.output_latency_s = getattr(stream, "latency", None)
         try:
             for start in range(0, len(samples), blocksize):
                 if self._stop.is_set():
@@ -124,6 +129,7 @@ class AudioPlayer:
                     )
                     self._stream = stream
                     stream.start()
+                    self.output_latency_s = getattr(stream, "latency", None)
                 blocksize = 1024
                 for start in range(0, len(chunk), blocksize):
                     if self._stop.is_set():

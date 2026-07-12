@@ -328,15 +328,53 @@ async def run(args: argparse.Namespace) -> None:
     device = _resolve_device(args.device, config.audio.input_device)
 
     canceller = None
+    mic_holder: dict[str, object] = {}
     if config.audio.echo_cancellation:
         from convobox.audio.aec import EchoCanceller
 
         canceller = EchoCanceller(delay_ms=config.audio.aec_delay_ms)
-        # Far-end reference: fed from the playback thread with each block
-        # as it's actually written to the device (queue-time would race
-        # ahead of realtime under streamed synthesis).
-        player.on_block_played = canceller.feed_reverse
-        log.info("acoustic echo cancellation ON (delay hint %dms)", config.audio.aec_delay_ms)
+        # A wrong delay hint is the #1 cause of weak in-room suppression
+        # (F1 in the 2026-07-11 UAT): Windows host APIs commonly buffer
+        # 100-500ms of output, dwarfing any fixed guess. Once both streams
+        # report their real latencies, estimate the true render-to-capture
+        # delay and apply it -- unless the user explicitly configured
+        # aec_delay_ms, in which case respect it but still LOG the
+        # estimate so UAT learns the right number.
+        delay_explicit = "aec_delay_ms" in config.audio.model_fields_set
+        delay_estimated = False
+
+        def _feed_reference(block, sample_rate) -> None:  # type: ignore[no-untyped-def]
+            nonlocal delay_estimated
+            if not delay_estimated:
+                out_lat = player.output_latency_s
+                mic = mic_holder.get("mic")
+                in_lat = getattr(mic, "input_latency_s", None)
+                if out_lat is not None and in_lat is not None:
+                    # +10ms for acoustics (a few meters) and framing slop.
+                    estimate = int((float(out_lat) + float(in_lat)) * 1000) + 10
+                    delay_estimated = True
+                    if delay_explicit and estimate != canceller.delay_ms:
+                        log.info(
+                            "AEC delay: measured stream latencies suggest ~%dms "
+                            "(out %.0fms + in %.0fms + 10ms); keeping configured %dms "
+                            "-- consider updating aec_delay_ms or removing it to auto-tune",
+                            estimate, float(out_lat) * 1000, float(in_lat) * 1000,
+                            canceller.delay_ms,
+                        )
+                    elif not delay_explicit:
+                        canceller.set_delay(estimate)
+                        log.info(
+                            "AEC delay auto-estimated: %dms (out %.0fms + in %.0fms + 10ms)",
+                            estimate, float(out_lat) * 1000, float(in_lat) * 1000,
+                        )
+            canceller.feed_reverse(block, sample_rate)
+
+        player.on_block_played = _feed_reference
+        log.info(
+            "acoustic echo cancellation ON (delay hint %dms%s)",
+            config.audio.aec_delay_ms,
+            " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
+        )
 
     monitor = BargeInMonitor(
         config.interaction.interrupt_mode, config.interaction.barge_in_min_speech_ms
@@ -360,13 +398,28 @@ async def run(args: argparse.Namespace) -> None:
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending
+        was_playing = False
         async for chunk in mic.stream():
             processed = canceller.process(chunk) if canceller is not None else chunk
+            playing = player.is_playing()
+            if canceller is not None and was_playing and not playing:
+                # Response just finished: one stats line per response is
+                # the number UAT needs -- ~0dB means AEC is inert in this
+                # room, 15dB+ means converged (F1 diagnosis).
+                attenuation = canceller.attenuation_db()
+                log.info(
+                    "AEC stats for last response: attenuation=%s  delay=%dms  "
+                    "frames(reverse=%d, capture=%d)",
+                    f"{attenuation:.1f}dB" if attenuation is not None else "n/a",
+                    canceller.delay_ms, canceller.reverse_frames, canceller.capture_frames,
+                )
+                canceller.reset_stats()
+            was_playing = playing
             # in_speech reflects the segmenter's state as of the PREVIOUS
             # chunk (this one hasn't been fed yet) -- one chunk (~32ms) of
             # lag, irrelevant against the sustained-speech threshold.
             chunk_ms = 1000 * len(chunk) / config.audio.sample_rate
-            if monitor.observe(segmenter.in_speech, player.is_playing(), chunk_ms):
+            if monitor.observe(segmenter.in_speech, playing, chunk_ms):
                 log.info("barge-in: sustained speech during playback -- stopping audio")
                 player.stop()
                 tts.stop()
@@ -378,6 +431,7 @@ async def run(args: argparse.Namespace) -> None:
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
              config.safeword.hard_stop_phrases[0])
     with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
+        mic_holder["mic"] = mic  # lets the AEC delay estimator read input latency
         async for utterance in segmenter.segment(_mic_chunks(mic)):
             result = transcriber.transcribe(utterance)
             text = result.text
@@ -404,18 +458,21 @@ async def run(args: argparse.Namespace) -> None:
                         playback_ended_at=player.playback_ended_at,
                     )
                 ):
+                    # Reports the REAL canceller state, not a hardcoded
+                    # "no echo cancellation" -- UAT needs to know whether
+                    # AEC was actually in the path when an echo leaked.
+                    aec_state = "echo-cancellation active" if canceller is not None else "no echo cancellation"
                     log.info(
-                        "dropped (overlapped response playback, no echo cancellation): %r",
-                        text,
+                        "dropped (overlap gate, %s): %r", aec_state, text
                     )
                     continue
                 if echo_filter.is_echo(text):
                     if barged_in:
                         log.warning(
-                            "barge-in was triggered by our own echo (dropped): %r", text
+                            "dropped (spoken-echo filter, barge-in was our own echo): %r", text
                         )
                     else:
-                        log.info("dropped (matches ConvoBox's own recent speech): %r", text)
+                        log.info("dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r", text)
                     continue
                 if result.language_probability < config.stt.min_language_probability:
                     log.info(

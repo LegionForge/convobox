@@ -64,6 +64,10 @@ class MicrophoneStream:
             callback=self._callback,
         )
         self._stream.start()
+        # Actual capture latency reported by the host API, for consumers
+        # that need real timing (the AEC delay estimate). None when the
+        # backend doesn't report one.
+        self.input_latency_s = getattr(self._stream, "latency", None)
 
     def read(self, timeout: float | None = None) -> np.ndarray:
         """Block until the next captured chunk is available and return it."""

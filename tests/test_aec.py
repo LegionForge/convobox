@@ -113,3 +113,57 @@ def test_enabling_without_package_raises_actionable_error(
     monkeypatch.setattr(builtins, "__import__", blocked)
     with pytest.raises(RuntimeError, match=r"\[aec\]"):
         EchoCanceller()
+
+
+# --- telemetry (F1 diagnosis instrumentation) ---
+
+
+def test_attenuation_db_reports_convergence_on_synthetic_echo() -> None:
+    # Same scenario as the suppression test, but measured through the
+    # telemetry the runner logs -- the number UAT reads must reflect the
+    # cancellation that's actually happening.
+    rng = np.random.default_rng(7)
+    canceller = EchoCanceller(delay_ms=50)
+    farend = _farend(4.0)
+    delay = int(0.05 * _SR)
+    mic = np.zeros_like(farend)
+    mic[delay:] = 0.6 * farend[:-delay]
+    mic += 0.002 * rng.standard_normal(len(mic)).astype(np.float32)
+
+    chunk = 512
+    for start in range(0, len(farend) - chunk, chunk):
+        canceller.feed_reverse(farend[start : start + chunk], _SR)
+        canceller.process(mic[start : start + chunk])
+
+    attenuation = canceller.attenuation_db()
+    assert attenuation is not None and attenuation >= 15.0
+    assert canceller.reverse_frames > 0
+    assert canceller.capture_frames > 0
+
+
+def test_attenuation_db_none_without_enough_signal() -> None:
+    canceller = EchoCanceller(delay_ms=50)
+    assert canceller.attenuation_db() is None
+    canceller.process(np.zeros(512, dtype=np.float32))
+    assert canceller.attenuation_db() is None  # no reverse activity -> no samples
+
+
+def test_reset_stats_clears_the_window() -> None:
+    canceller = EchoCanceller(delay_ms=50)
+    farend = _farend(1.0)
+    for start in range(0, len(farend) - 512, 512):
+        canceller.feed_reverse(farend[start : start + 512], _SR)
+        canceller.process(farend[start : start + 512])
+    assert canceller.attenuation_db() is not None
+    canceller.reset_stats()
+    assert canceller.attenuation_db() is None
+
+
+def test_set_delay_updates_hint() -> None:
+    canceller = EchoCanceller(delay_ms=100)
+    assert canceller.delay_ms == 100
+    canceller.set_delay(240)
+    assert canceller.delay_ms == 240
+    # Still processes fine with the new hint.
+    canceller.feed_reverse(np.zeros(512, dtype=np.float32), _SR)
+    assert len(canceller.process(np.zeros(512, dtype=np.float32))) == 512
