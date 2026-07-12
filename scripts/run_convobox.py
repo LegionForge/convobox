@@ -347,7 +347,7 @@ async def run(args: argparse.Namespace) -> None:
 
     # Imported lazily so --text mode works on hosts without PortAudio.
     from convobox.audio.capture import MicrophoneStream
-    from convobox.stt.transcriber import LocalTranscriber
+    from convobox.stt.factory import create_stt_engine
     from convobox.vad.segmenter import UtteranceSegmenter
 
     # Guarded BEFORE the heavyweight setup: the second instance should
@@ -368,7 +368,7 @@ async def run(args: argparse.Namespace) -> None:
         raise SystemExit(2)
     log.info("single-instance lock acquired (pid=%d)", os.getpid())
 
-    transcriber = LocalTranscriber(config.stt)
+    transcriber = create_stt_engine(config.stt)
     segmenter = UtteranceSegmenter(config.vad)
     device = _resolve_device(args.device, config.audio.input_device)
 

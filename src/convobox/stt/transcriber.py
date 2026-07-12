@@ -1,33 +1,20 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 
 import numpy as np
 from faster_whisper import WhisperModel
 
 from convobox.config import STTConfig
+from convobox.stt.base import SAMPLE_RATE, STTEngine, TranscriptResult
 
-SAMPLE_RATE = 16000
-
-
-@dataclass(frozen=True)
-class TranscriptResult:
-    text: str
-    language: str
-    language_probability: float
-    latency_ms: float
-    duration_s: float
-    # Mean per-segment avg_logprob from the decoder. Unlike
-    # language_probability (hardcoded to 1.0 whenever the language is
-    # pinned), this reflects how confident the decoder was in the words
-    # themselves, so it stays meaningful in pinned-language mode.
-    # exp(avg_logprob) maps it to a (0, 1] confidence-like score.
-    avg_logprob: float
-    segments: list[str] = field(default_factory=list)
+# Re-exported for backward compatibility: TranscriptResult and SAMPLE_RATE
+# now live in convobox.stt.base (shared with the STTEngine interface), but
+# code importing them from here keeps working.
+__all__ = ["SAMPLE_RATE", "LocalTranscriber", "TranscriptResult"]
 
 
-class LocalTranscriber:
+class LocalTranscriber(STTEngine):
     def __init__(self, config: STTConfig) -> None:
         self._config = config
         self._model = WhisperModel(

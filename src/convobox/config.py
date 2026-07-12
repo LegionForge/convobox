@@ -38,6 +38,10 @@ class VADConfig(BaseModel):
 
 
 class STTConfig(BaseModel):
+    # Which STT engine to build (see convobox.stt.factory). Only
+    # faster-whisper is implemented today; the field exists so STT is
+    # selectable/pluggable symmetrically with tts.engine.
+    engine: str = "faster-whisper"
     model: str = "base"
     device: str = "cpu"
     compute_type: str = "int8"
