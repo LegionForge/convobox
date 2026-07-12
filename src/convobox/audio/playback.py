@@ -17,6 +17,45 @@ if TYPE_CHECKING:
 _QUEUE_POLL_S = 0.1
 
 
+def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Linear-interpolation resample of a mono float32 block.
+
+    Playback-grade, not audiophile: TTS speech at modest ratios
+    (22050->44100/48000) tolerates linear interp fine, and it keeps
+    playback dependency-free (no scipy). Returns the input untouched when
+    the rates already match.
+    """
+    if src_rate == dst_rate or len(audio) == 0:
+        return audio
+    n_dst = int(round(len(audio) * dst_rate / src_rate))
+    if n_dst <= 0:
+        return np.zeros(0, dtype=np.float32)
+    src_x = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+    dst_x = np.linspace(0.0, 1.0, num=n_dst, endpoint=False)
+    return np.interp(dst_x, src_x, audio).astype(np.float32)
+
+
+def _device_output_rate(sd: object, device: str | int | None, source_rate: int) -> int:
+    """Pick a sample rate the device will actually accept.
+
+    Devices dictate the rate; you conform the audio to them. WASAPI
+    *rejects* a foreign rate outright (PaErrorCode -9997) and DirectSound
+    "accepts" then mis-resamples it to silence -- both observed live on a
+    Realtek endpoint fed Piper's 22050 Hz. Opening at the device's own
+    default rate (and resampling our audio to match) is what makes
+    ConvoBox work across arbitrary device/host-API combinations, and it
+    unlocks WASAPI's low latency. Falls back to the source rate if the
+    device can't be queried (e.g. a fake sounddevice in tests) -- which
+    reproduces the pre-fix behavior for anything that was already fine.
+    """
+    try:
+        info = sd.query_devices(device, "output")  # type: ignore[attr-defined]
+        native = int(info["default_samplerate"])
+    except Exception:
+        return source_rate
+    return native if native > 0 else source_rate
+
+
 class AudioPlayer:
     """Plays float32 audio through sounddevice with interruptible playback.
 
@@ -56,10 +95,15 @@ class AudioPlayer:
 
     def _run(self, samples: np.ndarray, sample_rate: int) -> None:
         sd = import_sounddevice()
+        device_rate = _device_output_rate(sd, self.device, sample_rate)
+        # Resample the whole buffer once (clean -- no per-block boundary
+        # discontinuities) so the stream can open at a rate the device
+        # actually accepts.
+        samples = _resample(samples, sample_rate, device_rate)
         channels = 1 if samples.ndim == 1 else samples.shape[1]
         blocksize = 1024
         stream = sd.OutputStream(
-            samplerate=sample_rate,
+            samplerate=device_rate,
             device=self.device,
             channels=channels,
             dtype="float32",
@@ -74,7 +118,9 @@ class AudioPlayer:
                 block = samples[start : start + blocksize]
                 stream.write(block)
                 if self.on_block_played is not None:
-                    self.on_block_played(block, sample_rate)
+                    # Reference is what actually hits the speaker: the
+                    # resampled block at the device rate.
+                    self.on_block_played(block, device_rate)
         finally:
             stream.stop()
             stream.close()
@@ -107,6 +153,7 @@ class AudioPlayer:
 
     def _run_stream(self, feed: queue.Queue[np.ndarray | None], sample_rate: int) -> None:
         sd = import_sounddevice()
+        device_rate = _device_output_rate(sd, self.device, sample_rate)
         stream = None
         try:
             while not self._stop.is_set():
@@ -116,13 +163,17 @@ class AudioPlayer:
                     continue
                 if chunk is None:
                     break
+                # Resample per chunk (not per block): chunks are
+                # sentence-sized, so boundary discontinuities are rare and
+                # fall at natural pauses.
+                chunk = _resample(chunk, sample_rate, device_rate)
                 if stream is None:
                     # Opened lazily on the first real chunk: channel count
                     # isn't known until then, and an empty stream (stopped
                     # before any audio) should never touch the device.
                     channels = 1 if chunk.ndim == 1 else chunk.shape[1]
                     stream = sd.OutputStream(
-                        samplerate=sample_rate,
+                        samplerate=device_rate,
                         device=self.device,
                         channels=channels,
                         dtype="float32",
@@ -137,7 +188,9 @@ class AudioPlayer:
                     block = chunk[start : start + blocksize]
                     stream.write(block)
                     if self.on_block_played is not None:
-                        self.on_block_played(block, sample_rate)
+                        # Reference is what actually hits the speaker: the
+                        # resampled block at the device rate.
+                        self.on_block_played(block, device_rate)
         finally:
             if stream is not None:
                 stream.stop()
