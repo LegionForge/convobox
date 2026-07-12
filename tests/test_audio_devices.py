@@ -10,9 +10,15 @@ import yaml
 
 from scripts.audio_devices import (
     _default_index,
+    _hostapi_rank,
+    _input_choice_from_key,
+    _is_meta_device,
     _qualified_name,
+    _resample_audio,
+    _suggest_next,
     _ync_from_key,
     collect_devices,
+    dedupe_devices,
     format_devices,
     format_level,
     level_meter,
@@ -227,3 +233,124 @@ def test_ync_from_key_keep_choose_ignore() -> None:
     assert _ync_from_key("c") == "choose"   # test others anyway -> also the chooser
     assert _ync_from_key("x") is None       # unrecognized -> ignore, keep waiting
     assert _ync_from_key("ENTER") is None   # ENTER is not a y/n/c answer
+
+
+def test_input_choice_from_key_adds_replay_and_again() -> None:
+    assert _input_choice_from_key("y") == "keep"
+    assert _input_choice_from_key("n") == "choose"
+    assert _input_choice_from_key("c") == "choose"
+    assert _input_choice_from_key("r") == "replay"      # hear the recording again
+    assert _input_choice_from_key("a") == "again"       # record a fresh sample
+    assert _input_choice_from_key("z") is None          # unrecognized -> ignore
+
+
+# --- playback resampling (the mic-playback -9997 fix) ---
+
+
+def test_resample_audio_noop_when_rates_match() -> None:
+    a = np.arange(100, dtype=np.float32)
+    assert np.array_equal(_resample_audio(a, 16000, 16000), a)
+
+
+def test_resample_audio_empty_stays_empty() -> None:
+    assert len(_resample_audio(np.zeros(0, dtype=np.float32), 16000, 48000)) == 0
+
+
+def test_resample_audio_upsamples_16k_to_48k() -> None:
+    a = np.ones(1600, dtype=np.float32)   # 0.1s at 16kHz
+    out = _resample_audio(a, 16000, 48000)
+    assert len(out) == 4800               # 0.1s at 48kHz
+    assert out.dtype == np.float32
+
+
+# --- chooser suggestion (ENTER = try the suggested device) ---
+
+
+def test_suggest_next_prefers_untried_system_default() -> None:
+    devices = _outputs()  # indices 1,2,3,4
+    assert _suggest_next(devices, tried=set(), default_idx=3) == 3
+
+
+def test_suggest_next_skips_already_tried_default() -> None:
+    # the default was tested first and rejected -> suggest a different device
+    devices = _outputs()
+    assert _suggest_next(devices, tried={1}, default_idx=1) == 2
+
+
+def test_suggest_next_first_untried_when_no_default() -> None:
+    devices = _outputs()
+    assert _suggest_next(devices, tried={1, 2}, default_idx=None) == 3
+
+
+def test_suggest_next_falls_back_to_first_when_all_tried() -> None:
+    devices = _outputs()
+    assert _suggest_next(devices, tried={1, 2, 3, 4}, default_idx=1) == 1
+
+
+def test_suggest_next_none_for_empty_device_list() -> None:
+    assert _suggest_next([], tried=set(), default_idx=None) is None
+
+
+# --- deduping the raw Windows device table for the simplified chooser ---
+
+
+def _raw_inputs() -> list[dict[str, Any]]:
+    """The real Helios shape: one mic under 4 host APIs, a truncated MME name,
+    a meta device, and a WDM-KS-only device."""
+    def dev(index: int, name: str, hostapi: str) -> dict[str, Any]:
+        return {"index": index, "name": name, "hostapi": hostapi,
+                "channels": 2, "samplerate": 44100, "default": False}
+    return [
+        dev(0, "Microsoft Sound Mapper - Input", "MME"),                 # meta
+        dev(1, "Microphone (1080P Pro Stream)", "MME"),
+        dev(2, "Headset Microphone (Oculus Virt", "MME"),                # MME truncated
+        dev(10, "Microphone (1080P Pro Stream)", "Windows DirectSound"),
+        dev(11, "Headset Microphone (Oculus Virtual Audio Device)", "Windows DirectSound"),
+        dev(22, "Microphone (1080P Pro Stream)", "Windows WASAPI"),
+        dev(28, "Microphone Array (Realtek HD Audio Mic Array input)", "Windows WDM-KS"),  # WDM-KS only
+        dev(40, "Microphone (1080P Pro Stream)", "Windows WDM-KS"),
+    ]
+
+
+def test_hostapi_rank_orders_mme_first_wdmks_last() -> None:
+    assert _hostapi_rank("MME") < _hostapi_rank("Windows WASAPI")
+    assert _hostapi_rank("Windows WASAPI") < _hostapi_rank("Windows WDM-KS")
+    assert _hostapi_rank("Nonsense API") == _hostapi_rank("Windows WDM-KS") + 1
+
+
+def test_is_meta_device() -> None:
+    assert _is_meta_device("Microsoft Sound Mapper - Input") is True
+    assert _is_meta_device("Primary Sound Capture Driver") is True
+    assert _is_meta_device("Microphone (1080P Pro Stream)") is False
+
+
+def test_dedupe_collapses_one_mic_to_its_best_host_api() -> None:
+    result = dedupe_devices(_raw_inputs())
+    by_index = {d["index"]: d for d in result}
+    # the 1080P appeared under 4 host APIs -> exactly one entry, the MME one
+    assert 1 in by_index
+    assert all(i not in by_index for i in (10, 22, 40))
+    assert by_index[1]["hostapi"] == "MME"
+
+
+def test_dedupe_bridges_mme_name_truncation() -> None:
+    # the 31-char MME "Headset Microphone (Oculus Virt" is the same physical
+    # device as the fuller DirectSound name -> one entry, not two
+    result = dedupe_devices(_raw_inputs())
+    oculus = [d for d in result if "Oculus" in d["name"]]
+    assert len(oculus) == 1
+    assert oculus[0]["hostapi"] == "MME"
+
+
+def test_dedupe_drops_meta_and_wdmks_only_devices() -> None:
+    result = dedupe_devices(_raw_inputs())
+    names = " ".join(d["name"] for d in result)
+    assert "Sound Mapper" not in names           # meta device dropped
+    assert "Realtek HD Audio Mic Array" not in names  # WDM-KS-only dropped
+    # net: just the 1080P and the Oculus headset survive
+    assert sorted(d["index"] for d in result) == [1, 2]
+
+
+def test_dedupe_show_all_returns_raw_list() -> None:
+    raw = _raw_inputs()
+    assert dedupe_devices(raw, show_all=True) == raw

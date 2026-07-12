@@ -82,6 +82,69 @@ def collect_devices(sd: Any, kind: str) -> list[dict[str, Any]]:
     return devices
 
 
+# Host APIs, best-first for a "just make it work" setup. MME always opens and
+# resamples gracefully; WASAPI is low-latency and (with ConvoBox's resampling)
+# reliable; DirectSound is the fallback. WDM-KS is last and hidden from the
+# simplified chooser: PortAudio frequently can't open a WDM-KS device at all
+# (PaErrorCode -9996), so offering it just wastes the user's time.
+_HOSTAPI_PRIORITY = ("MME", "Windows WASAPI", "Windows DirectSound", "Windows WDM-KS")
+
+# Virtual/meta "devices" that aren't a real jack. Offering them leads to
+# confusion or silent failure, so the simplified chooser drops them.
+_META_DEVICE_HINTS = ("sound mapper", "primary sound capture driver", "primary sound driver")
+
+
+def _hostapi_rank(hostapi: str) -> int:
+    """Lower is better. Unknown host APIs sort last."""
+    return _HOSTAPI_PRIORITY.index(hostapi) if hostapi in _HOSTAPI_PRIORITY else len(_HOSTAPI_PRIORITY)
+
+
+def _is_meta_device(name: str) -> bool:
+    low = name.lower()
+    return any(hint in low for hint in _META_DEVICE_HINTS)
+
+
+def dedupe_devices(
+    devices: list[dict[str, Any]], show_all: bool = False
+) -> list[dict[str, Any]]:
+    """Collapse the raw Windows device table to one entry per physical device.
+
+    Windows exposes the same jack under several host APIs -- and MME truncates
+    names to 31 chars -- so a single mic can appear 3-4 times under different
+    names. For a regular user that's noise, and the WDM-KS copies usually
+    can't even be opened. This groups devices that are the same physical
+    device (names where one is a prefix of the other, to bridge MME's
+    truncation), keeps the best-host-API entry of each group, and drops
+    virtual meta devices and WDM-KS-only devices. ``show_all`` returns the
+    raw list untouched for advanced users. Pure; unit-tested.
+    """
+    if show_all:
+        return devices
+    real = [d for d in devices if not _is_meta_device(d["name"])]
+    # Longest names first so an MME-truncated name attaches to its fuller
+    # sibling rather than seeding its own group.
+    groups: list[list[dict[str, Any]]] = []
+    canon: list[str] = []
+    for d in sorted(real, key=lambda x: len(x["name"]), reverse=True):
+        name = d["name"].strip().lower()
+        for i, cname in enumerate(canon):
+            if cname.startswith(name) or name.startswith(cname):
+                groups[i].append(d)
+                break
+        else:
+            canon.append(name)
+            groups.append([d])
+    chosen: list[dict[str, Any]] = []
+    for group in groups:
+        best = min(group, key=lambda d: _hostapi_rank(d["hostapi"]))
+        # A device whose only host API is WDM-KS is a -9996 trap; a real
+        # device is almost always ALSO exposed via MME/DirectSound/WASAPI.
+        if best["hostapi"] == "Windows WDM-KS":
+            continue
+        chosen.append(best)
+    return sorted(chosen, key=lambda d: d["index"])
+
+
 def format_devices(devices: list[dict[str, Any]], kind_label: str) -> str:
     """Render a device list as an aligned table (pure)."""
     if not devices:
@@ -230,11 +293,7 @@ def test_input_device(
         audio = record_test(sd, index, seconds, rate)
     rms_db, peak_db = level_meter(audio)
     print(format_level(rms_db, peak_db))
-    print("playing it back ...")
-    try:
-        sd.play(audio, samplerate=rate, device=playback_device, blocking=True)
-    except Exception as exc:  # noqa: BLE001 -- diagnostic tool: report, don't crash
-        print(f"  (playback failed: {exc})")
+    _play_recording(sd, audio, rate, playback_device)
     return rms_db, peak_db
 
 
@@ -287,15 +346,57 @@ def _qualified_name(sd: Any, index: int) -> str:
     return f"{sd.query_devices(index)['name']}, {_hostapi_name(sd, index)}"
 
 
-def _prompt_index(prompt: str, devices: list[dict[str, Any]]) -> int | None:
-    """Read a device number/name from the user; None if they skip (blank/q)."""
+def _suggest_next(
+    devices: list[dict[str, Any]], tried: set[int], default_idx: int | None
+) -> int | None:
+    """Suggest the next device to try in the chooser (pure).
+
+    Prefer the system default if it hasn't been tried yet; otherwise the
+    first untried device; otherwise (everything tried) the first device --
+    so ENTER always does something sensible instead of nothing.
+    """
+    if (
+        default_idx is not None
+        and default_idx not in tried
+        and any(d["index"] == default_idx for d in devices)
+    ):
+        return default_idx
+    for d in devices:
+        if d["index"] not in tried:
+            return d["index"]
+    return devices[0]["index"] if devices else None
+
+
+# Sentinel returned by _prompt_device when the user asks to see every device.
+_SHOW_ALL = "all"
+
+
+def _prompt_device(
+    label: str, devices: list[dict[str, Any]], suggested: int | None, allow_all: bool = False
+) -> int | str | None:
+    """Read a device choice, offering `suggested` as the ENTER default.
+
+    ENTER accepts the suggested device (so a regular user never has to read
+    indices); a number/name picks a specific one; 'q'/'skip' returns None;
+    'a' (when ``allow_all``) returns ``_SHOW_ALL`` to reveal the full device
+    list. Reprompts on an unrecognized entry rather than skipping.
+    """
+    hint = f"ENTER = try [{suggested}], or a number/name" if suggested is not None else "a number/name"
+    extra = "  (a = show all devices)" if allow_all else ""
+    prompt = f"\n{label.capitalize()} -- {hint}  (q to skip){extra}:  "
     while True:
         try:
             raw = input(prompt).strip()
         except EOFError:
             return None
-        if raw.lower() in ("", "q", "skip"):
+        if raw.lower() in ("q", "skip"):
             return None
+        if allow_all and raw.lower() == "a":
+            return _SHOW_ALL
+        if raw == "":
+            if suggested is not None:
+                return suggested
+            continue  # nothing to suggest -> need an explicit pick
         index, error = resolve_spec(raw, devices)
         if index is not None:
             return index
@@ -411,24 +512,23 @@ def _confirm_output(sd: Any, index: int) -> str:
         sd.stop()
 
 
-def _confirm_input(sd: Any, index: int) -> str:
-    """Test one input device. Returns 'keep' or 'choose'.
+def _record_with_meter(
+    sd: Any, index: int, seconds: float = 5.0
+) -> tuple[Any, int, float] | None:
+    """Record from `index` while showing a live meter.
 
-    Waits for ENTER (or ESC to skip) so the user can get ready, then shows
-    a LIVE level meter updating in place while they speak, then y / n / c.
+    Returns (audio, rate, seen_peak_dbfs), or None if the device can't
+    record. Captures the samples (not just the level) so the caller can
+    play them back.
     """
-    info = sd.query_devices(index)
-    print(f"\nMicrophone to test:  {info['name']}")
-    print("Press ENTER when you're ready to speak, or ESC to skip this device: ",
-          end="", flush=True)
-    if _read_key() == "ESC":
-        print("skip")
-        return "choose"
-    print()
+    import numpy as np
 
+    info = sd.query_devices(index)
+    chunks: list[Any] = []
     latest = {"rms": -120.0, "peak": -120.0}
 
     def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+        chunks.append(indata[:, 0].copy())
         latest["rms"], latest["peak"] = level_meter(indata[:, 0])
 
     rate = _CAPTURE_RATE
@@ -440,39 +540,194 @@ def _confirm_input(sd: Any, index: int) -> str:
             stream = sd.InputStream(samplerate=rate, channels=1, device=index, callback=callback)
         except Exception as exc:  # noqa: BLE001
             print(f"  (couldn't record on this device: {exc})")
-            return "choose"
-    print("Speak normally -- watch the bar move (about 6 seconds):")
+            return None
+    print(f"Speak normally -- recording ~{seconds:.0f}s (watch the bar):")
     seen_peak = -120.0
     with stream:
-        for _ in range(60):
+        for _ in range(int(seconds / 0.1)):
             sys.stdout.write("\r  " + format_level(latest["rms"], latest["peak"]))
             sys.stdout.flush()
             seen_peak = max(seen_peak, latest["peak"])
             time.sleep(0.1)
     print()
+    audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+    return audio, rate, seen_peak
+
+
+def _resample_audio(audio: Any, src_rate: int, dst_rate: int) -> Any:
+    """Linear-interpolation resample of a mono float32 buffer (pure).
+
+    Playback-grade, like convobox.audio.playback's resampler -- and needed
+    for the same reason: a device may reject a foreign rate (WASAPI does),
+    so a 16kHz recording must be converted to the OUTPUT device's rate
+    before it can be played.
+    """
+    import numpy as np
+
+    audio = np.asarray(audio, dtype=np.float32)
+    if src_rate == dst_rate or audio.size == 0:
+        return audio
+    n_dst = int(round(len(audio) * dst_rate / src_rate))
+    if n_dst <= 0:
+        return np.zeros(0, dtype=np.float32)
+    src_x = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+    dst_x = np.linspace(0.0, 1.0, num=n_dst, endpoint=False)
+    return np.interp(dst_x, src_x, audio).astype(np.float32)
+
+
+def _output_rate(sd: Any, playback_device: int | None) -> int:
+    """The native rate of the output device a recording will play through."""
+    device = playback_device if playback_device is not None else sd.default.device[1]
+    try:
+        return int(sd.query_devices(device)["default_samplerate"])
+    except Exception:  # noqa: BLE001 -- fall back if the device can't be queried
+        return _CAPTURE_RATE
+
+
+def _play_recording(sd: Any, audio: Any, rate: int, playback_device: int | None) -> None:
+    """Play a recorded buffer back so the user can HEAR the mic's quality.
+
+    Resamples from the capture rate to the OUTPUT device's native rate
+    first -- otherwise a WASAPI/exclusive output rejects the 16kHz buffer
+    (PaErrorCode -9997), the same rate mismatch ConvoBox's own playback
+    resamples around.
+    """
+    if getattr(audio, "size", 0) == 0:
+        print("  (nothing recorded to play back)")
+        return
+    out_rate = _output_rate(sd, playback_device)
+    playable = _resample_audio(audio, rate, out_rate)
+    print("Playing back what your mic captured...")
+    try:
+        sd.play(playable, samplerate=out_rate, device=playback_device, blocking=True)
+    except Exception as exc:  # noqa: BLE001 -- setup tool: report, don't crash
+        print(f"  (couldn't play back: {exc})")
+
+
+def _input_choice_from_key(key: str) -> str | None:
+    """Map a mic-test keypress to an outcome (pure).
+
+    Adds replay/again to y/n/c so the user can HEAR each mic -- and re-hear
+    it, or re-record -- before choosing. With several mics, playback is the
+    only way to tell them apart.
+    """
+    k = key.lower()
+    if k == "y":
+        return "keep"
+    if k in ("n", "c"):
+        return "choose"
+    if k == "r":
+        return "replay"
+    if k == "a":
+        return "again"
+    return None
+
+
+def _read_input_choice() -> str:
+    """Print the mic menu and block until a valid choice; echoes the key."""
+    print(
+        "  [y] keep this mic   [n] pick another   [c] test others   "
+        "[r] replay   [a] record again\n> ",
+        end="",
+        flush=True,
+    )
+    while True:
+        key = _read_key()
+        outcome = _input_choice_from_key(key)
+        if outcome is not None:
+            print(key.lower())
+            return outcome
+
+
+def _confirm_input(sd: Any, index: int, playback_device: int | None = None) -> str:
+    """Test one input device. Returns 'keep' or 'choose'.
+
+    Waits for ENTER (or ESC to skip), records a short sample with a live
+    meter, then PLAYS IT BACK so the user hears the mic's actual sound.
+    The menu lets them replay [r] or re-record [a] and compare devices
+    before keeping [y] / picking another [n] / testing others [c].
+    Playback uses the speaker chosen earlier in setup.
+    """
+    info = sd.query_devices(index)
+    print(f"\nMicrophone to test:  {info['name']}")
+    print(
+        "Press ENTER to record a short sample, or ESC to skip this device: ",
+        end="",
+        flush=True,
+    )
+    if _read_key() == "ESC":
+        print("skip")
+        return "choose"
+    print()
+
+    recorded = _record_with_meter(sd, index)
+    if recorded is None:
+        return "choose"
+    audio, rate, seen_peak = recorded
     if seen_peak <= -55.0:
         print("  (no sound detected -- if you were speaking, try a different device)")
-    return _read_ync("Did the bar move when you spoke?")
+    _play_recording(sd, audio, rate, playback_device)
+    while True:
+        choice = _read_input_choice()
+        if choice == "replay":
+            _play_recording(sd, audio, rate, playback_device)
+            continue
+        if choice == "again":
+            recorded = _record_with_meter(sd, index)
+            if recorded is not None:
+                audio, rate, seen_peak = recorded
+                _play_recording(sd, audio, rate, playback_device)
+            continue
+        return choice  # 'keep' or 'choose'
 
 
-def _setup_direction(sd: Any, kind: str, label: str) -> int | None:
+def _setup_direction(
+    sd: Any, kind: str, label: str, playback_device: int | None = None
+) -> int | None:
     """Default-first: test the auto-detected device; reveal the chooser only
-    if it fails or the user asks for others (progressive disclosure)."""
-    confirm = _confirm_output if kind == "output" else _confirm_input
+    if it fails or the user asks for others (progressive disclosure).
+
+    `playback_device` (the speaker chosen earlier) is where mic recordings
+    play back during input tests.
+    """
+
+    def _test(idx: int) -> str:
+        if kind == "output":
+            return _confirm_output(sd, idx)
+        return _confirm_input(sd, idx, playback_device)
+
     default_idx = _default_index(sd, kind)
-    if default_idx is not None and confirm(sd, default_idx) == "keep":
+    if default_idx is not None and _test(default_idx) == "keep":
         return default_idx
 
-    # The full device list appears ONLY now -- a regular user who confirmed
-    # the default never sees it.
-    print(f"\nHere are all your {label} options:")
-    devices = collect_devices(sd, kind)
-    print(format_devices(devices, kind.upper()))
+    # The device list appears ONLY now -- a regular user who confirmed the
+    # default never sees it. It's reprinted every loop so it never scrolls
+    # out of reach; it's DEDUPED to one clean entry per physical device
+    # (Windows shows each jack 3-4 times under different host APIs); and we
+    # suggest the next device to try (ENTER) so the user isn't forced to read
+    # indices. Pressing 'a' reveals the full raw list for advanced users.
+    all_devices = collect_devices(sd, kind)
+    if not all_devices:
+        print(f"\n(no {label} devices found)")
+        return None
+    show_all = False
+    tried: set[int] = {default_idx} if default_idx is not None else set()
     while True:
-        idx = _prompt_index(f"\n{label.capitalize()} -- number to test (blank to skip):  ", devices)
-        if idx is None:
+        devices = dedupe_devices(all_devices, show_all=show_all)
+        header = "all devices" if show_all else "the common devices"
+        print(f"\nHere are your {label} options ({header}):")
+        print(format_devices(devices, kind.upper()))
+        choice = _prompt_device(
+            label, devices, _suggest_next(devices, tried, default_idx), allow_all=not show_all
+        )
+        if choice == _SHOW_ALL:
+            show_all = True
+            continue
+        if choice is None:
             return None
-        if confirm(sd, idx) == "keep":
+        idx = int(choice)
+        tried.add(idx)
+        if _test(idx) == "keep":
             return idx
         print("ok, let's try another.")
 
@@ -492,7 +747,9 @@ def guided_setup(sd: Any, config_path: Path | None = None) -> None:
     print("Let's make sure your speaker and microphone work -- takes about a minute.")
 
     chosen_out = _setup_direction(sd, "output", "speaker")
-    chosen_in = _setup_direction(sd, "input", "microphone")
+    # Mic recordings play back through the speaker just confirmed, so the
+    # user hears each mic through the same output while comparing.
+    chosen_in = _setup_direction(sd, "input", "microphone", playback_device=chosen_out)
 
     if chosen_out is None and chosen_in is None:
         print("\nnothing selected -- convobox.yaml unchanged.")
@@ -506,10 +763,26 @@ def guided_setup(sd: Any, config_path: Path | None = None) -> None:
         name = _qualified_name(sd, chosen_in)
         write_device_to_config("input", name, config_path)
         saved.append(f"input_device: {name!r}")
-    print(f"\nAll set -- saved to {config_path}:")
-    for line in saved:
-        print(f"  {line}")
-    print("\nRun  python scripts/run_convobox.py  to start talking.")
+    if saved:
+        print(f"\nSaved to {config_path}:")
+        for line in saved:
+            print(f"  {line}")
+
+    # ConvoBox needs BOTH directions; warn loudly if one was skipped rather
+    # than letting the user discover it at first run.
+    if chosen_in is None:
+        print(
+            "\n  WARNING: no microphone selected. ConvoBox can't hear you without one --"
+            "\n  re-run  python scripts/audio_devices.py --setup  and choose a mic"
+            "\n  (a 'very quiet' mic still works; press [y] to keep it)."
+        )
+    if chosen_out is None:
+        print(
+            "\n  WARNING: no speaker selected. ConvoBox can't talk back without one --"
+            "\n  re-run  python scripts/audio_devices.py --setup  and choose a speaker."
+        )
+    if chosen_in is not None and chosen_out is not None:
+        print("\nAll set. Run  python scripts/run_convobox.py  to start talking.")
 
 
 def main() -> None:
