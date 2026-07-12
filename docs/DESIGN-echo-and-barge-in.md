@@ -146,3 +146,12 @@ dropped with a warning instead of forwarded. Forwarded text carries the
 truncation marker. Enabling a non-none mode without AEC logs a loud
 self-interruption warning (headphones users may proceed deliberately).
 Default flips to stop_audio only after room UAT signs off.
+
+## Research grounding
+
+The turn-taking, barge-in, backchannel, and interrupt design here is
+grounded in published conversation-analysis and spoken-dialogue research —
+see [CONVERSATION-DESIGN-REFERENCES.md](CONVERSATION-DESIGN-REFERENCES.md)
+for the sources and the concrete finding adopted from each (backchannels as
+continuers, the ~200 ms turn-transition target, TRP-aware yielding, and the
+Voice Activity Projection upgrade path beyond silence-timer VAD).
