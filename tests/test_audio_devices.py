@@ -11,6 +11,7 @@ import yaml
 from scripts.audio_devices import (
     _default_index,
     _qualified_name,
+    _ync_from_key,
     collect_devices,
     format_devices,
     format_level,
@@ -214,3 +215,15 @@ def test_default_index_none_when_unset() -> None:
     sd.default.device = (-1, -1)  # no system default
     assert _default_index(sd, "output") is None
     assert _default_index(sd, "input") is None
+
+
+# --- three-way y/n/c device choice ---
+
+
+def test_ync_from_key_keep_choose_ignore() -> None:
+    assert _ync_from_key("y") == "keep"
+    assert _ync_from_key("Y") == "keep"
+    assert _ync_from_key("n") == "choose"   # don't hear it -> pick another
+    assert _ync_from_key("c") == "choose"   # test others anyway -> also the chooser
+    assert _ync_from_key("x") is None       # unrecognized -> ignore, keep waiting
+    assert _ync_from_key("ENTER") is None   # ENTER is not a y/n/c answer

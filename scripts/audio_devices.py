@@ -308,40 +308,124 @@ def _default_index(sd: Any, kind: str) -> int | None:
     return idx if isinstance(idx, int) and idx >= 0 else None
 
 
-def _confirm_output(sd: Any, index: int) -> bool:
-    """Play a CONTINUOUS looping beep on `index`; ask whether the user hears it.
+def _read_key() -> str:
+    """Block for a single keypress: 'ENTER', 'ESC', or the lowercased char.
 
-    The tone loops for the whole prompt (not a one-shot clip) so the user
-    has as long as they need to notice it.
+    Single-key (no Enter needed) so the prompts feel immediate. Falls back
+    to a line read if stdin isn't a real terminal (piped input) -- the
+    first char of the line is used.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):  # arrow/function-key prefix: consume + ignore
+            msvcrt.getwch()
+            return ""
+        if ch in ("\r", "\n"):
+            return "ENTER"
+        if ch == "\x1b":
+            return "ESC"
+        return ch.lower()
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except (termios.error, ValueError):  # not a tty (e.g. piped stdin)
+        line = sys.stdin.readline()
+        return "ENTER" if line in ("\n", "") else line.strip()[:1].lower()
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    if ch in ("\r", "\n"):
+        return "ENTER"
+    if ch == "\x1b":
+        return "ESC"
+    return ch.lower()
+
+
+def _ync_from_key(key: str) -> str | None:
+    """Map a y/n/c keypress to an outcome (pure): keep | choose | None (ignore).
+
+    - y: I hear/see it -- keep this device.
+    - n: I don't -- go find another.
+    - c: may or may not work, but I want to change / test other devices.
+    n and c both open the device list; the split just lets the user say
+    which situation they're in without pressing "no" when a device is fine.
+    """
+    k = key.lower()
+    if k == "y":
+        return "keep"
+    if k in ("n", "c"):
+        return "choose"
+    return None
+
+
+def _read_ync(prompt: str) -> str:
+    """Print the y/n/c menu and block until a valid choice; echoes the key."""
+    print(prompt)
+    print("  [y] yes, use this device   [n] no, pick another   "
+          "[c] change / test others\n> ", end="", flush=True)
+    while True:
+        key = _read_key()
+        outcome = _ync_from_key(key)
+        if outcome is not None:
+            print(key.lower())
+            return outcome
+
+
+def _confirm_output(sd: Any, index: int) -> str:
+    """Test one output device. Returns 'keep' or 'choose'.
+
+    Nothing plays until the user opts in -- a sudden beep is startling --
+    so we name the device and wait for ENTER to play (or ESC to skip). The
+    soft beeps then loop while the user answers y / n / c.
     """
     import numpy as np
 
     info = sd.query_devices(index)
+    print(f"\nSpeaker to test:  {info['name']}")
+    print("You'll hear a few soft beeps on this device.")
+    print("Press ENTER to play them, or ESC to skip this device: ", end="", flush=True)
+    if _read_key() == "ESC":
+        print("skip")
+        return "choose"
+    print()
+
     rate = int(info["default_samplerate"])
-    tone = 0.25 * np.sin(
-        2 * np.pi * 660 * np.linspace(0.0, 0.35, int(rate * 0.35), endpoint=False)
-    )
-    pattern = np.concatenate([tone.astype(np.float32), np.zeros(int(rate * 0.3), dtype=np.float32)])
-    print(f"\nPlaying a test sound on:  {info['name']}")
+    tone = 0.2 * np.sin(2 * np.pi * 660 * np.linspace(0.0, 0.3, int(rate * 0.3), endpoint=False))
+    pattern = np.concatenate([tone.astype(np.float32), np.zeros(int(rate * 0.5), dtype=np.float32)])
     try:
         sd.play(pattern, samplerate=rate, device=index, loop=True)
     except Exception as exc:  # noqa: BLE001 -- setup tool: report, don't crash
         print(f"  (couldn't play on this device: {exc})")
-        return False
+        return "choose"
     try:
-        answer = input("Do you hear a repeating beep?  [Y]es  /  [n]o, choose another:  ")
+        return _read_ync("Playing test beeps. Do you hear them?")
     finally:
         sd.stop()
-    return answer.strip().lower() in ("", "y", "yes")
 
 
-def _confirm_input(sd: Any, index: int) -> bool:
-    """Show a CONTINUOUS live level meter for a few seconds, then confirm.
+def _confirm_input(sd: Any, index: int) -> str:
+    """Test one input device. Returns 'keep' or 'choose'.
 
-    The bar updates in place while the user talks, so they can see their
-    mic register in real time before deciding.
+    Waits for ENTER (or ESC to skip) so the user can get ready, then shows
+    a LIVE level meter updating in place while they speak, then y / n / c.
     """
     info = sd.query_devices(index)
+    print(f"\nMicrophone to test:  {info['name']}")
+    print("Press ENTER when you're ready to speak, or ESC to skip this device: ",
+          end="", flush=True)
+    if _read_key() == "ESC":
+        print("skip")
+        return "choose"
+    print()
+
     latest = {"rms": -120.0, "peak": -120.0}
 
     def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
@@ -355,9 +439,8 @@ def _confirm_input(sd: Any, index: int) -> bool:
         try:
             stream = sd.InputStream(samplerate=rate, channels=1, device=index, callback=callback)
         except Exception as exc:  # noqa: BLE001
-            print(f"\n  (couldn't record on this device: {exc})")
-            return False
-    print(f"\nListening on:  {info['name']}")
+            print(f"  (couldn't record on this device: {exc})")
+            return "choose"
     print("Speak normally -- watch the bar move (about 6 seconds):")
     seen_peak = -120.0
     with stream:
@@ -369,28 +452,27 @@ def _confirm_input(sd: Any, index: int) -> bool:
     print()
     if seen_peak <= -55.0:
         print("  (no sound detected -- if you were speaking, try a different device)")
-    answer = input("Did the bar move when you spoke?  [Y]es  /  [n]o, choose another:  ")
-    return answer.strip().lower() in ("", "y", "yes")
+    return _read_ync("Did the bar move when you spoke?")
 
 
 def _setup_direction(sd: Any, kind: str, label: str) -> int | None:
     """Default-first: test the auto-detected device; reveal the chooser only
-    if it fails or the user declines it (progressive disclosure)."""
+    if it fails or the user asks for others (progressive disclosure)."""
     confirm = _confirm_output if kind == "output" else _confirm_input
     default_idx = _default_index(sd, kind)
-    if default_idx is not None and confirm(sd, default_idx):
+    if default_idx is not None and confirm(sd, default_idx) == "keep":
         return default_idx
 
     # The full device list appears ONLY now -- a regular user who confirmed
     # the default never sees it.
-    print(f"\nLet's choose a different {label}.")
+    print(f"\nHere are all your {label} options:")
     devices = collect_devices(sd, kind)
     print(format_devices(devices, kind.upper()))
     while True:
         idx = _prompt_index(f"\n{label.capitalize()} -- number to test (blank to skip):  ", devices)
         if idx is None:
             return None
-        if confirm(sd, idx):
+        if confirm(sd, idx) == "keep":
             return idx
         print("ok, let's try another.")
 
