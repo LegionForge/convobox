@@ -2,6 +2,9 @@
 
 A local, backend-agnostic voice frontend for CLI coding agents.
 
+**New here? → [docs/QUICKSTART.md](docs/QUICKSTART.md)** — from install to
+talking to a coding agent in five steps.
+
 ## Purpose
 
 ConvoBox sits between you and whichever coding agent CLI you're driving —
