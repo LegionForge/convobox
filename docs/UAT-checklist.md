@@ -1,0 +1,170 @@
+# UAT checklist
+
+Per-subsystem live-testing matrix for the full voice loop. Each item
+names the module that implements the behavior so a pass/fail pins to a
+place. Derived from agent-assisted code review during the 2026-07-11
+Windows UAT, corrected and extended after log analysis (see
+DESIGN-echo-and-barge-in.md for the design rationale behind items
+marked as deliberate behavior).
+
+Additions from the 2026-07-11 live log:
+
+- **[E6] Whisper hallucination loops on far-field echo.** Observed live
+  (one transcript repeated a clause five times). Currently caught by the
+  overlap window; any future gate reordering must keep these out.
+- **[N5] Numbered lists keep their numbers** -- deliberate: spoken
+  enumeration is natural, unlike asterisks.
+- Echo layers' live scorecard: overlap window caught ~30 echo utterances
+  with zero false drops and zero echo reaching the backend; the text
+  filter never had to fire (it remains the backstop).
+
+---
+## 1. Echo / half-duplex overlap handling
+
+Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
+`utterance_overlapped_playback()`, and the drop branch in the main loop.
+
+- **[E1] Same-room echo arriving AFTER playback ends.** Speak a command right
+  as the assistant finishes. The overlap window (`ECHO_GRACE_S = 0.3` plus the
+  math in `utterance_overlapped_playback`) must catch echo that lands just
+  after `playback_ended_at`. Confirm such a transcript is dropped with the log
+  `"dropped (overlapped response playback ...)"` rather than looped back.
+- **[E2] Real short confirmation is NOT dropped.** `SpokenEchoFilter.MIN_TOKENS
+  = 3`: a genuine `"yes run it"` (3 tokens) that happens to appear in the
+  spoken response could be falsely flagged as echo. Craft a response whose
+  wording contains a likely short reply, then say that reply, and confirm it is
+  forwarded (not swallowed). This is the explicit false-positive risk in the
+  filter's docstring.
+- **[E3] Token-overlap threshold.** `OVERLAP_THRESHOLD = 0.7`: partial overlap
+  (<70% of the transcript's words) should pass; >=70% should drop. Test with a
+  transcript that shares most-but-not-all words with a recent response.
+- **[E4] Echo filter age bound.** `MAX_AGE_S = 30.0`: after 30s the spoken
+  history is ignored, so old responses must no longer cause drops. Speak a
+  phrase identical to something said >30s ago and confirm it is NOT dropped.
+- **[E5] Mute mode disables echo-drop by design.** `--mute` uses `MutePlayer`
+  (is_playing always False, `playback_ended_at` stays 0). Echo/overlap
+  suppression is therefore OFF in `--mute`. UAT echo behavior MUST be run with
+  speakers on; `--mute` runs validate the non-audio path only.
+
+## 2. VAD segmentation
+
+Implements in `src/convobox/vad/segmenter.py`. Config: `threshold=0.5`,
+`min_silence_ms=500`, `min_speech_ms=250`, `max_utterance_s=None` (uncapped).
+
+- **[V1] Short utterance floor.** Speech shorter than `min_speech_ms=250` is
+  discarded as noise. Test a very short command (e.g. "go", "no") and confirm
+  it may be dropped — decide if that's acceptable for UAT or needs lowering.
+- **[V2] Inter-utterance pause.** `min_silence_ms=500`: two phrases separated
+  by >500ms silence must become two utterances; <500ms must merge. Time the
+  pauses.
+- **[V3] Uncapped utterance (current config default).** `max_utterance_s=None`
+  means a long uninterrupted monologue yields NO transcript until the speaker
+  pauses (observed live as a 30.5s single utterance). UAT a 30s+ monologue and
+  confirm the transcript only arrives at the end. If real use needs mid-speech
+  transcripts, set `max_utterance_s` (e.g. 20) and re-test that it force-emits.
+- **[V4] `in_speech` signal** (exposed for UIs / future barge-in) flips True on
+  first speech window and back to False at utterance end. Verify with a harness
+  if a listening indicator depends on it.
+
+## 3. Safeword / hard stop
+
+Implements in `src/convobox/safeword/detector.py` + `orchestrator.py:50-57`.
+Config phrases: `stop stop stop`, `break break break`.
+
+- **[S1] Hard stop mid-playback.** While the assistant is speaking, say the
+  safeword. Confirm playback stops IMMEDIATELY (`player.stop()` +
+  `tts.stop()` + `send_hard_stop()`), and the app stays listening (safeword does
+  NOT exit, per the run_convobox.py docstring).
+- **[S2] Safeword cannot be swallowed.** The check runs on the RAW transcript
+  before the language-probability gate and before the echo/overlap drop. Test
+  a hard stop phrased with low-confidence/garbled audio (e.g. accented, quiet)
+  and confirm it still fires.
+- **[S3] Substring / boundary matching.** Detector pads with spaces
+  (`" stop stop stop "` in `" ... stop stop stop"`), so the phrase at the
+  start/end of an utterance still matches. Test "... please stop stop stop" and
+  "stop stop stop now".
+- **[S4] Empty-phrase guard at startup.** A configured phrase that normalizes to
+  nothing (pure punctuation) must raise `ValueError` at construction. Negative
+  test: set `hard_stop_phrases: ["!!!"]` and confirm a loud startup failure.
+- **[S5] Hard stop while idle.** Saying the safeword when the backend is not
+  busy should be a safe no-op (OpenCode's interrupt is documented idle-no-op).
+  Confirm no error and continued listening.
+
+## 4. Busy / interject routing
+
+Implements in `orchestrator.py:handle_transcript` + adapters.
+
+- **[B1] Talk while busy → interject, not new turn.** With the backend mid-
+  response, speak a command. Confirm `send_interject` is used (routed via
+  `is_busy()`) rather than `send_text`. Verify on the chosen backend --
+  CORRECTED (the endpoints originally listed here were the hard-stop
+  calls, not interjects): opencode interject = `POST .../prompt` with
+  `delivery: "steer"`; claude-code interject = a queued user message (no
+  true steering on that backend); codex interject = `turn/steer`.
+- **[B2] Talk while idle → new turn.** Confirm `send_text` path.
+- **[B3] Interject blocked by overlap drop.** Because ordinary speech during
+  playback is dropped (half-duplex), an interject only fires AFTER playback
+  ends. Confirm a command spoken during playback is NOT forwarded as an
+  interject, and that the same command spoken after playback IS.
+- **[B4] `wait_listening()` ordering.** `handle_transcript` awaits
+  `adapter.wait_listening()` before routing (except on hard stop). Confirm a
+  command issued immediately after first send is not lost to unsubscribed SSE
+  events.
+
+## 5. Speech normalization (separate file: speechnormalization.md)
+
+- **[N1] Asterisks not spoken** — `**bold**`, `*italic*`, `* bullet` stripped.
+- **[N2] Slashes preserved** — `path/to/file` spoken as-is (per UAT decision).
+- **[N3] Code blocks not spoken** — fenced ``` and inline `code` already
+  stripped; confirm a long code block produces no speech.
+- **[N4] `snake_case` / identifiers preserved** — no spurious stripping.
+
+## 6. TTS config & playback
+
+Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
+
+- **[T1] Rate/volume apply only when != default.** `SynthesisConfig` is built
+  only if `rate != 1.0` or `volume != 1.0`. Current config is 1.0/1.0, so
+  `syn_config=None` → voice default. Set `rate: 1.5` and confirm faster output;
+  set `volume: 0.5` and confirm quieter.
+- **[T2] Streamed first-audio latency.** `play_stream` starts audio on the
+  first chunk. Measure time-to-first-audio for a long response; confirm it's
+  ~one sentence, not the whole response.
+- **[T3] Stop mid-stream.** Hard stop / barge-in calls `player.stop()` which
+  joins the playback thread. Confirm no audio after stop and no thread leak
+  (check `is_playing()` returns False promptly).
+- **[T4] Replacing playback.** Calling play/play_stream while something is
+  playing must replace it cleanly (AudioPlayer.play calls stop() first). Test
+  rapid successive responses.
+
+## 7. Scriptable / non-mic modes
+
+- **[M1] `--text` single-shot.** `python scripts/run_convobox.py --text "run
+  the tests"` exercises Orchestrator + backend + TTS with no mic. Confirm it
+  responds, drains until idle, waits for playback, and exits.
+- **[M2] `--text --mute`** confirms the no-speaker path.
+- **[M3] Device resolution.** `--device N` numeric → int device; name → string.
+  Test an invalid device fails gracefully (not a hang).
+
+## 8. Cross-cutting
+
+- **[X1] Ctrl+C cleanup.** Confirm `stop_event_loop()` cancels `_speak_task`
+  and `_events_task` and the process exits cleanly (no orphaned threads /
+  backend sessions).
+- **[X2] Config defaults vs file.** With no `convobox.yaml`, `load_config`
+  returns `AppConfig()` defaults; with the file, all sections load. Confirm
+  `language` unset → detection active (language_probability gate meaningful);
+  pinned language → probability 1.0 (gate inert).
+
+---
+
+### Suggested UAT matrix ordering
+1. Happy path: idle → speak → response spoken (N1-N4, T2).
+2. Hard stop safety: S1-S5.
+3. Echo / half-duplex: E1-E5 (speakers ON).
+4. Barge-in gap: B3 (document current "drop, don't cut" behavior; see
+   bargein_suggestions.md for the fix).
+5. Edge VAD: V1-V3.
+6. Scriptable/cleanup: M1-M3, X1-X2.
+
+---

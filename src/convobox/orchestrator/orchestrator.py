@@ -13,13 +13,39 @@ logger = logging.getLogger(__name__)
 
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
+# Markdown link: speak the text, never the URL.
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# Emphasis/bullet asterisks -- heard live in UAT as Piper saying "asterisk
+# asterisk" through every bold phrase in the backend's markdown.
+_MD_ASTERISK_RE = re.compile(r"\*+")
+# Underscore emphasis, guarded so snake_case identifiers keep their
+# underscores (only strip runs not attached to word/path characters).
+_MD_UNDERSCORE_RE = re.compile(r"(?<![\w/])_+|_+(?![\w/])")
+# Heading markers and blockquote markers at line starts; list bullets
+# ("- item", "+ item" -- "* item" is already covered by the asterisk rule).
+_MD_LINE_NOISE_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-+][ \t]+)", re.MULTILINE)
+_COLLAPSE_SPACE_RE = re.compile(r"[ \t]{2,}")
 _COLLAPSE_BLANK_RE = re.compile(r"\n{3,}")
 
 
 def strip_code_for_speech(text: str) -> str:
-    without_fenced = _FENCED_CODE_RE.sub(" ", text)
-    without_inline = _INLINE_CODE_RE.sub(" ", without_fenced)
-    return _COLLAPSE_BLANK_RE.sub("\n\n", without_inline).strip()
+    """Turn backend markdown into something worth saying out loud.
+
+    Code is dropped entirely (nobody wants a for-loop recited); markdown
+    DECORATION is stripped while the decorated words are kept. Slashes are
+    deliberately untouched (paths read fine, per UAT). Literal math like
+    "3 * 4" loses its operator -- acceptable collateral: the backends emit
+    emphasis asterisks constantly and multiplication rarely, and a spoken
+    "asterisk" is wrong in both cases anyway.
+    """
+    text = _FENCED_CODE_RE.sub(" ", text)
+    text = _INLINE_CODE_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _MD_LINE_NOISE_RE.sub("", text)
+    text = _MD_ASTERISK_RE.sub("", text)
+    text = _MD_UNDERSCORE_RE.sub("", text)
+    text = _COLLAPSE_SPACE_RE.sub(" ", text)
+    return _COLLAPSE_BLANK_RE.sub("\n\n", text).strip()
 
 
 class Orchestrator:
