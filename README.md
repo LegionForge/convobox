@@ -79,15 +79,16 @@ flowchart TB
 
     subgraph ADAPTERS["Backend Adapters · one per CLI"]
         OC["OpenCodeAdapter · typed HTTP + SSE client"]:::backend
-        CC["Claude Code adapter · planned"]:::future
-        CX["Codex adapter · planned"]:::future
+        CC["ClaudeCodeAdapter · bidirectional stream-json CLI"]:::backend
+        CX["CodexAdapter · app-server JSON-RPC over stdio"]:::backend
     end
 
-    subgraph TOOLS["Test Utilities · same pipeline, no backend"]
+    subgraph TOOLS["Tools · same pipeline, no backend"]
         direction LR
         SPIKE["scripts/spike.py · logged transcripts"]:::tool
         TUI["scripts/voice_tui.py · live clarity dashboard"]:::tool
-        PICKER["scripts/voice_picker.py · browse/audition/pick a voice"]:::tool
+        PICKER["scripts/voice_picker_tui.py · browse/audition/pick a voice"]:::tool
+        AUDIO["scripts/audio_devices.py · find/test your audio device"]:::tool
         ROUNDTRIP["scripts/roundtrip_smoketest.py · TTS to STT, any voice"]:::tool
     end
 
@@ -117,14 +118,14 @@ flowchart TB
 - **Orchestrator** — tracks each backend's busy/idle state and routes an
   utterance as a fresh command, a soft interject, or a hard stop.
 - **Backend adapters** — one per target CLI, translating the orchestrator's
-  intent into whatever that tool actually understands. For a backend that
-  exposes a headless HTTP+SSE server (OpenCode does), the adapter is a
-  thin typed client over that API rather than PTY scraping — see
-  [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
-  **The specific endpoint paths this project initially assumed for
-  OpenCode turned out to be wrong** when tested against a real `opencode
-  serve` instance — see [OPENCODE_API_NOTES.md](OPENCODE_API_NOTES.md) for
-  the real API shape and what's not yet fixed.
+  intent into whatever that tool actually understands, preferring each
+  tool's native structured/headless interface over PTY scraping. Three are
+  implemented: **OpenCode** (typed client over its HTTP+SSE server),
+  **Claude Code** (bidirectional stream-json subprocess), and **Codex**
+  (app-server JSON-RPC over stdio), each verified against a live instance.
+  OpenCode's real API shape (the endpoint paths were wrong in an early
+  assumed version, then corrected against a real `opencode serve`) is
+  documented in [OPENCODE_API_NOTES.md](OPENCODE_API_NOTES.md).
 - **Local TTS** — streams spoken responses back, filtering out raw
   code/diff output in favor of prose summaries.
 - **Optional local LLM cleanup pass** between STT and the adapter, to fix
@@ -367,6 +368,22 @@ regardless of how the server is packaged.
 
 ## Status
 
+**As of 2026-07-12, the full voice loop runs end to end**
+(`scripts/run_convobox.py`: mic → VAD → local STT → orchestrator → backend
+adapter → streaming Piper TTS → playback), verified live on Windows across
+many conversation rounds. All three backend adapters are implemented and
+verified against live instances (OpenCode, Claude Code, Codex). Streaming
+TTS (audio starts on the first synthesized sentence), acoustic echo
+cancellation (optional `[aec]` extra, WebRTC AEC3), open barge-in
+(`interaction.interrupt_mode`, default off), a single-instance mic lock,
+and a documented, validated `convobox.yaml` (see `convobox.example.yaml`
+and [docs/QUICKSTART.md](docs/QUICKSTART.md)) are all in. ~220 automated
+tests, mypy/ruff/bandit clean. Still open: Linux/macOS aren't validated
+yet, and a Settings TUI plus a second TTS/STT engine (Kokoro) are on the
+roadmap ([docs/ROADMAP.md](docs/ROADMAP.md)).
+
+The rest of this section is the earlier progress log, kept for history.
+
 Scaffolding stage — an initial implementation of every pipeline stage
 exists (`src/convobox/`: audio capture/playback, VAD segmenter, local STT,
 safeword detector, TTS + Piper engine (streaming), an orchestrator, and an
@@ -421,10 +438,11 @@ runs the same TTS→STT intelligibility check as before against any
 installed voice, not just the original hardcoded one. See
 [TESTING.md](TESTING.md) → "Picking a voice". Linux hasn't been attempted
 at all.
-Nothing here is stable — no Claude Code/Codex adapters yet, config isn't
-threaded through the CLI, and the orchestrator→TTS wiring uses
-`synthesize()` (whole-utterance) rather than streaming synthesized audio
-straight into playback as it arrives.
+(At that 2026-07-09 point nothing was stable — no Claude Code/Codex
+adapters yet, config not threaded through a CLI, and the orchestrator→TTS
+wiring used `synthesize()` (whole-utterance) rather than streaming. All
+three have since been implemented; see the current-status summary at the
+top of this section.)
 
 A security + performance pass (8 independent finder angles, each claim
 verified against the actual code before acting) found and fixed 7 real
