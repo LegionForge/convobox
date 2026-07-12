@@ -272,6 +272,38 @@ async def test_send_interject_uses_steer_delivery(server: OpenCodeServer) -> Non
     ]
 
 
+class _RecordingClient:
+    """Minimal httpx.AsyncClient stand-in that records the timeout used."""
+
+    def __init__(self) -> None:
+        self.prompt_timeout: object = "unset"
+
+    async def post(self, path: str, json: object = None, timeout: object = None) -> object:
+        if path.endswith("/prompt"):
+            self.prompt_timeout = timeout
+
+        class _Resp:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict[str, object]:
+                return {"data": {"id": _SESSION_ID}}
+
+        return _Resp()
+
+
+@pytest.mark.asyncio
+async def test_prompt_post_uses_generous_read_timeout() -> None:
+    # A steer/interject to a BUSY session can take seconds to be accepted;
+    # the default 5s read timeout spuriously failed it and crashed the app.
+    # The prompt POST must carry an explicit, generous read timeout.
+    client = _RecordingClient()
+    adapter = OpenCodeAdapter("http://localhost:4096", client=client)  # type: ignore[arg-type]
+    await adapter.send_interject("steer me while busy")
+    assert client.prompt_timeout is not None and client.prompt_timeout != "unset"
+    assert getattr(client.prompt_timeout, "read", None) == 30.0
+
+
 @pytest.mark.asyncio
 async def test_events_yield_typed_backend_events_from_real_shape(
     server: OpenCodeServer,

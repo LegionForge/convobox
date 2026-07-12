@@ -647,7 +647,20 @@ async def run(args: argparse.Namespace) -> None:
                 # wasn't. The marker is our version of realtime APIs'
                 # history truncation (docs: "the truncation problem").
                 text = BARGE_IN_MARKER + text
-            await orchestrator.handle_transcript(text)
+            try:
+                await orchestrator.handle_transcript(text)
+            except Exception as exc:  # noqa: BLE001
+                # A single utterance failing to reach the backend (timeout,
+                # dropped connection, HTTP error) must NOT kill the whole
+                # voice session -- log it and keep listening so the user can
+                # just say it again. Observed live: an interject to a busy
+                # opencode timed out and the unhandled httpx.ReadTimeout
+                # crashed the app mid-conversation.
+                log.error(
+                    "couldn't deliver to the backend (%s: %s) -- still "
+                    "listening, say it again to retry",
+                    type(exc).__name__, exc,
+                )
 
 
 async def _drain_until_idle(adapter, timeout_s: float) -> None:  # type: ignore[no-untyped-def]

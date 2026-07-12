@@ -103,10 +103,21 @@ class OpenCodeAdapter(BackendAdapter):
                 self._session_id = resp.json()["data"]["id"]
             return self._session_id
 
+    # A prompt POST to a BUSY session (a steer/interject while a tool is
+    # running) can take several seconds to be accepted. httpx's default 5s
+    # read timeout spuriously fails it -- observed live: an interject during
+    # a running tool raised httpx.ReadTimeout, which (unhandled) crashed the
+    # app. The real response still streams over SSE, not this POST, so a
+    # generous read timeout here costs nothing and only bounds a genuinely
+    # dead server. connect stays short so an unreachable backend fails fast.
+    _PROMPT_TIMEOUT = httpx.Timeout(5.0, read=30.0)
+
     async def _post_prompt(self, text: str, delivery: str) -> None:
         session_id = await self._ensure_session()
         payload = {"prompt": {"text": text}, "delivery": delivery}
-        resp = await self._client.post(f"/api/session/{session_id}/prompt", json=payload)
+        resp = await self._client.post(
+            f"/api/session/{session_id}/prompt", json=payload, timeout=self._PROMPT_TIMEOUT
+        )
         resp.raise_for_status()
         self._busy = True
 
