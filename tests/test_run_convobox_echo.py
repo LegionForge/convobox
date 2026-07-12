@@ -180,3 +180,20 @@ def test_recorder_notes_text_and_delegates() -> None:
     assert len(audio) == 4
     assert recorder.sample_rate == 22050
     assert f.is_echo("all tests passed and the coverage threshold was reached")
+
+
+# --- single-instance guard ---
+
+from scripts.run_convobox import acquire_single_instance_lock  # noqa: E402
+
+
+def test_single_instance_lock_is_exclusive_and_releases() -> None:
+    first = acquire_single_instance_lock()
+    assert first is not None
+    try:
+        assert acquire_single_instance_lock() is None  # second caller refused
+    finally:
+        first.close()
+    third = acquire_single_instance_lock()  # released -> acquirable again
+    assert third is not None
+    third.close()
