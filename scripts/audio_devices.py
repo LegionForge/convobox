@@ -82,6 +82,69 @@ def collect_devices(sd: Any, kind: str) -> list[dict[str, Any]]:
     return devices
 
 
+# Host APIs, best-first for a "just make it work" setup. MME always opens and
+# resamples gracefully; WASAPI is low-latency and (with ConvoBox's resampling)
+# reliable; DirectSound is the fallback. WDM-KS is last and hidden from the
+# simplified chooser: PortAudio frequently can't open a WDM-KS device at all
+# (PaErrorCode -9996), so offering it just wastes the user's time.
+_HOSTAPI_PRIORITY = ("MME", "Windows WASAPI", "Windows DirectSound", "Windows WDM-KS")
+
+# Virtual/meta "devices" that aren't a real jack. Offering them leads to
+# confusion or silent failure, so the simplified chooser drops them.
+_META_DEVICE_HINTS = ("sound mapper", "primary sound capture driver", "primary sound driver")
+
+
+def _hostapi_rank(hostapi: str) -> int:
+    """Lower is better. Unknown host APIs sort last."""
+    return _HOSTAPI_PRIORITY.index(hostapi) if hostapi in _HOSTAPI_PRIORITY else len(_HOSTAPI_PRIORITY)
+
+
+def _is_meta_device(name: str) -> bool:
+    low = name.lower()
+    return any(hint in low for hint in _META_DEVICE_HINTS)
+
+
+def dedupe_devices(
+    devices: list[dict[str, Any]], show_all: bool = False
+) -> list[dict[str, Any]]:
+    """Collapse the raw Windows device table to one entry per physical device.
+
+    Windows exposes the same jack under several host APIs -- and MME truncates
+    names to 31 chars -- so a single mic can appear 3-4 times under different
+    names. For a regular user that's noise, and the WDM-KS copies usually
+    can't even be opened. This groups devices that are the same physical
+    device (names where one is a prefix of the other, to bridge MME's
+    truncation), keeps the best-host-API entry of each group, and drops
+    virtual meta devices and WDM-KS-only devices. ``show_all`` returns the
+    raw list untouched for advanced users. Pure; unit-tested.
+    """
+    if show_all:
+        return devices
+    real = [d for d in devices if not _is_meta_device(d["name"])]
+    # Longest names first so an MME-truncated name attaches to its fuller
+    # sibling rather than seeding its own group.
+    groups: list[list[dict[str, Any]]] = []
+    canon: list[str] = []
+    for d in sorted(real, key=lambda x: len(x["name"]), reverse=True):
+        name = d["name"].strip().lower()
+        for i, cname in enumerate(canon):
+            if cname.startswith(name) or name.startswith(cname):
+                groups[i].append(d)
+                break
+        else:
+            canon.append(name)
+            groups.append([d])
+    chosen: list[dict[str, Any]] = []
+    for group in groups:
+        best = min(group, key=lambda d: _hostapi_rank(d["hostapi"]))
+        # A device whose only host API is WDM-KS is a -9996 trap; a real
+        # device is almost always ALSO exposed via MME/DirectSound/WASAPI.
+        if best["hostapi"] == "Windows WDM-KS":
+            continue
+        chosen.append(best)
+    return sorted(chosen, key=lambda d: d["index"])
+
+
 def format_devices(devices: list[dict[str, Any]], kind_label: str) -> str:
     """Render a device list as an aligned table (pure)."""
     if not devices:
@@ -304,17 +367,23 @@ def _suggest_next(
     return devices[0]["index"] if devices else None
 
 
+# Sentinel returned by _prompt_device when the user asks to see every device.
+_SHOW_ALL = "all"
+
+
 def _prompt_device(
-    label: str, devices: list[dict[str, Any]], suggested: int | None
-) -> int | None:
+    label: str, devices: list[dict[str, Any]], suggested: int | None, allow_all: bool = False
+) -> int | str | None:
     """Read a device choice, offering `suggested` as the ENTER default.
 
     ENTER accepts the suggested device (so a regular user never has to read
-    indices); a number/name picks a specific one; 'q'/'skip' returns None.
-    Reprompts on an unrecognized entry rather than skipping.
+    indices); a number/name picks a specific one; 'q'/'skip' returns None;
+    'a' (when ``allow_all``) returns ``_SHOW_ALL`` to reveal the full device
+    list. Reprompts on an unrecognized entry rather than skipping.
     """
     hint = f"ENTER = try [{suggested}], or a number/name" if suggested is not None else "a number/name"
-    prompt = f"\n{label.capitalize()} -- {hint}  (q to skip):  "
+    extra = "  (a = show all devices)" if allow_all else ""
+    prompt = f"\n{label.capitalize()} -- {hint}  (q to skip){extra}:  "
     while True:
         try:
             raw = input(prompt).strip()
@@ -322,6 +391,8 @@ def _prompt_device(
             return None
         if raw.lower() in ("q", "skip"):
             return None
+        if allow_all and raw.lower() == "a":
+            return _SHOW_ALL
         if raw == "":
             if suggested is not None:
                 return suggested
@@ -629,21 +700,32 @@ def _setup_direction(
     if default_idx is not None and _test(default_idx) == "keep":
         return default_idx
 
-    # The full device list appears ONLY now -- a regular user who confirmed
-    # the default never sees it. It's reprinted every loop so it never
-    # scrolls out of reach, and we suggest the next device to try (ENTER)
-    # so the user isn't forced to read indices.
-    devices = collect_devices(sd, kind)
-    if not devices:
+    # The device list appears ONLY now -- a regular user who confirmed the
+    # default never sees it. It's reprinted every loop so it never scrolls
+    # out of reach; it's DEDUPED to one clean entry per physical device
+    # (Windows shows each jack 3-4 times under different host APIs); and we
+    # suggest the next device to try (ENTER) so the user isn't forced to read
+    # indices. Pressing 'a' reveals the full raw list for advanced users.
+    all_devices = collect_devices(sd, kind)
+    if not all_devices:
         print(f"\n(no {label} devices found)")
         return None
+    show_all = False
     tried: set[int] = {default_idx} if default_idx is not None else set()
     while True:
-        print(f"\nHere are all your {label} options:")
+        devices = dedupe_devices(all_devices, show_all=show_all)
+        header = "all devices" if show_all else "the common devices"
+        print(f"\nHere are your {label} options ({header}):")
         print(format_devices(devices, kind.upper()))
-        idx = _prompt_device(label, devices, _suggest_next(devices, tried, default_idx))
-        if idx is None:
+        choice = _prompt_device(
+            label, devices, _suggest_next(devices, tried, default_idx), allow_all=not show_all
+        )
+        if choice == _SHOW_ALL:
+            show_all = True
+            continue
+        if choice is None:
             return None
+        idx = int(choice)
         tried.add(idx)
         if _test(idx) == "keep":
             return idx
@@ -681,10 +763,26 @@ def guided_setup(sd: Any, config_path: Path | None = None) -> None:
         name = _qualified_name(sd, chosen_in)
         write_device_to_config("input", name, config_path)
         saved.append(f"input_device: {name!r}")
-    print(f"\nAll set -- saved to {config_path}:")
-    for line in saved:
-        print(f"  {line}")
-    print("\nRun  python scripts/run_convobox.py  to start talking.")
+    if saved:
+        print(f"\nSaved to {config_path}:")
+        for line in saved:
+            print(f"  {line}")
+
+    # ConvoBox needs BOTH directions; warn loudly if one was skipped rather
+    # than letting the user discover it at first run.
+    if chosen_in is None:
+        print(
+            "\n  WARNING: no microphone selected. ConvoBox can't hear you without one --"
+            "\n  re-run  python scripts/audio_devices.py --setup  and choose a mic"
+            "\n  (a 'very quiet' mic still works; press [y] to keep it)."
+        )
+    if chosen_out is None:
+        print(
+            "\n  WARNING: no speaker selected. ConvoBox can't talk back without one --"
+            "\n  re-run  python scripts/audio_devices.py --setup  and choose a speaker."
+        )
+    if chosen_in is not None and chosen_out is not None:
+        print("\nAll set. Run  python scripts/run_convobox.py  to start talking.")
 
 
 def main() -> None:
