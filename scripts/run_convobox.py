@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import logging
 import math
+import os
 import re
 import socket
 import sys
@@ -71,17 +72,19 @@ ECHO_GRACE_S = 0.3
 SINGLE_INSTANCE_PORT = 47613
 
 
-def acquire_single_instance_lock() -> socket.socket | None:
+def acquire_single_instance_lock(port: int = SINGLE_INSTANCE_PORT) -> socket.socket | None:
     """Try to become THE listening instance; None means someone already is.
 
-    Two live-UAT incidents (docs/UAT-checklist.md [O1]) had a second
-    run_convobox.py silently contending for the microphone and splitting
-    the conversation -- symptoms confusing enough to burn an evening.
-    Mic mode now refuses to start a second instance instead.
+    Mic mode refuses to start a second logical instance (mic contention,
+    split conversation -- docs/UAT-checklist.md [O1]; note the corrected
+    process-counting guidance there). The port is injectable so tests can
+    exercise exclusivity on a throwaway port -- the default port is
+    legitimately held whenever a real ConvoBox is listening on this
+    machine, which is exactly when the dev suite tends to be running.
     """
     lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        lock.bind(("127.0.0.1", port))
     except OSError:
         lock.close()
         return None
@@ -326,10 +329,11 @@ async def run(args: argparse.Namespace) -> None:
     orchestrator = Orchestrator(adapter=adapter, safeword=safeword, tts=tts, player=player)
 
     log.info(
-        "backend=%s  voice=%s  safeword=%r",
+        "backend=%s  voice=%s  safeword=%r  pid=%d",
         config.backend.name,
         config.tts.voice,
         config.safeword.hard_stop_phrases[0],
+        os.getpid(),
     )
 
     if args.text is not None:
@@ -354,14 +358,15 @@ async def run(args: argparse.Namespace) -> None:
     if instance_lock is None:
         log.error(
             "another run_convobox.py is already listening (instance lock "
-            "127.0.0.1:%d is held). Two instances contend for the mic and "
-            "split the conversation -- this exact incident happened twice "
-            "in UAT (docs/UAT-checklist.md [O1]). Stop the other instance "
-            "first; find it with:  Get-CimInstance Win32_Process | "
-            "? { $_.CommandLine -match 'run_convobox' }",
+            "127.0.0.1:%d is held). Two LOGICAL instances contend for the "
+            "mic and split the conversation. NOTE when checking processes: "
+            "on Windows uv venvs, ONE instance always shows as TWO python "
+            "processes (launcher parent + interpreter child) -- count by "
+            "ParentProcessId, see docs/UAT-checklist.md [O1].",
             SINGLE_INSTANCE_PORT,
         )
         raise SystemExit(2)
+    log.info("single-instance lock acquired (pid=%d)", os.getpid())
 
     transcriber = LocalTranscriber(config.stt)
     segmenter = UtteranceSegmenter(config.vad)

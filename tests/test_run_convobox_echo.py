@@ -188,12 +188,17 @@ from scripts.run_convobox import acquire_single_instance_lock  # noqa: E402
 
 
 def test_single_instance_lock_is_exclusive_and_releases() -> None:
-    first = acquire_single_instance_lock()
+    # A throwaway port, NOT the real one: the real port is legitimately
+    # held whenever a live ConvoBox is listening on this machine -- which
+    # is exactly when the dev suite tends to be running. (Discovered the
+    # obvious way: this test failed while a live UAT session was up.)
+    port = 47991
+    first = acquire_single_instance_lock(port)
     assert first is not None
     try:
-        assert acquire_single_instance_lock() is None  # second caller refused
+        assert acquire_single_instance_lock(port) is None  # second caller refused
     finally:
         first.close()
-    third = acquire_single_instance_lock()  # released -> acquirable again
+    third = acquire_single_instance_lock(port)  # released -> acquirable again
     assert third is not None
     third.close()
