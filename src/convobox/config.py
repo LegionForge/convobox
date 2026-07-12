@@ -11,6 +11,17 @@ class AudioConfig(BaseModel):
     input_device: str | None = None
     output_device: str | None = None
     sample_rate: int = 16000
+    # Acoustic echo cancellation (WebRTC APM via the optional [aec]
+    # extra). Off by default: it needs the extra installed, and its
+    # value depends on the speaker/mic arrangement -- see
+    # docs/DESIGN-echo-and-barge-in.md.
+    echo_cancellation: bool = False
+    # Hint for the canceller: expected ms between writing audio to the
+    # output device and hearing it back in the mic (device buffers +
+    # acoustic path). APM adapts around it; the default suits typical
+    # Windows onboard audio. Tune per machine during UAT if suppression
+    # is weak.
+    aec_delay_ms: int = 100
 
 
 class VADConfig(BaseModel):

@@ -282,10 +282,25 @@ async def run(args: argparse.Namespace) -> None:
     segmenter = UtteranceSegmenter(config.vad)
     device = _resolve_device(args.device, config.audio.input_device)
 
+    canceller = None
+    if config.audio.echo_cancellation:
+        from convobox.audio.aec import EchoCanceller
+
+        canceller = EchoCanceller(delay_ms=config.audio.aec_delay_ms)
+        # Far-end reference: fed from the playback thread with each block
+        # as it's actually written to the device (queue-time would race
+        # ahead of realtime under streamed synthesis).
+        player.on_block_played = canceller.feed_reverse
+        log.info("acoustic echo cancellation ON (delay hint %dms)", config.audio.aec_delay_ms)
+
+    async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
+        async for chunk in mic.stream():
+            yield canceller.process(chunk) if canceller is not None else chunk
+
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
              config.safeword.hard_stop_phrases[0])
     with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
-        async for utterance in segmenter.segment(mic.stream()):
+        async for utterance in segmenter.segment(_mic_chunks(mic)):
             result = transcriber.transcribe(utterance)
             text = result.text
             is_hard_stop = safeword.check(text) is not None
