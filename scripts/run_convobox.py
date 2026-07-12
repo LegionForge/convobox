@@ -10,16 +10,26 @@ the whole product loop against a real backend.
     python scripts/run_convobox.py --text "run the tests"   # one utterance, no mic
     python scripts/run_convobox.py --text "..." --mute      # and no speakers
 
-Half-duplex on purpose (UAT-mode simplification, not product doctrine):
-utterances whose audio OVERLAPPED a playing response are dropped -- there
-is no echo cancellation yet, so an open mic transcribes the assistant's
-own voice back into the loop. Overlap, not "is playing right now": the
-VAD only emits an utterance after its trailing silence, so echo of the
-response usually arrives just AFTER playback ended (confirmed in the
-first same-room UAT), and a naive is_playing() check misses it. The one
-exception is the safeword: a hard stop is honored mid-playback, always,
-which is exactly the barge-in that matters for safety. Full barge-in for
-ordinary speech needs echo cancellation first (future work).
+Echo handling is layered, and how much duplex you get depends on config:
+
+1. Overlap gate (always on): utterances whose audio OVERLAPPED a playing
+   response are dropped. Overlap, not "is playing right now" -- the VAD
+   only emits an utterance after its trailing silence, so echo of the
+   response usually arrives just AFTER playback ended (confirmed in the
+   first same-room UAT), and a naive is_playing() check misses it.
+2. Text-level echo filter (always on): a transcript whose tokens mostly
+   match what we just spoke is treated as echo and dropped (catches echo
+   that slips past the timing window through long reverb / delayed devices).
+3. Signal-level AEC (opt-in via audio.echo_cancellation): a WebRTC echo
+   canceller fed the playback as a far-end reference. When on, it removes
+   the assistant's voice from the mic signal so full-duplex barge-in is
+   safe; without it the open mic would transcribe the assistant back.
+
+Barge-in for ordinary speech (interaction.interrupt_mode = stop_audio /
+abort_turn) requires echo_cancellation on -- otherwise the assistant's own
+voice would interrupt it. The safeword is the exception: a hard stop is
+honored mid-playback ALWAYS, regardless of AEC, which is the barge-in that
+matters for safety. See docs/DESIGN-echo-and-barge-in.md.
 
 Exit with Ctrl+C. The safeword does NOT exit the app -- it hard-stops the
 backend's current work and keeps listening, per the Orchestrator contract
