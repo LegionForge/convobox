@@ -26,6 +26,14 @@ dev = [
     "ruff>=0.15",
     "bandit>=1.9",
 ]
+# Acoustic echo cancellation (WebRTC APM, BSD-3). A separate extra, NOT
+# part of dev: its wheels are Windows-only today and CI's Linux runners
+# must keep installing cleanly. Code paths degrade gracefully without it
+# (audio.echo_cancellation defaults off; enabling it without the package
+# raises with install instructions). AEC tests skip when it's absent.
+aec = [
+    "aec-audio-processing>=1.0",
+]
 
 [project.scripts]
 convobox-spike = "scripts.spike:main"
@@ -57,7 +65,14 @@ asyncio_mode = "auto"
 # every other import stays checked; this is what makes plain `mypy
 # src/convobox` (dev-rig's lint.yml invocation, no flags) pass, matching
 # what `mypy ... --ignore-missing-imports` already did for the whole tree.
-module = ["faster_whisper", "faster_whisper.*", "sounddevice", "silero_vad", "silero_vad.*"]
+module = [
+    "faster_whisper",
+    "faster_whisper.*",
+    "sounddevice",
+    "silero_vad",
+    "silero_vad.*",
+    "aec_audio_processing",
+]
 ignore_missing_imports = true
 
 [tool.bandit]

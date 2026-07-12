@@ -105,6 +105,7 @@ ends up in use, its specific voice/model files need their own check.
 | onnxruntime | MIT | Verified directly from installed package metadata |
 | httpx, httpx-sse, pydantic, pyyaml, sounddevice, numpy | MIT / BSD (various) | Verified directly from installed package metadata |
 | **Kokoro-82M** (candidate replacement, not currently used) | Apache 2.0, code AND model weights | Verified via web search against the model's own Hugging Face page |
+| aec-audio-processing (optional `[aec]` extra, added 2026-07-11) | BSD-3-Clause | Verified directly from the bundled `dist-info/licenses/LICENSE` (the wheel's METADATA declares no license field — the LICENSE file is the authority); wraps Google's WebRTC audio processing module, itself BSD-3 |
 
 ## Recommended fix
 

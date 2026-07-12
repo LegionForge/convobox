@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -34,6 +34,12 @@ class AudioPlayer:
         self._stream: sd.OutputStream | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Called from the PLAYBACK THREAD with each block as it is written
+        # to the device -- i.e. aligned with what the speakers actually
+        # emit, not with what was queued. Exists for consumers that need a
+        # realtime far-end reference (acoustic echo cancellation); must be
+        # fast and must not raise.
+        self.on_block_played: Callable[[np.ndarray, int], None] | None = None
 
     def play(self, samples: np.ndarray, sample_rate: int) -> None:
         """Start playing samples. Non-blocking; replaces any current playback."""
@@ -60,7 +66,10 @@ class AudioPlayer:
             for start in range(0, len(samples), blocksize):
                 if self._stop.is_set():
                     break
-                stream.write(samples[start : start + blocksize])
+                block = samples[start : start + blocksize]
+                stream.write(block)
+                if self.on_block_played is not None:
+                    self.on_block_played(block, sample_rate)
         finally:
             stream.stop()
             stream.close()
@@ -119,7 +128,10 @@ class AudioPlayer:
                 for start in range(0, len(chunk), blocksize):
                     if self._stop.is_set():
                         return
-                    stream.write(chunk[start : start + blocksize])
+                    block = chunk[start : start + blocksize]
+                    stream.write(block)
+                    if self.on_block_played is not None:
+                        self.on_block_played(block, sample_rate)
         finally:
             if stream is not None:
                 stream.stop()

@@ -8,6 +8,17 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "aec-audio-processing"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/f1/d4c91eeaed6a2d91b448eb3eb17c150a505973aa7c5495d8772325918e38/aec_audio_processing-1.0.1.tar.gz", hash = "sha256:f03a3ce3f45bf15a04a8504d0f692a651180ca2d3171bd9f3de0516e5f2b8360", size = 5897164, upload-time = "2025-09-01T13:13:16.718Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/18/692ca4f7ffe305cbcde5b8b3e1f48a545a6c44b62310d307ca27aadd1957/aec_audio_processing-1.0.1-cp311-cp311-win_amd64.whl", hash = "sha256:89440a4edb6a2dab0e6f89cd6b8097082f028d194b0619474ef51473411840e2", size = 920646, upload-time = "2025-09-01T13:13:10.324Z" },
+    { url = "https://files.pythonhosted.org/packages/36/4f/13a1dfdde223744a65efd17e3d3f322286e4f5220b7f3d1eb54c776930f1/aec_audio_processing-1.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:158946224289773ed9101aaf4acedddb8eaed442f94809ffd7fb4778e4c65f47", size = 920835, upload-time = "2025-09-01T13:13:12.087Z" },
+    { url = "https://files.pythonhosted.org/packages/11/b0/96a1bdb897a4aff9d21efa2f805a5ba2e9cba99945e855045719105a3513/aec_audio_processing-1.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:25502a35a08a55650d926b0280199118af42e6405cda177039fa5ad04d24671e", size = 920835, upload-time = "2025-09-01T13:13:13.698Z" },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -257,6 +268,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+aec = [
+    { name = "aec-audio-processing" },
+]
 dev = [
     { name = "bandit" },
     { name = "mypy" },
@@ -268,6 +282,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aec-audio-processing", marker = "extra == 'aec'", specifier = ">=1.0" },
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.9" },
     { name = "faster-whisper", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
@@ -284,7 +299,7 @@ requires-dist = [
     { name = "silero-vad", specifier = ">=5.1" },
     { name = "sounddevice", specifier = ">=0.4.7" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "aec"]
 
 [[package]]
 name = "coverage"
