@@ -97,6 +97,41 @@ def _norm_tokens(text: str) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
 
 
+# Below this echo-to-ambient headroom there's effectively no echo present
+# to cancel -- reading attenuation as "success" here is meaningless.
+AEC_MEASURABLE_ECHO_DB = 3.0
+
+
+def interpret_aec_stats(attenuation_db: float | None, ceiling_db: float | None) -> str:
+    """One-line verdict tag for an AEC stats line.
+
+    Three real cases, learned the hard way in live UAT where the old
+    two-way logic screamed "success" at total silence:
+
+    - ceiling near zero: no echo reached the mic AT ALL. The usual cause
+      is that no audio is reaching the room (dead/muted/misrouted output
+      device) -- NOT successful cancellation. This is the case that would
+      have flagged the silent-endpoint problem immediately.
+    - positive ceiling, attenuation near it: genuine floor-limited
+      success -- echo cancelled down to the room's own noise.
+    - positive ceiling, attenuation well below it: AEC underperforming;
+      real echo headroom remains (usually a wrong delay hint).
+    """
+    if attenuation_db is None or ceiling_db is None:
+        return ""
+    if ceiling_db < AEC_MEASURABLE_ECHO_DB:
+        return (
+            "  [NO ECHO DETECTED: barely any speaker sound is reaching the mic -- "
+            "check the output device is audible; this is NOT a cancellation result]"
+        )
+    if attenuation_db >= ceiling_db - 2.0:
+        return "  [FLOOR-LIMITED: echo cancelled down to room noise -- success]"
+    return (
+        f"  [UNDER-CANCELLING: ~{ceiling_db - attenuation_db:.1f}dB of echo headroom "
+        "remains -- try tuning aec_delay_ms]"
+    )
+
+
 # Prefixed to a barge-in utterance so the backend knows its previous
 # response wasn't fully heard (we can't edit backend session history the
 # way realtime APIs truncate theirs -- see docs/DESIGN-echo-and-barge-in.md,
@@ -459,19 +494,13 @@ async def run(args: argparse.Namespace) -> None:
                 # weak filter.
                 attenuation = canceller.attenuation_db()
                 ceiling = canceller.measurable_ceiling_db()
-                floor_limited = (
-                    attenuation is not None
-                    and ceiling is not None
-                    and attenuation >= ceiling - 2.0
-                )
                 log.info(
                     "AEC stats for last response: attenuation=%s of ~%s measurable  "
                     "delay=%dms  frames(reverse=%d, capture=%d)%s",
                     f"{attenuation:.1f}dB" if attenuation is not None else "n/a",
                     f"{ceiling:.1f}dB" if ceiling is not None else "?",
                     canceller.delay_ms, canceller.reverse_frames, canceller.capture_frames,
-                    "  [FLOOR-LIMITED: echo cancelled down to room noise -- "
-                    "this is what success looks like]" if floor_limited else "",
+                    interpret_aec_stats(attenuation, ceiling),
                 )
                 canceller.reset_stats()
             was_playing = playing

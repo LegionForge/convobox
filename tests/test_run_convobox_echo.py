@@ -202,3 +202,41 @@ def test_single_instance_lock_is_exclusive_and_releases() -> None:
     third = acquire_single_instance_lock(port)  # released -> acquirable again
     assert third is not None
     third.close()
+
+
+# --- AEC stats verdict (three-way; the false-success-on-silence fix) ---
+
+from scripts.run_convobox import interpret_aec_stats  # noqa: E402
+
+
+def test_aec_verdict_empty_without_numbers() -> None:
+    assert interpret_aec_stats(None, None) == ""
+    assert interpret_aec_stats(4.0, None) == ""
+    assert interpret_aec_stats(None, 4.0) == ""
+
+
+def test_aec_verdict_flags_no_echo_when_ceiling_near_zero() -> None:
+    # The silent-device case from live UAT: ceiling ~0 means no speaker
+    # sound reached the mic -- must NOT read as success.
+    verdict = interpret_aec_stats(attenuation_db=8.2, ceiling_db=-0.3)
+    assert "NO ECHO DETECTED" in verdict
+    assert "success" not in verdict.lower() or "NOT a cancellation" in verdict
+
+
+def test_aec_verdict_floor_limited_when_attenuation_near_ceiling() -> None:
+    # Real room with audible speakers: positive ceiling, attenuation at it.
+    verdict = interpret_aec_stats(attenuation_db=4.1, ceiling_db=4.6)
+    assert "FLOOR-LIMITED" in verdict and "success" in verdict
+
+
+def test_aec_verdict_floor_limited_when_attenuation_exceeds_ceiling() -> None:
+    # AEC3's residual suppressor can gate below the ambient floor.
+    verdict = interpret_aec_stats(attenuation_db=5.7, ceiling_db=4.7)
+    assert "FLOOR-LIMITED" in verdict
+
+
+def test_aec_verdict_under_cancelling_when_headroom_remains() -> None:
+    # Positive ceiling but attenuation well below it -> real residual echo.
+    verdict = interpret_aec_stats(attenuation_db=2.0, ceiling_db=15.0)
+    assert "UNDER-CANCELLING" in verdict
+    assert "13.0dB" in verdict  # 15.0 - 2.0
