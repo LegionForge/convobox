@@ -173,17 +173,24 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 
 ## Operational gotchas (from live UAT incidents)
 
-- **[O1] Exactly one runner instance.** A 2026-07-11 incident had two
-  `run_convobox.py` processes launched 88ms apart via different
-  launchers (`.venv\Scripts\python.exe` and `uv run`) -- both read the
-  mic, at most one owns the backend conversation, and audio output
-  behavior becomes undefined. Symptom: speech transcribed but no audio
-  heard. Before debugging "no audio" as a code problem, check:
-  `Get-CimInstance Win32_Process | ? { $_.CommandLine -match "run_convobox" }`
-  UPDATE (after the second occurrence, same evening): mic mode now takes
-  a single-instance lock (localhost port bind, auto-released on any kind
-  of process death) and a duplicate launch exits immediately with an
-  explanatory error instead of silently contending for the mic.
+- **[O1] Exactly one runner instance -- but COUNT CORRECTLY.**
+  CORRECTED DIAGNOSIS (late 2026-07-11): on Windows, a uv-created
+  venv's `.venv\Scripts\python.exe` is a launcher trampoline that
+  spawns the real interpreter (the uv-managed base python) as a CHILD
+  process. **One launch therefore always shows as TWO python processes**
+  -- an idle parent and a busy worker -- and both match a command-line
+  grep for run_convobox. The 2026-07-11 "double-launch incidents" were
+  this pair misread as duplicates (verified by ParentProcessId: the
+  "second instance" was the first one's child). Count LOGICAL instances:
+  `Get-CimInstance Win32_Process | ? { $_.CommandLine -match "run_convobox" } |
+   Select ProcessId, ParentProcessId` -- a parent-child pair is ONE
+  instance; two processes with unrelated parents are two.
+  True duplicates are still harmful (mic contention, split
+  conversation), and since the second same-evening scare, mic mode
+  takes a single-instance lock (localhost port bind, auto-released on
+  any kind of process death): a genuine duplicate exits immediately
+  with an explanatory error. The startup banner now logs its PID and
+  lock acquisition so the log itself disambiguates.
 - **[O2] Output device pinning.** `audio.output_device` unset means the
   system default output, which on a multi-device Windows box (onboard
   Realtek headphone/speaker endpoints, monitor audio, VR headset
