@@ -33,11 +33,19 @@ not at module import.
 from __future__ import annotations
 
 import logging
+import math
+import time
+from collections import deque
 from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# A capture frame only counts toward the attenuation estimate if the
+# far end was fed within this window -- attenuation of silence is
+# meaningless and would corrupt the average.
+_REVERSE_ACTIVE_WINDOW_S = 0.25
 
 # APM's native format: 10ms frames. We run it at the pipeline's rate.
 _AEC_RATE = 16000
@@ -86,6 +94,44 @@ class EchoCanceller:
         # Capture-side output must preserve chunk sizes 1:1 for the VAD,
         # so processed samples are pooled and re-cut to the input length.
         self._processed_pool = np.zeros(0, dtype=np.float32)
+        # Telemetry (all cheap): lets UAT answer "is AEC actually doing
+        # anything in THIS room?" with numbers instead of vibes.
+        self.reverse_frames = 0
+        self.capture_frames = 0
+        self._reverse_last_fed = 0.0
+        self._rms_in: deque[float] = deque(maxlen=400)  # ~4s of 10ms frames
+        self._rms_out: deque[float] = deque(maxlen=400)
+
+    def set_delay(self, delay_ms: int) -> None:
+        """Update the render-to-capture delay hint (applied per frame)."""
+        self._delay_ms = delay_ms
+
+    @property
+    def delay_ms(self) -> int:
+        return self._delay_ms
+
+    def attenuation_db(self) -> float | None:
+        """Estimated echo attenuation over recent playback-active capture.
+
+        Compares capture RMS in vs out for frames processed while the
+        far end was recently fed. None until there's enough signal to
+        say anything (short/quiet samples would just be noise). This is
+        an ERLE-flavored estimate, not a lab measurement -- it includes
+        the user's own speech when they double-talk -- but across a
+        response's worth of frames it clearly separates "AEC inert"
+        (~0dB) from "AEC converged" (15dB+).
+        """
+        if len(self._rms_in) < 20:
+            return None
+        rms_in = sum(self._rms_in) / len(self._rms_in)
+        rms_out = sum(self._rms_out) / len(self._rms_out)
+        if rms_in < 1e-4:
+            return None  # effectively silence; ratio would be noise
+        return 20 * math.log10(rms_in / max(rms_out, 1e-9))
+
+    def reset_stats(self) -> None:
+        self._rms_in.clear()
+        self._rms_out.clear()
 
     def feed_reverse(self, chunk: np.ndarray, sample_rate: int) -> None:
         """Register far-end audio (what the speakers are playing right now)."""
@@ -99,6 +145,8 @@ class EchoCanceller:
             self._apm.process_reverse_stream(_to_int16_bytes(frame))
             # Keep the delay hint fresh: APM consumes it per 10ms frame.
             self._apm.set_stream_delay(self._delay_ms)
+            self.reverse_frames += 1
+        self._reverse_last_fed = time.monotonic()
 
     def process(self, chunk: np.ndarray) -> np.ndarray:
         """Echo-cancel a near-end (mic) chunk; output length == input length.
@@ -115,10 +163,12 @@ class EchoCanceller:
                 self._capture_carry[:_FRAME],
                 self._capture_carry[_FRAME:],
             )
-            out = self._apm.process_stream(_to_int16_bytes(frame))
-            self._processed_pool = np.concatenate(
-                [self._processed_pool, _from_int16_bytes(out)]
-            )
+            out_frame = _from_int16_bytes(self._apm.process_stream(_to_int16_bytes(frame)))
+            self._processed_pool = np.concatenate([self._processed_pool, out_frame])
+            self.capture_frames += 1
+            if time.monotonic() - self._reverse_last_fed < _REVERSE_ACTIVE_WINDOW_S:
+                self._rms_in.append(float(np.sqrt(np.mean(frame**2))))
+                self._rms_out.append(float(np.sqrt(np.mean(out_frame**2))))
         if len(self._processed_pool) >= len(samples):
             result, self._processed_pool = (
                 self._processed_pool[: len(samples)],
