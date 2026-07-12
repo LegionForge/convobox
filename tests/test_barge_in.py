@@ -88,3 +88,52 @@ def test_marker_is_nonempty_and_readable() -> None:
     # The truncation-problem marker: prefixed to forwarded barge-in text.
     assert BARGE_IN_MARKER.startswith("(")
     assert "interrupt" in BARGE_IN_MARKER
+
+
+# --- working-indicator heartbeat (silently-busy backend feedback) ---
+
+from scripts.run_convobox import WorkingIndicator  # noqa: E402
+
+
+def _feed_working(ind: WorkingIndicator, busy: bool, playing: bool, n: int, dt: float = 1.0):
+    return [ind.observe(busy, playing, dt) for _ in range(n)]
+
+
+def test_working_no_notice_while_idle() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    assert all(r is None for r in _feed_working(ind, busy=False, playing=False, n=10))
+
+
+def test_working_no_notice_while_playing() -> None:
+    # Busy but playing: audio is its own feedback, no heartbeat needed.
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    assert all(r is None for r in _feed_working(ind, busy=True, playing=True, n=10))
+
+
+def test_working_notice_after_first_grace() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    results = _feed_working(ind, busy=True, playing=False, n=3)
+    assert results[0] is None and results[1] is None
+    assert results[2] == pytest.approx(3.0)
+
+
+def test_working_repeats_at_interval() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    fires = [i for i, r in enumerate(_feed_working(ind, True, False, 20), start=1) if r is not None]
+    assert fires == [3, 8, 13, 18]  # first at grace, then every repeat_s
+
+
+def test_working_resets_when_playback_starts() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    _feed_working(ind, busy=True, playing=False, n=2)  # 2s, no notice yet
+    assert ind.observe(busy=True, playing=True, dt_s=1.0) is None  # playing resets
+    after = _feed_working(ind, busy=True, playing=False, n=3)
+    assert after[2] is not None  # needs a fresh full grace
+
+
+def test_working_resets_when_idle() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    _feed_working(ind, busy=True, playing=False, n=2)
+    assert ind.observe(busy=False, playing=False, dt_s=1.0) is None  # idle resets
+    after = _feed_working(ind, busy=True, playing=False, n=3)
+    assert after[2] is not None

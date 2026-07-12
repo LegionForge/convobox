@@ -142,6 +142,46 @@ class BargeInMonitor:
         return False
 
 
+class WorkingIndicator:
+    """Decides when to remind the user the backend is still working.
+
+    When the backend is busy but nothing is playing -- it's thinking, or
+    grinding on a long tool call (a file write, a build) -- the user gets
+    zero feedback and can't tell "working" from "broken". Observed live:
+    a philosophy.md append left the loop silently busy for minutes while
+    the user repeatedly asked "did I break something?". This emits a
+    heartbeat after an initial quiet grace, then at a steady interval,
+    and resets the moment audio plays or the backend goes idle.
+
+    Pure state machine (like BargeInMonitor) so the timing is unit
+    testable without real clocks.
+    """
+
+    def __init__(self, first_notice_s: float = 6.0, repeat_s: float = 12.0) -> None:
+        self._first_notice_s = first_notice_s
+        self._repeat_s = repeat_s
+        self._silent_busy_s = 0.0
+        self._next_notice_at = first_notice_s
+
+    def observe(self, busy: bool, playing: bool, dt_s: float) -> float | None:
+        """Advance by dt_s; return elapsed silent-busy seconds when a
+        heartbeat is due, else None.
+
+        "Silent busy" = backend busy AND nothing playing. Playing audio is
+        its own feedback, so it resets the timer -- the heartbeat only
+        covers the feedback gap.
+        """
+        if not busy or playing:
+            self._silent_busy_s = 0.0
+            self._next_notice_at = self._first_notice_s
+            return None
+        self._silent_busy_s += dt_s
+        if self._silent_busy_s >= self._next_notice_at:
+            self._next_notice_at += self._repeat_s
+            return self._silent_busy_s
+        return None
+
+
 class SpokenEchoFilter:
     """Text-level echo suppression: does a transcript match our own speech?
 
@@ -317,6 +357,24 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
     return device
 
 
+async def _working_watchdog(adapter, player, indicator: WorkingIndicator) -> None:  # type: ignore[no-untyped-def]
+    """Heartbeat: remind the user a silently-busy backend is still alive.
+
+    Runs for the process lifetime; asyncio.run() cancels and awaits it on
+    shutdown, so no explicit teardown is needed here.
+    """
+    interval = 1.0
+    while True:
+        await asyncio.sleep(interval)
+        elapsed = indicator.observe(adapter.is_busy(), player.is_playing(), interval)
+        if elapsed is not None:
+            log.info(
+                "backend still working (%.0fs, no audio yet) -- thinking or running a "
+                "tool; say the safeword to abort",
+                elapsed,
+            )
+
+
 async def run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     adapter = create_backend_adapter(config.backend)
@@ -490,6 +548,12 @@ async def run(args: argparse.Namespace) -> None:
 
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
              config.safeword.hard_stop_phrases[0])
+
+    # Heartbeat so a silently-busy backend (thinking, or grinding on a long
+    # tool call) reads as "working", not "hung" -- the exact confusion a
+    # philosophy.md write caused in live UAT.
+    asyncio.create_task(_working_watchdog(adapter, player, WorkingIndicator()))
+
     with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
         mic_holder["mic"] = mic  # lets the AEC delay estimator read input latency
         async for utterance in segmenter.segment(_mic_chunks(mic)):
