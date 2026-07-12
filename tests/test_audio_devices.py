@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
+import pytest
+import yaml
+
 from scripts.audio_devices import (
+    _qualified_name,
     collect_devices,
     format_devices,
+    format_level,
+    level_meter,
     resolve_spec,
+    write_device_to_config,
 )
 
 
@@ -25,10 +34,17 @@ def _fake_sd(default_out: int = 1, default_in: int = 0) -> SimpleNamespace:
         {"name": "Headphones (Realtek)", "hostapi": 2, "max_output_channels": 2, "max_input_channels": 0,
          "default_samplerate": 48000.0},
     ]
+    # Real sounddevice accepts both no-arg (all) and indexed (one) forms.
+    def q_devices(index: int | None = None) -> Any:
+        return devices if index is None else devices[index]
+
+    def q_hostapis(index: int | None = None) -> Any:
+        return hostapis if index is None else hostapis[index]
+
     return SimpleNamespace(
         default=SimpleNamespace(device=(default_in, default_out)),
-        query_hostapis=lambda: hostapis,
-        query_devices=lambda: devices,
+        query_hostapis=q_hostapis,
+        query_devices=q_devices,
     )
 
 
@@ -106,3 +122,78 @@ def test_resolve_spec_no_match() -> None:
     index, error = resolve_spec("Nonexistent Device", _outputs())
     assert index is None
     assert error is not None and "no device matching" in error
+
+
+# --- input-level metering (the --test-input / --setup mic check) ---
+
+
+def test_level_meter_silence_floors() -> None:
+    rms, peak = level_meter(np.zeros(1000, dtype=np.float32))
+    assert rms == -120.0 and peak == -120.0
+
+
+def test_level_meter_empty_buffer() -> None:
+    assert level_meter(np.zeros(0, dtype=np.float32)) == (-120.0, -120.0)
+
+
+def test_level_meter_full_scale_sine() -> None:
+    t = np.linspace(0.0, 1.0, 16000, endpoint=False)
+    sine = np.sin(2 * np.pi * 440 * t).astype(np.float32)  # peak ~1.0, rms ~0.707
+    rms, peak = level_meter(sine)
+    assert peak == pytest.approx(0.0, abs=0.5)   # ~0 dBFS
+    assert rms == pytest.approx(-3.0, abs=1.0)   # 0.707 -> ~-3 dBFS
+
+
+def test_format_level_verdicts() -> None:
+    assert "CLIPPING" in format_level(-10.0, -0.5)
+    assert "SILENT" in format_level(-60.0, -58.0)
+    assert "very quiet" in format_level(-45.0, -42.0)
+    assert "good" in format_level(-20.0, -12.0)
+
+
+def test_format_level_bar_matches_width() -> None:
+    out = format_level(-30.0, -25.0, width=20)
+    bar = out[out.index("[") + 1 : out.index("]")]
+    assert len(bar) == 20
+
+
+# --- writing the chosen device to config ---
+
+
+def test_write_device_to_config_creates_output(tmp_path: Path) -> None:
+    p = tmp_path / "convobox.yaml"
+    write_device_to_config("output", "Speakers, MME", p)
+    data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert data["audio"]["output_device"] == "Speakers, MME"
+
+
+def test_write_device_to_config_merges_and_preserves_header(tmp_path: Path) -> None:
+    p = tmp_path / "convobox.yaml"
+    p.write_text(
+        "# my header -- keep me\n"
+        "backend:\n  name: opencode\n"
+        "audio:\n  echo_cancellation: true\n",
+        encoding="utf-8",
+    )
+    write_device_to_config("input", "Mic, MME", p)
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith("# my header -- keep me")
+    data = yaml.safe_load(text)
+    assert data["audio"]["input_device"] == "Mic, MME"
+    assert data["audio"]["echo_cancellation"] is True   # other audio keys preserved
+    assert data["backend"]["name"] == "opencode"        # other sections preserved
+
+
+def test_write_device_result_loads_through_real_config_loader(tmp_path: Path) -> None:
+    from convobox.config import load_config
+
+    p = tmp_path / "convobox.yaml"
+    write_device_to_config("output", "Headphones (Realtek), MME", p)
+    config = load_config(p)
+    assert config.audio.output_device == "Headphones (Realtek), MME"
+
+
+def test_qualified_name_includes_host_api() -> None:
+    sd = _fake_sd()
+    assert _qualified_name(sd, 4) == "Headphones (Realtek), Windows WASAPI"
+    assert _qualified_name(sd, 1) == "Headphones (Realtek), MME"
