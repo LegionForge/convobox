@@ -100,3 +100,36 @@ now strips decoration while keeping the decorated words:
 
 The per-subsystem UAT checklist derived from these designs lives in
 [UAT-checklist.md](UAT-checklist.md).
+
+## Barge-in target design (decided 2026-07-11)
+
+JP's call, and it matches industry practice: **open barge-in** -- any
+sustained user speech during playback stops the rendering and is treated
+as the next input, no safeword needed. ("The assistant's speech is
+disposable; the human's time is not.") The formal pattern, borrowed from
+the cleanest public formalization (OpenAI's Realtime API interruption
+flow) and telephony's decades-old bargein attribute:
+
+1. **AEC** so the mic hears the user over the TTS (the load-bearing
+   prerequisite; see the AEC plan above).
+2. **Sustained-speech threshold** (~200-300ms of confirmed speech)
+   before cutting playback, so coughs and chair creaks don't kill a
+   response. The VAD already exposes the needed signal.
+3. **Stop rendering, don't abort the work**: playback and TTS stop; the
+   backend turn keeps running; the utterance routes through normal
+   busy/interject logic. The safeword remains the escalation that also
+   aborts the work. Config: `interrupt_mode: none | stop_audio |
+   abort_turn`, with `stop_audio` becoming the default once AEC is
+   verified; today's behavior is `none`.
+4. **The truncation problem**: when speech is cut at sentence 2 of 6,
+   the backend believes it delivered all 6. We cannot edit backend
+   session history (unlike Realtime's conversation.item.truncate), but
+   we know exactly which synthesized chunks played -- so the interject
+   can carry a marker such as "(interrupted you mid-response)" or
+   "(heard up to: ...)". Exact wording to be decided during barge-in
+   implementation UAT.
+
+Spectrum note for the record: wake-word-gated barge-in (Alexa-style,
+which our safeword-only behavior resembles) is the deliberate
+false-trigger trade-off for far-field speakers; open barge-in is where
+conversational agents live. ConvoBox is a conversational agent.
