@@ -101,6 +101,13 @@ class EchoCanceller:
         self._reverse_last_fed = 0.0
         self._rms_in: deque[float] = deque(maxlen=400)  # ~4s of 10ms frames
         self._rms_out: deque[float] = deque(maxlen=400)
+        # Room ambient level, sampled while NOTHING is playing: the
+        # attenuation reading's hard ceiling. Echo can be cancelled;
+        # room noise cannot (it isn't in the reference), so measured
+        # attenuation can never exceed the echo-to-ambient headroom.
+        # Not cleared by reset_stats -- ambience is a room property,
+        # not a per-response one.
+        self._rms_ambient: deque[float] = deque(maxlen=400)
 
     def set_delay(self, delay_ms: int) -> None:
         """Update the render-to-capture delay hint (applied per frame)."""
@@ -128,6 +135,27 @@ class EchoCanceller:
         if rms_in < 1e-4:
             return None  # effectively silence; ratio would be noise
         return 20 * math.log10(rms_in / max(rms_out, 1e-9))
+
+    def measurable_ceiling_db(self) -> float | None:
+        """Approximate echo-to-ambient headroom: the reading's soft ceiling.
+
+        20*log10(playback-time mic level / ambient level). If echo at the
+        mic is only ~6dB above room ambience, a ~6dB attenuation reading
+        means the canceller removed essentially everything the room lets
+        us measure -- found the hard way when perfectly-executed
+        clean-window UAT runs kept reading ~5dB and looked like failure.
+        SOFT ceiling, not physics: AEC3's residual suppressor gates the
+        output below the ambient floor during far-end-only stretches, so
+        readings can exceed this. Its job is interpretive: attenuation AT
+        OR NEAR the ceiling is success, not a weak filter.
+        """
+        if len(self._rms_in) < 20 or len(self._rms_ambient) < 20:
+            return None
+        rms_in = sum(self._rms_in) / len(self._rms_in)
+        ambient = sum(self._rms_ambient) / len(self._rms_ambient)
+        if ambient < 1e-6 or rms_in < 1e-4:
+            return None
+        return 20 * math.log10(rms_in / ambient)
 
     def reset_stats(self) -> None:
         self._rms_in.clear()
@@ -169,6 +197,8 @@ class EchoCanceller:
             if time.monotonic() - self._reverse_last_fed < _REVERSE_ACTIVE_WINDOW_S:
                 self._rms_in.append(float(np.sqrt(np.mean(frame**2))))
                 self._rms_out.append(float(np.sqrt(np.mean(out_frame**2))))
+            else:
+                self._rms_ambient.append(float(np.sqrt(np.mean(frame**2))))
         if len(self._processed_pool) >= len(samples):
             result, self._processed_pool = (
                 self._processed_pool[: len(samples)],

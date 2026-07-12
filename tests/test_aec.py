@@ -167,3 +167,65 @@ def test_set_delay_updates_hint() -> None:
     # Still processes fine with the new hint.
     canceller.feed_reverse(np.zeros(512, dtype=np.float32), _SR)
     assert len(canceller.process(np.zeros(512, dtype=np.float32))) == 512
+
+
+# --- floor-aware ceiling (the clean-window mystery, solved) ---
+
+
+def test_measurable_ceiling_reflects_echo_to_ambient_headroom() -> None:
+    # The insight from a night of UAT: attenuation readings are capped by
+    # how far the echo rises above room ambience at the mic. Build a room
+    # with a known ~23dB headroom and check the ceiling reports it.
+    rng = np.random.default_rng(11)
+    canceller = EchoCanceller(delay_ms=50)
+
+    ambient_level = 0.01
+    # Quiet room first (nothing playing): populates the ambient estimate.
+    for _ in range(40):
+        noise = ambient_level * rng.standard_normal(512).astype(np.float32)
+        canceller.process(noise)
+
+    farend = _farend(3.0)
+    delay = int(0.05 * _SR)
+    mic = np.zeros_like(farend)
+    mic[delay:] = 0.25 * farend[:-delay]  # echo well above ambience
+    mic += ambient_level * rng.standard_normal(len(mic)).astype(np.float32)
+
+    chunk = 512
+    for start in range(0, len(farend) - chunk, chunk):
+        canceller.feed_reverse(farend[start : start + chunk], _SR)
+        canceller.process(mic[start : start + chunk])
+
+    ceiling = canceller.measurable_ceiling_db()
+    attenuation = canceller.attenuation_db()
+    assert ceiling is not None and 15.0 < ceiling < 35.0
+    # The ceiling is SOFT: AEC3's residual suppressor gates output below
+    # the ambient floor during far-end-only stretches, so attenuation may
+    # legitimately read above it (observed right here in this test: ~25dB
+    # against a ~19.5dB headroom). Assert strong cancellation happened,
+    # not a hard bound the suppressor is free to beat.
+    assert attenuation is not None and attenuation >= 15.0
+
+
+def test_ceiling_none_without_ambient_samples() -> None:
+    canceller = EchoCanceller(delay_ms=50)
+    farend = _farend(1.0)
+    for start in range(0, len(farend) - 512, 512):
+        canceller.feed_reverse(farend[start : start + 512], _SR)
+        canceller.process(farend[start : start + 512])
+    # Reverse was always active: no ambient frames ever sampled.
+    assert canceller.measurable_ceiling_db() is None
+
+
+def test_ambient_survives_reset_stats() -> None:
+    # Ambience is a room property, not a per-response one.
+    rng = np.random.default_rng(3)
+    canceller = EchoCanceller(delay_ms=50)
+    for _ in range(40):
+        canceller.process(0.01 * rng.standard_normal(512).astype(np.float32))
+    canceller.reset_stats()
+    farend = _farend(1.0)
+    for start in range(0, len(farend) - 512, 512):
+        canceller.feed_reverse(farend[start : start + 512], _SR)
+        canceller.process(farend[start : start + 512])
+    assert canceller.measurable_ceiling_db() is not None

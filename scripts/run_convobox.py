@@ -443,15 +443,30 @@ async def run(args: argparse.Namespace) -> None:
             processed = canceller.process(chunk) if canceller is not None else chunk
             playing = player.is_playing()
             if canceller is not None and was_playing and not playing:
-                # Response just finished: one stats line per response is
-                # the number UAT needs -- ~0dB means AEC is inert in this
-                # room, 15dB+ means converged (F1 diagnosis).
+                # Response just finished: one stats line per response.
+                # CRITICAL interpretation note (learned from a night of
+                # perfectly-executed clean-window runs that looked like
+                # failure): the reading is CEILING-LIMITED by how far the
+                # echo rises above room ambience at the mic. Room noise
+                # isn't in the reference and can't be cancelled, so
+                # attenuation ~= ceiling means the canceller removed
+                # essentially everything measurable -- success, not a
+                # weak filter.
                 attenuation = canceller.attenuation_db()
+                ceiling = canceller.measurable_ceiling_db()
+                floor_limited = (
+                    attenuation is not None
+                    and ceiling is not None
+                    and attenuation >= ceiling - 2.0
+                )
                 log.info(
-                    "AEC stats for last response: attenuation=%s  delay=%dms  "
-                    "frames(reverse=%d, capture=%d)",
+                    "AEC stats for last response: attenuation=%s of ~%s measurable  "
+                    "delay=%dms  frames(reverse=%d, capture=%d)%s",
                     f"{attenuation:.1f}dB" if attenuation is not None else "n/a",
+                    f"{ceiling:.1f}dB" if ceiling is not None else "?",
                     canceller.delay_ms, canceller.reverse_frames, canceller.capture_frames,
+                    "  [FLOOR-LIMITED: echo cancelled down to room noise -- "
+                    "this is what success looks like]" if floor_limited else "",
                 )
                 canceller.reset_stats()
             was_playing = playing
