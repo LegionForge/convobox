@@ -283,15 +283,49 @@ def _qualified_name(sd: Any, index: int) -> str:
     return f"{sd.query_devices(index)['name']}, {_hostapi_name(sd, index)}"
 
 
-def _prompt_index(prompt: str, devices: list[dict[str, Any]]) -> int | None:
-    """Read a device number/name from the user; None if they skip (blank/q)."""
+def _suggest_next(
+    devices: list[dict[str, Any]], tried: set[int], default_idx: int | None
+) -> int | None:
+    """Suggest the next device to try in the chooser (pure).
+
+    Prefer the system default if it hasn't been tried yet; otherwise the
+    first untried device; otherwise (everything tried) the first device --
+    so ENTER always does something sensible instead of nothing.
+    """
+    if (
+        default_idx is not None
+        and default_idx not in tried
+        and any(d["index"] == default_idx for d in devices)
+    ):
+        return default_idx
+    for d in devices:
+        if d["index"] not in tried:
+            return d["index"]
+    return devices[0]["index"] if devices else None
+
+
+def _prompt_device(
+    label: str, devices: list[dict[str, Any]], suggested: int | None
+) -> int | None:
+    """Read a device choice, offering `suggested` as the ENTER default.
+
+    ENTER accepts the suggested device (so a regular user never has to read
+    indices); a number/name picks a specific one; 'q'/'skip' returns None.
+    Reprompts on an unrecognized entry rather than skipping.
+    """
+    hint = f"ENTER = try [{suggested}], or a number/name" if suggested is not None else "a number/name"
+    prompt = f"\n{label.capitalize()} -- {hint}  (q to skip):  "
     while True:
         try:
             raw = input(prompt).strip()
         except EOFError:
             return None
-        if raw.lower() in ("", "q", "skip"):
+        if raw.lower() in ("q", "skip"):
             return None
+        if raw == "":
+            if suggested is not None:
+                return suggested
+            continue  # nothing to suggest -> need an explicit pick
         index, error = resolve_spec(raw, devices)
         if index is not None:
             return index
@@ -596,14 +630,21 @@ def _setup_direction(
         return default_idx
 
     # The full device list appears ONLY now -- a regular user who confirmed
-    # the default never sees it.
-    print(f"\nHere are all your {label} options:")
+    # the default never sees it. It's reprinted every loop so it never
+    # scrolls out of reach, and we suggest the next device to try (ENTER)
+    # so the user isn't forced to read indices.
     devices = collect_devices(sd, kind)
-    print(format_devices(devices, kind.upper()))
+    if not devices:
+        print(f"\n(no {label} devices found)")
+        return None
+    tried: set[int] = {default_idx} if default_idx is not None else set()
     while True:
-        idx = _prompt_index(f"\n{label.capitalize()} -- number to test (blank to skip):  ", devices)
+        print(f"\nHere are all your {label} options:")
+        print(format_devices(devices, kind.upper()))
+        idx = _prompt_device(label, devices, _suggest_next(devices, tried, default_idx))
         if idx is None:
             return None
+        tried.add(idx)
         if _test(idx) == "keep":
             return idx
         print("ok, let's try another.")

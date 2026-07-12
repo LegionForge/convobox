@@ -13,6 +13,7 @@ from scripts.audio_devices import (
     _input_choice_from_key,
     _qualified_name,
     _resample_audio,
+    _suggest_next,
     _ync_from_key,
     collect_devices,
     format_devices,
@@ -257,3 +258,31 @@ def test_resample_audio_upsamples_16k_to_48k() -> None:
     out = _resample_audio(a, 16000, 48000)
     assert len(out) == 4800               # 0.1s at 48kHz
     assert out.dtype == np.float32
+
+
+# --- chooser suggestion (ENTER = try the suggested device) ---
+
+
+def test_suggest_next_prefers_untried_system_default() -> None:
+    devices = _outputs()  # indices 1,2,3,4
+    assert _suggest_next(devices, tried=set(), default_idx=3) == 3
+
+
+def test_suggest_next_skips_already_tried_default() -> None:
+    # the default was tested first and rejected -> suggest a different device
+    devices = _outputs()
+    assert _suggest_next(devices, tried={1}, default_idx=1) == 2
+
+
+def test_suggest_next_first_untried_when_no_default() -> None:
+    devices = _outputs()
+    assert _suggest_next(devices, tried={1, 2}, default_idx=None) == 3
+
+
+def test_suggest_next_falls_back_to_first_when_all_tried() -> None:
+    devices = _outputs()
+    assert _suggest_next(devices, tried={1, 2, 3, 4}, default_idx=1) == 1
+
+
+def test_suggest_next_none_for_empty_device_list() -> None:
+    assert _suggest_next([], tried=set(), default_idx=None) is None
