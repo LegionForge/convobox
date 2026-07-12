@@ -411,24 +411,23 @@ def _confirm_output(sd: Any, index: int) -> str:
         sd.stop()
 
 
-def _confirm_input(sd: Any, index: int) -> str:
-    """Test one input device. Returns 'keep' or 'choose'.
+def _record_with_meter(
+    sd: Any, index: int, seconds: float = 5.0
+) -> tuple[Any, int, float] | None:
+    """Record from `index` while showing a live meter.
 
-    Waits for ENTER (or ESC to skip) so the user can get ready, then shows
-    a LIVE level meter updating in place while they speak, then y / n / c.
+    Returns (audio, rate, seen_peak_dbfs), or None if the device can't
+    record. Captures the samples (not just the level) so the caller can
+    play them back.
     """
-    info = sd.query_devices(index)
-    print(f"\nMicrophone to test:  {info['name']}")
-    print("Press ENTER when you're ready to speak, or ESC to skip this device: ",
-          end="", flush=True)
-    if _read_key() == "ESC":
-        print("skip")
-        return "choose"
-    print()
+    import numpy as np
 
+    info = sd.query_devices(index)
+    chunks: list[Any] = []
     latest = {"rms": -120.0, "peak": -120.0}
 
     def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+        chunks.append(indata[:, 0].copy())
         latest["rms"], latest["peak"] = level_meter(indata[:, 0])
 
     rate = _CAPTURE_RATE
@@ -440,27 +439,126 @@ def _confirm_input(sd: Any, index: int) -> str:
             stream = sd.InputStream(samplerate=rate, channels=1, device=index, callback=callback)
         except Exception as exc:  # noqa: BLE001
             print(f"  (couldn't record on this device: {exc})")
-            return "choose"
-    print("Speak normally -- watch the bar move (about 6 seconds):")
+            return None
+    print(f"Speak normally -- recording ~{seconds:.0f}s (watch the bar):")
     seen_peak = -120.0
     with stream:
-        for _ in range(60):
+        for _ in range(int(seconds / 0.1)):
             sys.stdout.write("\r  " + format_level(latest["rms"], latest["peak"]))
             sys.stdout.flush()
             seen_peak = max(seen_peak, latest["peak"])
             time.sleep(0.1)
     print()
+    audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+    return audio, rate, seen_peak
+
+
+def _play_recording(sd: Any, audio: Any, rate: int, playback_device: int | None) -> None:
+    """Play a recorded buffer back so the user can HEAR the mic's quality."""
+    if getattr(audio, "size", 0) == 0:
+        print("  (nothing recorded to play back)")
+        return
+    print("Playing back what your mic captured...")
+    try:
+        sd.play(audio, samplerate=rate, device=playback_device, blocking=True)
+    except Exception as exc:  # noqa: BLE001 -- setup tool: report, don't crash
+        print(f"  (couldn't play back: {exc})")
+
+
+def _input_choice_from_key(key: str) -> str | None:
+    """Map a mic-test keypress to an outcome (pure).
+
+    Adds replay/again to y/n/c so the user can HEAR each mic -- and re-hear
+    it, or re-record -- before choosing. With several mics, playback is the
+    only way to tell them apart.
+    """
+    k = key.lower()
+    if k == "y":
+        return "keep"
+    if k in ("n", "c"):
+        return "choose"
+    if k == "r":
+        return "replay"
+    if k == "a":
+        return "again"
+    return None
+
+
+def _read_input_choice() -> str:
+    """Print the mic menu and block until a valid choice; echoes the key."""
+    print(
+        "  [y] keep this mic   [n] pick another   [c] test others   "
+        "[r] replay   [a] record again\n> ",
+        end="",
+        flush=True,
+    )
+    while True:
+        key = _read_key()
+        outcome = _input_choice_from_key(key)
+        if outcome is not None:
+            print(key.lower())
+            return outcome
+
+
+def _confirm_input(sd: Any, index: int, playback_device: int | None = None) -> str:
+    """Test one input device. Returns 'keep' or 'choose'.
+
+    Waits for ENTER (or ESC to skip), records a short sample with a live
+    meter, then PLAYS IT BACK so the user hears the mic's actual sound.
+    The menu lets them replay [r] or re-record [a] and compare devices
+    before keeping [y] / picking another [n] / testing others [c].
+    Playback uses the speaker chosen earlier in setup.
+    """
+    info = sd.query_devices(index)
+    print(f"\nMicrophone to test:  {info['name']}")
+    print(
+        "Press ENTER to record a short sample, or ESC to skip this device: ",
+        end="",
+        flush=True,
+    )
+    if _read_key() == "ESC":
+        print("skip")
+        return "choose"
+    print()
+
+    recorded = _record_with_meter(sd, index)
+    if recorded is None:
+        return "choose"
+    audio, rate, seen_peak = recorded
     if seen_peak <= -55.0:
         print("  (no sound detected -- if you were speaking, try a different device)")
-    return _read_ync("Did the bar move when you spoke?")
+    _play_recording(sd, audio, rate, playback_device)
+    while True:
+        choice = _read_input_choice()
+        if choice == "replay":
+            _play_recording(sd, audio, rate, playback_device)
+            continue
+        if choice == "again":
+            recorded = _record_with_meter(sd, index)
+            if recorded is not None:
+                audio, rate, seen_peak = recorded
+                _play_recording(sd, audio, rate, playback_device)
+            continue
+        return choice  # 'keep' or 'choose'
 
 
-def _setup_direction(sd: Any, kind: str, label: str) -> int | None:
+def _setup_direction(
+    sd: Any, kind: str, label: str, playback_device: int | None = None
+) -> int | None:
     """Default-first: test the auto-detected device; reveal the chooser only
-    if it fails or the user asks for others (progressive disclosure)."""
-    confirm = _confirm_output if kind == "output" else _confirm_input
+    if it fails or the user asks for others (progressive disclosure).
+
+    `playback_device` (the speaker chosen earlier) is where mic recordings
+    play back during input tests.
+    """
+
+    def _test(idx: int) -> str:
+        if kind == "output":
+            return _confirm_output(sd, idx)
+        return _confirm_input(sd, idx, playback_device)
+
     default_idx = _default_index(sd, kind)
-    if default_idx is not None and confirm(sd, default_idx) == "keep":
+    if default_idx is not None and _test(default_idx) == "keep":
         return default_idx
 
     # The full device list appears ONLY now -- a regular user who confirmed
@@ -472,7 +570,7 @@ def _setup_direction(sd: Any, kind: str, label: str) -> int | None:
         idx = _prompt_index(f"\n{label.capitalize()} -- number to test (blank to skip):  ", devices)
         if idx is None:
             return None
-        if confirm(sd, idx) == "keep":
+        if _test(idx) == "keep":
             return idx
         print("ok, let's try another.")
 
@@ -492,7 +590,9 @@ def guided_setup(sd: Any, config_path: Path | None = None) -> None:
     print("Let's make sure your speaker and microphone work -- takes about a minute.")
 
     chosen_out = _setup_direction(sd, "output", "speaker")
-    chosen_in = _setup_direction(sd, "input", "microphone")
+    # Mic recordings play back through the speaker just confirmed, so the
+    # user hears each mic through the same output while comparing.
+    chosen_in = _setup_direction(sd, "input", "microphone", playback_device=chosen_out)
 
     if chosen_out is None and chosen_in is None:
         print("\nnothing selected -- convobox.yaml unchanged.")

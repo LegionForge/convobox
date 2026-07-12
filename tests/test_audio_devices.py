@@ -10,6 +10,7 @@ import yaml
 
 from scripts.audio_devices import (
     _default_index,
+    _input_choice_from_key,
     _qualified_name,
     _ync_from_key,
     collect_devices,
@@ -227,3 +228,12 @@ def test_ync_from_key_keep_choose_ignore() -> None:
     assert _ync_from_key("c") == "choose"   # test others anyway -> also the chooser
     assert _ync_from_key("x") is None       # unrecognized -> ignore, keep waiting
     assert _ync_from_key("ENTER") is None   # ENTER is not a y/n/c answer
+
+
+def test_input_choice_from_key_adds_replay_and_again() -> None:
+    assert _input_choice_from_key("y") == "keep"
+    assert _input_choice_from_key("n") == "choose"
+    assert _input_choice_from_key("c") == "choose"
+    assert _input_choice_from_key("r") == "replay"      # hear the recording again
+    assert _input_choice_from_key("a") == "again"       # record a fresh sample
+    assert _input_choice_from_key("z") is None          # unrecognized -> ignore
