@@ -35,6 +35,51 @@ def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     return np.interp(dst_x, src_x, audio).astype(np.float32)
 
 
+class _StreamResampler:
+    """Phase-continuous linear resampler for chunked/streaming playback.
+
+    Resampling each chunk in isolation (a fresh 0..1 interpolation per
+    chunk, as a bare _resample() call does) injects a phase discontinuity at
+    every chunk boundary. At an integer ratio (22050->44100 = 2.0x) the
+    seams land on whole samples and are inaudible; at a non-integer ratio
+    (22050->48000 = 2.177x, i.e. any 48 kHz WASAPI device) each seam lands
+    mid-sample and clicks -- dozens of clicks a second, heard as garbled
+    static over otherwise-correct-duration speech (confirmed live: MME clean,
+    WASAPI garbled, from the identical code). This carries the fractional
+    read position and the unconsumed source tail across chunks so the
+    interpolation is continuous, matching a whole-buffer resample to ~0 RMS
+    error. Mono float32 only, which is all TTS playback feeds it.
+    """
+
+    def __init__(self, src_rate: int, dst_rate: int) -> None:
+        self._step = src_rate / dst_rate  # source samples advanced per output sample
+        self._passthrough = src_rate == dst_rate
+        self._buf = np.zeros(0, dtype=np.float32)  # unconsumed source samples
+        self._pos = 0.0  # next output sample's position within _buf (source-sample units)
+
+    def process(self, chunk: np.ndarray) -> np.ndarray:
+        if self._passthrough:
+            return chunk
+        self._buf = np.concatenate([self._buf, np.asarray(chunk, dtype=np.float32)])
+        # Need at least two samples to interpolate between; hold the chunk
+        # back until there's a right-hand neighbour for the last position.
+        if len(self._buf) < 2:
+            return np.zeros(0, dtype=np.float32)
+        last = len(self._buf) - 1
+        n = int(np.floor((last - self._pos) / self._step)) + 1
+        if n <= 0:
+            return np.zeros(0, dtype=np.float32)
+        idx = self._pos + self._step * np.arange(n)
+        out = np.interp(idx, np.arange(len(self._buf)), self._buf).astype(np.float32)
+        # Advance: drop fully-consumed source samples, keep the fractional
+        # remainder (and the anchor sample the next chunk interpolates from).
+        next_pos = self._pos + self._step * n
+        drop = min(int(np.floor(next_pos)), len(self._buf) - 1)
+        self._buf = self._buf[drop:]
+        self._pos = next_pos - drop
+        return out
+
+
 def _device_output_rate(sd: object, device: str | int | None, source_rate: int) -> int:
     """Pick a sample rate the device will actually accept.
 
@@ -154,6 +199,10 @@ class AudioPlayer:
     def _run_stream(self, feed: queue.Queue[np.ndarray | None], sample_rate: int) -> None:
         sd = import_sounddevice()
         device_rate = _device_output_rate(sd, self.device, sample_rate)
+        # Phase-continuous across chunks: resampling each chunk in isolation
+        # clicks at non-integer ratios (e.g. 22050->48000 on WASAPI), which
+        # reads as garbled static. See _StreamResampler.
+        resampler = _StreamResampler(sample_rate, device_rate)
         stream = None
         try:
             while not self._stop.is_set():
@@ -163,10 +212,9 @@ class AudioPlayer:
                     continue
                 if chunk is None:
                     break
-                # Resample per chunk (not per block): chunks are
-                # sentence-sized, so boundary discontinuities are rare and
-                # fall at natural pauses.
-                chunk = _resample(chunk, sample_rate, device_rate)
+                chunk = resampler.process(chunk)
+                if len(chunk) == 0:
+                    continue  # resampler is buffering; nothing to play yet
                 if stream is None:
                     # Opened lazily on the first real chunk: channel count
                     # isn't known until then, and an empty stream (stopped

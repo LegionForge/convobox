@@ -347,7 +347,11 @@ def test_play_stream_with_no_chunks_never_touches_the_device() -> None:
 
 # --- output resampling (device-rate conformance; the WASAPI/DirectSound fix) ---
 
-from convobox.audio.playback import _device_output_rate, _resample  # noqa: E402
+from convobox.audio.playback import (  # noqa: E402
+    _device_output_rate,
+    _resample,
+    _StreamResampler,
+)
 
 
 def _resampling_sd(rate: float) -> SimpleNamespace:
@@ -379,6 +383,43 @@ def test_resample_preserves_a_ramp_monotonically() -> None:
     assert len(out) == round(500 * 48000 / 22050)
     assert out[0] == 0.0
     assert np.all(np.diff(out) >= -1e-6)  # still monotonically non-decreasing
+
+
+def test_stream_resampler_passthrough_when_rates_match() -> None:
+    r = _StreamResampler(48000, 48000)
+    chunk = np.arange(100, dtype=np.float32)
+    assert r.process(chunk) is chunk
+
+
+def test_stream_resampler_matches_whole_buffer_at_noninteger_ratio() -> None:
+    # THE bug: streaming 22050->48000 in many small chunks must match a
+    # single whole-buffer resample. Per-chunk resampling (the old code) fails
+    # this with ~0.02 RMS error -- audible as garbled static on WASAPI.
+    sig = (0.5 * np.sin(2 * np.pi * 200 * np.linspace(0, 1, 22050, endpoint=False))).astype(np.float32)
+    truth = _resample(sig, 22050, 48000)
+    r = _StreamResampler(22050, 48000)
+    streamed = np.concatenate([r.process(sig[i : i + 1200]) for i in range(0, len(sig), 1200)])
+    n = min(len(streamed), len(truth))
+    rms = float(np.sqrt(np.mean((streamed[:n] - truth[:n]) ** 2)))
+    assert rms < 1e-4                      # essentially exact
+    assert abs(len(streamed) - len(truth)) <= 2
+
+
+def test_stream_resampler_matches_whole_buffer_at_integer_ratio() -> None:
+    sig = np.linspace(0.0, 1.0, 4410, dtype=np.float32)
+    truth = _resample(sig, 22050, 44100)
+    r = _StreamResampler(22050, 44100)
+    streamed = np.concatenate([r.process(sig[i : i + 700]) for i in range(0, len(sig), 700)])
+    n = min(len(streamed), len(truth))
+    assert float(np.sqrt(np.mean((streamed[:n] - truth[:n]) ** 2))) < 1e-4
+
+
+def test_stream_resampler_total_length_tracks_duration() -> None:
+    # 0.5s @22050 fed in odd-sized chunks -> ~0.5s @48000
+    r = _StreamResampler(22050, 48000)
+    total = sum(len(r.process(np.ones(min(333, 11025 - i), dtype=np.float32)))
+                for i in range(0, 11025, 333))
+    assert abs(total - round(11025 * 48000 / 22050)) <= 3
 
 
 def test_device_output_rate_uses_device_default() -> None:
