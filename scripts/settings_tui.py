@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import os
 import shlex
+import shutil
 import sys
 import tempfile
 import time
@@ -477,10 +478,21 @@ def validate_config(config: AppConfig) -> ValidationReport:
             except FileNotFoundError as exc:
                 report.errors.append(str(exc))
 
-    if config.backend.name in {"claude-code", "codex"} and not config.backend.command:
-        report.errors.append(
-            f"backend.command is required when backend.name is {config.backend.name!r}"
-        )
+    if config.backend.name in {"claude-code", "codex"}:
+        if not config.backend.command:
+            report.errors.append(
+                f"backend.command is required when backend.name is {config.backend.name!r}"
+            )
+        elif shutil.which(config.backend.command[0]) is None:
+            # Dependency-level check: the backend is a local CLI ConvoBox
+            # spawns, so if its executable isn't on PATH the loop will fail
+            # with a bare FileNotFoundError at first utterance. A warning
+            # (not an error) surfaces it at save time without blocking --
+            # PATH at edit time may legitimately differ from run time.
+            report.warnings.append(
+                f"backend command {config.backend.command[0]!r} was not found on PATH -- "
+                f"is {config.backend.name} installed? it will fail to start until it is"
+            )
     if config.backend.name == "opencode" and not config.backend.url.startswith(("http://", "https://")):
         report.warnings.append(
             "backend.url does not start with http:// or https://; the connection may fail"
@@ -531,6 +543,12 @@ async def probe_backend(config: AppConfig) -> str:
         await asyncio.sleep(0.15)
         probe_error = consumer.exception() if consumer.done() else None
         if probe_error is not None:
+            if isinstance(probe_error, FileNotFoundError):
+                cmd = (config.backend.command or [config.backend.name])[0]
+                raise RuntimeError(
+                    f"backend executable {cmd!r} not found -- is {config.backend.name} "
+                    "installed and on PATH?"
+                ) from probe_error
             raise probe_error
     finally:
         if consumer is not None:
@@ -979,12 +997,17 @@ def _save(state: TuiState) -> None:
         return
     if report.warnings:
         state.status = "warning: " + report.warnings[0]
+    detail = ["This writes a backup first and then atomically replaces the config."]
+    if report.warnings:
+        detail.append("")
+        detail.append("Warnings (save still allowed):")
+        detail.extend(f"  - {warning}" for warning in report.warnings)
+        detail.append("")
+        detail.append("Tip: press [t] to live-test the selected backend/engine first.")
     if not _confirm_modal(
         "Confirm Save",
         f"Save changes to {state.path}?",
-        [
-            "This writes a backup first and then atomically replaces the config.",
-        ],
+        detail,
     ):
         state.status = "save cancelled"
         return
