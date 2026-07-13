@@ -164,6 +164,30 @@ def test_validate_config_reports_missing_voice(tmp_path: Path, monkeypatch: pyte
     assert any("tts.voice is required" in msg for msg in report.errors)
 
 
+def test_validate_config_warns_when_backend_command_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exact surprise from UAT: a schema-valid codex config that can't
+    # actually launch. The dependency check must flag it at save time.
+    monkeypatch.setattr(settings_tui.shutil, "which", lambda cmd: None)
+    config = _make_config(**{"backend.name": "codex", "backend.command": ["codex"]})
+    report = validate_config(config)
+    assert any("not found on PATH" in w and "codex" in w for w in report.warnings)
+
+
+def test_validate_config_no_backend_warning_when_command_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui.shutil, "which", lambda cmd: f"C:/bin/{cmd}.cmd")
+    config = _make_config(**{"backend.name": "claude-code", "backend.command": ["claude"]})
+    report = validate_config(config)
+    assert not any("not found on PATH" in w for w in report.warnings)
+
+
+def test_validate_config_skips_path_check_for_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
+    # opencode is HTTP, not a spawned CLI -- the PATH check must not apply.
+    consulted: list[str] = []
+    monkeypatch.setattr(settings_tui.shutil, "which", lambda cmd: consulted.append(cmd) or None)
+    validate_config(_make_config(**{"backend.name": "opencode"}))
+    assert consulted == []
+
+
 def test_backup_and_save_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "convobox.yaml"
     path.write_text("backend:\n  name: opencode\n", encoding="utf-8")
