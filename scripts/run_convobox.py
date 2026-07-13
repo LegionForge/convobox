@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -446,6 +447,7 @@ async def run(args: argparse.Namespace) -> None:
         await _drain_until_idle(adapter, timeout_s=args.timeout)
         player.wait()
         await orchestrator.stop_event_loop()
+        await adapter.aclose()
         return
 
     # Imported lazily so --text mode works on hosts without PortAudio.
@@ -591,86 +593,98 @@ async def run(args: argparse.Namespace) -> None:
     # Heartbeat so a silently-busy backend (thinking, or grinding on a long
     # tool call) reads as "working", not "hung" -- the exact confusion a
     # philosophy.md write caused in live UAT.
-    asyncio.create_task(_working_watchdog(adapter, player, WorkingIndicator()))
+    watchdog_task = asyncio.create_task(_working_watchdog(adapter, player, WorkingIndicator()))
 
-    with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
-        mic_holder["mic"] = mic  # lets the AEC delay estimator read input latency
-        async for utterance in segmenter.segment(_mic_chunks(mic)):
-            result = transcriber.transcribe(utterance)
-            text = result.text
-            is_hard_stop = safeword.check(text) is not None
-            barged_in, barge_in_pending = barge_in_pending, False
+    try:
+        with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
+            mic_holder["mic"] = mic  # lets the AEC delay estimator read input latency
+            async for utterance in segmenter.segment(_mic_chunks(mic)):
+                result = transcriber.transcribe(utterance)
+                text = result.text
+                is_hard_stop = safeword.check(text) is not None
+                barged_in, barge_in_pending = barge_in_pending, False
 
-            # Safeword is checked on the raw transcript BEFORE any quality
-            # gate or half-duplex drop: a hard stop must never be swallowed.
-            if not is_hard_stop:
-                # A barge-in utterance overlapped playback BY DEFINITION --
-                # that's the user exercising their right to interrupt, not
-                # echo -- so the overlap gate steps aside for it. The
-                # spoken-text echo check below still applies: if what
-                # "interrupted" us matches our own words, it was self-echo
-                # that tripped the barge-in (AEC not converged / headphones
-                # assumption violated) and must not be forwarded.
-                if not barged_in and (
-                    player.is_playing()
-                    or utterance_overlapped_playback(
-                        now=time.monotonic(),
-                        duration_s=result.duration_s,
-                        stt_latency_ms=result.latency_ms,
-                        min_silence_ms=config.vad.min_silence_ms,
-                        playback_ended_at=player.playback_ended_at,
-                    )
-                ):
-                    # Reports the REAL canceller state, not a hardcoded
-                    # "no echo cancellation" -- UAT needs to know whether
-                    # AEC was actually in the path when an echo leaked.
-                    aec_state = "echo-cancellation active" if canceller is not None else "no echo cancellation"
-                    log.info(
-                        "dropped (overlap gate, %s): %r", aec_state, text
-                    )
-                    continue
-                if echo_filter.is_echo(text):
-                    if barged_in:
-                        log.warning(
-                            "dropped (spoken-echo filter, barge-in was our own echo): %r", text
+                # Safeword is checked on the raw transcript BEFORE any quality
+                # gate or half-duplex drop: a hard stop must never be swallowed.
+                if not is_hard_stop:
+                    # A barge-in utterance overlapped playback BY DEFINITION --
+                    # that's the user exercising their right to interrupt, not
+                    # echo -- so the overlap gate steps aside for it. The
+                    # spoken-text echo check below still applies: if what
+                    # "interrupted" us matches our own words, it was self-echo
+                    # that tripped the barge-in (AEC not converged / headphones
+                    # assumption violated) and must not be forwarded.
+                    if not barged_in and (
+                        player.is_playing()
+                        or utterance_overlapped_playback(
+                            now=time.monotonic(),
+                            duration_s=result.duration_s,
+                            stt_latency_ms=result.latency_ms,
+                            min_silence_ms=config.vad.min_silence_ms,
+                            playback_ended_at=player.playback_ended_at,
                         )
-                    else:
-                        log.info("dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r", text)
-                    continue
-                if result.language_probability < config.stt.min_language_probability:
-                    log.info(
-                        "dropped low-confidence transcript=%r lang=%s (%.2f < %.2f)",
-                        text, result.language,
-                        result.language_probability, config.stt.min_language_probability,
-                    )
-                    continue
+                    ):
+                        # Reports the REAL canceller state, not a hardcoded
+                        # "no echo cancellation" -- UAT needs to know whether
+                        # AEC was actually in the path when an echo leaked.
+                        aec_state = "echo-cancellation active" if canceller is not None else "no echo cancellation"
+                        log.info(
+                            "dropped (overlap gate, %s): %r", aec_state, text
+                        )
+                        continue
+                    if echo_filter.is_echo(text):
+                        if barged_in:
+                            log.warning(
+                                "dropped (spoken-echo filter, barge-in was our own echo): %r", text
+                            )
+                        else:
+                            log.info("dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r", text)
+                        continue
+                    if result.language_probability < config.stt.min_language_probability:
+                        log.info(
+                            "dropped low-confidence transcript=%r lang=%s (%.2f < %.2f)",
+                            text, result.language,
+                            result.language_probability, config.stt.min_language_probability,
+                        )
+                        continue
 
-            log.info(
-                "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s%s",
-                text, result.language, result.language_probability,
-                math.exp(result.avg_logprob), adapter.is_busy(),
-                "  [HARD STOP]" if is_hard_stop else "",
-                "  [BARGE-IN]" if barged_in and not is_hard_stop else "",
-            )
-            if barged_in and not is_hard_stop:
-                # The backend believes its whole response was delivered; it
-                # wasn't. The marker is our version of realtime APIs'
-                # history truncation (docs: "the truncation problem").
-                text = BARGE_IN_MARKER + text
-            try:
-                await orchestrator.handle_transcript(text)
-            except Exception as exc:  # noqa: BLE001
-                # A single utterance failing to reach the backend (timeout,
-                # dropped connection, HTTP error) must NOT kill the whole
-                # voice session -- log it and keep listening so the user can
-                # just say it again. Observed live: an interject to a busy
-                # opencode timed out and the unhandled httpx.ReadTimeout
-                # crashed the app mid-conversation.
-                log.error(
-                    "couldn't deliver to the backend (%s: %s) -- still "
-                    "listening, say it again to retry",
-                    type(exc).__name__, exc,
+                log.info(
+                    "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s%s",
+                    text, result.language, result.language_probability,
+                    math.exp(result.avg_logprob), adapter.is_busy(),
+                    "  [HARD STOP]" if is_hard_stop else "",
+                    "  [BARGE-IN]" if barged_in and not is_hard_stop else "",
                 )
+                if barged_in and not is_hard_stop:
+                    # The backend believes its whole response was delivered; it
+                    # wasn't. The marker is our version of realtime APIs'
+                    # history truncation (docs: "the truncation problem").
+                    text = BARGE_IN_MARKER + text
+                try:
+                    await orchestrator.handle_transcript(text)
+                except Exception as exc:  # noqa: BLE001
+                    # A single utterance failing to reach the backend (timeout,
+                    # dropped connection, HTTP error) must NOT kill the whole
+                    # voice session -- log it and keep listening so the user can
+                    # just say it again. Observed live: an interject to a busy
+                    # opencode timed out and the unhandled httpx.ReadTimeout
+                    # crashed the app mid-conversation.
+                    log.error(
+                        "couldn't deliver to the backend (%s: %s) -- still "
+                        "listening, say it again to retry",
+                        type(exc).__name__, exc,
+                    )
+    finally:
+        # Close the backend transport (subprocess pipes / HTTP client)
+        # while the loop is still alive, so shutdown is quiet instead of
+        # spraying 'Event loop is closed' tracebacks. Runs on Ctrl+C too
+        # (KeyboardInterrupt cancels this task, triggering the finally).
+        watchdog_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog_task
+        await orchestrator.stop_event_loop()
+        await adapter.aclose()
+        instance_lock.close()
 
 
 async def _drain_until_idle(adapter, timeout_s: float) -> None:  # type: ignore[no-untyped-def]

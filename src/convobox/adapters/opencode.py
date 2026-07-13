@@ -80,6 +80,9 @@ class OpenCodeAdapter(BackendAdapter):
     def __init__(self, url: str, client: httpx.AsyncClient | None = None) -> None:
         self._base_url = url.rstrip("/")
         self._client = client if client is not None else httpx.AsyncClient(base_url=self._base_url)
+        # Only close a client we created; an injected one (tests) is the
+        # caller's to manage.
+        self._owns_client = client is None
         self._session_id: str | None = None
         self._session_lock = asyncio.Lock()
         self._busy = False
@@ -164,6 +167,14 @@ class OpenCodeAdapter(BackendAdapter):
 
     def is_busy(self) -> bool:
         return self._busy
+
+    async def aclose(self) -> None:
+        # Close the SSE stream and (if we own it) the HTTP client while the
+        # loop is alive, so httpx's connections don't get finalized after
+        # the loop closes. Idempotent; safe even if events() never ran.
+        await self._close_sse()
+        if self._owns_client:
+            await self._client.aclose()
 
     async def wait_listening(self, timeout: float = 2.0) -> None:
         """Best-effort wait until the SSE subscription is being dispatched.

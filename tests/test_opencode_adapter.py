@@ -277,6 +277,10 @@ class _RecordingClient:
 
     def __init__(self) -> None:
         self.prompt_timeout: object = "unset"
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     async def post(self, path: str, json: object = None, timeout: object = None) -> object:
         if path.endswith("/prompt"):
@@ -290,6 +294,24 @@ class _RecordingClient:
                 return {"data": {"id": _SESSION_ID}}
 
         return _Resp()
+
+
+@pytest.mark.asyncio
+async def test_aclose_does_not_close_an_injected_client() -> None:
+    # An injected client (tests, or a shared client) is the caller's to
+    # manage -- aclose must NOT close it, only a client the adapter created.
+    client = _RecordingClient()
+    adapter = OpenCodeAdapter("http://localhost:4096", client=client)  # type: ignore[arg-type]
+    await adapter.aclose()
+    assert client.closed is False
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_a_client_the_adapter_owns() -> None:
+    adapter = OpenCodeAdapter("http://localhost:4096")  # constructs its own client
+    assert adapter._owns_client is True
+    await adapter.aclose()  # closes the owned httpx client; must not raise
+    assert adapter._client.is_closed
 
 
 @pytest.mark.asyncio

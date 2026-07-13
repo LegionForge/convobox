@@ -33,6 +33,7 @@ instead of after shipping a wrong adapter. Key empirical findings:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
@@ -183,6 +184,32 @@ class ClaudeCodeAdapter(BackendAdapter):
 
     def is_busy(self) -> bool:
         return self._pending > 0
+
+    async def aclose(self) -> None:
+        # Terminate the claude subprocess and await it here, while the loop
+        # is alive, so its stdin/stdout/stderr pipe transports are closed
+        # cleanly. Without this the transports are GC'd after the loop
+        # closes and Windows asyncio prints "Event loop is closed" /
+        # "unclosed transport" tracebacks on every exit. Idempotent.
+        proc, self._proc = self._proc, None
+        task, self._stderr_task = self._stderr_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError, OSError):
+            if proc.stdin is not None:
+                proc.stdin.close()  # EOF lets claude exit gracefully
+            proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
 
     async def events(self) -> AsyncGenerator[BackendEvent, None]:
         proc = await self._ensure_proc()
