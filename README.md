@@ -549,6 +549,14 @@ reworking a test suite that deliberately asserts today's open/close-per-call
 contract. Revisit once real latency numbers from the now-wired
 orchestrator→TTS path are available to justify the rework.
 
+## Credits & attributions
+
+ConvoBox is built on other people's code, models, and research. See
+[CREDITS.md](CREDITS.md) for acknowledgments — the software and models it
+depends on, the conversation-design research behind its turn-taking/barge-in
+behavior ([docs/CONVERSATION-DESIGN-REFERENCES.md](docs/CONVERSATION-DESIGN-REFERENCES.md)),
+and the voice-assistant interaction patterns it deliberately mirrors.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Free for everyone, personal and commercial

@@ -1,0 +1,177 @@
+# Design: configurable barge-in & interrupt handling
+
+> **Version target: 0.3.0.** This is *new user-facing functionality* — a
+> configurable interrupt system with new config surface — so by our
+> numbering rule it's a MINOR bump (0.3.0), not a 0.2.x patch. (0.2.x is
+> reserved for fixes to 0.2.0, e.g. the WASAPI octave bug in
+> [KNOWN-ISSUES.md](KNOWN-ISSUES.md).)
+
+## Goal
+
+Make interrupting ConvoBox feel like interrupting the voice assistants users
+already know — and let them configure it to their own preference. We do
+**not** invent a new interaction model; we expose the ones people already
+have muscle memory for (Alexa, Google, ChatGPT voice) and let them pick.
+
+Grounded in published turn-taking / backchannel research —
+see [CONVERSATION-DESIGN-REFERENCES.md](CONVERSATION-DESIGN-REFERENCES.md).
+
+## The core idea: expose axes, name the common cells
+
+Every "interrupt pattern" a user might want is a combination of two
+independent choices. We expose the two axes for power users and name the
+useful cells as **presets** for everyone else.
+
+- **Axis 1 — what happens to the assistant's *current turn*?**
+  `let-finish` (audio + backend continue) · `mute` (stop audio, backend keeps
+  working) · `abort` (stop audio *and* cancel backend work)
+- **Axis 2 — what happens to the user's *new words*?**
+  `drop` · `queue` (deliver when the turn ends) · `now` (deliver immediately —
+  *steer* if still working, *fresh command* if aborted)
+
+|  current turn ↓ / new words → | **drop** | **queue** | **now** |
+|---|---|---|---|
+| **let-finish** | do-not-disturb | patient | soft-steer |
+| **mute audio** | *(odd)* | mute-then-queue | ★ **conversational** |
+| **abort all** | halt | *(rare)* | take-over |
+
+"More patterns than four" isn't an enumeration problem — the grid generates
+them. Users sculpt behavior by setting the two axes; presets are just named
+cells.
+
+## Presets (the control surface)
+
+| Preset | Cell (turn × words) | Feels like | Best for |
+|--------|--------------------|-----------|----------|
+| **`conversational`** ★ | mute × now (steer) | "stop talking over me, take my input, keep working" | default — natural without destroying work in flight |
+| **`patient`** | let-finish × queue | it finishes, then does your thing | users who dislike interrupting |
+| **`do-not-disturb`** | let-finish × drop | ignores you until done (safeword still stops) | focus / long tasks |
+| **`halt`** | abort × drop | stop everything, await a fresh command | "just stop" |
+| **`take-over`** | abort × now | stop everything and do the new thing now | the consumer-assistant reflex |
+
+## Trigger axis (orthogonal): how is an interrupt *initiated*?
+
+Separate from *what* the interrupt does is *what counts as* an interrupt:
+
+- **`speech` (open / VAD-gated)** — any sustained user speech interrupts.
+  The ChatGPT-voice / Gemini-Live model. Natural; needs AEC or headphones.
+- **`push-word` (wake-word-gated)** — only a specific word interrupts. The
+  Alexa / Google-Home model. Robust in noise / on speakers.
+- **Safeword = always-on hard-abort.** In *every* preset and trigger, the
+  safeword ("stop stop stop") is a guaranteed hard stop, honored
+  mid-playback regardless of AEC. This is the non-negotiable safety floor.
+
+## Wake word = the push-word trigger
+
+A wake word *is* the `push-word` trigger, and for ConvoBox it's nearly free:
+because we already run Whisper on every utterance, detecting a user-chosen
+wake word is just a transcript match — the exact mechanism `SafewordDetector`
+already uses. So it's a third instance of one proven pattern:
+
+- `SafewordDetector` — hard-stop (shipped)
+- `ConfirmwordDetector` — approval gate (shipped, 0.2.0)
+- **`WakewordDetector`** — attention / interrupt (new): same normalized
+  transcript match, same construction-time validation of the user's choice.
+
+**User-selectable, validated at setup.** Ship a strong built-in default
+*and* an advanced "choose your own." Validate the pick the way
+`ConfirmwordDetector` validates approval words: it should be **distinctive &
+multisyllabic** (rarely false-fires in normal speech) and **Whisper-safe**
+(test-transcribe a few times at setup — remember "break break break" →
+"Frank Frank"; warn if it keeps getting mangled). Naming the assistant
+("Hey Athena") is welcome personalization.
+
+A *dedicated* wake-word engine (openWakeWord etc.) is only needed for a
+future low-power "asleep until called" idle mode — **deferred**; transcript
+matching covers interrupt-while-active.
+
+## Backchannel filtering (research-grounded, load-bearing)
+
+"mm-hmm / uh-huh / yeah / right / oh" are **continuers** — they signal "keep
+going," the opposite of a bid for the floor (Schegloff 1982; Ward &
+Tsukahara 2000). A `speech`-triggered barge-in **must not** fire on them, or
+it will feel broken. Rule: a **short, affirmation-class token** does not
+count as an interrupt. (Bonus later: the assistant *producing* backchannels
+is a large naturalness win.)
+
+## The coding-agent nuance (why the default isn't `take-over`)
+
+The consumer reflex is `take-over` — stop everything and respond to me. But a
+person interrupting Siri costs nothing, whereas aborting an agent that's
+three tool-calls into a refactor can corrupt state. So ConvoBox's **default
+is `conversational` (mute + steer)** — it *feels* like take-over (the
+assistant shuts up and takes your input) without hard-aborting work in
+flight. True `abort` is opt-in (`halt`/`take-over` presets), and the
+safeword is always the explicit hard stop. This is the README's
+"voice-aware risk policy" made concrete.
+
+## Default-by-safety
+
+Out of the box, pick the trigger by whether the setup can support open
+barge-in safely:
+
+- **Headphones or AEC on** → `speech` trigger (natural barge-in).
+- **Bare speakers without AEC** → auto-fall back to `push-word`, so a bad
+  acoustic setup never surprises the user with dropped audio.
+
+Controlled by `only_when_safe: true`.
+
+## Latency target (acceptance criteria)
+
+Human turn-transitions cluster around **~200 ms** (Stivers et al. 2009). So:
+
+- **Interrupt-stop latency** (user speech onset → audio actually stops) and
+  **response-start latency** target **~200 ms**, sub-second as the ceiling.
+- Instrument both as tracked metrics (same template as the AEC telemetry),
+  so "feels fast" becomes a number we can regress against.
+
+## Config schema
+
+```yaml
+interaction:
+  interrupt:
+    mode: conversational      # conversational | patient | do-not-disturb | halt | take-over
+    # advanced — a preset just fills these in; override to sculpt any cell:
+    on_current_turn: mute     # let-finish | mute | abort
+    on_new_words:    now      # drop | queue | now
+    trigger:         speech   # speech | push-word
+    wake_word:       ""       # push-word trigger; validated at setup
+    sensitivity_ms:  250      # sustained speech before it counts (backchannels excluded)
+    only_when_safe:  true     # auto-fall back to push-word on speakers w/o AEC
+  # safeword hard-stop is always on, in every mode (see safeword config)
+```
+
+## Maps onto primitives we already have
+
+Mostly orchestration wiring, not new backend work:
+
+- `queue`, `steer` (interject), `hard_stop` are the three backend verbs
+  already implemented per adapter → Axis 2 (`queue`/`now`/abort) picks which.
+- `mute` = stop the `AudioPlayer`; Axis 1 picks whether audio mutes and
+  whether the backend turn is aborted.
+- `BargeInMonitor` already is the sustained-speech state machine → extend it
+  with backchannel exclusion and the trigger/axis wiring.
+- `BARGE_IN_MARKER` already handles the truncation problem (annotate history
+  since we can't edit the backend's).
+
+## Phasing
+
+**In 0.3.0:** the two-axis model + presets; the `speech`/`push-word` triggers
+(wake word via transcript match + `WakewordDetector`); backchannel filtering;
+default-by-safety; interrupt-stop / response-start latency instrumentation.
+
+**Deferred (post-0.3.0):** Voice Activity Projection for predictive
+endpointing (beyond silence-timer VAD); a low-power idle wake-word *engine*;
+TRP-aware graceful yielding; speaker verification / voice enrollment (so the
+TV can't trip the wake word); `duck` mode; full-duplex generative direction.
+
+## Open questions (validate in UAT)
+
+- Confirm `conversational` as the shipped default (vs. `take-over` for the
+  consumer reflex).
+- The backchannel token set — start with English affirmations; per-language
+  later.
+- Wake-word validation UX — how many test-transcriptions, what threshold to
+  warn.
+- Per-backend behavior of `BARGE_IN_MARKER` (opencode, then Claude Code /
+  Codex) — this is where the barge-in and backend-validation cycles overlap.
