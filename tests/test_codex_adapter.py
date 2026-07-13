@@ -319,4 +319,17 @@ def test_create_backend_adapter_codex() -> None:
 def test_create_backend_adapter_codex_defaults() -> None:
     adapter = create_backend_adapter(BackendConfig(name="codex"))
     assert isinstance(adapter, CodexAdapter)
-    assert adapter._command == ["codex"]
+    if sys.platform == "win32":
+        assert adapter._command[0].endswith("codex.cmd")
+    else:
+        assert adapter._command == ["codex"]
+
+
+def test_codex_adapter_resolves_windows_cmd_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"C:/bin/{name}" if name == "codex.cmd" else None)
+
+    adapter = CodexAdapter(["codex"])
+    assert adapter._command == ["C:/bin/codex.cmd"]

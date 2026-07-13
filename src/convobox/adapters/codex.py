@@ -43,6 +43,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import shutil
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
@@ -72,9 +74,23 @@ _APPROVAL_METHODS = frozenset(
 _EOF = object()
 
 
+def _resolve_command(command: Sequence[str] | None) -> list[str]:
+    resolved = list(command) if command else ["codex"]
+    if os.name != "nt" or not resolved:
+        return resolved
+    head = resolved[0]
+    if head.lower() != "codex":
+        return resolved
+    for candidate in ("codex.cmd", "codex.exe", "codex"):
+        path = shutil.which(candidate)
+        if path:
+            return [path, *resolved[1:]]
+    return resolved
+
+
 class CodexAdapter(BackendAdapter):
     def __init__(self, command: Sequence[str] | None = None) -> None:
-        self._command = list(command) if command else ["codex"]
+        self._command = _resolve_command(command)
         self._proc: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()  # guards spawn + handshake (see _ensure_thread)
         self._reader_task: asyncio.Task[None] | None = None
