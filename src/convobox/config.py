@@ -96,6 +96,13 @@ class BackendConfig(BaseModel):
     command: list[str] | None = None
 
 
+class BackendProfileConfig(BaseModel):
+    # Per-backend memory for the settings TUI. `url` matters for opencode;
+    # `command` matters for claude-code and codex.
+    url: str | None = None
+    command: list[str] | None = None
+
+
 class AppConfig(BaseModel):
     audio: AudioConfig = Field(default_factory=AudioConfig)
     vad: VADConfig = Field(default_factory=VADConfig)
@@ -103,6 +110,7 @@ class AppConfig(BaseModel):
     tts: TTSConfig = Field(default_factory=TTSConfig)
     safeword: SafewordConfig = Field(default_factory=SafewordConfig)
     backend: BackendConfig = Field(default_factory=BackendConfig)
+    backend_profiles: dict[str, BackendProfileConfig] = Field(default_factory=dict)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)
 
 

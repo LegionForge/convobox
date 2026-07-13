@@ -1,0 +1,1102 @@
+"""Interactive settings TUI for editing and validating convobox.yaml.
+
+The first cut is deliberately conservative:
+
+- one config profile only
+- staged edits in memory until explicit save
+- backup + atomic replace on save
+- validation before save
+- section-level test hooks for TTS/STT/backend
+
+It is stdlib-only plus the repo's own runtime modules, so it can run in the
+same environments as the rest of ConvoBox.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import os
+import shlex
+import sys
+import tempfile
+import time
+import textwrap
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+import numpy as np
+import yaml
+from pydantic import ValidationError
+
+# Inserted (not relied on as a package import) so this file works identically
+# run directly (`python scripts/settings_tui.py`) and imported as
+# scripts.settings_tui (e.g. from a pytest test).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from _console import use_utf8_console  # type: ignore[import-not-found]
+
+from convobox.adapters import create_backend_adapter
+from convobox.config import (
+    AppConfig,
+    BackendProfileConfig,
+    load_config,
+)
+from convobox.stt.factory import create_stt_engine
+from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
+
+_RESET = "\x1b[0m"
+_REVERSE = "\x1b[7m"
+_BOLD = "\x1b[1m"
+_RED = "\x1b[31m"
+_YELLOW = "\x1b[33m"
+_CYAN = "\x1b[36m"
+
+_CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
+_CHOICE_TTS_ENGINES = ("piper",)
+_CHOICE_STT_ENGINES = ("faster-whisper",)
+_CHOICE_INTERRUPT_MODES = ("none", "stop_audio", "abort_turn")
+_BACKEND_PROFILE_DEFAULTS: dict[str, BackendProfileConfig] = {
+    "opencode": BackendProfileConfig(url="http://localhost:4096"),
+    "claude-code": BackendProfileConfig(url="http://localhost:4096", command=["claude"]),
+    "codex": BackendProfileConfig(url="http://localhost:4096", command=["codex"]),
+}
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    section: str
+    key: str
+    label: str
+    kind: Literal[
+        "str",
+        "optional_str",
+        "int",
+        "optional_float",
+        "float",
+        "bool",
+        "choice",
+        "list_str",
+        "command",
+    ]
+    choices: tuple[str, ...] = ()
+    help_text: str = ""
+
+
+@dataclass(frozen=True)
+class SectionSpec:
+    key: str
+    label: str
+    fields: tuple[FieldSpec, ...]
+
+
+@dataclass
+class ValidationReport:
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def ok(self) -> bool:
+        return not self.errors
+
+
+@dataclass
+class TuiState:
+    path: Path
+    original: AppConfig
+    working: AppConfig
+    selected_section: int = 0
+    selected_field: int = 0
+    dirty: bool = False
+    status: str = "BIOS style: Left/Right tabs, Up/Down fields, Enter edit"
+    last_report: ValidationReport | None = None
+
+    @property
+    def sections(self) -> tuple[SectionSpec, ...]:
+        return SECTION_SPECS
+
+    def current_section(self) -> SectionSpec:
+        return self.sections[self.selected_section]
+
+    def current_fields(self) -> tuple[FieldSpec, ...]:
+        return _visible_fields_for_section(self.working, self.current_section())
+
+    def current_field(self) -> FieldSpec | None:
+        fields = self.current_fields()
+        if not fields:
+            return None
+        self.selected_field = max(0, min(self.selected_field, len(fields) - 1))
+        return fields[self.selected_field]
+
+    def move_section(self, delta: int) -> None:
+        self.selected_section = max(0, min(self.selected_section + delta, len(self.sections) - 1))
+        self.selected_field = min(self.selected_field, max(0, len(self.current_fields()) - 1))
+
+    def move_field(self, delta: int) -> None:
+        fields = self.current_fields()
+        if not fields:
+            return
+        self.selected_field = max(0, min(self.selected_field + delta, len(fields) - 1))
+
+
+SECTION_SPECS: tuple[SectionSpec, ...] = (
+    SectionSpec(
+        key="audio",
+        label="Audio",
+        fields=(
+            FieldSpec("audio", "input_device", "Input device", "optional_str", help_text="Optional capture device name or index; leave unset to use the system default."),
+            FieldSpec("audio", "output_device", "Output device", "optional_str", help_text="Optional playback device name or index; use the full host-API-qualified name when pinning a Windows device."),
+            FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
+            FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
+            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "int", help_text="Estimated render-to-capture delay in milliseconds. Leave this near the default unless live testing suggests a better value."),
+        ),
+    ),
+    SectionSpec(
+        key="stt",
+        label="STT",
+        fields=(
+            FieldSpec("stt", "engine", "Engine", "choice", _CHOICE_STT_ENGINES, help_text="Speech-to-text backend. Only faster-whisper is implemented right now."),
+            FieldSpec("stt", "model", "Model", "str", help_text="Whisper model name, such as base or small."),
+            FieldSpec("stt", "device", "Device", "str", help_text="Inference device. cpu is the safe default; cuda is for supported GPUs."),
+            FieldSpec("stt", "compute_type", "Compute type", "str", help_text="Whisper compute precision, such as int8 on CPU or float16 on GPU."),
+            FieldSpec("stt", "language", "Language", "optional_str", help_text="Pin a language code like en, or leave unset for auto-detect."),
+            FieldSpec("stt", "min_language_probability", "Min language probability", "float", help_text="Drop auto-detected transcripts below this confidence threshold."),
+        ),
+    ),
+    SectionSpec(
+        key="tts",
+        label="TTS",
+        fields=(
+            FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. Piper is the first supported local engine."),
+            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="Installed Piper voice key, such as en_US-lessac-medium."),
+            FieldSpec("tts", "rate", "Rate", "float", help_text="Speech speed multiplier. 1.0 is normal."),
+            FieldSpec("tts", "volume", "Volume", "float", help_text="Speech loudness multiplier. 1.0 is normal."),
+        ),
+    ),
+    SectionSpec(
+        key="backend",
+        label="Backend",
+        fields=(
+            FieldSpec("backend", "name", "Name", "choice", _CHOICE_BACKENDS, help_text="Which coding agent ConvoBox should drive."),
+            FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
+            FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
+        ),
+    ),
+    SectionSpec(
+        key="interaction",
+        label="Interaction",
+        fields=(
+            FieldSpec("interaction", "interrupt_mode", "Interrupt mode", "choice", _CHOICE_INTERRUPT_MODES, help_text="none drops overlap, stop_audio stops playback, abort_turn also interrupts the backend."),
+            FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
+        ),
+    ),
+    SectionSpec(
+        key="safeword",
+        label="Safeword",
+        fields=(FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str", help_text="Comma-separated phrases that immediately hard-stop the current turn."),),
+    ),
+    SectionSpec(
+        key="vad",
+        label="VAD",
+        fields=(
+            FieldSpec("vad", "threshold", "Threshold", "float", help_text="Silero VAD speech-probability threshold."),
+            FieldSpec("vad", "min_silence_ms", "Min silence ms", "int", help_text="Trailing silence needed to end an utterance."),
+            FieldSpec("vad", "min_speech_ms", "Min speech ms", "int", help_text="Minimum speech burst to keep as a real utterance."),
+            FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
+        ),
+    ),
+)
+
+
+def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tuple[FieldSpec, ...]:
+    if section.key != "backend":
+        return section.fields
+    backend_name = config.backend.name
+    if backend_name == "opencode":
+        return tuple(field for field in section.fields if field.key in {"name", "url"})
+    if backend_name in {"claude-code", "codex"}:
+        return tuple(field for field in section.fields if field.key in {"name", "command"})
+    return section.fields
+
+
+def fit(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(text) > width:
+        return text[: width - 3] + "..." if width > 3 else text[:width]
+    return text.ljust(width)
+
+
+def viewport_start(selected: int, total: int, height: int, current_start: int) -> int:
+    if total <= height:
+        return 0
+    start = current_start
+    if selected < start:
+        start = selected
+    elif selected >= start + height:
+        start = selected - height + 1
+    return max(0, min(start, total - height))
+
+
+def default_config_path() -> Path:
+    return Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+
+
+def _section_model(config: AppConfig, section: str) -> Any:
+    return getattr(config, section)
+
+
+def _get_value(config: AppConfig, spec: FieldSpec) -> Any:
+    return getattr(_section_model(config, spec.section), spec.key)
+
+
+def _set_value(config: AppConfig, spec: FieldSpec, value: Any) -> None:
+    setattr(_section_model(config, spec.section), spec.key, value)
+
+
+def _backend_profile_defaults(name: str) -> BackendProfileConfig:
+    profile = _BACKEND_PROFILE_DEFAULTS.get(name)
+    if profile is None:
+        return BackendProfileConfig()
+    return profile.model_copy(deep=True)
+
+
+def _backend_profile_value(config: AppConfig, name: str) -> BackendProfileConfig:
+    profile = config.backend_profiles.get(name)
+    if profile is not None:
+        return profile.model_copy(deep=True)
+    return _backend_profile_defaults(name)
+
+
+def _set_backend_profile(config: AppConfig, name: str, profile: BackendProfileConfig) -> None:
+    config.backend_profiles[name] = profile.model_copy(deep=True)
+
+
+def _backend_profile_from_active(config: AppConfig, name: str) -> BackendProfileConfig:
+    if name == "opencode":
+        return BackendProfileConfig(url=config.backend.url)
+    if name in {"claude-code", "codex"}:
+        return BackendProfileConfig(
+            url=config.backend.url,
+            command=list(config.backend.command) if config.backend.command is not None else None,
+        )
+    return BackendProfileConfig(
+        url=config.backend.url,
+        command=list(config.backend.command) if config.backend.command is not None else None,
+    )
+
+
+def _apply_backend_profile(config: AppConfig, name: str) -> None:
+    profile = _backend_profile_value(config, name)
+    defaults = _backend_profile_defaults(name)
+    config.backend.name = name
+    resolved_url = profile.url if profile.url is not None else defaults.url
+    if resolved_url is not None:
+        config.backend.url = resolved_url
+    if name == "opencode":
+        config.backend.command = None
+    elif profile.command is not None:
+        config.backend.command = list(profile.command)
+    else:
+        config.backend.command = list(defaults.command) if defaults.command is not None else None
+
+
+def _switch_backend(config: AppConfig, new_name: str) -> None:
+    current_name = config.backend.name
+    if new_name == current_name:
+        return
+    _set_backend_profile(config, current_name, _backend_profile_from_active(config, current_name))
+    _apply_backend_profile(config, new_name)
+
+
+def _format_value(value: Any) -> str:
+    if value is None:
+        return "(unset)"
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value) if value else "(empty)"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _parse_value(spec: FieldSpec, raw: str, current: Any) -> Any:
+    text = raw.strip()
+    if spec.kind == "bool":
+        if not text:
+            return current
+        lowered = text.lower()
+        if lowered in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "f", "no", "n", "off"}:
+            return False
+        raise ValueError("enter yes/no, true/false, or 1/0")
+    if spec.kind == "choice":
+        if not text:
+            return current
+        for choice in spec.choices:
+            if text.lower() == choice.lower():
+                return choice
+        raise ValueError(f"choose one of: {', '.join(spec.choices)}")
+    if spec.kind == "int":
+        if not text:
+            return current
+        return int(text)
+    if spec.kind == "float":
+        if not text:
+            return current
+        return float(text)
+    if spec.kind == "optional_float":
+        if text == "-":
+            return None
+        if not text:
+            return current
+        return float(text)
+    if spec.kind == "command":
+        if text == "-":
+            return None
+        if not text:
+            return current
+        return shlex.split(text)
+    if spec.kind == "list_str":
+        if text == "-":
+            return []
+        if not text:
+            return current
+        return [item.strip() for item in text.split(",") if item.strip()]
+    if spec.kind == "optional_str":
+        if text == "-":
+            return None
+        if not text:
+            return current
+        return text
+    if not text:
+        return current
+    return text
+
+
+def _choice_index(spec: FieldSpec, current: Any) -> int:
+    if not spec.choices:
+        return -1
+    try:
+        return spec.choices.index(current)
+    except ValueError:
+        text = str(current).lower()
+        for index, choice in enumerate(spec.choices):
+            if choice.lower() == text:
+                return index
+    return -1
+
+
+def _cycle_choice(spec: FieldSpec, current: Any, delta: int) -> str:
+    if not spec.choices:
+        raise ValueError("no choices configured")
+    idx = _choice_index(spec, current)
+    return spec.choices[(idx + delta) % len(spec.choices)]
+
+
+def _read_leading_header(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    leading: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#") or not line.strip():
+            leading.append(line)
+        else:
+            break
+    return leading
+
+
+def _dump_config(config: AppConfig) -> str:
+    return yaml.safe_dump(config.model_dump(mode="python"), sort_keys=False)
+
+
+def backup_config(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.backup-{stamp}")
+    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    return backup
+
+
+def write_config(path: Path, config: AppConfig) -> None:
+    header = _read_leading_header(path)
+    body = _dump_config(config)
+    content = ("\n".join(header) + "\n") if header else ""
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", delete=False, dir=str(path.parent), prefix=f".{path.name}."
+    ) as tmp:
+        tmp.write(content + body)
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
+
+
+def save_with_backup(path: Path, config: AppConfig) -> Path | None:
+    backup = backup_config(path)
+    try:
+        write_config(path, config)
+    except Exception:
+        if backup is not None and backup.exists():
+            with contextlib.suppress(Exception):
+                os.replace(backup, path)
+        raise
+    return backup
+
+
+def validate_config(config: AppConfig) -> ValidationReport:
+    report = ValidationReport()
+    try:
+        AppConfig.model_validate(config.model_dump(mode="python"))
+    except ValidationError as exc:
+        report.errors.append(str(exc))
+        return report
+
+    if config.backend.name not in _CHOICE_BACKENDS:
+        report.errors.append(
+            f"backend.name {config.backend.name!r} is not supported here "
+            f"(implemented: {', '.join(_CHOICE_BACKENDS)})"
+        )
+    if config.stt.engine not in _CHOICE_STT_ENGINES:
+        report.errors.append(
+            f"stt.engine {config.stt.engine!r} is not supported here "
+            f"(implemented: {', '.join(_CHOICE_STT_ENGINES)})"
+        )
+    if config.tts.engine not in _CHOICE_TTS_ENGINES:
+        report.errors.append(
+            f"tts.engine {config.tts.engine!r} is not supported here "
+            f"(implemented: {', '.join(_CHOICE_TTS_ENGINES)})"
+        )
+    if config.tts.engine == "piper":
+        if not config.tts.voice:
+            report.errors.append("tts.voice is required when tts.engine is piper")
+        else:
+            try:
+                resolve_voice_paths(config.tts.voice, DEFAULT_VOICES_DIR)
+            except FileNotFoundError as exc:
+                report.errors.append(str(exc))
+
+    if config.backend.name in {"claude-code", "codex"} and not config.backend.command:
+        report.errors.append(
+            f"backend.command is required when backend.name is {config.backend.name!r}"
+        )
+    if config.backend.name == "opencode" and not config.backend.url.startswith(("http://", "https://")):
+        report.warnings.append(
+            "backend.url does not start with http:// or https://; the connection may fail"
+        )
+    if config.audio.sample_rate <= 0:
+        report.errors.append("audio.sample_rate must be positive")
+    if config.audio.aec_delay_ms < 0:
+        report.errors.append("audio.aec_delay_ms must be non-negative")
+    if config.vad.threshold < 0 or config.vad.threshold > 1:
+        report.errors.append("vad.threshold must be between 0 and 1")
+    return report
+
+
+async def probe_tts(config: AppConfig) -> str:
+    engine = create_tts_engine(config.tts, DEFAULT_VOICES_DIR)
+    chunks = []
+    async for chunk in engine.synthesize_stream("ConvoBox settings test."):
+        chunks.append(chunk)
+        if sum(len(item) for item in chunks) > 48000:
+            break
+    engine.stop()
+    total = sum(len(chunk) for chunk in chunks)
+    return f"TTS probe succeeded ({total} samples @ {engine.sample_rate} Hz)"
+
+
+async def probe_stt(config: AppConfig) -> str:
+    transcriber = create_stt_engine(config.stt)
+    silence = np.zeros(int(config.audio.sample_rate), dtype=np.float32)
+    result = transcriber.transcribe(silence)
+    return (
+        "STT probe succeeded "
+        f"(text={result.text!r}, lang={result.language}, "
+        f"confidence={result.language_probability:.2f})"
+    )
+
+
+async def probe_backend(config: AppConfig) -> str:
+    adapter = create_backend_adapter(config.backend)
+    consumer: asyncio.Task[None] | None = None
+
+    async def _consume() -> None:
+        async for _ in adapter.events():
+            return
+
+    try:
+        consumer = asyncio.create_task(_consume())
+        await asyncio.wait_for(adapter.wait_listening(timeout=0.5), timeout=1.0)
+        await asyncio.sleep(0.15)
+        probe_error = consumer.exception() if consumer.done() else None
+        if probe_error is not None:
+            raise probe_error
+    finally:
+        if consumer is not None:
+            consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await consumer
+        await adapter.aclose()
+    return f"Backend probe started for {config.backend.name!r}"
+
+
+def _section_summary(config: AppConfig) -> list[str]:
+    report = validate_config(config)
+    lines = [
+        f"backend: {config.backend.name}  tts: {config.tts.engine}/{config.tts.voice or '(unset)'}  "
+        f"stt: {config.stt.engine}/{config.stt.model}  audio: {config.audio.input_device or 'default'} -> "
+        f"{config.audio.output_device or 'default'}",
+    ]
+    if report.warnings:
+        lines.append("warnings: " + " | ".join(report.warnings[:2]))
+    if report.errors:
+        lines.append("errors: " + " | ".join(report.errors[:2]))
+    return lines
+
+
+def _section_tabs(state: TuiState, width: int) -> str:
+    tabs: list[str] = []
+    for idx, section in enumerate(state.sections):
+        label = f" {section.label} "
+        if idx == state.selected_section:
+            tabs.append(f"{_REVERSE}[{label}]{_RESET}")
+        else:
+            tabs.append(f"[{label}]")
+    tabs_line = " ".join(tabs)
+    return fit(tabs_line, width)
+
+
+def _field_hint(spec: FieldSpec) -> str:
+    if spec.kind == "choice":
+        return f"choices: {', '.join(spec.choices)}"
+    if spec.kind == "command":
+        return "enter command line text, or '-' to clear"
+    if spec.kind == "list_str":
+        return "comma-separated list, or '-' to clear"
+    if spec.kind in {"optional_str", "optional_float"}:
+        return "enter text, or '-' to clear"
+    if spec.kind == "bool":
+        return "enter yes/no, true/false, or 1/0"
+    return "enter a new value"
+
+
+def _wrap_text(text: str, width: int) -> list[str]:
+    if width <= 0:
+        return [""]
+    wrapped = textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False)
+    return wrapped or [""]
+
+
+def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
+    spec = state.current_field()
+    if spec is None:
+        return ["", ""]
+    title = f"{spec.section.upper()} / {spec.label}"
+    value = f"Value: {_format_value(_get_value(state.working, spec))}"
+    hint = spec.help_text or _field_hint(spec)
+    lines = [title, value, ""]
+    lines.extend(_wrap_text(hint, width))
+    if spec.section == "backend":
+        lines.append("")
+        lines.extend(
+            _wrap_text(
+                "Backend profiles are remembered per backend: opencode uses url, claude-code/codex use command.",
+                width,
+            )
+        )
+    if spec.kind == "choice" and spec.choices:
+        lines.append("")
+        lines.extend(_wrap_text("Choices: " + ", ".join(spec.choices), width))
+    extra = [
+        f"Key: {spec.section}.{spec.key}",
+        f"Type: {spec.kind}",
+    ]
+    lines.extend([""] + extra)
+    return lines[:height]
+
+
+def render_modal(
+    title: str,
+    prompt: str,
+    detail_lines: list[str],
+    buffer: str,
+    width: int,
+    height: int,
+    severity: Literal["normal", "destructive"] = "normal",
+    choice_options: list[str] | None = None,
+    choice_value: str | None = None,
+) -> list[str]:
+    width = max(width, 80)
+    height = max(height, 24)
+    border = "=" if severity == "destructive" else "-"
+    accent = f"{_RED}{_BOLD}" if severity == "destructive" else f"{_CYAN}{_BOLD}"
+    tone = " DANGER " if severity == "destructive" else " INFO "
+    lines: list[str] = []
+    lines.append(fit(f" ConvoBox Settings TUI | {title} ", width))
+    lines.append(fit(f" status: {prompt}", width))
+    lines.append(
+        fit(
+            f" {tone}{'Esc cancel | Enter confirm' if severity == 'normal' else 'Esc back out carefully | Enter confirm'} ",
+            width,
+        )
+    )
+    lines.append(accent + "+" + border * (width - 2) + "+" + _RESET)
+    body_height = height - 6
+    box_width = min(width - 4, max(52, len(buffer) + 8))
+    left_pad = max(0, (width - box_width) // 2 - 1)
+    right_pad = max(0, width - left_pad - box_width - 2)
+    box_top = " " * left_pad + border + border * (box_width - 2) + border + " " * right_pad
+    lines.append(box_top[:width])
+    content_lines = [f"{tone.strip()} {title}", "", prompt, ""]
+    content_lines.extend(detail_lines)
+    if choice_options:
+        selected = choice_value if choice_value in choice_options else (choice_options[0] if choice_options else None)
+        content_lines.extend(["", "Options:"])
+        for option in choice_options:
+            marker = ">" if option == selected else " "
+            content_lines.append(f" {marker} {option}")
+    content_lines.append("")
+    content_lines.append(
+        "Esc cancel | Enter accept"
+        if severity == "normal"
+        else "Esc back out carefully | Enter accept"
+    )
+    content_lines.append(f"> {buffer}")
+    inner_width = box_width - 2
+    for idx in range(body_height):
+        if idx < len(content_lines):
+            inner = fit(content_lines[idx], inner_width)
+        else:
+            inner = fit("", inner_width)
+        lines.append(
+            " " * left_pad
+            + "|"
+            + inner
+            + "|"
+            + " " * max(0, width - left_pad - box_width - 2)
+        )
+    lines.append(box_top[:width])
+    tip = (
+        " Tip: Escape cancels the modal and returns to the editor"
+        if severity == "normal"
+        else " Tip: Escape returns to the editor without changing anything"
+    )
+    lines.append(fit(tip, width))
+    return lines[:height]
+
+
+def _draw_modal(
+    title: str,
+    prompt: str,
+    detail_lines: list[str],
+    buffer: str,
+    severity: Literal["normal", "destructive"] = "normal",
+    choice_options: list[str] | None = None,
+    choice_value: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> None:
+    if width is None or height is None:
+        try:
+            size = os.get_terminal_size()
+            width = size.columns if width is None else width
+            height = size.lines if height is None else height
+        except OSError:
+            width = 100 if width is None else width
+            height = 30 if height is None else height
+    sys.stdout.write(
+        "\x1b[H"
+        + "\n".join(
+            render_modal(
+                title,
+                prompt,
+                detail_lines,
+                buffer,
+                width,
+                height,
+                severity=severity,
+                choice_options=choice_options,
+                choice_value=choice_value,
+            )
+        )
+    )
+    sys.stdout.flush()
+
+
+def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
+    buffer = _format_value(current)
+    hint = spec.help_text or _field_hint(spec)
+    prompt = f"Editing {spec.section}.{spec.key}"
+    if spec.kind == "choice":
+        detail_lines = [
+            f"Current: {_format_value(current)}",
+            hint,
+            "Use Left/Right or Space to cycle choices, Enter to accept, Esc to cancel.",
+        ]
+    else:
+        detail_lines = [f"Current: {_format_value(current)}", hint]
+    choice_options = list(spec.choices) if spec.kind == "choice" else None
+    _draw_modal(
+        f"Edit {spec.label}",
+        prompt,
+        detail_lines,
+        buffer,
+        choice_options=choice_options,
+        choice_value=buffer if spec.kind == "choice" else None,
+    )
+    while True:
+        key = read_key()
+        if key == "ESC":
+            return False, current
+        if key == "ENTER":
+            return True, _parse_value(spec, buffer, current)
+        if spec.kind == "choice":
+            if key in {"LEFT", "UP"}:
+                buffer = _cycle_choice(spec, buffer, -1)
+                _draw_modal(
+                    f"Edit {spec.label}",
+                    prompt,
+                    detail_lines,
+                    buffer,
+                    choice_options=choice_options,
+                    choice_value=buffer,
+                )
+                continue
+            if key in {"RIGHT", "DOWN", " "}:
+                buffer = _cycle_choice(spec, buffer, 1)
+                _draw_modal(
+                    f"Edit {spec.label}",
+                    prompt,
+                    detail_lines,
+                    buffer,
+                    choice_options=choice_options,
+                    choice_value=buffer,
+                )
+                continue
+        if key == "BACKSPACE":
+            buffer = buffer[:-1]
+        elif len(key) == 1 and key.isprintable():
+            buffer += key
+        _draw_modal(
+            f"Edit {spec.label}",
+            prompt,
+            [f"Current: {_format_value(current)}", hint],
+            buffer,
+            choice_options=choice_options,
+            choice_value=buffer if spec.kind == "choice" else None,
+        )
+
+
+def _confirm_modal(
+    title: str,
+    prompt: str,
+    detail_lines: list[str],
+    severity: Literal["normal", "destructive"] = "normal",
+) -> bool:
+    while True:
+        _draw_modal(title, prompt, detail_lines, "", severity=severity)
+        key = read_key()
+        if key == "ESC":
+            return False
+        if key == "ENTER":
+            return True
+
+
+def render(state: TuiState, width: int, height: int) -> list[str]:
+    width = max(width, 80)
+    height = max(height, 24)
+    left_width = max(36, min(54, width // 2 + 4))
+    right_width = max(24, width - left_width - 3)
+    lines: list[str] = []
+    header = (
+        f" ConvoBox Settings TUI | {'dirty' if state.dirty else 'clean'} | {state.path}"
+    )
+    lines.append(fit(header, width))
+    summary = _section_summary(state.working)
+    lines.append(fit(summary[0], width))
+    status = f" status: {state.status}"
+    if len(summary) > 1:
+        status += f" | {summary[1]}"
+    lines.append(fit(status, width))
+    lines.append(_section_tabs(state, width))
+    lines.append("+" + "-" * (width - 2) + "+")
+
+    body_height = height - 10
+    field_count = len(state.current_fields())
+    field_start = viewport_start(state.selected_field, field_count, body_height, 0)
+    visible_fields = state.current_fields()[field_start : field_start + body_height]
+    help_lines = _help_panel_lines(state, right_width, body_height)
+
+    for row in range(body_height):
+        left_cell = ""
+        if row < len(visible_fields):
+            spec = visible_fields[row]
+            value = _get_value(state.working, spec)
+            pointer = ">" if (field_start + row) == state.selected_field else " "
+            left_cell = f"{pointer} {spec.label:<28.28} {_format_value(value)}"
+            if (field_start + row) == state.selected_field:
+                left_cell = _REVERSE + fit(left_cell, left_width) + _RESET
+            else:
+                left_cell = fit(left_cell, left_width)
+        else:
+            left_cell = fit("", left_width)
+
+        right_cell = help_lines[row] if row < len(help_lines) else ""
+        lines.append(f"{left_cell} | {fit(right_cell, right_width)}")
+
+    lines.append("+" + "-" * (width - 2) + "+")
+    lines.append(
+        fit(
+            " Keys: Left/Right tabs  Up/Down fields  Enter edit  Space toggle/cycle  "
+            "T test  S save  R revert  Q quit",
+            width,
+        )
+    )
+    lines.append(fit(f" Tip: {state.status}", width))
+    return lines
+
+
+def _enable_ansi() -> None:
+    if os.name == "nt":
+        os.system("")  # nosec B605 B607
+
+
+def read_key() -> str:
+    if sys.platform == "win32":
+        import msvcrt
+
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            code = msvcrt.getwch()
+            return {"H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT", "G": "HOME", "O": "END"}.get(code, "")
+        if ch == "\r":
+            return "ENTER"
+        if ch == "\x08":
+            return "BACKSPACE"
+        if ch == "\x1b":
+            return "ESC"
+        return ch
+
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch != "\x1b":
+            if ch in ("\r", "\n"):
+                return "ENTER"
+            if ch == "\x7f":
+                return "BACKSPACE"
+            return ch
+        if not select.select([sys.stdin], [], [], 0.05)[0]:
+            return "ESC"
+        seq = sys.stdin.read(1)
+        if seq != "[":
+            return "ESC"
+        code = sys.stdin.read(1)
+        return {"A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT", "H": "HOME", "F": "END"}.get(code, "")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def draw(state: TuiState) -> None:
+    size = os.get_terminal_size()
+    sys.stdout.write("\x1b[H" + "\n".join(render(state, size.columns, size.lines)))
+    sys.stdout.flush()
+
+
+def _toggle_or_cycle(state: TuiState) -> None:
+    spec = state.current_field()
+    if spec is None:
+        state.status = "nothing to change in this section"
+        return
+    current = _get_value(state.working, spec)
+    new_value: bool | str
+    if spec.kind == "bool":
+        new_value = not bool(current)
+    elif spec.kind == "choice":
+        choices = spec.choices
+        if not choices:
+            state.status = "no choices configured"
+            return
+        try:
+            idx = choices.index(current)
+        except ValueError:
+            idx = -1
+        new_value = choices[(idx + 1) % len(choices)]
+    else:
+        state.status = "space toggles booleans and cycles choices only"
+        return
+    if spec.section == "backend" and spec.key == "name":
+        # backend.name is a choice field, so new_value is a str here; str()
+        # makes that explicit for the type checker.
+        _switch_backend(state.working, str(new_value))
+    else:
+        _set_value(state.working, spec, new_value)
+    state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(mode="python")
+    state.status = f"{spec.label} updated"
+
+
+def _prompt_edit(state: TuiState) -> None:
+    spec = state.current_field()
+    if spec is None:
+        state.status = "nothing to edit in this section"
+        return
+    current = _get_value(state.working, spec)
+    try:
+        accepted, new_value = _edit_value_interactive(spec, current)
+    except Exception as exc:  # noqa: BLE001
+        state.status = f"invalid value: {exc}"
+        return
+    if not accepted:
+        state.status = "edit cancelled"
+        return
+    if spec.section == "backend" and spec.key == "name":
+        _switch_backend(state.working, new_value)
+    else:
+        _set_value(state.working, spec, new_value)
+    state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(mode="python")
+    state.status = f"{spec.label} updated"
+
+
+def _restore_original(state: TuiState) -> None:
+    state.working = state.original.model_copy(deep=True)
+    state.dirty = False
+    state.last_report = None
+    state.status = "staged changes reverted"
+
+
+def _save(state: TuiState) -> None:
+    report = validate_config(state.working)
+    state.last_report = report
+    if report.errors:
+        state.status = "save blocked: " + report.errors[0]
+        return
+    if report.warnings:
+        state.status = "warning: " + report.warnings[0]
+    if not _confirm_modal(
+        "Confirm Save",
+        f"Save changes to {state.path}?",
+        [
+            "This writes a backup first and then atomically replaces the config.",
+        ],
+    ):
+        state.status = "save cancelled"
+        return
+    try:
+        save_with_backup(state.path, state.working)
+    except Exception as exc:  # noqa: BLE001
+        state.status = f"save failed: {exc}"
+        return
+    state.original = state.working.model_copy(deep=True)
+    state.dirty = False
+    state.status = f"saved to {state.path}"
+
+
+async def _test_state(state: TuiState) -> None:
+    section = state.current_section().key
+    report = validate_config(state.working)
+    state.last_report = report
+    if report.errors:
+        state.status = "test blocked: " + report.errors[0]
+        return
+    try:
+        if section == "tts":
+            state.status = await probe_tts(state.working)
+        elif section == "stt":
+            state.status = await probe_stt(state.working)
+        elif section == "backend":
+            state.status = await probe_backend(state.working)
+        else:
+            state.status = f"{section} configuration validated"
+    except Exception as exc:  # noqa: BLE001
+        state.status = f"{section} test failed: {type(exc).__name__}: {exc}"
+
+
+def _handle_browse(state: TuiState, key: str) -> bool:
+    lowered = key.lower() if len(key) == 1 else key
+    if lowered in ("q", "esc"):
+        if state.dirty and not _confirm_modal(
+            "Confirm Quit",
+            "Discard unsaved changes and quit?",
+            ["Unsaved edits will be lost if you confirm."],
+            severity="destructive",
+        ):
+            state.status = "quit cancelled"
+            return True
+        return False
+    if key == "UP":
+        state.move_field(-1)
+    elif key == "DOWN":
+        state.move_field(1)
+    elif key == "LEFT":
+        state.move_section(-1)
+        state.selected_field = 0
+    elif key == "RIGHT":
+        state.move_section(1)
+        state.selected_field = 0
+    elif key == "HOME":
+        state.selected_field = 0
+        state.selected_section = 0
+    elif key == "END":
+        state.selected_section = len(state.sections) - 1
+        state.selected_field = max(0, len(state.current_fields()) - 1)
+    elif key == "ENTER":
+        _prompt_edit(state)
+    elif lowered == " ":
+        _toggle_or_cycle(state)
+    elif lowered == "r":
+        if _confirm_modal(
+            "Confirm Revert",
+            "Revert staged changes back to the last saved config?",
+            ["This only resets the working copy; the file on disk is unchanged."],
+            severity="destructive",
+        ):
+            _restore_original(state)
+        else:
+            state.status = "revert cancelled"
+    elif lowered == "s":
+        _save(state)
+    elif lowered == "t":
+        asyncio.run(_test_state(state))
+    return True
+
+
+def run_tui(config_path: Path | None = None) -> None:
+    path = config_path or default_config_path()
+    config = load_config(path)
+    state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
+    _enable_ansi()
+    sys.stdout.write("\x1b[?25l\x1b[2J")
+    sys.stdout.flush()
+    try:
+        running = True
+        while running:
+            draw(state)
+            key = read_key()
+            if not key:
+                continue
+            running = _handle_browse(state, key)
+    finally:
+        sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")
+        sys.stdout.flush()
+    print(state.status)
+
+
+def main() -> None:
+    use_utf8_console()
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--config", default=None, help="path to a convobox.yaml file")
+    args = parser.parse_args()
+    run_tui(Path(args.config) if args.config else None)
+
+
+if __name__ == "__main__":
+    main()
