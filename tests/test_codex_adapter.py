@@ -33,21 +33,27 @@ async def _collect(
 
 
 async def _shutdown(adapter: CodexAdapter) -> None:
+    # aclose() IS the shutdown path now (terminate the app-server + cancel
+    # the reader within the loop); using it as teardown exercises it too.
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_terminates_the_appserver() -> None:
+    adapter = _adapter()
+    await adapter.send_text("hi")
     proc = adapter._proc
-    if proc is not None and proc.returncode is None:
-        assert proc.stdin is not None
-        proc.stdin.close()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-    if adapter._reader_task is not None:
-        adapter._reader_task.cancel()
-        try:
-            await adapter._reader_task
-        except asyncio.CancelledError:
-            pass
+    assert proc is not None and proc.returncode is None
+    await adapter.aclose()
+    assert adapter._proc is None
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_aclose_without_a_process_is_a_safe_noop() -> None:
+    adapter = _adapter()
+    await adapter.aclose()
+    await adapter.aclose()
 
 
 @pytest.mark.asyncio

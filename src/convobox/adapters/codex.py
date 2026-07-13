@@ -40,6 +40,7 @@ route, so its events() can read the pipe directly.)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
@@ -217,6 +218,31 @@ class CodexAdapter(BackendAdapter):
 
     def is_busy(self) -> bool:
         return self._busy
+
+    async def aclose(self) -> None:
+        # Terminate the codex app-server subprocess and await it here, while
+        # the loop is alive, so its pipe transports close cleanly instead of
+        # being GC'd after the loop closes (which prints "Event loop is
+        # closed" / "unclosed transport" tracebacks on Windows). Idempotent.
+        proc, self._proc = self._proc, None
+        task, self._reader_task = self._reader_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError, OSError):
+            if proc.stdin is not None:
+                proc.stdin.close()
+            proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
 
     async def events(self) -> AsyncGenerator[BackendEvent, None]:
         await self._ensure_thread()

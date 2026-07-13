@@ -33,15 +33,28 @@ async def _collect(
 
 
 async def _shutdown(adapter: ClaudeCodeAdapter) -> None:
+    # aclose() IS the shutdown path now (terminate + await the subprocess so
+    # its pipe transports close within the loop); using it here means every
+    # test also exercises it as teardown.
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_terminates_the_subprocess() -> None:
+    adapter = _adapter()
+    await adapter.send_text("hi")
     proc = adapter._proc
-    if proc is not None and proc.returncode is None:
-        assert proc.stdin is not None
-        proc.stdin.close()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
+    assert proc is not None and proc.returncode is None  # spawned + alive
+    await adapter.aclose()
+    assert adapter._proc is None
+    assert proc.returncode is not None  # actually terminated, not leaked
+
+
+@pytest.mark.asyncio
+async def test_aclose_without_a_process_is_a_safe_noop() -> None:
+    adapter = _adapter()
+    await adapter.aclose()  # never spawned -> must not raise
+    await adapter.aclose()  # idempotent
 
 
 @pytest.mark.asyncio

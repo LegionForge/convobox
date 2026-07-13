@@ -89,3 +89,15 @@ class BackendAdapter(ABC):
         # e.g. to cancel a live SSE stream on hard stop/shutdown — which
         # AsyncIterator doesn't guarantee but AsyncGenerator does.
         ...
+
+    async def aclose(self) -> None:
+        """Release transport resources (subprocess, sockets, HTTP client).
+
+        Default no-op. Adapters that own a subprocess or client override this
+        so shutdown closes them WHILE THE EVENT LOOP IS STILL RUNNING —
+        otherwise Python finalizes the pipe transports after the loop has
+        closed and spews harmless-but-alarming "Event loop is closed" /
+        "unclosed transport" tracebacks (seen on Windows with the subprocess
+        adapters). Must be idempotent and must not raise.
+        """
+        return None
