@@ -54,19 +54,33 @@ run anywhere" is not "verified everywhere." This is what has actually been
 driven through the full voice loop (mic → STT → backend → TTS → speakers) on
 real hardware, versus what is implemented but not yet voice-validated:
 
-| Axis        | Tested end-to-end          | Implemented, not yet voice-validated |
-|-------------|----------------------------|--------------------------------------|
-| **Platform**| Windows 11                 | Linux, macOS                         |
-| **Backend** | opencode (HTTP+SSE)        | Claude Code (stream-json), Codex (app-server) |
-| **STT**     | faster-whisper             | —                                    |
-| **TTS**     | Piper                      | —                                    |
+| Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
+|-------------|----------------------------------------------------------------------|---------------------------------------|
+| **Platform**| Windows 11                                                            | Linux, macOS                         |
+| **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
+| **STT**     | faster-whisper                                                        | —                                     |
+| **TTS**     | Piper                                                                 | —                                     |
 
-The Claude Code and Codex adapters are unit- and adapter-level tested but
-have not yet had a microphone pointed at them; validating them through the
-live loop is the next milestone. Linux/macOS parity is on the roadmap
+All three backend adapters have now been driven through the full live voice
+loop, including tool use. Linux/macOS parity is on the roadmap
 (`docs/ROADMAP.md`). Known problems are tracked in
 [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) — notably WASAPI audio output
 on Windows (use an **MME** output device; see the known-issues doc).
+
+**Claude Code permission mode.** Headless (`--print`) mode has no way to
+answer a tool-permission prompt at runtime — a gated tool call would hang
+the session forever with no signal (see `src/convobox/adapters/claude_code.py`'s
+module docstring for the live-probed root cause). ConvoBox therefore
+defaults Claude Code to `--permission-mode plan`: it can read, explore, and
+explain, but never edit files or run commands on its own. For full
+write/execute access, set your own `--permission-mode bypassPermissions`
+(or the equivalent `--dangerously-skip-permissions`) in `backend.command` —
+**this bypasses every permission check**, which is risky on a voice-driven
+channel (misheard words, no per-action confirmation yet); only use it in a
+context you'd trust an unsupervised agent with. An explicit
+`--permission-mode` you set always wins over ConvoBox's default. Per-action
+voice approval is on the roadmap (`docs/ROADMAP.md`'s "Safety tiers for
+destructive actions").
 
 ## Architecture
 
