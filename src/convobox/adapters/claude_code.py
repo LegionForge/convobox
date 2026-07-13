@@ -28,6 +28,34 @@ instead of after shipping a wrong adapter. Key empirical findings:
 - Output NDJSON lines can exceed asyncio's 64KB default stream limit
   (the ``system/init`` line listing every tool/MCP server did, on the
   first probe) -- hence _STREAM_LIMIT.
+- **Permission gate (confirmed live, 2026-07-13): headless ``--print``
+  mode has NO runtime-answerable permission channel.** When Claude
+  requests a tool that needs approval (e.g. Bash), the process emits the
+  ``assistant`` tool_use block and then goes **completely silent** --
+  no ``control_request``, no ``result``, nothing -- for as long as the
+  process lives (confirmed: 25s+ of dead air on a real installed CLI
+  before the probe was killed). This is not a ConvoBox bug to catch and
+  answer; Anthropic's own docs confirm headless mode has no interactive
+  prompt to answer and expects the permission decision to be made via a
+  startup flag (``--permission-mode`` / ``--allowedTools``), not at
+  runtime -- unlike Codex's app-server, which sends a real per-call
+  JSON-RPC approval request this adapter COULD answer (see codex.py).
+  Without a startup flag, every gated tool call hangs the voice session
+  forever with zero signal -- exactly the ~50-90s silent stalls seen in
+  live UAT before this was diagnosed.
+
+  Fix: default to ``--permission-mode plan`` unless the caller's own
+  ``command`` already sets ``--permission-mode`` (a user override always
+  wins). Confirmed live: plan mode never hangs -- every turn ends with a
+  real, speakable ``result`` -- and it never executes a write/exec
+  action; a gated request comes back as explanatory text instead ("I
+  can't run that without approval..."). This is the same safety stance
+  Codex's adapter already takes (decline the destructive step, but let
+  the turn finish) -- see codex.py's _APPROVAL_METHODS -- just expressed
+  as a session-level flag because headless mode has no per-call channel
+  to express it any other way. Voice-driven approval (wiring
+  ConfirmwordDetector into an actual accept/decline flow) is future
+  work, same as codex.py's TODO.
 """
 
 from __future__ import annotations
@@ -64,6 +92,27 @@ _REQUIRED_FLAGS = [
     "--no-session-persistence",
 ]
 
+# The safe default permission mode: never hangs (every turn ends with a
+# speakable result) and never executes a write/exec action without the
+# user opting into something more permissive themselves. See module
+# docstring "Permission gate" for why this exists and what it replaces
+# (there is no per-call channel to answer in headless mode, unlike
+# codex.py's runtime decline).
+_DEFAULT_PERMISSION_MODE = "plan"
+
+
+def _resolve_flags(command: Sequence[str]) -> list[str]:
+    """The flags to append after the caller's own command (pure, tested).
+
+    Skips the default --permission-mode if the caller's own command
+    already sets one -- an explicit user choice always wins over this
+    adapter's safe default, the same "respect an explicit override"
+    principle used for AEC delay and audio device resolution elsewhere.
+    """
+    if "--permission-mode" in command:
+        return list(_REQUIRED_FLAGS)
+    return [*_REQUIRED_FLAGS, "--permission-mode", _DEFAULT_PERMISSION_MODE]
+
 
 class ClaudeCodeAdapter(BackendAdapter):
     def __init__(self, command: Sequence[str] | None = None) -> None:
@@ -90,7 +139,7 @@ class ClaudeCodeAdapter(BackendAdapter):
             if self._proc is None or self._proc.returncode is not None:
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
-                    *_REQUIRED_FLAGS,
+                    *_resolve_flags(self._command),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

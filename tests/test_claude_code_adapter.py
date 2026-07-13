@@ -8,6 +8,7 @@ import pytest
 
 from convobox.adapters import ClaudeCodeAdapter, create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.adapters.claude_code import _resolve_flags
 from convobox.config import BackendConfig
 
 _FAKE_CLI = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))]
@@ -236,6 +237,23 @@ async def test_lines_beyond_asyncio_default_limit_are_handled() -> None:
         assert events[1].type == BackendEventType.DONE
     finally:
         await _shutdown(adapter)
+
+
+# --- the permission-gate hang fix: default --permission-mode plan ---
+
+
+def test_resolve_flags_defaults_to_plan_mode() -> None:
+    flags = _resolve_flags(["claude"])
+    assert "--permission-mode" in flags
+    assert flags[flags.index("--permission-mode") + 1] == "plan"
+
+
+def test_resolve_flags_respects_an_explicit_user_permission_mode() -> None:
+    # A user who configured their own --permission-mode must win; the
+    # adapter must not append a second, conflicting one.
+    flags = _resolve_flags(["claude", "--permission-mode", "acceptEdits"])
+    assert flags.count("--permission-mode") == 0  # none appended by the adapter
+    assert "acceptEdits" not in flags  # that's in the user's own command, not here
 
 
 def test_create_backend_adapter_claude_code() -> None:
