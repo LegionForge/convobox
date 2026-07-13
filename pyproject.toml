@@ -37,6 +37,7 @@ aec = [
 
 [project.scripts]
 convobox-spike = "scripts.spike:main"
+convobox-settings = "scripts.settings_tui:main"
 
 [build-system]
 requires = ["hatchling"]

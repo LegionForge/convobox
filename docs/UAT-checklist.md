@@ -166,6 +166,7 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
    bargein_suggestions.md for the fix).
 5. Edge VAD: V1-V3.
 6. Scriptable/cleanup: M1-M3, X1-X2.
+7. Settings UI: see [UAT-settings-tui.md](UAT-settings-tui.md).
 
 ---
 
