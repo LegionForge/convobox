@@ -186,18 +186,29 @@ worth contrasting. Three concrete, source-verified findings:
   end of the spectrum (§5).
 - **`max_words`/`max_duration` + `on_user_turn_exceeded` callback caps a
   user's turn and proactively intervenes**, rather than letting VAD buffer
-  an unbounded monologue. **Adopt →** This is real-production validation
-  of a gap ConvoBox already found and flagged, independently, in live UAT
-  five days before this research pass: `docs/UAT-checklist.md`'s **[V3]**
-  notes `vad.max_utterance_s=None` (uncapped) means "a long uninterrupted
-  monologue yields NO transcript until the speaker pauses (observed live
-  as a 30.5s single utterance)," with "candidate upstream improvement:
-  max-duration forced flush" written at the time but not built. LiveKit
-  shipping exactly this as a named, callback-driven feature is a strong
-  signal it's worth actually building, not just noting — a concrete
-  roadmap candidate, still not built this cycle (this is a research pass,
-  not a code pass; `UtteranceSegmenter` already has the field, wiring a
-  force-flush + callback is real, scoped follow-up work).
+  an unbounded monologue. **Correction (2026-07-14, caught re-reading the
+  actual code rather than trusting this entry's own first draft): the
+  force-flush half of this is NOT missing.** `docs/UAT-checklist.md`'s
+  **[V3]** (2026-07-09) observed `vad.max_utterance_s=None` (uncapped)
+  meant no transcript until a 30.5s monologue finally paused, and wrote
+  "candidate upstream improvement: max-duration forced flush" as an open
+  idea — but that was fixed the very next day, PR #1
+  (`4aa61ac`, 2026-07-10, "Add UAT-derived input guards: max_utterance_s
+  cap and STT confidence gate"). `UtteranceSegmenter._process_window`
+  already force-emits at `max_utterance_s` when set, well before this
+  research pass, verified via `tests/test_vad_segmenter.py`'s
+  `test_max_utterance_cap_splits_continuous_speech` (a 70-window
+  continuous run with a 1s/31-window cap correctly splits into two capped
+  utterances plus an in-progress remainder). **Adopt →** What's genuinely
+  still open, narrower than originally written here: (1) the *default* is
+  still `None` (uncapped) — a real product decision about what default
+  cap to ship, not missing code; (2) unlike LiveKit's named
+  `on_user_turn_exceeded` callback, `UtteranceSegmenter.feed()` returns
+  plain `list[np.ndarray]` with no signal distinguishing a forced-flush
+  utterance from a naturally-silence-ended one, so the main loop can't
+  (e.g.) log or announce "still listening, that was a checkpoint, not the
+  end" differently — a real, narrow, still-scoped gap, just a much
+  smaller one than "force-flush doesn't exist."
 - **False-interruption recovery** (`resume_false_interruption`,
   `false_interruption_timeout`): when VAD-detected "speech" during agent
   playback produces an empty transcription, LiveKit treats the
@@ -339,10 +350,14 @@ source-verified until it actually is.
 7. **Error-escalation ladder is a real, scoped gap** (Google Conversation
    Design) — low-confidence transcripts are silently dropped today with no
    escalating user-facing signal; a future candidate, not built this cycle.
-8. **Uncapped monologues are a real, independently-validated gap**
-   (LiveKit Agents' `max_words`/`max_duration`) — matches
-   `docs/UAT-checklist.md`'s own **[V3]** finding from live UAT
-   (2026-07-09); a scoped roadmap candidate, not built this cycle.
+8. **Corrected (2026-07-14): the monologue force-flush already exists**
+   (`UtteranceSegmenter`'s `max_utterance_s` cap, PR #1/`4aa61ac`,
+   2026-07-10) — this entry originally claimed it was still missing,
+   which was wrong (see §4's LiveKit entry for the full correction). The
+   genuinely-open remainder, independently validated by LiveKit Agents'
+   `max_words`/`max_duration`/`on_user_turn_exceeded`: the default stays
+   uncapped (a product decision) and forced-flush utterances carry no
+   signal distinguishing them from naturally-ended ones.
 9. **False-interruption recovery is a real, newly-identified gap**
    (LiveKit Agents' `resume_false_interruption`) — `BargeInMonitor` fires
    and stops playback purely from VAD timing, before STT can confirm the
