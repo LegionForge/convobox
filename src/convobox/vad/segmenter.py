@@ -55,6 +55,7 @@ class UtteranceSegmenter:
         self._triggered = False
         self._speech_windows = 0
         self._trailing_silence_windows = 0
+        self._last_forced = False
 
     @property
     def in_speech(self) -> bool:
@@ -64,6 +65,26 @@ class UtteranceSegmenter:
         in the README needs exactly this signal); no behavior depends on it.
         """
         return self._triggered
+
+    @property
+    def was_forced(self) -> bool:
+        """True if the MOST RECENTLY completed utterance was force-emitted at
+        `max_utterance_s` rather than ending naturally on a silence gap (or,
+        for `flush()`, on stream close -- also False, it's neither of those).
+
+        Read-only observability, same tier as `in_speech`: no behavior
+        depends on it, it exists so a caller can distinguish "the speaker
+        paused" from "we cut them off mid-thought because the cap hit" --
+        e.g. to log or announce that differently. Caveat: only meaningful
+        immediately after consuming ONE utterance from `feed()`/`segment()`.
+        A single `feed()` call CAN complete more than one utterance (a large
+        chunk relative to a small cap) -- real-time mic streaming feeds
+        chunks small enough this is not a practical concern, but if it
+        happens, only the LAST completed utterance's forced status survives
+        here, matching how `feed()`'s own docstring already flags "usually
+        empty or length one" as the common case, not a guarantee.
+        """
+        return self._last_forced
 
     def feed(self, chunk: np.ndarray) -> list[np.ndarray]:
         """Push one capture chunk; return any utterances it completes.
@@ -94,6 +115,9 @@ class UtteranceSegmenter:
         Ignores the ``min_speech_ms`` floor: if the stream ended mid-speech,
         the audio captured so far is real and worth emitting.
         """
+        # Neither a natural silence-end nor a max_utterance_s cap -- a third,
+        # distinct case (stream closed) that `was_forced` reports as False.
+        self._last_forced = False
         if not self._triggered or not self._speech:
             self._reset_run()
             return None
@@ -129,19 +153,22 @@ class UtteranceSegmenter:
         # and the run would only end via an external flush().
 
         if self._trailing_silence_windows >= self._min_silence_windows:
-            return self._finish_run()
+            return self._finish_run(forced=False)
         # Cap check runs after the silence check so a natural end-of-speech
         # always wins; the cap only fires on genuinely continuous audio.
         # The forced emit resets state, so ongoing speech simply starts a new
         # utterance at the next window — a long monologue arrives as several
         # capped utterances rather than one giant one after it finally ends.
         if self._max_run_windows is not None and len(self._speech) >= self._max_run_windows:
-            return self._finish_run()
+            return self._finish_run(forced=True)
         return None
 
-    def _finish_run(self) -> np.ndarray | None:
+    def _finish_run(self, forced: bool) -> np.ndarray | None:
         emit = self._speech_windows >= self._min_speech_windows
         utterance = np.concatenate(self._speech) if emit else None
+        # Set before _reset_run() clears _speech, but that's irrelevant here
+        # -- was_forced only describes WHY this run ended, not its content.
+        self._last_forced = forced
         self._reset_run()
         return utterance
 

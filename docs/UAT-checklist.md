@@ -65,6 +65,16 @@ Implements in `src/convobox/vad/segmenter.py`. Config: `threshold=0.5`,
 - **[V4] `in_speech` signal** (exposed for UIs / future barge-in) flips True on
   first speech window and back to False at utterance end. Verify with a harness
   if a listening indicator depends on it.
+- **[V5] `was_forced` distinguishes a cap-triggered cutoff from a natural
+  pause.** Set `vad.max_utterance_s` to something short (e.g. 5) and talk
+  continuously past it. Confirm the main loop's transcript log line grows a
+  `[FORCED: cut at max_utterance_s, still your turn]` marker for the capped
+  utterance (`UtteranceSegmenter.was_forced`, `scripts/run_convobox.py`),
+  and that the marker does NOT appear on a normal utterance that ends via a
+  silence pause instead. This is purely a log-line signal for now (no
+  spoken/TUI notification) -- note during UAT whether that's sufficient or
+  whether a spoken cue (`docs/CONVERSATION-DESIGN-REFERENCES.md`'s
+  LiveKit-research gap) would actually be needed in practice.
 
 ## 3. Safeword / hard stop
 
@@ -159,16 +169,28 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 ---
 
 ### Suggested UAT matrix ordering
+
+Updated 2026-07-14 -- the original 8-step list below predated barge-in
+presets, pause/resume, the conversation TUI, response tiering, and the
+STT recovery fix, so it silently stopped covering roughly half the
+document. Re-derived from the doc's own current section list rather than
+patched piecemeal, to catch anything else that had drifted (nothing else
+did).
+
 1. Happy path: idle → speak → response spoken (N1-N4, T2).
 2. Hard stop safety: S1-S5.
 3. Echo / half-duplex: E1-E5 (speakers ON).
-4. Barge-in gap: B3 (document current "drop, don't cut" behavior; see
-   bargein_suggestions.md for the fix).
-5. Edge VAD: V1-V3.
-6. Scriptable/cleanup: M1-M3, X1-X2.
-7. Settings UI: see [UAT-settings-tui.md](UAT-settings-tui.md).
-8. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
+4. Barge-in (`interrupt_preset` != `do-not-disturb`/`halt`, requires AEC
+   or headphones): G1-G7 -- barge-in itself is fully built now, this is
+   no longer "document the gap," it's "verify the real behavior."
+5. Edge VAD: V1-V4.
+6. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
    priority-ordering bug -- do not skip it).
+7. Conversation TUI (`--tui`): U1-U6.
+8. Response tiering (`interaction.tier_responses: true`): R1-R7.
+9. STT native-allocator recovery (long session, 20+ min): ST1-ST3.
+10. Scriptable/cleanup: M1-M3, X1-X2.
+11. Settings UI: see [UAT-settings-tui.md](UAT-settings-tui.md).
 
 ---
 
@@ -233,6 +255,28 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   the first flushes: only the most recent one should be delivered
   (most-recent-wins, not both) -- log line: "queued interjection replaced
   by a newer one".
+- **[G7] Backchannels don't count as a real interrupt.** Say a bare
+  backchannel token or short phrase built from one (e.g. "yeah", "right",
+  "okay"/"ok", "sure", "wow", "really", "gotcha", "mm-hmm"/"uh-huh" --
+  the exact whole-utterance token set is `_BACKCHANNEL_TOKENS` in
+  `scripts/run_convobox.py`: `mm`, `mhm`, `mmhmm`, `uh`, `huh`, `uhhuh`,
+  `hmm`, `yeah`, `yep`, `yup`, `right`, `oh`, `ok`, `okay`, `sure`, `wow`,
+  `really`, `gotcha`) during playback under a preset where
+  `BargeInMonitor` can fire (`conversational`/`halt`/`take-over`). Audio
+  STILL stops (`BargeInMonitor` decides from raw audio timing alone,
+  before STT can know the content -- this is expected, not a bug), but
+  the utterance itself must NOT be forwarded to the backend -- log line
+  `"dropped (backchannel, not a real interrupt attempt)"`
+  (`is_backchannel(text)` in `scripts/run_convobox.py`). Research-grounded
+  default behavior (Schegloff 1982; Ward & Tsukahara 2000; independently
+  validated in production by Pipecat, LiveKit Agents, and Vocode -- see
+  `docs/CONVERSATION-DESIGN-REFERENCES.md` section 2/4), never live-mic
+  verified until now. Note whether the audio-stops-anyway part feels
+  like a real UX problem in practice (a backchannel currently always
+  costs the rest of the response, even though it's correctly not
+  forwarded as a command) -- that gap is the false-interruption-recovery
+  item flagged in `docs/DESIGN-barge-in.md`'s open questions, not yet
+  built.
 
 ## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
 

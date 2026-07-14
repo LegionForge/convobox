@@ -10,10 +10,11 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
-> LiveKit Agents, ElevenLabs Conversational AI, Google Conversation Design)
-> were web-verified July 2026 by reading real primary-source pages/code,
-> not secondhand summaries. The foundational conversation-analysis and
-> pragmatics classics are cited from the standard literature; confirm
+> LiveKit Agents, Deepgram Flux, Vocode, ElevenLabs Conversational AI,
+> Google Conversation Design) were web-verified July 2026 by reading real
+> primary-source pages/code, not secondhand summaries. The foundational
+> conversation-analysis and pragmatics classics are cited from the
+> standard literature; confirm
 > against the primary source before any
 > formal/public citation. The Alexa Design Guide entry is explicitly
 > flagged as NOT primary-source-verified this pass (see that entry) --
@@ -187,18 +188,29 @@ worth contrasting. Three concrete, source-verified findings:
   end of the spectrum (§5).
 - **`max_words`/`max_duration` + `on_user_turn_exceeded` callback caps a
   user's turn and proactively intervenes**, rather than letting VAD buffer
-  an unbounded monologue. **Adopt →** This is real-production validation
-  of a gap ConvoBox already found and flagged, independently, in live UAT
-  five days before this research pass: `docs/UAT-checklist.md`'s **[V3]**
-  notes `vad.max_utterance_s=None` (uncapped) means "a long uninterrupted
-  monologue yields NO transcript until the speaker pauses (observed live
-  as a 30.5s single utterance)," with "candidate upstream improvement:
-  max-duration forced flush" written at the time but not built. LiveKit
-  shipping exactly this as a named, callback-driven feature is a strong
-  signal it's worth actually building, not just noting — a concrete
-  roadmap candidate, still not built this cycle (this is a research pass,
-  not a code pass; `UtteranceSegmenter` already has the field, wiring a
-  force-flush + callback is real, scoped follow-up work).
+  an unbounded monologue. **Correction (2026-07-14, caught re-reading the
+  actual code rather than trusting this entry's own first draft): the
+  force-flush half of this is NOT missing.** `docs/UAT-checklist.md`'s
+  **[V3]** (2026-07-09) observed `vad.max_utterance_s=None` (uncapped)
+  meant no transcript until a 30.5s monologue finally paused, and wrote
+  "candidate upstream improvement: max-duration forced flush" as an open
+  idea — but that was fixed the very next day, PR #1
+  (`4aa61ac`, 2026-07-10, "Add UAT-derived input guards: max_utterance_s
+  cap and STT confidence gate"). `UtteranceSegmenter._process_window`
+  already force-emits at `max_utterance_s` when set, well before this
+  research pass, verified via `tests/test_vad_segmenter.py`'s
+  `test_max_utterance_cap_splits_continuous_speech` (a 70-window
+  continuous run with a 1s/31-window cap correctly splits into two capped
+  utterances plus an in-progress remainder). **Adopt →** What's genuinely
+  still open, narrower than originally written here: (1) the *default* is
+  still `None` (uncapped) — a real product decision about what default
+  cap to ship, not missing code; (2) unlike LiveKit's named
+  `on_user_turn_exceeded` callback, `UtteranceSegmenter.feed()` returns
+  plain `list[np.ndarray]` with no signal distinguishing a forced-flush
+  utterance from a naturally-silence-ended one, so the main loop can't
+  (e.g.) log or announce "still listening, that was a checkpoint, not the
+  end" differently — a real, narrow, still-scoped gap, just a much
+  smaller one than "force-flush doesn't exist."
 - **False-interruption recovery** (`resume_false_interruption`,
   `false_interruption_timeout`): when VAD-detected "speech" during agent
   playback produces an empty transcription, LiveKit treats the
@@ -227,6 +239,75 @@ worth contrasting. Three concrete, source-verified findings:
   environment can't live-verify. Flagged here and worth a line in
   `docs/DESIGN-barge-in.md`'s open questions the next time that doc is
   touched, not invented as unscoped code today.
+
+**Deepgram Flux / Voice Agent API (developers.deepgram.com, verified
+2026-07-14 by reading the real Flux agent doc, not a secondhand
+summary).** A commercial STT vendor's own production voice-agent stack —
+useful because Deepgram builds the ASR itself, so their endpointing
+opinions are informed by owning that layer, not bolted on top of a
+third-party transcript stream the way ConvoBox's Whisper-based pipeline
+necessarily is.
+
+- **"Eager" end-of-turn: a two-stage speculative response pipeline.**
+  Flux emits `EagerEndOfTurn` at *medium* confidence — before final
+  certainty — letting the caller start LLM generation early; a
+  `TurnResumed` event cancels that speculative work if the user keeps
+  talking; a final `EndOfTurn` confirms and the prepared response
+  proceeds. Tunable via `eot_threshold` (final confidence),
+  `eager_eot_threshold` (speculative-start confidence), and
+  `eot_timeout_ms`. **Adopt →** A real, shipped instance of "predict
+  before you're sure, cancel if wrong" — the same family of idea as
+  VAP's turn-shift prediction (§4 above) and Pipecat's incomplete-turn
+  LLM classification, but applied to *response latency* specifically
+  rather than *when to yield the floor*. Doesn't transplant directly for
+  the same reason Pipecat's LLM-classification example didn't: ConvoBox
+  is a thin client over external coding-agent CLIs (opencode/Claude
+  Code/Codex) it doesn't control the generation of, so there's no
+  "start the LLM speculatively" lever to pull the way a framework with
+  direct model access has. Worth remembering as the shape a *future*
+  deeper backend integration could take, not something buildable at
+  ConvoBox's current architectural layer.
+
+**Vocode (docs.vocode.dev, open-source conversation framework, verified
+2026-07-14 by reading the real conversation-mechanics doc).** Smaller
+and older than Pipecat/LiveKit Agents, but two findings worth banking:
+
+- **`interrupt_sensitivity`: an explicit low/high toggle, with backchannel
+  filtering as the named "low" behavior.** Low sensitivity (their default)
+  "makes the bot ignore backchannels (e.g. 'sure', 'uh-huh') while the bot
+  is speaking"; high sensitivity "makes the agent treat any word from the
+  human as an interruption." **Adopt →** A third independent, real-
+  production validation (after Pipecat's word-count strategies and the
+  backchannel-filtering literature in §2) that filtering backchannels by
+  default — not treating every utterance as a bid for the floor — is the
+  correct default behavior, not an ConvoBox-specific judgment call. Their
+  binary low/high is coarser than ConvoBox's five-preset grid; the grid
+  is still the right level of control, this just confirms the *direction*
+  of the default.
+- **`conversation_speed` / `speed_coefficient`: response latency scales
+  with the CURRENT user's own observed speaking rate (words-per-minute),
+  not a fixed number.** "The amount of time the bot waits inversely
+  scales with the `conversation_speed` value," computed dynamically per
+  session. **Adopt →** A genuinely new idea for ConvoBox, distinct from
+  everything else in this doc: every timing knob here so far (`
+  min_silence_ms`, `continue_timeout_s`, Deepgram's `eot_timeout_ms`,
+  LiveKit's per-*language* thresholds) is static once configured — none
+  scale to the *individual* speaker's pace within a session. A fast
+  talker and a slow, deliberate talker get the same silence-timeout
+  today. Not built this cycle (needs a real design for what "observed
+  speaking rate" even means from VAD-only signal, and live-mic tuning to
+  validate it doesn't feel erratic) — but worth naming as a concrete,
+  distinct-from-everything-else-flagged roadmap candidate, since it's a
+  different axis than the presets/thresholds already designed.
+- **`utterance_cutoff_ms`/"mark final if no new words in X seconds"**
+  confirms Vocode's own DEFAULT endpointing is still a plain silence
+  timer, same family as ConvoBox's `min_silence_ms` — even a more
+  sophisticated production framework ships a silence-timer baseline and
+  treats semantic/adaptive endpointing as a layered addition, not a
+  replacement. **Adopt →** Reassurance, not a gap: ConvoBox's baseline
+  approach is the same starting point real frameworks use; VAP/semantic
+  upgrades (§4 above) are genuinely optional upgrades, not table stakes
+  ConvoBox is missing.
 
 **ElevenLabs Conversational AI (elevenlabs.io/docs, commercial, verified
 2026-07-14 by reading the real conversation-flow and skip-turn docs
@@ -401,10 +482,14 @@ source-verified until it actually is.
 7. **Error-escalation ladder is a real, scoped gap** (Google Conversation
    Design) — low-confidence transcripts are silently dropped today with no
    escalating user-facing signal; a future candidate, not built this cycle.
-8. **Uncapped monologues are a real, independently-validated gap**
-   (LiveKit Agents' `max_words`/`max_duration`) — matches
-   `docs/UAT-checklist.md`'s own **[V3]** finding from live UAT
-   (2026-07-09); a scoped roadmap candidate, not built this cycle.
+8. **Corrected (2026-07-14): the monologue force-flush already exists**
+   (`UtteranceSegmenter`'s `max_utterance_s` cap, PR #1/`4aa61ac`,
+   2026-07-10) — this entry originally claimed it was still missing,
+   which was wrong (see §4's LiveKit entry for the full correction). The
+   genuinely-open remainder, independently validated by LiveKit Agents'
+   `max_words`/`max_duration`/`on_user_turn_exceeded`: the default stays
+   uncapped (a product decision) and forced-flush utterances carry no
+   signal distinguishing them from naturally-ended ones.
 9. **False-interruption recovery is a real, newly-identified gap**
    (LiveKit Agents' `resume_false_interruption`) — `BargeInMonitor` fires
    and stops playback purely from VAD timing, before STT can confirm the
@@ -413,9 +498,21 @@ source-verified until it actually is.
    this cycle (needs real design work on how a resume interacts with
    response tiering, and can't be live-audio-verified in this
    environment).
-10. **`patient` is validated, not new** (ElevenLabs' `turn_eagerness`) —
+10. **Backchannel filtering as the default, not the exception, is now
+    triply validated** (Pipecat's word-count strategies, the §2
+    literature, and Vocode's `interrupt_sensitivity` low/high split) —
+    the direction of ConvoBox's default is confirmed by three independent
+    production sources; no change needed.
+11. **Per-speaker adaptive timing is a genuinely new, distinct roadmap
+    candidate** (Vocode's `conversation_speed`) — every timing knob
+    ConvoBox has today is static once configured; scaling to the current
+    speaker's own observed pace is a different axis than the
+    presets/thresholds already designed, not built this cycle (needs a
+    real design for what "observed speaking rate" means from VAD-only
+    signal).
+12. **`patient` is validated, not new** (ElevenLabs' `turn_eagerness`) —
     a major commercial platform names the same axis with the same word.
-11. **The "direct LLM access" limitation is a real, recurring
+13. **The "direct LLM access" limitation is a real, recurring
     architectural boundary, not three unrelated caveats** (Deepgram
     Flux's eager-EOT, Pipecat's incomplete-turn classification,
     ElevenLabs' partial-generation TTS start and skip-turn tool) — every
