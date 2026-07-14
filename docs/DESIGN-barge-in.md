@@ -224,6 +224,32 @@ Mostly orchestration wiring, not new backend work:
 - `BARGE_IN_MARKER` already handles the truncation problem (annotate history
   since we can't edit the backend's).
 
+**The two axes fire at DIFFERENT pipeline stages -- this is the part that
+isn't just "orchestration wiring," found while actually implementing it.**
+Axis 1 for `mute`/`abort` must be decided at the RAW AUDIO level, chunk by
+chunk, before STT -- that's what `BargeInMonitor` already does, fast,
+because it can't wait for a transcript. Axis 1 = `let-finish` means that
+fast trigger never runs at all. Axis 2, by contrast, is decided at the
+TRANSCRIBED TEXT level, in the existing overlap-gate code that runs AFTER
+STT for any utterance that overlapped playback -- completely independent of
+whether axis 1's fast trigger fired:
+- `drop` -- today's existing overlap-gate behavior, unchanged.
+- `now` -- forward immediately with `BARGE_IN_MARKER` (today's existing
+  "barged_in" forwarding path, now gated on axis 2 explicitly rather than
+  implicitly following whenever axis 1 fired).
+- `queue` -- the one genuinely NEW mechanism: hold the utterance's text in a
+  small pending list, flush it (in order) once playback has ended AND the
+  backend is idle. Doesn't touch `BargeInMonitor`'s state machine at all --
+  it's an addition to the overlap-gate branch.
+
+This means `patient`/`do-not-disturb` (`let-finish` + queue/drop) never
+need to consult `BargeInMonitor`'s fast trigger in the first place -- they
+operate purely on the overlap gate's existing "did this utterance overlap
+playback" signal. `halt` (`abort` + `drop`) DOES need the fast trigger (to
+abort quickly) but its drop means the utterance that caused it is simply
+absorbed as "the stop," never forwarded -- same as `do-not-disturb`'s drop,
+the only difference being whether the trigger also fired the abort.
+
 **The migration is a strict superset, not a breaking redesign** (noticed
 while scoping the config/`BargeInMonitor` migration, `src/convobox/interrupt_presets.py`):
 today's three `interrupt_mode` values map cleanly onto three of the five new
