@@ -83,7 +83,7 @@ reading a shared state file/socket? Lean toward same-process for phase 1
 (simpler, matches the working-indicator/heartbeat pattern already in
 `run_convobox.py`); revisit if that proves awkward.
 
-**Rendering layer shipped (2026-07-14), wiring not yet started.**
+**Rendering layer + live wiring shipped (2026-07-14).**
 `src/convobox/tui/` — `state.py` (`ConversationTuiState`, `TranscriptTurn`,
 pure dataclasses, no terminal I/O) and `render.py`
 (`render_conversation_frame(state, width, height, now) -> list[str]`, pure
@@ -99,12 +99,39 @@ visible length, ANSI codes included but not counted), full-detail pane
 (paragraph breaks preserved, not flattened by a naive wrapper), and the
 warning banner (phase 3 -- reserves zero space when unset, bordered
 top/bottom with `!` so it can't be mistaken for an ordinary line once
-set). **Deliberately scoped to just the rendering layer** — wiring this
-into `run_convobox.py`'s live loop (feeding real transcript/status/
-barge-in updates into the state as the pipeline runs, and the `_draw`
-wrapper that resolves the real terminal + writes to stdout) is a
-follow-up PR, so the visual design is reviewable on its own before the
-larger integration change.
+set).
+
+**Wiring** (`run_convobox.py --tui`): required a small prerequisite --
+`Orchestrator` gained an optional `on_event` observer hook (the class
+consumed backend events internally and only ever acted on TEXT by
+speaking it; nothing exposed the stream to a caller wanting to *see* the
+real response). With that hook, transcript turns and the full-detail pane
+populate from real backend events; status (`listening`/`capturing`/
+`speaking`/`working`/`paused`) is derived by the existing
+working-watchdog's 1s poll rather than threaded through every call site
+in the main loop -- a deliberate simplification, not laziness:
+`transcriber.transcribe()` blocks the event loop synchronously today (no
+`asyncio.to_thread` offload), so a render task can't redraw *during* that
+decode regardless of whether status updates are poll- or event-driven;
+polling is the lower-risk mechanism for a label that's inherently
+"close enough," not frame-perfect, either way. Log output moves to a file
+(`convobox-tui.log`) when `--tui` is active -- interleaving ordinary log
+lines with the alt-screen redraw would garble the display, same reasoning
+`voice_tui.py`/`settings_tui.py` already avoid the general logging module
+entirely for.
+
+**Live-verified against the real pipeline** (proper subprocess lifecycle
+management, not a shell `timeout` -- that sends SIGTERM on Windows, which
+Python doesn't map to a graceful `KeyboardInterrupt`, and produced a
+misleading "no output" false alarm before this was caught): real config
+load, real STT model check, real single-instance lock, real mic device
+open, a real session against a running opencode server, correct
+`LISTENING` status with accurate elapsed time, clean alt-screen
+entry/exit, no traceback, log correctly redirected to file (stderr
+empty). **Honest limitation**: this verifies startup/idle/shutdown, not
+an actual spoken utterance flowing all the way to a rendered transcript
+turn + response -- that needs a live mic UAT pass with a real voice,
+which is queued, not done.
 
 ## Phase 2 — Response tiering
 
