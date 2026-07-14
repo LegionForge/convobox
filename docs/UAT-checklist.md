@@ -204,23 +204,35 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   runs as a launcher process plus the server it spawns -- two PIDs, one
   server. Verify by port, not by process count.
 
-## Barge-in items (interrupt_mode != "none"; requires AEC or headphones)
+## Barge-in items (interrupt_preset != "do-not-disturb"/"halt"; requires AEC or headphones)
 
 - **[G1] Sustained speech during playback stops audio** within
-  ~barge_in_min_speech_ms + one chunk; the utterance is forwarded with
-  the interruption marker and `[BARGE-IN]` in its transcript log line.
+  ~barge_in_min_speech_ms + one chunk (preset `conversational` or
+  `take-over`); the utterance is forwarded with the interruption marker
+  and `[BARGE-IN]` in its transcript log line.
 - **[G2] Cough test.** Sub-threshold noise bursts during playback must
   NOT stop audio (the monitor resets between speech episodes).
 - **[G3] Echo-triggered barge-in is contained.** If self-echo trips the
   barge-in (AEC not converged), the utterance matches the spoken-text
   filter and is dropped with a WARNING log -- playback stops (annoying)
   but the echo is never forwarded to the backend (safe). Persistent
-  occurrences mean AEC needs tuning or interrupt_mode should be "none".
-- **[G4] abort_turn mode** also interrupts the backend turn
+  occurrences mean AEC needs tuning or interrupt_preset should be
+  "do-not-disturb".
+- **[G4] `halt`/`take-over` presets** also interrupt the backend turn
   (safeword-equivalent) -- verify against each backend.
 - **[G5] Marker delivery.** The forwarded barge-in text carries
   BARGE_IN_MARKER so the backend knows its response wasn't fully heard
   ("the truncation problem", DESIGN-echo-and-barge-in.md).
+- **[G6] `patient` preset queues, doesn't drop or deliver immediately.**
+  Talk over a response under preset `patient`: audio keeps playing
+  (`on_current_turn: let-finish`, unlike G1); the utterance is neither
+  forwarded immediately nor silently dropped -- once the response is
+  FULLY done (backend idle AND audio finished), the queued utterance is
+  delivered automatically (log line: "delivering queued interjection now
+  that the turn is idle"). Say a second thing while still queued before
+  the first flushes: only the most recent one should be delivered
+  (most-recent-wins, not both) -- log line: "queued interjection replaced
+  by a newer one".
 
 ## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
 

@@ -75,13 +75,16 @@ audio:
 # interaction -- barge-in (talking over a response).
 # ---------------------------------------------------------------------------
 interaction:
-  interrupt_mode: none    # none       = half-duplex; speech during playback
-                          #              is dropped (the safe default).
-                          # stop_audio = talking over the response stops it
-                          #              and your words are forwarded.
-                          # abort_turn = also aborts the backend's turn.
-                          # NOTE: the non-none modes need echo_cancellation
-                          # (or headphones) or the assistant interrupts ITSELF.
+  interrupt_preset: do-not-disturb   # do-not-disturb = half-duplex; speech
+                          #   during playback is dropped (the safe default).
+                          # conversational = talking over the response mutes
+                          #   it and your words steer the backend now.
+                          # patient        = finishes, then delivers your words.
+                          # halt           = aborts the backend's turn, drops.
+                          # take-over      = aborts the turn, steers now.
+                          # NOTE: every preset except do-not-disturb/halt
+                          # needs echo_cancellation (or headphones) or the
+                          # assistant interrupts ITSELF. See docs/DESIGN-barge-in.md.
   barge_in_min_speech_ms: 250   # sustained speech required before barge-in
                           # fires, so a cough doesn't kill a response.
   wake_word: Athena       # say this to resume after "pause listening" below.

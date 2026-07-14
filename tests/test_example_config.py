@@ -28,7 +28,7 @@ def test_example_config_reflects_documented_defaults() -> None:
     assert config.stt.model == "base"
     assert config.audio.echo_cancellation is False
     assert config.audio.sample_rate == 16000
-    assert config.interaction.interrupt_mode == "none"
+    assert config.interaction.interrupt_preset == "do-not-disturb"
     assert "stop stop stop" in config.safeword.hard_stop_phrases
 
 
