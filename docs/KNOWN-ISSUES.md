@@ -6,6 +6,58 @@ PR history.
 
 ---
 
+## faster-whisper's native allocator can fail during a long session
+
+**Status:** mitigated (2026-07-14), root cause is upstream and unfixed.
+`LocalTranscriber` (`src/convobox/stt/transcriber.py`) now catches this and
+recovers automatically -- see below. This entry documents the underlying
+cause for anyone debugging a recurrence or deciding whether to chase a real
+upstream fix later.
+
+**Symptom.** Live-confirmed 2026-07-14: a real ~13-minute UAT session
+(claude-code backend, ~20 transcriptions in) crashed the whole
+`run_convobox.py` process with an unhandled `RuntimeError: could not create
+a memory object`, raised from inside `WhisperModel.transcribe()` ->
+`detect_language()` -> `self.model.encode()`. Independently reproduced the
+same failure class this same session while live-verifying a detector's
+default vocabulary via a throwaway TTS->STT round-trip script: repeated
+`transcribe()` calls in one long-lived process eventually failed with
+`mkl_malloc: failed to allocate memory` (a different message, same
+underlying allocator exhaustion), reproducible even in a fresh process
+with system RAM never actually low (26GB free throughout, confirmed via
+`Get-CimInstance Win32_OperatingSystem`) -- ruling out simple system-wide
+memory pressure as the cause.
+
+**Root cause: known, unresolved upstream issue, not a ConvoBox bug.**
+ctranslate2's native (MKL on Windows) allocator leaks memory across
+repeated inference calls in a long-lived process -- documented in
+SYSTRAN/faster-whisper#660 ("Faster whisper holding memory not releasing
+it, killing the flask server") and #390 ("Memory Leak investigation"),
+both open/unresolved as of this writing. Not something Python-level
+`gc.collect()` can fix, since the leaked memory is native (C++) heap, not
+Python-managed objects.
+
+**Mitigation shipped.** `LocalTranscriber.transcribe()` catches
+`RuntimeError` around the model call, logs a warning with the real
+exception and traceback (nothing silently swallowed), reloads the
+`WhisperModel` (resets its allocator state -- the practical workaround for
+this whole class of native-library leak), and returns an empty
+`TranscriptResult` so the failed utterance is treated as unheard/dropped
+by the normal low-confidence-transcript gate rather than crashing the
+process. One lost utterance instead of a dead session. `model_factory` is
+injectable for tests (`tests/test_transcriber.py`), so the recovery path
+is unit-tested without needing to actually reproduce the native failure.
+
+**Why not "actually fix" it.** The leak is inside ctranslate2's C++
+runtime, several layers below anything ConvoBox's Python code controls --
+not fixable here. Worth revisiting if a future ctranslate2/faster-whisper
+release resolves the upstream issue, or if the reload mitigation itself
+turns out to be insufficient (e.g. recurring often enough within a single
+session to be disruptive) during a longer live-mic UAT pass than this
+session's own testing has covered.
+
+---
+
 ## WASAPI output plays speech an octave too high ("static chipmunk")
 
 **Status:** deferred (2026-07-12). Mitigation: use an **MME** output device.
