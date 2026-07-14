@@ -162,6 +162,54 @@ existing:
   silence-timing machinery as barge-in's sustained-speech threshold —
   intentionally, per the shared-primitive section above.
 
+**Core tiering logic shipped (2026-07-14), wiring not yet started.**
+`src/convobox/response_tiering/tiering.py` — `split_tiers(text) ->
+list[str]` (paragraph-boundary split, pure function) and
+`ResponseTierState` (`start(full_text) -> str` returns tier 0 to actually
+speak; `reveal_more() -> str | None` is the `ContinueDetector`-triggered
+action, `None` once nothing's left; `has_more()` for callers that need to
+know before deciding whether to even listen for "continue"). Same
+"primitive first, review it, wire it later" pacing as the TUI work
+(#54/#55/#56): no `Orchestrator`/`run_convobox.py` changes in this PR.
+
+Picked **paragraph**, not sentence, as the v1 split unit (the design
+above says "first paragraph/sentence," left open) — reliable sentence-
+boundary detection has to handle abbreviations, decimals, ellipses, and
+code fragments correctly, which is genuinely hard to get right; paragraph
+splitting (blank line) is simple, robust, and already the boundary
+`Orchestrator.strip_code_for_speech` collapses onto. It also degrades
+correctly for the common case: most coding-agent replies are a single
+paragraph with nothing to hide, so tier 0 *is* the whole response and
+there's nothing to offer "more" of -- `has_more()` is `False`
+immediately, no dangling "want more detail?" prompt for a two-sentence
+answer. 13 new tests, including the reset-on-new-response semantics (an
+old response's remaining tiers are moot once a new one exists, same
+principle as the TUI's full-detail pane resetting per-turn).
+
+**`Orchestrator` wiring shipped (2026-07-14), main-loop gate not yet
+started.** `Orchestrator(..., tier_responses: bool = False)`: off by
+default (zero behavior change for existing callers -- full text spoken
+exactly as before). When on, each `TEXT` event tiers the
+*already-stripped* speech text (not raw markdown -- `strip_code_for_speech`
+already collapses 3+ newlines to exactly `"\n\n"`, so tiering after
+stripping matches `split_tiers()`'s expected boundary, and avoids
+splitting mid-code-block on a blank line stripping was about to remove
+anyway) and speaks only tier 0. `has_more_to_reveal()` and
+`speak_more()` (the `ContinueDetector`-triggered action) expose the rest.
+The `on_event` observer hook (#55, so the TUI's full-detail pane) always
+sees the full, untiered raw content -- fires before tiering, by design,
+matching "the TUI always shows the full, untruncated response." 15 new
+tests, including the reset-on-new-response and stripped-vs-raw-boundary
+cases explicitly.
+
+Still needed before this is user-visible: a silence-timeout gate in
+`run_convobox.py`'s main loop (same shape as `ListeningGate`'s
+pause/resume gate) that listens for `ContinueDetector` after a tiered
+response (only when `orchestrator.has_more_to_reveal()` -- no point
+prompting for "more" a response never held back) and implies "no" after
+1-4s of silence, and exposing `tier_responses` as a real config field
+(currently only reachable by constructing `Orchestrator` directly).
+
 ## Phase 3 — Approvals
 
 **Codex (built now — it has a real channel).** `codex.py`'s

@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.audio.playback import AudioPlayer
+from convobox.response_tiering import ResponseTierState
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
 
@@ -57,11 +58,22 @@ class Orchestrator:
         tts: TTSEngine | None = None,
         player: AudioPlayer | None = None,
         on_event: Callable[[BackendEvent], None] | None = None,
+        tier_responses: bool = False,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
         self._tts = tts
         self._player = player
+        # Response tiering (docs/DESIGN-0.3.0-interaction-and-safety.md,
+        # Phase 2): "voice always gives the tiered/short version." Off by
+        # default (existing callers speak the full text exactly as before)
+        # -- opt-in via tier_responses=True. One ResponseTierState covers
+        # the CURRENT response only; a new TEXT event replaces it (see
+        # ResponseTierState.start()'s own docstring for why: an old
+        # response's remaining tiers are moot once a new one exists).
+        self._tier_state: ResponseTierState | None = (
+            ResponseTierState() if tier_responses else None
+        )
         # Optional observer for every backend event (TEXT, TOOL_CALL,
         # TOOL_RESULT, DONE, ERROR -- the full stream, not just the TEXT
         # events _on_event itself acts on). Orchestrator's own job is
@@ -162,14 +174,53 @@ class Orchestrator:
         if self._tts is None or self._player is None:
             return
         spoken = strip_code_for_speech(event.content)
-        if spoken:
-            # Fire-and-forget rather than awaited inline: synthesis can take
-            # noticeably longer than draining the next backend event (e.g. a
-            # DONE right behind this TEXT), and is_busy() staying fresh
-            # matters more than serializing speech with event consumption.
-            # AudioPlayer.play() is itself non-blocking (own thread), so this
-            # task's own work is just the synthesize() await.
-            self._speak_task = asyncio.create_task(self._speak(spoken))
+        if not spoken:
+            return
+        if self._tier_state is not None:
+            # Tier on the ALREADY-STRIPPED text, not the raw event content:
+            # strip_code_for_speech already collapses 3+ newlines down to
+            # exactly "\n\n" (_COLLAPSE_BLANK_RE), so its output's paragraph
+            # boundaries are exactly what split_tiers() expects -- tiering
+            # the raw markdown would risk splitting mid-code-block or on a
+            # blank line that strip_code_for_speech was about to remove
+            # anyway. start() REPLACES any previous tier state: a new TEXT
+            # event is a new response to tier, not a continuation of the
+            # last one's held-back tiers (matches on_event_hook seeing the
+            # untiered, full raw content above -- the TUI's full-detail
+            # pane is never affected by tiering, by design).
+            spoken = self._tier_state.start(spoken)
+            if not spoken:
+                return
+        # Fire-and-forget rather than awaited inline: synthesis can take
+        # noticeably longer than draining the next backend event (e.g. a
+        # DONE right behind this TEXT), and is_busy() staying fresh
+        # matters more than serializing speech with event consumption.
+        # AudioPlayer.play() is itself non-blocking (own thread), so this
+        # task's own work is just the synthesize() await.
+        self._speak_task = asyncio.create_task(self._speak(spoken))
+
+    def has_more_to_reveal(self) -> bool:
+        """Whether the current (most recently tiered) response has
+        held-back tiers left. Lets a caller (the main loop's
+        ContinueDetector wiring) decide whether it's even worth listening
+        for "continue" after a response -- a response that already said
+        everything shouldn't prompt for more."""
+        return self._tier_state is not None and self._tier_state.has_more()
+
+    async def speak_more(self) -> bool:
+        """The ContinueDetector "continue" action: speak the next
+        held-back tier of the current response, if any. Returns whether
+        there was anything to speak (False: nothing left, or tiering
+        isn't enabled, or TTS isn't configured -- the caller doesn't need
+        to distinguish why, just whether it should have said something).
+        """
+        if self._tier_state is None or self._tts is None or self._player is None:
+            return False
+        chunk = self._tier_state.reveal_more()
+        if chunk is None:
+            return False
+        self._speak_task = asyncio.create_task(self._speak(chunk))
+        return True
 
     async def _speak(self, text: str) -> None:
         # SECURITY EXCEPTION: B101 (assert stripped under python -O) -- this is
