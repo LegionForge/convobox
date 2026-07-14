@@ -20,6 +20,11 @@ backend:
   # command: ["claude"]
   # command: ["claude", "--model", "claude-haiku-4-5"]
   # command: ["codex"]
+  # -- claude-code only: to remove specific tools entirely (rather than
+  #    accepting the safe default --permission-mode plan's blanket
+  #    no-writes stance), pass --disallowedTools yourself -- ConvoBox
+  #    doesn't reject or reinterpret anything already in `command`:
+  # command: ["claude", "--disallowedTools", "Bash", "Write", "Edit"]
 
 # ---------------------------------------------------------------------------
 # tts -- how ConvoBox speaks (text-to-speech).

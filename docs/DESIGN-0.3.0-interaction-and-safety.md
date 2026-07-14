@@ -302,11 +302,27 @@ hardcode with a real `PendingPrompt(approve/deny/discuss)`:
    different, more granular knob — name specific tools (or, per
    `claude --help`, specific command patterns like `"Bash(git *)"`) to
    remove entirely, rather than accepting plan mode's blanket
-   research-only stance. Whether ConvoBox should expose this (a new
-   config field, a default deny-list, or leave `command:` overrides as
-   the escape hatch it already is) is a real feature-scoping decision,
-   not a mechanical follow-up — deliberately not rushed into this probe;
-   tracked as an open question below.
+   research-only stance.
+
+   **Resolved (2026-07-14): no new config field — `command:` is the
+   sanctioned mechanism, not a stopgap.** `BackendConfig.command` already
+   accepts an arbitrary argv list (`["claude", "--model", "..."]`) that
+   `ClaudeCodeAdapter` spawns directly, with `_resolve_flags()` only
+   appending its own required protocol flags after it — it doesn't
+   inspect or reject anything else in `command`, so `["claude",
+   "--disallowedTools", "Bash", "Write", "Edit"]` already works today,
+   zero new code needed. A dedicated config field or a hardcoded default
+   deny-list were both considered and rejected: `--permission-mode plan`
+   is *already* the universally-safe zero-config default (nothing
+   executes, full stop), so there's no safe "default deny-list" to pick
+   for the more-permissive case a user opts into by overriding
+   `--permission-mode` themselves — the right tool list is inherently
+   workflow-specific, which is exactly what `command:` is already for.
+   Adding a second, narrower config surface next to an existing general
+   one that already covers it would be a redundant abstraction, not a
+   feature. Documented with a concrete example in
+   `convobox.example.yaml` and `claude_code.py`'s module docstring so
+   this doesn't need rediscovering.
 2. **Out of scope for 0.3.0**: switching Claude Code off headless mode
    entirely to drive its interactive TTY via injected keystrokes (the
    README's own named fallback: *"a PTY/keystroke fallback where nothing
@@ -346,6 +362,8 @@ here needs to be its own pass.
 - ~~Whether Codex's app-server preserves a pending approval request across a
   "discuss" exchange~~ — **confirmed yes**, see phase 2 above. "Discuss" is
   unblocked to build.
-- Whether to actually wire `--disallowedTools` into ConvoBox's Claude Code
+- ~~Whether to actually wire `--disallowedTools` into ConvoBox's Claude Code
   adapter (confirmed safe, see phase 3 above) — and if so, what the default
-  deny-list should be and whether it's user-configurable. Not started.
+  deny-list should be and whether it's user-configurable.~~ — **resolved,
+  2026-07-14**: no new wiring needed, `command:` already supports it (see
+  phase 3 above).
