@@ -270,7 +270,7 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   unnervingly silent in practice; see DESIGN-barge-in.md's open question on
   this.
 
-## 8. Conversation TUI (`--tui`, `src/convobox/tui/`)
+## 9. Conversation TUI (`--tui`, `src/convobox/tui/`)
 
 Only startup/idle/shutdown against a real backend+mic is automation-
 verified so far (no scripted way to "speak" into this loop) -- this
@@ -303,7 +303,7 @@ section is the live-mic pass that closes the gap.
   visible) state afterward -- no leftover garbled screen requiring a
   manual `reset`/`cls`.
 
-## 9. Response tiering (`interaction.tier_responses: true`)
+## 10. Response tiering (`interaction.tier_responses: true`)
 
 Only the `Orchestrator`-level tiering logic is automation-verified so far
 (a real multi-paragraph response through a real backend, confirmed
