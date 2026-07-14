@@ -91,6 +91,63 @@ A *dedicated* wake-word engine (openWakeWord etc.) is only needed for a
 future low-power "asleep until called" idle mode — **deferred**; transcript
 matching covers interrupt-while-active.
 
+## Pause/resume listening (JP, 2026-07-14)
+
+A fourth interaction primitive, related to but distinct from barge-in's
+push-word trigger: a spoken **"stop listening" / "pause listening"** puts
+ConvoBox into a standing paused state — every utterance is ignored except
+the wake word — until the wake word is heard again, which resumes normal
+listening. In JP's framing: *"like interrupt, but interrupt and stop
+processing all speech, then listen for wake word."*
+
+**Not the deferred wake-word roadmap item.** `docs/ROADMAP.md`'s "Wake word
+(post-0.5)" item is specifically about a **dedicated low-power spotter
+engine** (openWakeWord etc.) plus **speaker enrollment** (biometric
+voice-trained, so other speakers can't trigger it) — that's what's deferred,
+for closing the open-mic *trust* boundary. Pause/resume needs neither: it
+rides on the Whisper transcription that's already running continuously
+(same "transcript matching covers interrupt-while-active" principle used
+for the push-word barge-in trigger), and it's *user-initiated* per session,
+not an always-asleep-from-boot state. Cheap, buildable now.
+
+**Priority ordering** (highest first — this governs where the check sits in
+`run_convobox.py`'s main loop, ahead of the existing overlap/echo/confidence
+gates):
+
+1. **Safeword** — always checked first, unconditionally, regardless of
+   pause state (a paused session must still be hard-stoppable; idempotent
+   no-op if nothing is running, same as today). Does **not** by itself
+   change pause state — pause and hard-stop are orthogonal axes.
+2. **If currently paused** (and not a safeword match) — check *only* the
+   wake word:
+   - matched → resume (exit paused state); the utterance is never routed
+     to the backend as a command.
+   - not matched → drop silently (log at debug, don't reach the
+     overlap/echo/confidence gates or the orchestrator at all).
+3. **If not paused** (and not a safeword match) — check the pause phrase:
+   - matched → hard-stop the backend (interrupts in-flight work, same as
+     the safeword's abort) **and** enter the paused state; the utterance
+     is never routed to the backend as a command.
+   - not matched → today's normal flow, unchanged.
+
+**One wake word, two jobs.** The same `WakewordDetector` instance serves
+both the push-word barge-in trigger *and* resuming from pause — "get
+ConvoBox's attention," just triggered from different starting states
+(mid-response vs. fully paused). Pause/resume does **not** require barge-in's
+`push-word` trigger to be configured; it's independent and on by default
+(using `DEFAULT_WAKE_WORD` if the user never sets one).
+
+**New detector: `PauseListeningDetector`.** Same shape as `SafewordDetector`
+(a list of phrases, matched deterministically; only construction guard is
+"doesn't normalize to nothing") — **not** `ConfirmwordDetector`'s stricter
+guard, since accidentally saying "stop listening" is benign (you just say
+the wake word again), not destructive. Default phrases: `["stop listening",
+"pause listening"]`.
+
+**Config schema change:** `wake_word` moves out of `interrupt:` (see below)
+to `interaction:` top-level, since it's now shared by two independent
+features, not owned by barge-in alone.
+
 ## Backchannel filtering (research-grounded, load-bearing)
 
 "mm-hmm / uh-huh / yeah / right / oh" are **continuers** — they signal "keep
@@ -135,16 +192,19 @@ Human turn-transitions cluster around **~200 ms** (Stivers et al. 2009). So:
 
 ```yaml
 interaction:
+  wake_word: "ConvoBox"          # shared: push-word barge-in trigger AND pause/resume
+  pause_listening_phrases:       # enters the paused (wake-word-only) state; hard-stops in flight
+    - "stop listening"
+    - "pause listening"
   interrupt:
     mode: conversational      # conversational | patient | do-not-disturb | halt | take-over
     # advanced — a preset just fills these in; override to sculpt any cell:
     on_current_turn: mute     # let-finish | mute | abort
     on_new_words:    now      # drop | queue | now
-    trigger:         speech   # speech | push-word
-    wake_word:       ""       # push-word trigger; validated at setup
+    trigger:         speech   # speech | push-word (uses interaction.wake_word)
     sensitivity_ms:  250      # sustained speech before it counts (backchannels excluded)
     only_when_safe:  true     # auto-fall back to push-word on speakers w/o AEC
-  # safeword hard-stop is always on, in every mode (see safeword config)
+  # safeword hard-stop is always on, in every mode, paused or not (see safeword config)
 ```
 
 ## Maps onto primitives we already have
@@ -163,8 +223,10 @@ Mostly orchestration wiring, not new backend work:
 ## Phasing
 
 **In 0.3.0:** the two-axis model + presets; the `speech`/`push-word` triggers
-(wake word via transcript match + `WakewordDetector`); backchannel filtering;
-default-by-safety; interrupt-stop / response-start latency instrumentation.
+(wake word via transcript match + `WakewordDetector`); pause/resume
+listening (`PauseListeningDetector` + the wake word, shared); backchannel
+filtering; default-by-safety; interrupt-stop / response-start latency
+instrumentation.
 
 **Deferred (post-0.3.0):** Voice Activity Projection for predictive
 endpointing (beyond silence-timer VAD); a low-power idle wake-word *engine*;
@@ -181,3 +243,7 @@ TV can't trip the wake word); `duck` mode; full-duplex generative direction.
   warn.
 - Per-backend behavior of `BARGE_IN_MARKER` (opencode, then Claude Code /
   Codex) — this is where the barge-in and backend-validation cycles overlap.
+- Should resuming from pause produce an audible/logged acknowledgment (a
+  short tone or "listening again"), or resume silently? Leaning toward a
+  short acknowledgment (matches Alexa/Google's wake confirmation), but
+  needs a live-UAT check against feeling naggy.
