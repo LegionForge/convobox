@@ -13,6 +13,9 @@ Turn behavior is scripted by the prompt text:
   contains "hang"       -> turn/started only; completes on turn/interrupt
   contains "needs approval" -> server->client approval request first (current
                             protocol method); echoes the decision back
+  contains "needs file edit approval" -> item/fileChange/requestApproval
+                            (current protocol, live-confirmed 2026-07-14 --
+                            see codex.py's module docstring)
   contains "needs legacy exec approval" -> same, but the legacy
                             execCommandApproval method name
   contains "needs legacy patch approval" -> same, but applyPatchApproval
@@ -98,6 +101,16 @@ def main() -> None:
                 continue
             if "fail" in text:
                 turn_completed(turn_id, status="failed", error={"message": "model exploded"})
+                continue
+            if "needs file edit approval" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "item/fileChange/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id},
+                })
                 continue
             if "needs legacy exec approval" in text:
                 pending_approval_turn = turn_id

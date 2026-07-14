@@ -42,16 +42,26 @@ adapter was written. Key facts:
   entirely different shape with no `"decision"` field -- a required
   `"permissions"` object naming what's granted, so `{"permissions": {}}`
   (grant nothing) is the deny-equivalent. See `_APPROVAL_DENY_PAYLOADS`.
-  **Live-verified**: spawned a real `codex app-server` (0.144.1) with
-  `approvalPolicy: "untrusted"`, asked it to run a destructive-flavored
-  command (`rm -f` on a nonexistent file, safe by construction), and
-  confirmed the server sends `item/commandExecution/requestApproval` in
-  practice (not the legacy names) -- responding with this adapter's
-  exact `{"decision": "decline"}` produced `"exec command rejected by
-  user"` and the command never ran. The legacy-method and
-  permissions-method payloads are schema-verified but were **not**
-  observed live (this server version didn't trigger them in testing) --
-  correctness by vendor-schema reading, not a live probe, for those two.
+  **Live-verified, both current-protocol methods**: spawned a real
+  `codex app-server` (0.144.1) with `approvalPolicy: "untrusted"`. (1)
+  Asked it to run a destructive-flavored command (`rm -f` on a
+  nonexistent file, safe by construction) -- confirmed the server sends
+  `item/commandExecution/requestApproval`, and this adapter's exact
+  `{"decision": "decline"}` produced `"exec command rejected by user"`;
+  the command never ran. (2) Asked it to WRITE a file via its editing
+  tool (2026-07-14, second probe) -- confirmed the server sends
+  `item/fileChange/requestApproval` (fired twice; codex retried once
+  before giving up), and the same `{"decision": "decline"}` response
+  worked both times: the model reported *"I couldn't complete the file
+  creation because the file-editing tool request was rejected by the
+  environment"*, and the target file was confirmed absent from disk
+  afterward. Both of the current protocol's two approval methods are now
+  live-confirmed, not just schema-read. The legacy-method
+  (`execCommandApproval`/`applyPatchApproval`) and permissions-method
+  payloads remain schema-verified but **not** observed live -- this
+  server version sent only the two current-protocol methods across both
+  probe sessions, suggesting (not yet proof) the legacy names may be
+  unreachable dead code for this client/server combination.
 
 - **A pending approval request survives a deliberate delay + unrelated
   traffic on the same connection (confirmed live, 2026-07-14).** Probed

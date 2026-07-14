@@ -245,6 +245,23 @@ async def test_approval_requests_are_auto_declined() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filechange_approval_uses_decline() -> None:
+    # item/fileChange/requestApproval -- live-confirmed 2026-07-14 against
+    # a real codex app-server (see codex.py's module docstring): a file
+    # write triggers this method specifically (not commandExecution), and
+    # {"decision": "decline"} correctly blocks it.
+    adapter = _adapter()
+    try:
+        await adapter.send_text("this needs file edit approval")
+        events = await _collect(adapter, 2)
+        assert events[0].type == BackendEventType.TEXT
+        assert events[0].content == "approval decision was: decline"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_legacy_exec_approval_uses_denied_not_decline() -> None:
     # "decline" is not a valid ReviewDecision value for the legacy
     # execCommandApproval method (confirmed against codex-cli 0.144.1's
