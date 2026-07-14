@@ -45,6 +45,30 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   (is_playing always False, `playback_ended_at` stays 0). Echo/overlap
   suppression is therefore OFF in `--mute`. UAT echo behavior MUST be run with
   speakers on; `--mute` runs validate the non-audio path only.
+- **[E7] Multi-segment tool-calling responses don't spuriously kill the
+  overlap gate.** A real bug, live-confirmed 2026-07-14 and fixed in
+  `Orchestrator._on_event`/`speak_more()`: a single backend turn with
+  multiple TEXT segments (text interleaved with tool calls -- "let me
+  check that file" ... [tool work] ... "found it, fixing now") used to
+  leave the PREVIOUS segment's `_speak_task` running uncancelled, which
+  kept advancing `EchoAwarePlayer.playback_ended_at`
+  (`scripts/run_convobox.py`) for audio that was never actually played
+  (`play_stream()` already replaces the audio thread/stream regardless).
+  Observed live as an entire multi-minute session where nearly every
+  utterance got dropped by the overlap gate as echo -- reported as "AEC
+  seems to be misfiring," though AEC itself was never the mechanism
+  doing the dropping. Ask a coding-agent backend to do real multi-step
+  work (read a file, then explain what it found, then make an edit) so
+  it emits several TEXT segments in one turn, and confirm: (a) only the
+  LAST segment's text is actually heard (matches existing behavior,
+  unaffected by this fix), (b) speaking normally a few seconds after
+  the full response finishes is NOT dropped as overlap -- the
+  regression case this fix specifically targets. Unit-tested
+  (`tests/test_orchestrator.py::test_second_text_event_cancels_the_first_speak_task_before_it_completes`,
+  verified to fail without the fix -- hangs forever, confirming it
+  detects the real bug) but not live-mic re-verified against a fresh
+  session, to avoid interfering with an in-progress UAT session on a
+  shared local backend server when this was found and fixed.
 
 ## 2. VAD segmentation
 
