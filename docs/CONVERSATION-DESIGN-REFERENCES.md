@@ -9,10 +9,14 @@ re-derive them from vibes.
 Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
-> dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000) were
-> web-verified July 2026. The foundational conversation-analysis and
-> pragmatics classics are cited from the standard literature; confirm
-> against the primary source before any formal/public citation.
+> dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
+> Google Conversation Design) were web-verified July 2026 by reading real
+> primary-source pages/code, not secondhand summaries. The foundational
+> conversation-analysis and pragmatics classics are cited from the
+> standard literature; confirm against the primary source before any
+> formal/public citation. The Alexa Design Guide entry is explicitly
+> flagged as NOT primary-source-verified this pass (see that entry) --
+> don't treat it as equally solid.
 
 ---
 
@@ -193,12 +197,56 @@ discoverability.
 **Adopt →** Use as the checklist for the non-turn-taking parts of the voice
 UX (confirmation flows — cf. the ConfirmwordDetector — and error recovery).
 
-**Industry design guides: Amazon Alexa Design Guide; Google Conversation
-Design.**
-The codified, shipped-at-scale barge-in and confirmation patterns.
-**Adopt →** Sanity-check our preset behaviors against what hundreds of
-millions of users are already trained on (wake-word interrupt = Alexa;
-open barge-in = modern LLM voice modes).
+**Google Conversation Design (developers.google.com/assistant/conversation-design,
+verified 2026-07-14 by reading the real live pages, not a secondhand
+summary — `/confirmations` and `/errors`).** Google's own shipped-at-scale
+guidance for the Assistant/Actions platform. Two concrete, source-quoted
+findings:
+
+- **Confirmation policy matches `ConfirmwordDetector`'s existing design,
+  independently**: *"Double-check with the user prior to performing an
+  action that would be difficult to undo, for example, deleting user data,
+  completing a transaction, etc."* paired with *"Don't confirm if the
+  input is simple and typically recognized with high confidence, for
+  example, yes/no grammars"* (their own stated anti-pattern: a redundant
+  "Ok, yes"). **Adopt →** Real-production validation of the exact split
+  ConvoBox already ships: `ConfirmwordDetector`'s strict ban on common
+  affirmations for approval-class prompts (PR #29) vs. `ContinueDetector`
+  and other low-stakes detectors allowing a bare "yes" — Google's
+  reversible/self-evident vs. irreversible/destructive line is the same
+  line ConvoBox already drew, not a new idea to import.
+- **The No-Input / No-Match error-escalation ladder is a genuinely new,
+  adoptable pattern — ConvoBox doesn't have this today.** *"Users should
+  experience no more than 3 No Input or No Match errors in a row, after
+  which your Action should play the appropriate max error prompt and
+  exit."* The ladder itself: 1st attempt — brief rephrase, no
+  over-explaining; 2nd attempt — escalate with examples/options (Google's
+  own note: examples work better than instructions, since they model the
+  expected response implicitly); max attempt (2-3) — end gracefully with
+  a concrete next step, never a vague "try again later." **Adopt →**
+  ConvoBox's `min_language_probability` gate today just silently drops a
+  low-confidence transcript with no user-facing signal and no escalation
+  state — a real gap next to this pattern. A future improvement: track
+  consecutive low-confidence/empty-transcript counts per session, and
+  after N in a row, speak something (not just log it) rather than sitting
+  in silence indefinitely from the user's perspective. Not built this
+  cycle — flagged as a concrete, scoped roadmap candidate, not vague
+  "add error handling."
+
+**Amazon Alexa Design Guide (alexa.design/guide, developer.amazon.com/.../design).**
+Attempted the same live-read verification this cycle; the guide is
+presented as an interactive, audio-example-driven experience rather than
+static indexable pages, and didn't yield fetchable, quotable content the
+way Google's docs did. Leaving the general, less-verified citation here
+rather than overclaiming specifics: Alexa's wake-word-gated interaction
+(no true open barge-in on-device) is the real-world validation for
+ConvoBox's `push-word` trigger option, and its "no confirmation on
+simple/reversible actions" convention is well-known industry practice
+independent of this fetch attempt — but unlike the Google findings above,
+this wasn't verified against primary-source text this pass.
+**Adopt →** Revisit with a more targeted URL/search if Alexa-specific
+detail becomes load-bearing for a future decision; don't cite it as
+source-verified until it actually is.
 
 ---
 
@@ -215,3 +263,9 @@ open barge-in = modern LLM voice modes).
 5. **Presets = the control surface; VAP / full-duplex = the engine upgrade**
    for later cycles. Match the mental models users already have (Alexa,
    Google, ChatGPT voice) rather than inventing a new one.
+6. **Confirmation policy is validated, not new** (Google Conversation
+   Design) — `ConfirmwordDetector`'s strict-vs-lightweight split already
+   matches Google's irreversible/reversible line.
+7. **Error-escalation ladder is a real, scoped gap** (Google Conversation
+   Design) — low-confidence transcripts are silently dropped today with no
+   escalating user-facing signal; a future candidate, not built this cycle.
