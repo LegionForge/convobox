@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.audio.playback import AudioPlayer
@@ -55,11 +56,24 @@ class Orchestrator:
         safeword: SafewordDetector,
         tts: TTSEngine | None = None,
         player: AudioPlayer | None = None,
+        on_event: Callable[[BackendEvent], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
         self._tts = tts
         self._player = player
+        # Optional observer for every backend event (TEXT, TOOL_CALL,
+        # TOOL_RESULT, DONE, ERROR -- the full stream, not just the TEXT
+        # events _on_event itself acts on). Orchestrator's own job is
+        # routing transcripts and speaking TEXT content; a caller that
+        # wants to know what actually happened (e.g. a live TUI showing
+        # the real response, not just "backend busy or not") has no other
+        # way to see it -- events() is drained internally by
+        # _consume_events(), never exposed to callers of handle_transcript.
+        # Deliberately a plain synchronous callback, not another asyncio
+        # queue/generator: the caller decides how to buffer/render: this
+        # is a hook, not a second consumer contending for the same events.
+        self._on_event_hook = on_event
         self._events_task: asyncio.Task[None] | None = None
         self._speak_task: asyncio.Task[None] | None = None
 
@@ -132,6 +146,17 @@ class Orchestrator:
         logger.debug(
             "backend event type=%s tool=%s", event.type.value, event.tool
         )
+        if self._on_event_hook is not None:
+            try:
+                self._on_event_hook(event)
+            except Exception:  # noqa: BLE001
+                # Called synchronously from inside _consume_events()'s
+                # async-for loop -- an uncaught exception here would kill
+                # _events_task, silently stopping event consumption
+                # (is_busy() goes stale forever, no more speech, no more
+                # TUI updates) over a bug in an OBSERVER, not the core
+                # routing/speech responsibility this class exists for.
+                logger.warning("on_event observer raised; ignoring", exc_info=True)
         if event.type != BackendEventType.TEXT or not event.content:
             return
         if self._tts is None or self._player is None:
