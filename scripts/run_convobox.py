@@ -72,6 +72,7 @@ from convobox.config import load_config
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator
+from convobox.response_tiering import ContinueDetector
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
@@ -308,6 +309,65 @@ class ListeningGate:
         return "pass"
 
 
+class ContinuePromptGate:
+    """Tracks whether ConvoBox is waiting for a continue/decline reply
+    after a tiered response (docs/DESIGN-0.3.0-interaction-and-safety.md,
+    Phase 2's "silence-timeout-implies-no").
+
+    Pure state machine, like BargeInMonitor/ListeningGate, so the wait/
+    timeout logic is unit-testable independent of the mic loop and real
+    clocks. Two separate call sites, matching the two ways the wait can
+    end: `observe_transcript()` per heard utterance while waiting (an
+    explicit reply -- continue, decline, or the user just said something
+    else instead of answering), and `observe_timeout()` on the same 1s
+    poll tick BargeInMonitor/QueuedInterjection/the TUI status already
+    share (silence -- no utterance arrived at all).
+    """
+
+    def __init__(self, detector: ContinueDetector, timeout_s: float) -> None:
+        self._detector = detector
+        self.timeout_s = timeout_s
+        self._waiting_since: float | None = None
+
+    @property
+    def is_waiting(self) -> bool:
+        return self._waiting_since is not None
+
+    def start_waiting(self, now: float) -> None:
+        self._waiting_since = now
+
+    def observe_timeout(self, now: float) -> bool:
+        """Call once per watchdog tick. Returns True exactly once, the
+        tick the wait silently expires (implied decline) -- the caller
+        doesn't need to do anything further; there's nothing to speak and
+        nothing to forward, unlike observe_transcript()'s "pass" outcome.
+        """
+        if self._waiting_since is None:
+            return False
+        if now - self._waiting_since >= self.timeout_s:
+            self._waiting_since = None
+            return True
+        return False
+
+    def observe_transcript(self, transcript: str) -> Literal["continue", "decline", "pass"]:
+        """Call for every utterance while is_waiting (caller checks
+        is_waiting first; calling this while not waiting is a caller bug,
+        not handled specially here). ANY utterance ends the wait, matched
+        or not -- unlike ListeningGate's paused state, which drops
+        everything until the wake word, a non-continue/decline reply here
+        means the user moved on to a new topic, not that they're still
+        mid-answer, so "pass" tells the caller to forward it normally
+        rather than dropping it.
+        """
+        outcome = self._detector.check(transcript)
+        self._waiting_since = None
+        if outcome == "continue":
+            return "continue"
+        if outcome == "decline":
+            return "decline"
+        return "pass"
+
+
 class WorkingIndicator:
     """Decides when to remind the user the backend is still working.
 
@@ -526,26 +586,28 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
 async def _working_watchdog(  # type: ignore[no-untyped-def]
     adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection,
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
+    continue_gate: ContinuePromptGate | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
-    is fully idle (docs/DESIGN-barge-in.md's "patient" preset), and derives
-    the TUI's status label when a TUI is active -- all three share one 1s
-    poll rather than each growing its own timer: two unrelated jobs (queue
-    flush, status label) piggybacking on the SAME tick as the original
-    heartbeat, not one job growing new responsibilities. The status label
-    specifically is poll-based rather than threaded through every call
-    site in the main loop because of a real constraint, not laziness:
-    transcriber.transcribe() blocks the event loop synchronously today (no
-    asyncio.to_thread offload), so a render task can't redraw DURING that
-    decode regardless of whether status updates are poll- or event-driven;
-    polling is the lower-risk mechanism for a label that's inherently
-    "close enough," not frame-perfect, either way.
+    is fully idle (docs/DESIGN-barge-in.md's "patient" preset), derives
+    the TUI's status label when a TUI is active, and starts/expires the
+    response-tiering continue-prompt wait -- all sharing one 1s poll
+    rather than each growing its own timer: unrelated jobs piggybacking
+    on the SAME tick as the original heartbeat, not one job growing new
+    responsibilities. The status label and continue-wait start are both
+    poll-based rather than threaded through every call site in the main
+    loop because of a real constraint, not laziness: transcriber.transcribe()
+    blocks the event loop synchronously today (no asyncio.to_thread
+    offload), so nothing can react DURING that decode regardless of
+    whether it's poll- or event-driven; polling is the lower-risk
+    mechanism either way.
 
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
     """
     interval = 1.0
+    was_playing = False
     while True:
         await asyncio.sleep(interval)
         busy, playing = adapter.is_busy(), player.is_playing()
@@ -569,6 +631,23 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                     "couldn't deliver queued interjection to the backend (%s: %s)",
                     type(exc).__name__, exc,
                 )
+        if continue_gate is not None:
+            now = time.monotonic()
+            # The response JUST finished speaking (not "isn't playing" on
+            # every idle tick -- that would restart the wait indefinitely).
+            # Only worth a wait if there's actually something held back;
+            # a response that said everything already has nothing to
+            # prompt for.
+            if was_playing and not playing and orchestrator.has_more_to_reveal():
+                continue_gate.start_waiting(now)
+                log.info(
+                    "say 'continue'/'go on' within %.1fs for more, or just carry on -- "
+                    "silence means done",
+                    continue_gate.timeout_s,
+                )
+            if continue_gate.observe_timeout(now):
+                log.debug("continue-prompt window expired with no reply -- assuming done")
+        was_playing = playing
         if tui_state is not None:
             if listening_gate is not None and listening_gate.is_paused:
                 tui_state.status = "paused"
@@ -675,7 +754,9 @@ async def run(args: argparse.Namespace) -> None:
         tts=tts,
         player=player,
         on_event=(lambda e: _on_backend_event(tui_state, e)) if tui_state is not None else None,
+        tier_responses=config.interaction.tier_responses,
     )
+    continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
 
     log.info(
         "backend=%s  voice=%s  safeword=%r  pid=%d",
@@ -858,7 +939,7 @@ async def run(args: argparse.Namespace) -> None:
     watchdog_task = asyncio.create_task(
         _working_watchdog(
             adapter, player, WorkingIndicator(), orchestrator, interject_queue,
-            segmenter, listening_gate, tui_state,
+            segmenter, listening_gate, tui_state, continue_gate,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
@@ -914,6 +995,26 @@ async def run(args: argparse.Namespace) -> None:
                             text, config.interaction.wake_word,
                         )
                         continue
+                    # Response-tiering continue-prompt (docs/DESIGN-0.3.0-
+                    # interaction-and-safety.md, Phase 2). Checked here, same
+                    # reasoning as barge-in below: an utterance answering the
+                    # prompt arrives right after the response finished
+                    # speaking, exactly the window the overlap gate would
+                    # otherwise flag as suspiciously-close-to-playback -- so
+                    # continue/decline bypass it here, same as a real
+                    # barge-in does. A non-matching reply ("pass") is NOT
+                    # bypassed: it falls through to the normal gates below,
+                    # since we don't know yet whether it's genuine new
+                    # speech or residual echo.
+                    if continue_gate.is_waiting:
+                        outcome = continue_gate.observe_transcript(text)
+                        if outcome == "continue":
+                            log.info("continuing tiered response: %r", text)
+                            await orchestrator.speak_more()
+                            continue
+                        if outcome == "decline":
+                            log.info("declined more detail: %r", text)
+                            continue
                     # A barge-in utterance overlapped playback BY DEFINITION --
                     # that's the user exercising their right to interrupt, not
                     # echo -- so the overlap gate steps aside for it. The

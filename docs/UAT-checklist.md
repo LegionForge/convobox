@@ -302,3 +302,41 @@ section is the live-mic pass that closes the gap.
   session must leave the terminal in its normal (non-alt-screen, cursor
   visible) state afterward -- no leftover garbled screen requiring a
   manual `reset`/`cls`.
+
+## 9. Response tiering (`interaction.tier_responses: true`)
+
+Only the `Orchestrator`-level tiering logic is automation-verified so far
+(a real multi-paragraph response through a real backend, confirmed
+correctly speaking paragraph 1 first and delivering paragraph 2 via
+`speak_more()`) -- the watchdog-trigger + main-loop `ContinuePromptGate`
+wiring is unit-tested at the pure-logic level only. This section is the
+live-mic pass that closes that gap.
+
+- **[R1] A multi-paragraph response speaks only the first paragraph**,
+  then goes quiet -- confirm nothing extra is spoken automatically.
+- **[R2] Saying "continue" (or "go on"/a bare "yes") within
+  `continue_timeout_s` speaks the rest** of the already-received
+  response, with no perceptible round-trip delay to the backend (it's
+  already in hand -- this should feel instant, not like a fresh request).
+- **[R3] Silence past `continue_timeout_s` implies "no"** -- say nothing
+  after a tiered response and confirm ConvoBox does NOT prompt again,
+  re-speak, or otherwise nag; it should simply go back to normal
+  listening.
+- **[R4] Saying something unrelated instead of continue/decline is
+  forwarded normally**, not dropped and not misread as either outcome --
+  e.g. after a tiered response, say a completely different command and
+  confirm it's treated as a fresh instruction, not swallowed by the
+  continue-prompt gate.
+- **[R5] A single-paragraph response never triggers the prompt at all**
+  -- `has_more_to_reveal()` is `False` immediately for a short reply, so
+  there should be no wait, no timeout, no "say continue for more"
+  anywhere in the logs.
+- **[R6] Barge-in still works normally during/after a tiered response**
+  -- the continue-prompt gate and barge-in are independent axes; talking
+  over the FIRST paragraph while it's still playing should barge in as
+  usual, not get misrouted through the continue-prompt logic (which only
+  activates once playback has already ended).
+- **[R7] `continue_timeout_s` tuning.** Default is 2.5s (the 1-4s range
+  from the design doc, not yet live-tuned). Note whether it feels laggy
+  (too long) or naggy/cut-off (too short) in practice; adjust the config
+  default if a clear preference emerges.

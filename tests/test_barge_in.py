@@ -101,6 +101,14 @@ def test_interaction_config_wake_word_and_pause_phrase_defaults() -> None:
     assert config.interaction.pause_listening_phrases == ["stop listening", "pause listening"]
 
 
+def test_interaction_config_tier_responses_off_by_default() -> None:
+    # No behavior change for existing sessions: full responses spoken
+    # exactly as before unless explicitly opted in.
+    config = AppConfig()
+    assert config.interaction.tier_responses is False
+    assert config.interaction.continue_timeout_s == 2.5
+
+
 # --- QueuedInterjection: Axis 2's "queue" behavior, the `patient` preset
 # (docs/DESIGN-barge-in.md) ---
 

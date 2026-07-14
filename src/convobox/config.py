@@ -101,6 +101,20 @@ class InteractionConfig(BaseModel):
     pause_listening_phrases: list[str] = Field(
         default_factory=lambda: list(DEFAULT_PAUSE_PHRASES)
     )
+    # Response tiering (docs/DESIGN-0.3.0-interaction-and-safety.md, Phase
+    # 2): "voice always gives the tiered/short version." Off by default --
+    # existing sessions hear the full response exactly as before. When on,
+    # only the first paragraph of a multi-paragraph response is spoken;
+    # ContinueDetector's "continue"/"go on"/a bare "yes" within
+    # continue_timeout_s of the response finishing speaks the rest.
+    # Silence past the timeout implies "no" -- never treated as consent to
+    # keep talking, same non-auto-approve spirit as approval prompts, just
+    # for a much lower-stakes decision.
+    tier_responses: bool = False
+    # 1-4s range per the design doc; 2.5s split-the-difference default,
+    # not yet live-UAT-tuned against a real "did that feel laggy or
+    # naggy" pass.
+    continue_timeout_s: float = 2.5
 
 
 class SafewordConfig(BaseModel):
