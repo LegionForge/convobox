@@ -45,6 +45,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -64,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from _console import use_utf8_console
 
 from convobox.adapters import create_backend_adapter
+from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.audio.playback import AudioPlayer
 from convobox.config import load_config
 from convobox.listening_pause import PauseListeningDetector
@@ -71,10 +73,12 @@ from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
+from convobox.tui import ConversationTuiState, render_conversation_frame
 from convobox.wakeword import WakewordDetector
 
 log = logging.getLogger("convobox.run")
 
+_TUI_LOG_FILE = "convobox-tui.log"
 
 # Utterances that started up to this long after playback ended still count
 # as overlapping it: room reverb plus VAD/timestamp slop.
@@ -466,8 +470,19 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
     return device
 
 
-async def _working_watchdog(adapter, player, indicator: WorkingIndicator) -> None:  # type: ignore[no-untyped-def]
+async def _working_watchdog(  # type: ignore[no-untyped-def]
+    adapter, player, indicator: WorkingIndicator, segmenter=None, listening_gate=None,
+    tui_state: ConversationTuiState | None = None,
+) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
+    Also derives the TUI's status label from the same 1s poll, when a TUI
+    is active -- poll-based rather than threaded through every call site
+    in the main loop, because the real constraint (transcriber.transcribe()
+    blocks the event loop synchronously -- no asyncio.to_thread offload
+    today) means a render task can't redraw DURING that decode regardless
+    of whether status updates are poll- or event-driven; polling is the
+    simpler, lower-risk mechanism for a status label that's inherently
+    "close enough, not frame-perfect" either way.
 
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
@@ -475,13 +490,62 @@ async def _working_watchdog(adapter, player, indicator: WorkingIndicator) -> Non
     interval = 1.0
     while True:
         await asyncio.sleep(interval)
-        elapsed = indicator.observe(adapter.is_busy(), player.is_playing(), interval)
+        busy = adapter.is_busy()
+        playing = player.is_playing()
+        elapsed = indicator.observe(busy, playing, interval)
         if elapsed is not None:
             log.info(
                 "backend still working (%.0fs, no audio yet) -- thinking or running a "
                 "tool; say the safeword to abort",
                 elapsed,
             )
+        if tui_state is not None:
+            if listening_gate is not None and listening_gate.is_paused:
+                tui_state.status = "paused"
+            elif playing:
+                tui_state.status = "speaking"
+            elif busy:
+                tui_state.status = "working"
+            elif segmenter is not None and segmenter.in_speech:
+                tui_state.status = "capturing"
+            else:
+                tui_state.status = "listening"
+
+
+def _on_backend_event(tui_state: ConversationTuiState, event: BackendEvent) -> None:
+    """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
+    and full-detail panes from the real backend event stream. Only TEXT
+    is handled -- TOOL_CALL/TOOL_RESULT visibility is future work, not
+    dropped silently forever, just out of this pass's scope (matches the
+    design doc's "deliberately minimal, built to be extended" phase-1
+    mandate).
+
+    full_detail accumulates WITHIN one turn (a backend can emit more than
+    one agentMessage per turn -- e.g. reasoning-then-answer) and is reset
+    by the caller when a new user utterance starts a fresh turn, so it
+    always reflects "the current response," not a running transcript of
+    the whole session (that's what the transcript pane is for).
+    """
+    if event.type != BackendEventType.TEXT or not event.content:
+        return
+    tui_state.add_turn("assistant", event.content)
+    tui_state.full_detail = (
+        f"{tui_state.full_detail}\n\n{event.content}" if tui_state.full_detail else event.content
+    )
+
+
+def _draw_conversation_tui(tui_state: ConversationTuiState) -> None:
+    cols, rows = shutil.get_terminal_size()
+    lines = render_conversation_frame(tui_state, cols, rows, time.monotonic())
+    frame = "\x1b[H" + "\x1b[K\n".join(lines) + "\x1b[K\x1b[J"
+    sys.stdout.write(frame)
+    sys.stdout.flush()
+
+
+async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
+    while True:
+        _draw_conversation_tui(tui_state)
+        await asyncio.sleep(0.1)
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -493,7 +557,19 @@ async def run(args: argparse.Namespace) -> None:
         device=config.audio.output_device
     )
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
-    orchestrator = Orchestrator(adapter=adapter, safeword=safeword, tts=tts, player=player)
+    # --tui only applies to the live mic loop, not --text mode (which
+    # returns before the mic loop even exists, below) -- constructed here
+    # regardless so it's in scope for the Orchestrator on_event wiring,
+    # but never entered into alt-screen or rendered unless the mic loop
+    # actually runs.
+    tui_state = ConversationTuiState() if (args.tui and args.text is None) else None
+    orchestrator = Orchestrator(
+        adapter=adapter,
+        safeword=safeword,
+        tts=tts,
+        player=player,
+        on_event=(lambda e: _on_backend_event(tui_state, e)) if tui_state is not None else None,
+    )
 
     log.info(
         "backend=%s  voice=%s  safeword=%r  pid=%d",
@@ -658,6 +734,8 @@ async def run(args: argparse.Namespace) -> None:
                 if monitor.mode == "abort_turn":
                     await adapter.send_hard_stop()
                 barge_in_pending = True
+                if tui_state is not None:
+                    tui_state.barge_in_active = True
             yield processed
 
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
@@ -666,7 +744,20 @@ async def run(args: argparse.Namespace) -> None:
     # Heartbeat so a silently-busy backend (thinking, or grinding on a long
     # tool call) reads as "working", not "hung" -- the exact confusion a
     # philosophy.md write caused in live UAT.
-    watchdog_task = asyncio.create_task(_working_watchdog(adapter, player, WorkingIndicator()))
+    watchdog_task = asyncio.create_task(
+        _working_watchdog(
+            adapter, player, WorkingIndicator(), segmenter, listening_gate, tui_state
+        )
+    )
+    tui_render_task: asyncio.Task[None] | None = None
+    if tui_state is not None:
+        # Same VT-mode-enable idiom as voice_tui.py/settings_tui.py --
+        # os.system("") with a hardcoded empty-string literal has the
+        # side effect of enabling ANSI/VT100 escape processing in legacy
+        # Windows console hosts; it never executes a program.
+        os.system("")  # nosec B605 B607
+        sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
+        tui_render_task = asyncio.create_task(_tui_render_loop(tui_state))
 
     try:
         with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
@@ -676,6 +767,15 @@ async def run(args: argparse.Namespace) -> None:
                 text = result.text
                 is_hard_stop = safeword.check(text) is not None
                 barged_in, barge_in_pending = barge_in_pending, False
+                if tui_state is not None:
+                    tui_state.barge_in_active = False
+                    if text.strip():
+                        # Every utterance ConvoBox actually heard, even
+                        # ones later dropped by a gate below -- "what was
+                        # heard" per the design doc's scope, and a real
+                        # debugging aid ("did it hear me right") distinct
+                        # from "what got forwarded."
+                        tui_state.add_turn("user", text)
 
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
@@ -765,6 +865,14 @@ async def run(args: argparse.Namespace) -> None:
                     # wasn't. The marker is our version of realtime APIs'
                     # history truncation (docs: "the truncation problem").
                     text = BARGE_IN_MARKER + text
+                if tui_state is not None and not is_hard_stop:
+                    # A new response is about to start -- the full-detail
+                    # pane shows "the current response," not a running log
+                    # (that's the transcript pane's job), so clear it here
+                    # rather than on every heard utterance above (a
+                    # gate-dropped utterance never produces a new response;
+                    # clearing there would blank the pane for nothing).
+                    tui_state.full_detail = ""
                 try:
                     await orchestrator.handle_transcript(text)
                 except Exception as exc:  # noqa: BLE001
@@ -780,6 +888,15 @@ async def run(args: argparse.Namespace) -> None:
                         type(exc).__name__, exc,
                     )
     finally:
+        # Restore the terminal FIRST (even on an exception mid-loop) so
+        # any log lines the rest of this block produces are visible on
+        # the normal screen, not lost inside a still-active alt-screen.
+        if tui_render_task is not None:
+            tui_render_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tui_render_task
+            sys.stdout.write("\x1b[?25h\x1b[?1049l")  # restore cursor + main screen
+            sys.stdout.flush()
         # Close the backend transport (subprocess pipes / HTTP client)
         # while the loop is still alive, so shutdown is quiet instead of
         # spraying 'Event loop is closed' tracebacks. Runs on Ctrl+C too
@@ -822,12 +939,31 @@ def main() -> None:
         "--timeout", type=float, default=120.0,
         help="--text mode: max seconds to wait for the backend response",
     )
+    parser.add_argument(
+        "--tui", action="store_true",
+        help=(
+            "full-screen live conversation view (transcript, full response "
+            "text, barge-in/warning status) instead of scrolling log lines. "
+            "Only affects the mic loop, not --text mode. Log output moves to "
+            f"{_TUI_LOG_FILE} -- interleaving ordinary log lines with the "
+            "alt-screen redraw would garble the display."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    if args.tui and args.text is None:
+        logging.basicConfig(
+            level=log_level,
+            format="%(asctime)s %(levelname)s %(message)s",
+            filename=_TUI_LOG_FILE,
+        )
+        print(f"--tui: log output redirected to {_TUI_LOG_FILE}", flush=True)
+    else:
+        logging.basicConfig(
+            level=log_level,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
     try:
         asyncio.run(run(args))
     except KeyboardInterrupt:
