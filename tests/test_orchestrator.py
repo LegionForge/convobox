@@ -97,15 +97,24 @@ def make_orchestrator(
     busy: bool,
     with_tts: bool = False,
     on_event: Callable[[BackendEvent], None] | None = None,
+    tier_responses: bool = False,
 ) -> tuple[Orchestrator, FakeBackendAdapter, FakeTTSEngine | None, FakePlayer | None]:
     adapter = FakeBackendAdapter(busy=busy)
     safeword = SafewordDetector(["stop stop stop"])
     if not with_tts:
-        return Orchestrator(adapter, safeword, on_event=on_event), adapter, None, None
+        return (
+            Orchestrator(adapter, safeword, on_event=on_event, tier_responses=tier_responses),
+            adapter,
+            None,
+            None,
+        )
     tts = FakeTTSEngine()
     player = FakePlayer()
     return (
-        Orchestrator(adapter, safeword, tts=tts, player=player, on_event=on_event),
+        Orchestrator(
+            adapter, safeword, tts=tts, player=player, on_event=on_event,
+            tier_responses=tier_responses,
+        ),
         adapter,
         tts,
         player,
@@ -273,6 +282,182 @@ async def test_on_event_hook_exception_does_not_break_speech_or_crash() -> None:
 
     assert tts.synthesized == ["hello"]
     assert len(player.played) == 1
+
+
+# --- response tiering (docs/DESIGN-0.3.0-interaction-and-safety.md, Phase 2) ---
+
+
+@pytest.mark.asyncio
+async def test_tiering_disabled_by_default_speaks_full_text() -> None:
+    # No behavior change for existing callers: tier_responses defaults to
+    # False, so a multi-paragraph response is still spoken in full.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(type=BackendEventType.TEXT, content="first paragraph.\n\nsecond paragraph.")
+    )
+    await orch._speak_task
+
+    assert tts.synthesized == ["first paragraph.\n\nsecond paragraph."]
+
+
+@pytest.mark.asyncio
+async def test_tiering_enabled_speaks_only_first_tier() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(type=BackendEventType.TEXT, content="first paragraph.\n\nsecond paragraph.")
+    )
+    await orch._speak_task
+
+    assert tts.synthesized == ["first paragraph."]
+
+
+@pytest.mark.asyncio
+async def test_tiering_single_paragraph_response_speaks_the_whole_thing() -> None:
+    # The common case: nothing held back for a short reply.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="just one short reply."))
+    await orch._speak_task
+
+    assert tts.synthesized == ["just one short reply."]
+    assert orch.has_more_to_reveal() is False
+
+
+@pytest.mark.asyncio
+async def test_has_more_to_reveal_true_after_multi_paragraph_response() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+    orch._on_event(
+        BackendEvent(type=BackendEventType.TEXT, content="first.\n\nsecond.\n\nthird.")
+    )
+    await orch._speak_task
+    assert orch.has_more_to_reveal() is True
+
+
+@pytest.mark.asyncio
+async def test_has_more_to_reveal_false_when_tiering_disabled() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=False)
+    assert tts is not None and player is not None
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first.\n\nsecond."))
+    await orch._speak_task
+    assert orch.has_more_to_reveal() is False
+
+
+def test_has_more_to_reveal_false_before_any_response() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert orch.has_more_to_reveal() is False
+
+
+@pytest.mark.asyncio
+async def test_speak_more_speaks_the_next_tier_and_returns_true() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(type=BackendEventType.TEXT, content="first.\n\nsecond.\n\nthird.")
+    )
+    await orch._speak_task
+    assert tts.synthesized == ["first."]
+
+    said_more = await orch.speak_more()
+    assert said_more is True
+    await orch._speak_task
+    assert tts.synthesized == ["first.", "second."]
+
+
+@pytest.mark.asyncio
+async def test_speak_more_returns_false_once_nothing_left() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first.\n\nsecond."))
+    await orch._speak_task
+    assert await orch.speak_more() is True
+    await orch._speak_task
+
+    assert await orch.speak_more() is False
+    assert tts.synthesized == ["first.", "second."]
+
+
+@pytest.mark.asyncio
+async def test_speak_more_returns_false_when_tiering_disabled() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=False)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first.\n\nsecond."))
+    await orch._speak_task
+
+    assert await orch.speak_more() is False
+
+
+@pytest.mark.asyncio
+async def test_speak_more_returns_false_without_tts_configured() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False, with_tts=False, tier_responses=True)
+    assert await orch.speak_more() is False
+
+
+@pytest.mark.asyncio
+async def test_a_new_response_replaces_the_previous_ones_remaining_tiers() -> None:
+    # An old response's held-back tiers are moot once a new one arrives --
+    # same principle as the TUI's full-detail pane resetting per-turn.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(type=BackendEventType.TEXT, content="old first.\n\nold second.")
+    )
+    await orch._speak_task
+    assert orch.has_more_to_reveal() is True
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="new reply, single paragraph."))
+    await orch._speak_task
+
+    assert tts.synthesized == ["old first.", "new reply, single paragraph."]
+    assert orch.has_more_to_reveal() is False
+
+
+@pytest.mark.asyncio
+async def test_tiering_tiers_the_stripped_text_not_raw_markdown() -> None:
+    # split_tiers() expects "\n\n"-separated paragraphs; strip_code_for_speech
+    # already collapses 3+ newlines down to exactly that, so tiering must
+    # run AFTER stripping, not on the raw event content.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(
+            type=BackendEventType.TEXT,
+            content="**first** paragraph.\n\n\n\n*second* paragraph.",
+        )
+    )
+    await orch._speak_task
+
+    assert tts.synthesized == ["first paragraph."]
+
+
+@pytest.mark.asyncio
+async def test_on_event_hook_sees_full_untiered_text() -> None:
+    # The TUI's full-detail pane (docs/DESIGN-0.3.0-interaction-and-safety.md:
+    # "The TUI always shows the full, untruncated response") must never be
+    # affected by tiering -- the observer hook fires with the raw event
+    # before any tiering happens.
+    seen: list[BackendEvent] = []
+    orch, _, tts, player = make_orchestrator(
+        busy=False, with_tts=True, on_event=seen.append, tier_responses=True
+    )
+    assert tts is not None and player is not None
+
+    full_text = "first paragraph.\n\nsecond paragraph."
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content=full_text))
+    await orch._speak_task
+
+    assert seen[0].content == full_text
+    assert tts.synthesized == ["first paragraph."]
 
 
 @pytest.mark.asyncio
