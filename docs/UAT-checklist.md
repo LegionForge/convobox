@@ -167,6 +167,8 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 5. Edge VAD: V1-V3.
 6. Scriptable/cleanup: M1-M3, X1-X2.
 7. Settings UI: see [UAT-settings-tui.md](UAT-settings-tui.md).
+8. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
+   priority-ordering bug -- do not skip it).
 
 ---
 
@@ -219,3 +221,39 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 - **[G5] Marker delivery.** The forwarded barge-in text carries
   BARGE_IN_MARKER so the backend knows its response wasn't fully heard
   ("the truncation problem", DESIGN-echo-and-barge-in.md).
+
+## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
+
+- **[P1] Pause hard-stops in-flight work.** While the backend is actively
+  responding (mid-playback or mid-tool-call), say "stop listening" --
+  playback stops immediately, `is_busy()` drops, and the log shows
+  "paused listening (matched...)". No spoken response to "stop listening"
+  itself is ever heard.
+- **[P2] Pause while idle.** Say "stop listening" with nothing running --
+  no crash, no spoken response, log shows the pause; the hard-stop calls are
+  effectively no-ops (same as the safeword's own idle no-op).
+- **[P3] Ordinary speech is dropped while paused.** While paused, say a
+  normal command ("what time is it", "run the tests") -- NOT routed to the
+  backend (no new HTTP/subprocess request; `is_busy()` never flips true),
+  logged at debug as "dropped (paused, not the wake word)".
+- **[P4] Wake word resumes.** While paused, say the configured wake word
+  (default "ConvoBox") -- log shows "resumed listening (wake word
+  matched)"; the NEXT ordinary utterance after that routes normally again.
+- **[P5] Safeword still works while paused, but does NOT resume.** While
+  paused, say "stop stop stop" -- the `[HARD STOP]` path still fires
+  (matters if something got started right as pause was requested / a race).
+  Critically: verify ConvoBox is STILL paused afterward -- only the wake
+  word should resume it, confirming pause/hard-stop are the orthogonal axes
+  the design calls for, not the same thing.
+- **[P6] The pause phrase is inert while already paused.** While paused,
+  say "stop listening" (or "pause listening") again -- treated as ordinary
+  ignored speech per P3, not a special case; still requires the wake word
+  to exit.
+- **[P7] Custom wake_word / pause_listening_phrases via config.** Set
+  non-default values in convobox.yaml (or the Settings TUI once it exposes
+  these fields) and confirm the whole P1-P6 cycle still works end-to-end,
+  not just the unit-tested detector classes in isolation.
+- **[P8] Resume acknowledgment (open question).** Currently silent on
+  resume -- no tone/spoken confirmation. Note whether this feels
+  unnervingly silent in practice; see DESIGN-barge-in.md's open question on
+  this.
