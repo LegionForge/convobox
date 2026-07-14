@@ -410,8 +410,9 @@ many conversation rounds. All three backend adapters are implemented and
 verified against live instances (OpenCode, Claude Code, Codex). Streaming
 TTS (audio starts on the first synthesized sentence), acoustic echo
 cancellation (optional `[aec]` extra, WebRTC AEC3), open barge-in
-(`interaction.interrupt_mode`, default off), a single-instance mic lock,
-and a documented, validated `convobox.yaml` (see `convobox.example.yaml`
+(`interaction.interrupt_preset`, defaults to `do-not-disturb` -- off), a
+single-instance mic lock, and a documented, validated `convobox.yaml`
+(see `convobox.example.yaml`
 and [docs/QUICKSTART.md](docs/QUICKSTART.md)) are all in. ~220 automated
 tests, mypy/ruff/bandit clean. Still open: Linux/macOS aren't validated
 yet, and a Settings TUI plus a second TTS/STT engine (Kokoro) are on the
