@@ -128,10 +128,20 @@ hardcode with a real `PendingPrompt(approve/deny/discuss)`:
   never approve).
 - **Discuss** — the interesting one: the user asks a question about the
   pending action instead of deciding. Needs the *same* approval request to
-  still be answerable after the exchange — verify Codex's app-server
-  preserves the pending JSON-RPC request across an intervening `turn`
-  (unconfirmed; needs a live probe before this is built, same discipline as
-  every other adapter finding in this codebase).
+  still be answerable after the exchange — **confirmed live, 2026-07-14**:
+  spawned a real `codex app-server`, captured a genuine pending
+  `item/commandExecution/requestApproval` request and deliberately left it
+  unanswered for 20s (simulating time spent on a voice exchange), sent a
+  completely unrelated request on the *same* connection in the meantime
+  (a second, independent `thread/start` — got a normal response, proving
+  the pipe isn't blocked/serialized behind the pending approval), **then**
+  answered the *original* request's id with `decline` — it resolved
+  normally (`"exec command rejected by user"`, `turn/completed` with
+  `status: "completed"`, no error). Codex's app-server does not time out
+  or invalidate a pending approval across an intervening exchange, at
+  least at this scale (one 20s delay, one interleaved request) — not
+  tested for much longer delays or heavier interleaved traffic, but
+  enough to unblock building "discuss" without a preservation workaround.
 - Every decision is recorded + timestamped (per the roadmap sketch); crypto
   signing / audio-snippet retention stays a later option, not phase-3 scope.
 - Rendered in the TUI as a loud, unmissable **WARNING** block — visible
@@ -205,8 +215,9 @@ here needs to be its own pass.
   phase 1).
 - Exact silence-timeout durations for response-tiering (1-4s range given;
   needs live-UAT tuning, same as barge-in's `barge_in_min_speech_ms`).
-- Whether Codex's app-server preserves a pending approval request across a
-  "discuss" exchange (needs a live probe before building "discuss").
+- ~~Whether Codex's app-server preserves a pending approval request across a
+  "discuss" exchange~~ — **confirmed yes**, see phase 2 above. "Discuss" is
+  unblocked to build.
 - Whether to actually wire `--disallowedTools` into ConvoBox's Claude Code
   adapter (confirmed safe, see phase 3 above) — and if so, what the default
   deny-list should be and whether it's user-configurable. Not started.
