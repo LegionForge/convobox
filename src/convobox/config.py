@@ -7,6 +7,9 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
+from convobox.wakeword import DEFAULT_WAKE_WORD
+
 
 class AudioConfig(BaseModel):
     input_device: str | None = None
@@ -80,6 +83,16 @@ class InteractionConfig(BaseModel):
     # Sustained speech required before barge-in fires, so a cough or a
     # chair creak doesn't kill a response.
     barge_in_min_speech_ms: int = 250
+    # Shared by two independent features (docs/DESIGN-barge-in.md, "Pause/
+    # resume listening"): the push-word barge-in trigger (future work) and
+    # resuming from the paused listening state (below) both use this word.
+    wake_word: str = DEFAULT_WAKE_WORD
+    # Saying one of these hard-stops in-flight backend work (same as the
+    # safeword) and enters a paused state where only wake_word is heard,
+    # until it's said and normal listening resumes.
+    pause_listening_phrases: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_PAUSE_PHRASES)
+    )
 
 
 class SafewordConfig(BaseModel):

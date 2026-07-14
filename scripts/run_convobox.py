@@ -51,6 +51,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
@@ -65,10 +66,12 @@ from _console import use_utf8_console
 from convobox.adapters import create_backend_adapter
 from convobox.audio.playback import AudioPlayer
 from convobox.config import load_config
+from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
+from convobox.wakeword import WakewordDetector
 
 log = logging.getLogger("convobox.run")
 
@@ -186,6 +189,35 @@ class BargeInMonitor:
             self._fired = True
             return True
         return False
+
+
+class ListeningGate:
+    """Tracks the paused (wake-word-only) listening state (docs/DESIGN-barge-in.md,
+    "Pause/resume listening").
+
+    Pure state machine, like BargeInMonitor, so it's unit-testable independent
+    of the mic loop. Call observe() once per transcript that the SAFEWORD DID
+    NOT match -- the caller checks the safeword first, unconditionally, outside
+    this class, because pause state and hard-stop are orthogonal axes (a
+    paused session must still be hard-stoppable; the safeword's own check
+    already runs regardless of anything this class does).
+    """
+
+    def __init__(self, pause_detector: PauseListeningDetector, wake_detector: WakewordDetector) -> None:
+        self._pause_detector = pause_detector
+        self._wake_detector = wake_detector
+        self.is_paused = False
+
+    def observe(self, transcript: str) -> Literal["resume", "drop", "pause", "pass"]:
+        if self.is_paused:
+            if self._wake_detector.check(transcript):
+                self.is_paused = False
+                return "resume"
+            return "drop"
+        if self._pause_detector.check(transcript) is not None:
+            self.is_paused = True
+            return "pause"
+        return "pass"
 
 
 class WorkingIndicator:
@@ -546,6 +578,16 @@ async def run(args: argparse.Namespace) -> None:
         )
     barge_in_pending = False
 
+    listening_gate = ListeningGate(
+        PauseListeningDetector(config.interaction.pause_listening_phrases),
+        WakewordDetector(config.interaction.wake_word),
+    )
+    log.info(
+        "say %r to pause listening (hard-stops in-flight work); say %r to resume",
+        config.interaction.pause_listening_phrases[0],
+        config.interaction.wake_word,
+    )
+
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending
         was_playing = False
@@ -607,6 +649,28 @@ async def run(args: argparse.Namespace) -> None:
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
                 if not is_hard_stop:
+                    # Pause/resume gate runs before every other gate, same
+                    # reasoning as the safeword: while paused, NOTHING except
+                    # the wake word should reach the overlap/echo/confidence
+                    # gates or the backend (docs/DESIGN-barge-in.md,
+                    # "Pause/resume listening").
+                    gate_action = listening_gate.observe(text)
+                    if gate_action == "resume":
+                        log.info("resumed listening (wake word matched): %r", text)
+                        continue
+                    if gate_action == "drop":
+                        log.debug("dropped (paused, not the wake word): %r", text)
+                        continue
+                    if gate_action == "pause":
+                        player.stop()
+                        tts.stop()
+                        await adapter.send_hard_stop()
+                        log.info(
+                            "paused listening (matched %r) -- hard-stopped in-flight "
+                            "work; say %r to resume",
+                            text, config.interaction.wake_word,
+                        )
+                        continue
                     # A barge-in utterance overlapped playback BY DEFINITION --
                     # that's the user exercising their right to interrupt, not
                     # echo -- so the overlap gate steps aside for it. The

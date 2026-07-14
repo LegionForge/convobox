@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from convobox.config import AppConfig, InteractionConfig
-from scripts.run_convobox import BARGE_IN_MARKER, BargeInMonitor
+from convobox.listening_pause import PauseListeningDetector
+from convobox.wakeword import WakewordDetector
+from scripts.run_convobox import BARGE_IN_MARKER, BargeInMonitor, ListeningGate
 
 CHUNK_MS = 32.0  # 512 samples at 16kHz, the real capture chunk size
 
@@ -82,6 +84,72 @@ def test_interaction_config_defaults_to_half_duplex() -> None:
 def test_interrupt_mode_rejects_unknown_values() -> None:
     with pytest.raises(ValueError):
         InteractionConfig(interrupt_mode="shout_louder")  # type: ignore[arg-type]
+
+
+def test_interaction_config_wake_word_and_pause_phrase_defaults() -> None:
+    config = AppConfig()
+    assert config.interaction.wake_word == "ConvoBox"
+    assert config.interaction.pause_listening_phrases == ["stop listening", "pause listening"]
+
+
+# --- ListeningGate: pause/resume listening (docs/DESIGN-barge-in.md) ---
+
+
+def _gate(pause_phrases: list[str] | None = None, wake_word: str = "ConvoBox") -> ListeningGate:
+    return ListeningGate(
+        PauseListeningDetector(pause_phrases),
+        WakewordDetector(wake_word),
+    )
+
+
+def test_pause_phrase_pauses() -> None:
+    gate = _gate()
+    assert gate.observe("stop listening") == "pause"
+    assert gate.is_paused is True
+
+
+def test_ordinary_speech_passes_through_when_not_paused() -> None:
+    gate = _gate()
+    assert gate.observe("run the tests please") == "pass"
+    assert gate.is_paused is False
+
+
+def test_wake_word_resumes_from_paused() -> None:
+    gate = _gate()
+    gate.observe("stop listening")
+    assert gate.observe("hey ConvoBox") == "resume"
+    assert gate.is_paused is False
+
+
+def test_non_wake_word_speech_drops_while_paused() -> None:
+    gate = _gate()
+    gate.observe("stop listening")
+    assert gate.observe("run the tests please") == "drop"
+    assert gate.is_paused is True  # stays paused
+
+
+def test_pause_phrase_itself_is_ignored_while_already_paused() -> None:
+    # While paused, ONLY the wake word is checked -- the pause phrase is
+    # just more ignored speech, not a special case.
+    gate = _gate()
+    gate.observe("stop listening")
+    assert gate.observe("pause listening") == "drop"
+    assert gate.is_paused is True
+
+
+def test_resume_then_pause_again_is_a_fresh_cycle() -> None:
+    gate = _gate()
+    gate.observe("stop listening")
+    gate.observe("ConvoBox")  # resume
+    assert gate.observe("stop listening") == "pause"
+    assert gate.is_paused is True
+
+
+def test_custom_pause_phrases_and_wake_word() -> None:
+    gate = _gate(pause_phrases=["go to sleep"], wake_word="Athena")
+    assert gate.observe("go to sleep") == "pause"
+    assert gate.observe("run the tests") == "drop"
+    assert gate.observe("hey Athena") == "resume"
 
 
 def test_marker_is_nonempty_and_readable() -> None:
