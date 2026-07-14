@@ -143,15 +143,32 @@ hardcode with a real `PendingPrompt(approve/deny/discuss)`:
 "approval needed" but there is still nothing to tell the hung subprocess
 "approved." Two tiers, explicitly separated:
 
-1. **Cheap, in-scope for 0.3.0**: investigate `--allowedTools` /
-   `--disallowedTools` (confirmed to exist via `claude --help`, not yet
-   probed) as a startup-time, per-tool allow/deny list — more granular than
-   the blunt `--permission-mode`. If it lets Claude Code freely use
-   read-only tools (Read/Grep/Glob/WebSearch) while still gating
-   Bash/Write/Edit, that shrinks how often the `plan`-mode wall gets hit at
-   all, with zero architecture risk. Needs a live probe (same
-   kill-before-anything-executes discipline as the permission-hang
-   investigation) before committing to specifics.
+1. **Cheap, in-scope for 0.3.0 — probed live, 2026-07-14, confirmed
+   safe.** `--disallowedTools Bash Write Edit` makes those tools
+   **genuinely unavailable** to the model, not gated-behind-approval: a
+   real spawned `claude --print ... --disallowedTools Bash Write Edit`
+   asked to run a shell command never attempted a `Bash` tool_use at
+   all — it searched for one (`ToolSearch: 'select:Bash,PowerShell'` →
+   `'No matching deferred tools found'`), then reported back in plain
+   text that it has no shell tool available and stopped. Terminal
+   `result` message: `is_error=False, subtype=success` — a clean,
+   speakable turn, **not** the permission-gate's silent-forever hang
+   (same class of bug `--permission-mode plan` already fixes, see
+   `claude_code.py`'s docstring). Read-only tools (Read/Glob) were
+   confirmed to keep working normally under the same flags in a
+   companion probe.
+
+   **Relationship to the shipped `--permission-mode plan` fix**: plan
+   mode already avoids the hang for *any* gated tool by never executing
+   writes/exec at all (blanket, zero-config). `--disallowedTools` is a
+   different, more granular knob — name specific tools (or, per
+   `claude --help`, specific command patterns like `"Bash(git *)"`) to
+   remove entirely, rather than accepting plan mode's blanket
+   research-only stance. Whether ConvoBox should expose this (a new
+   config field, a default deny-list, or leave `command:` overrides as
+   the escape hatch it already is) is a real feature-scoping decision,
+   not a mechanical follow-up — deliberately not rushed into this probe;
+   tracked as an open question below.
 2. **Out of scope for 0.3.0**: switching Claude Code off headless mode
    entirely to drive its interactive TTY via injected keystrokes (the
    README's own named fallback: *"a PTY/keystroke fallback where nothing
@@ -190,5 +207,6 @@ here needs to be its own pass.
   needs live-UAT tuning, same as barge-in's `barge_in_min_speech_ms`).
 - Whether Codex's app-server preserves a pending approval request across a
   "discuss" exchange (needs a live probe before building "discuss").
-- `--allowedTools` granularity for Claude Code (needs a live probe before
-  committing to a specific tool allow-list).
+- Whether to actually wire `--disallowedTools` into ConvoBox's Claude Code
+  adapter (confirmed safe, see phase 3 above) — and if so, what the default
+  deny-list should be and whether it's user-configurable. Not started.
