@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 import numpy as np
 from faster_whisper import WhisperModel
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from convobox.config import STTConfig
 from convobox.stt.base import SAMPLE_RATE, STTEngine, TranscriptResult
@@ -28,6 +29,44 @@ class _WhisperLikeModel(Protocol):
     def transcribe(self, audio: np.ndarray, language: str | None = None) -> tuple[Any, Any]: ...
 
 
+def _build_whisper_model(config: STTConfig) -> WhisperModel:
+    """Construct the real WhisperModel, preferring the local cache.
+
+    faster-whisper/huggingface_hub otherwise makes a real network call on
+    EVERY construction (GET .../api/models/<repo>/revision/<rev>, a "did
+    this change on the Hub" freshness check) even when the model is
+    already fully cached -- pointless network dependency for a tool whose
+    whole premise is local-first (README: "without leaving infrastructure
+    you control"), and genuinely costly here specifically: the native-
+    allocator recovery below reconstructs the model via this same
+    function, so without this fix, every recovery during a degraded
+    session would ALSO re-attempt that network call, with no guaranteed
+    timeout, right when things are already going wrong. Found + explained
+    to JP live, 2026-07-14, while investigating an unrelated UAT log that
+    surfaced the call.
+
+    local_files_only=True skips the network entirely and raises
+    LocalEntryNotFoundError if nothing is cached yet -- caught here and
+    retried with the normal (network-enabled) path, so first-time setup
+    (no model downloaded yet) still works exactly as before. Every
+    subsequent construction after that first download is fully offline.
+    """
+    try:
+        return WhisperModel(
+            config.model, device=config.device, compute_type=config.compute_type,
+            local_files_only=True,
+        )
+    except LocalEntryNotFoundError:
+        logger.info(
+            "STT model %r not cached locally yet -- downloading (one-time; "
+            "every construction after this one will be offline)",
+            config.model,
+        )
+        return WhisperModel(
+            config.model, device=config.device, compute_type=config.compute_type,
+        )
+
+
 class LocalTranscriber(STTEngine):
     def __init__(
         self,
@@ -39,9 +78,7 @@ class LocalTranscriber(STTEngine):
         # every real caller passes only `config` and gets the real
         # WhisperModel, unchanged from before this parameter existed.
         self._config = config
-        self._model_factory = model_factory or (
-            lambda: WhisperModel(config.model, device=config.device, compute_type=config.compute_type)
-        )
+        self._model_factory = model_factory or (lambda: _build_whisper_model(config))
         self._model = self._model_factory()
 
     def transcribe(self, audio: np.ndarray) -> TranscriptResult:

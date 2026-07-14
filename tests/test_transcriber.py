@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from convobox.config import STTConfig
-from convobox.stt.transcriber import LocalTranscriber
+from convobox.stt.transcriber import LocalTranscriber, _build_whisper_model
 
 
 @dataclass
@@ -129,3 +131,57 @@ def test_recovery_does_not_swallow_the_utterance_permanently() -> None:
     second = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
     assert first.text == ""
     assert second.text == "hello world"
+
+
+# --- _build_whisper_model: prefers the local cache, avoiding the
+# per-construction network freshness check faster-whisper otherwise makes
+# even when the model is already fully downloaded (found live, 2026-07-14,
+# investigating an unexpected huggingface.co call in a UAT log -- costly
+# specifically because the native-allocator recovery above reconstructs
+# the model via this same function, so every recovery during a degraded
+# session would otherwise ALSO re-attempt a network call). ---
+
+
+def test_build_whisper_model_tries_local_files_only_first() -> None:
+    with patch("convobox.stt.transcriber.WhisperModel") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        _build_whisper_model(_config())
+
+    mock_cls.assert_called_once_with(
+        "tiny.en", device="cpu", compute_type="int8", local_files_only=True
+    )
+
+
+def test_build_whisper_model_falls_back_to_network_when_not_cached() -> None:
+    # First call (local_files_only=True) raises "not cached yet"; the
+    # function must retry WITHOUT local_files_only (network-enabled) --
+    # first-time setup (no model downloaded yet) must keep working exactly
+    # as before this change.
+    online_model = MagicMock()
+
+    def side_effect(*args, **kwargs):
+        if kwargs.get("local_files_only"):
+            raise LocalEntryNotFoundError("not cached")
+        return online_model
+
+    with patch("convobox.stt.transcriber.WhisperModel", side_effect=side_effect) as mock_cls:
+        result = _build_whisper_model(_config())
+
+    assert result is online_model
+    assert mock_cls.call_count == 2
+    first_call, second_call = mock_cls.call_args_list
+    assert first_call.kwargs["local_files_only"] is True
+    assert "local_files_only" not in second_call.kwargs
+
+
+def test_build_whisper_model_used_as_the_default_factory() -> None:
+    # LocalTranscriber's default model_factory (no injection) must route
+    # through _build_whisper_model, not construct WhisperModel directly --
+    # otherwise this whole fix would be dead code nothing actually calls.
+    with patch("convobox.stt.transcriber.WhisperModel") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        LocalTranscriber(_config())
+
+    mock_cls.assert_called_once_with(
+        "tiny.en", device="cpu", compute_type="int8", local_files_only=True
+    )
