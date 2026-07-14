@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+from convobox.tui.render import _fit, _visible_len, _wrap, render_conversation_frame
+from convobox.tui.state import ConversationTuiState
+
+
+def _plain(lines: list[str]) -> list[str]:
+    """Strip ANSI codes for content assertions that shouldn't care about color."""
+    out = []
+    for line in lines:
+        text = ""
+        i = 0
+        while i < len(line):
+            if line[i] == "\x1b" and i + 1 < len(line) and line[i + 1] == "[":
+                j = line.find("m", i)
+                i = (j + 1) if j != -1 else len(line)
+                continue
+            text += line[i]
+            i += 1
+        out.append(text)
+    return out
+
+
+def test_frame_is_exactly_the_requested_size() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = render_conversation_frame(state, width=80, height=24, now=5.0)
+    assert len(lines) == 24
+    assert all(_visible_len(line) <= 80 for line in lines)
+
+
+def test_frame_clamps_below_minimum_size() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = render_conversation_frame(state, width=1, height=1, now=0.0)
+    # Clamped to the module's floor, not a crash or a degenerate 1x1 frame.
+    assert len(lines) >= 16
+
+
+def test_empty_transcript_shows_placeholder() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert any("nothing heard yet" in line for line in lines)
+
+
+def test_empty_full_detail_shows_placeholder() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert any("nothing yet" in line for line in lines)
+
+
+def test_turns_appear_in_order_with_speaker_labels() -> None:
+    state = ConversationTuiState(started=0.0)
+    state.add_turn("user", "run the tests", "12:00:01")
+    state.add_turn("assistant", "running them now", "12:00:02")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=5.0))
+    you_idx = next(i for i, line in enumerate(lines) if "run the tests" in line)
+    assistant_idx = next(i for i, line in enumerate(lines) if "running them now" in line)
+    assert you_idx < assistant_idx
+    assert "you:" in lines[you_idx]
+    assert "assistant:" in lines[assistant_idx]
+    assert "12:00:01" in lines[you_idx]
+
+
+def test_long_turn_wraps_not_truncates() -> None:
+    # The exact bug caught manually while building this: a colored label
+    # prefix made the naive len()-based fit() overcount width and
+    # truncate a line that actually fit. Assert the full text survives
+    # across wrapped lines, nothing silently dropped or "..."-ed.
+    state = ConversationTuiState(started=0.0)
+    long_text = "word " * 40
+    state.add_turn("assistant", long_text.strip(), "12:00:00")
+    lines = _plain(render_conversation_frame(state, width=78, height=30, now=0.0))
+    joined = " ".join(lines)
+    assert "..." not in " ".join(
+        line for line in lines if "word" in line or "assistant" in line
+    )
+    assert joined.count("word") == 40
+
+
+def test_full_detail_preserves_paragraph_breaks() -> None:
+    state = ConversationTuiState(started=0.0, full_detail="first paragraph\n\nsecond paragraph")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    first_idx = next(i for i, line in enumerate(lines) if "first paragraph" in line)
+    second_idx = next(i for i, line in enumerate(lines) if "second paragraph" in line)
+    # A genuine blank line between them, not silently joined into one run.
+    assert lines[first_idx + 1].strip() == ""
+    assert second_idx > first_idx + 1
+
+
+def test_warning_absent_by_default_reserves_no_space() -> None:
+    with_warning = ConversationTuiState(started=0.0, warning="approve this?")
+    without_warning = ConversationTuiState(started=0.0)
+    lines_with = render_conversation_frame(with_warning, width=80, height=24, now=0.0)
+    lines_without = render_conversation_frame(without_warning, width=80, height=24, now=0.0)
+    assert len(lines_with) == len(lines_without) == 24
+    assert any("approve this?" in line for line in _plain(lines_with))
+    assert not any("approve this?" in line for line in _plain(lines_without))
+
+
+def test_warning_is_bordered_and_unmissable() -> None:
+    state = ConversationTuiState(started=0.0, warning="run rm -rf /tmp/x -- approve?")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    warning_idx = next(i for i, line in enumerate(lines) if "approve?" in line)
+    # Bordered top and bottom by a solid row of '!' so it can't be
+    # mistaken for an ordinary transcript line.
+    assert set(lines[warning_idx - 1].strip()) == {"!"}
+    assert set(lines[warning_idx + 1].strip()) == {"!"}
+
+
+def test_status_label_reflects_state() -> None:
+    for status, label in [
+        ("listening", "LISTENING"),
+        ("capturing", "CAPTURING"),
+        ("transcribing", "TRANSCRIBING"),
+        ("working", "WORKING"),
+        ("speaking", "SPEAKING"),
+        ("paused", "PAUSED"),
+    ]:
+        state = ConversationTuiState(started=0.0, status=status)  # type: ignore[arg-type]
+        lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+        assert label in lines[0]
+
+
+def test_barge_in_flag_shown_only_when_active() -> None:
+    active = ConversationTuiState(started=0.0, barge_in_active=True)
+    inactive = ConversationTuiState(started=0.0, barge_in_active=False)
+    active_line = _plain(render_conversation_frame(active, width=80, height=24, now=0.0))[0]
+    inactive_line = _plain(render_conversation_frame(inactive, width=80, height=24, now=0.0))[0]
+    assert "BARGE-IN" in active_line
+    assert "BARGE-IN" not in inactive_line
+
+
+def test_elapsed_time_formats_minutes_and_seconds() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=125.0))
+    assert "elapsed 02:05" in lines[0]
+
+
+def test_transcript_scrolls_to_most_recent_when_overflowing() -> None:
+    state = ConversationTuiState(started=0.0)
+    for i in range(50):
+        state.add_turn("user", f"message {i}", f"12:00:{i:02d}")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    joined = "\n".join(lines)
+    assert "message 49" in joined  # most recent must be visible
+    assert "message 0 " not in joined  # earliest scrolled off
+
+
+def test_wrap_preserves_all_words() -> None:
+    text = " ".join(f"w{i}" for i in range(20))
+    wrapped = _wrap(text, width=20)
+    assert " ".join(wrapped).split() == text.split()
+    assert all(len(line) <= 20 for line in wrapped)
+
+
+def test_wrap_empty_paragraph_becomes_blank_line() -> None:
+    assert _wrap("a\n\nb", width=10) == ["a", "", "b"]
+
+
+def test_fit_pads_short_ansi_text_to_visible_width() -> None:
+    colored = "\x1b[31mhi\x1b[0m"
+    fitted = _fit(colored, 10)
+    assert _visible_len(fitted) == 10
+
+
+def test_fit_does_not_truncate_colored_text_that_visually_fits() -> None:
+    # Regression for the exact bug found manually: a naive len()-based fit
+    # truncated a colored "assistant:" label even though its VISIBLE
+    # length was well within the requested width.
+    colored = "\x1b[36myou:\x1b[0m short line"
+    fitted = _fit(colored, 40)
+    assert "..." not in fitted
+    assert "short line" in fitted
+
+
+def test_fit_truncates_when_visible_text_actually_overflows() -> None:
+    fitted = _fit("this is definitely too long for ten", 10)
+    assert _visible_len(fitted) == 10
+    assert fitted.endswith("...")
