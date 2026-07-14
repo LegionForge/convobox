@@ -340,3 +340,34 @@ live-mic pass that closes that gap.
   from the design doc, not yet live-tuned). Note whether it feels laggy
   (too long) or naggy/cut-off (too short) in practice; adjust the config
   default if a clear preference emerges.
+
+## 11. STT native-allocator recovery (`src/convobox/stt/transcriber.py`, PR #65)
+
+Implements in `LocalTranscriber.transcribe()`. Mitigates a known, unresolved
+upstream ctranslate2/faster-whisper issue (`SYSTRAN/faster-whisper#660`,
+`#390`): the native (MKL on Windows) allocator can fail after enough
+repeated `transcribe()` calls in one long-lived process. Live-confirmed
+2026-07-14, crashing a real session at ~13 minutes / ~20 transcriptions --
+see `docs/KNOWN-ISSUES.md` for the full writeup. `tests/test_transcriber.py`
+verifies the recovery logic against a fake model that fails on command --
+the real native failure can't be triggered deterministically, so a live
+long session is the only way to confirm the recovery actually fires
+correctly when the real bug recurs.
+
+- **[ST1] Long-session survival.** Run a real mic session for 20+ minutes
+  with regular speech (aim for 30+ transcriptions -- roughly 50% more than
+  the ~20 that crashed the pre-fix session, to have margin). Confirm either
+  (a) no failure occurs at all, or (b) if the log shows `"faster-whisper
+  native transcribe() failure -- reloading the STT model..."`, the app does
+  **not** crash: it logs the warning, keeps listening, and the very next
+  utterance transcribes normally again.
+- **[ST2] A recovered failure doesn't corrupt state.** If [ST1]'s failure
+  case fires, confirm the failed utterance is silently dropped the same way
+  an ordinary low-confidence transcript is (check for the immediately-
+  following `"dropped low-confidence transcript=''"` line) -- not forwarded
+  to the backend as an empty command, and not leaving any gate
+  (barge-in/pause/continue-prompt) stuck waiting.
+- **[ST3] Reload preserves configured STT settings.** After a recovery,
+  confirm subsequent transcriptions still use the same `stt.model`/
+  `stt.language`/etc. as before -- the reload rebuilds from the original
+  `STTConfig` via `model_factory`, not a fresh-defaults model.
