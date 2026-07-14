@@ -23,11 +23,35 @@ adapter was written. Key facts:
   ignored, same policy as OpenCode's text.ended-not-text.delta).
 - The server can ask the CLIENT questions mid-turn (JSON-RPC server
   requests like `item/commandExecution/requestApproval`) and the turn
-  hangs until answered. This adapter auto-declines them all
-  (`decision: "decline"` = deny but let the turn continue) with a
+  hangs until answered. This adapter auto-declines them all with a
   warning log: a voice loop has no approval UI yet, and silently
   auto-APPROVING shell commands from a voice-driven agent would be
   indefensible. Voice-driven approval is future work.
+
+  **The deny payload is per-method, not one blanket `{"decision":
+  "decline"}` (bug found + fixed 2026-07-14, live-verified for the
+  reachable path).** Reading codex-cli 0.144.1's own published JSON
+  schemas (`codex app-server generate-json-schema`) shows the response
+  shape differs by method:
+  `item/commandExecution/requestApproval`/`item/fileChange/requestApproval`
+  (the current protocol's approval requests) take `{"decision":
+  "decline"}`; `execCommandApproval`/`applyPatchApproval` (legacy names,
+  still declared in the server's schema union) have NO `"decline"`
+  value in their `ReviewDecision` enum at all -- the schema-correct deny
+  is `{"decision": "denied"}`; `item/permissions/requestApproval` has an
+  entirely different shape with no `"decision"` field -- a required
+  `"permissions"` object naming what's granted, so `{"permissions": {}}`
+  (grant nothing) is the deny-equivalent. See `_APPROVAL_DENY_PAYLOADS`.
+  **Live-verified**: spawned a real `codex app-server` (0.144.1) with
+  `approvalPolicy: "untrusted"`, asked it to run a destructive-flavored
+  command (`rm -f` on a nonexistent file, safe by construction), and
+  confirmed the server sends `item/commandExecution/requestApproval` in
+  practice (not the legacy names) -- responding with this adapter's
+  exact `{"decision": "decline"}` produced `"exec command rejected by
+  user"` and the command never ran. The legacy-method and
+  permissions-method payloads are schema-verified but were **not**
+  observed live (this server version didn't trigger them in testing) --
+  correctness by vendor-schema reading, not a live probe, for those two.
 
 Transport architecture differs from claude_code.py deliberately:
 JSON-RPC multiplexes request-responses and notifications on one pipe,
@@ -60,16 +84,27 @@ _RESPONSE_TIMEOUT_S = 30.0
 _TOOL_ITEM_TYPES = frozenset({"commandExecution", "fileChange", "mcpToolCall", "webSearch"})
 
 # JSON-RPC server->client requests that are approval prompts; all
-# auto-declined (see module docstring).
-_APPROVAL_METHODS = frozenset(
-    {
-        "item/commandExecution/requestApproval",
-        "item/fileChange/requestApproval",
-        "item/permissions/requestApproval",
-        "execCommandApproval",
-        "applyPatchApproval",
-    }
-)
+# auto-declined (see module docstring), with a per-method deny payload --
+# NOT one blanket {"decision": "decline"} -- because the response schema
+# differs by method (confirmed against codex-cli 0.144.1's own published
+# schemas, cross-checked live for the reachable one; see module docstring):
+# - item/commandExecution/requestApproval, item/fileChange/requestApproval
+#   (the current protocol's approval requests): {"decision": "decline"}.
+# - execCommandApproval, applyPatchApproval (legacy protocol names, still
+#   declared in the server's schema union but not observed live against
+#   this version): {"decision": "decline"} is NOT a valid ReviewDecision
+#   value for these -- the schema-correct deny is {"decision": "denied"}.
+# - item/permissions/requestApproval: an entirely different response
+#   shape (no "decision" field at all -- a required "permissions" object
+#   naming what's granted). {"permissions": {}} grants nothing, the
+#   schema-correct equivalent of declining.
+_APPROVAL_DENY_PAYLOADS: dict[str, dict[str, Any]] = {
+    "item/commandExecution/requestApproval": {"decision": "decline"},
+    "item/fileChange/requestApproval": {"decision": "decline"},
+    "execCommandApproval": {"decision": "denied"},
+    "applyPatchApproval": {"decision": "denied"},
+    "item/permissions/requestApproval": {"permissions": {}},
+}
 
 _EOF = object()
 
@@ -313,16 +348,19 @@ class CodexAdapter(BackendAdapter):
 
     async def _answer_server_request(self, msg: dict[str, Any]) -> None:
         method = msg.get("method", "")
-        if method in _APPROVAL_METHODS:
+        payload = _APPROVAL_DENY_PAYLOADS.get(method)
+        if payload is not None:
             # Deny-but-continue, never auto-approve -- see module docstring.
             logger.warning(
                 "auto-declining codex approval request %s (no voice approval UI yet)",
                 method,
             )
-            await self._write(
-                {"jsonrpc": "2.0", "id": msg["id"], "result": {"decision": "decline"}}
-            )
+            await self._write({"jsonrpc": "2.0", "id": msg["id"], "result": payload})
             return
+        # Unknown method outside the deny-payload map -- "decision": "decline"
+        # is the best-effort fallback (matches the request/response shape
+        # every KNOWN approval method except item/permissions/requestApproval
+        # uses), not a verified-correct answer for whatever this is.
         logger.warning("unanswerable codex server request %s; declining generically", method)
         await self._write(
             {"jsonrpc": "2.0", "id": msg["id"], "result": {"decision": "decline"}}
