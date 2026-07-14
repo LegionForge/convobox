@@ -224,6 +224,23 @@ Mostly orchestration wiring, not new backend work:
 - `BARGE_IN_MARKER` already handles the truncation problem (annotate history
   since we can't edit the backend's).
 
+**The migration is a strict superset, not a breaking redesign** (noticed
+while scoping the config/`BargeInMonitor` migration, `src/convobox/interrupt_presets.py`):
+today's three `interrupt_mode` values map cleanly onto three of the five new
+presets --
+
+| Old `interrupt_mode` | New preset | Why |
+|---|---|---|
+| `none` | `do-not-disturb` | half-duplex: assistant keeps talking (let-finish), your words during playback are simply dropped (drop) -- exactly that preset's axes. |
+| `stop_audio` | `conversational` | mute + forward now -- today's open-barge-in behavior IS the shipped default's axes. |
+| `abort_turn` | `take-over` | abort + forward now. |
+
+`patient` and `halt` are genuinely new capability, not expressible in the
+old three-mode scheme. Worth stating plainly in whatever PR does the actual
+config migration: existing `convobox.yaml` files using `interrupt_mode`
+aren't losing anything, they're being handed a name for what they already
+had plus two new options -- not a downgrade some users need to relearn.
+
 ## Phasing
 
 **In 0.3.0:** the two-axis model + presets; the `speech`/`push-word` triggers
