@@ -56,6 +56,21 @@ instead of after shipping a wrong adapter. Key empirical findings:
   to express it any other way. Voice-driven approval (wiring
   ConfirmwordDetector into an actual accept/decline flow) is future
   work, same as codex.py's TODO.
+
+- **`--disallowedTools` (confirmed live, 2026-07-14): removes tools
+  entirely, doesn't reproduce the hang above.** A real spawned
+  ``claude --print ... --disallowedTools Bash Write Edit`` asked to run
+  a shell command never emitted a ``Bash`` tool_use at all -- it
+  searched for an available shell tool, found none, and reported back
+  in plain text that it couldn't do that. Terminal ``result``:
+  ``is_error=False, subtype=success`` -- a normal, clean turn end, not
+  a stall. Read-only tools (Read/Glob) kept working normally under the
+  same flags. This is a more granular sibling to the
+  ``--permission-mode plan`` fix above (name specific tools/patterns to
+  remove vs. plan mode's blanket no-writes stance) -- not yet wired
+  into this adapter's ``command`` construction; see
+  ``docs/DESIGN-0.3.0-interaction-and-safety.md``'s phase 3 for the
+  open feature-scoping question (default deny-list? user-configurable?).
 """
 
 from __future__ import annotations
