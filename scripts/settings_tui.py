@@ -59,7 +59,10 @@ _CYAN = "\x1b[36m"
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
 _CHOICE_TTS_ENGINES = ("piper",)
 _CHOICE_STT_ENGINES = ("faster-whisper",)
-_CHOICE_INTERRUPT_MODES = ("none", "stop_audio", "abort_turn")
+# Keep in sync with convobox.interrupt_presets.PRESETS's keys (config.py
+# validates the actual value against that dict at load time; this tuple is
+# just what the TUI offers to pick from).
+_CHOICE_INTERRUPT_PRESETS = ("conversational", "patient", "do-not-disturb", "halt", "take-over")
 _BACKEND_PROFILE_DEFAULTS: dict[str, BackendProfileConfig] = {
     "opencode": BackendProfileConfig(url="http://localhost:4096"),
     "claude-code": BackendProfileConfig(url="http://localhost:4096", command=["claude"]),
@@ -189,7 +192,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         key="interaction",
         label="Interaction",
         fields=(
-            FieldSpec("interaction", "interrupt_mode", "Interrupt mode", "choice", _CHOICE_INTERRUPT_MODES, help_text="none drops overlap, stop_audio stops playback, abort_turn also interrupts the backend."),
+            FieldSpec("interaction", "interrupt_preset", "Interrupt preset", "choice", _CHOICE_INTERRUPT_PRESETS, help_text="do-not-disturb (default, safe without headphones/AEC): finish, drop overlap. conversational: mute+steer now. patient: finish, then deliver. halt: abort, drop. take-over: abort, steer now."),
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
         ),
     ),

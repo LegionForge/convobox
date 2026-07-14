@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
 from convobox.wakeword import DEFAULT_WAKE_WORD
 
@@ -67,22 +67,30 @@ class TTSConfig(BaseModel):
 
 
 class InteractionConfig(BaseModel):
-    # What happens when the user talks while a response is playing.
-    #   none       -- half-duplex: overlapping speech is dropped (the safe
-    #                 default; the only mode that's safe WITHOUT echo
-    #                 cancellation or headphones).
-    #   stop_audio -- open barge-in: playback stops, the backend keeps
-    #                 working, and the utterance is forwarded (with an
-    #                 interruption marker) through normal routing.
-    #   abort_turn -- barge-in that also aborts the backend's turn,
-    #                 safeword-style.
-    # See docs/DESIGN-echo-and-barge-in.md for why the non-none modes
-    # require audio.echo_cancellation (or headphones): without it the
-    # assistant's own voice trips the VAD and it interrupts itself.
-    interrupt_mode: Literal["none", "stop_audio", "abort_turn"] = "none"
+    # What happens when the user talks while a response is playing --
+    # one of the named presets in convobox.interrupt_presets.PRESETS
+    # (docs/DESIGN-barge-in.md's two-axis grid: on_current_turn x
+    # on_new_words). Default is "do-not-disturb" (let-finish + drop) --
+    # behaviorally identical to the old interrupt_mode="none" default
+    # (half-duplex: overlapping speech is dropped) -- deliberately NOT
+    # switched to "conversational" by this migration. Whether
+    # "conversational" should become the shipped default is a real
+    # product decision flagged for live UAT, not something a schema
+    # refactor should silently decide (docs/DESIGN-0.3.0-interaction-and-safety.md's
+    # open questions). Non-"do-not-disturb"/"halt" presets need
+    # audio.echo_cancellation (or headphones) -- see
+    # docs/DESIGN-echo-and-barge-in.md -- without it the assistant's own
+    # voice trips the VAD and it interrupts itself.
+    interrupt_preset: str = "do-not-disturb"
     # Sustained speech required before barge-in fires, so a cough or a
     # chair creak doesn't kill a response.
     barge_in_min_speech_ms: int = 250
+
+    @field_validator("interrupt_preset")
+    @classmethod
+    def _validate_interrupt_preset(cls, v: str) -> str:
+        resolve_preset(v)  # raises ValueError listing valid choices
+        return v
     # Shared by two independent features (docs/DESIGN-barge-in.md, "Pause/
     # resume listening"): the push-word barge-in trigger (future work) and
     # resuming from the paused listening state (below) both use this word.

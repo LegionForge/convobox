@@ -147,6 +147,27 @@ truncation marker. Enabling a non-none mode without AEC logs a loud
 self-interruption warning (headphones users may proceed deliberately).
 Default flips to stop_audio only after room UAT signs off.
 
+### Status update (2026-07-14): migrated to the two-axis preset system
+
+`interrupt_mode: none | stop_audio | abort_turn` was replaced by
+`interrupt_preset`, selecting one of five named presets on the two-axis
+grid in [DESIGN-barge-in.md](DESIGN-barge-in.md) (`conversational`,
+`patient`, `do-not-disturb`, `halt`, `take-over`). Strict superset, not a
+behavior change for existing configs: the default (`do-not-disturb` =
+`let-finish` + `drop`) is behaviorally identical to the old `none`
+default. `BargeInMonitor` now keys off the resolved `on_current_turn`
+axis value (`let-finish`/`mute`/`abort`) instead of the three old mode
+strings. The one genuinely new capability is the `patient` preset's
+`on_new_words: queue` behavior (`QueuedInterjection` in
+`run_convobox.py`): a barge-in utterance is held, not dropped or
+delivered immediately, and flushed automatically once the backend is
+fully idle (no longer busy AND nothing playing) via the existing
+working-watchdog's poll loop. Settings TUI's Interaction tab updated to
+offer the five presets. "Default flips to stop_audio [conversational]
+only after room UAT signs off" (above) still applies -- this migration
+deliberately did not change the shipped default, see config.py's
+InteractionConfig docstring.
+
 ## Research grounding
 
 The turn-taking, barge-in, backchannel, and interrupt design here is
