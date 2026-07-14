@@ -11,8 +11,17 @@ Turn behavior is scripted by the prompt text:
 
   contains "use a tool" -> commandExecution item + agentMessage + completed
   contains "hang"       -> turn/started only; completes on turn/interrupt
-  contains "needs approval" -> server->client approval request first; echoes
-                            the decision back in the agentMessage
+  contains "needs approval" -> server->client approval request first (current
+                            protocol method); echoes the decision back
+  contains "needs file edit approval" -> item/fileChange/requestApproval
+                            (current protocol, live-confirmed 2026-07-14 --
+                            see codex.py's module docstring)
+  contains "needs legacy exec approval" -> same, but the legacy
+                            execCommandApproval method name
+  contains "needs legacy patch approval" -> same, but applyPatchApproval
+  contains "needs permissions approval" -> item/permissions/requestApproval
+                            (different response shape -- no "decision" key,
+                            a "permissions" object instead); echoes that back
   contains "fail"       -> turn/completed with status "failed"
   contains "die"        -> exits mid-turn
   anything else         -> echoes the prompt as agentMessage + completed
@@ -93,6 +102,46 @@ def main() -> None:
             if "fail" in text:
                 turn_completed(turn_id, status="failed", error={"message": "model exploded"})
                 continue
+            if "needs file edit approval" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "item/fileChange/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id},
+                })
+                continue
+            if "needs legacy exec approval" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "execCommandApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id, "command": "rm -rf /"},
+                })
+                continue
+            if "needs legacy patch approval" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "applyPatchApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id},
+                })
+                continue
+            if "needs permissions approval" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "item/permissions/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id},
+                })
+                continue
             if "needs approval" in text:
                 pending_approval_turn = turn_id
                 approval_req_id += 1
@@ -138,10 +187,17 @@ def main() -> None:
                 active_turn = None
         elif method is None and "id" in msg:
             # A response from the client to a server->client request
-            # (the approval flow). Echo the decision and finish the turn.
-            decision = (msg.get("result") or {}).get("decision")
+            # (the approval flow). Echo what it answered and finish the
+            # turn. item/permissions/requestApproval's response has no
+            # "decision" key at all (a "permissions" object instead) --
+            # echo whichever key is actually present, don't assume.
+            result = msg.get("result") or {}
+            if "decision" in result:
+                answer = result["decision"]
+            else:
+                answer = result.get("permissions")
             if pending_approval_turn is not None:
-                agent_message(f"approval decision was: {decision}")
+                agent_message(f"approval decision was: {answer}")
                 turn_completed(pending_approval_turn)
                 pending_approval_turn = None
 

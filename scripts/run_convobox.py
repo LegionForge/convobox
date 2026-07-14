@@ -25,11 +25,12 @@ Echo handling is layered, and how much duplex you get depends on config:
    the assistant's voice from the mic signal so full-duplex barge-in is
    safe; without it the open mic would transcribe the assistant back.
 
-Barge-in for ordinary speech (interaction.interrupt_mode = stop_audio /
-abort_turn) requires echo_cancellation on -- otherwise the assistant's own
-voice would interrupt it. The safeword is the exception: a hard stop is
-honored mid-playback ALWAYS, regardless of AEC, which is the barge-in that
-matters for safety. See docs/DESIGN-echo-and-barge-in.md.
+Barge-in for ordinary speech (interaction.interrupt_preset = "conversational" /
+"halt" / "take-over") requires echo_cancellation on -- otherwise the
+assistant's own voice would interrupt it. The safeword is the exception: a
+hard stop is honored mid-playback ALWAYS, regardless of AEC, which is the
+barge-in that matters for safety. See docs/DESIGN-echo-and-barge-in.md and
+docs/DESIGN-barge-in.md (the two-axis preset grid).
 
 Exit with Ctrl+C. The safeword does NOT exit the app -- it hard-stops the
 backend's current work and keeps listening, per the Orchestrator contract
@@ -66,6 +67,7 @@ from _console import use_utf8_console
 from convobox.adapters import create_backend_adapter
 from convobox.audio.playback import AudioPlayer
 from convobox.config import load_config
+from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
@@ -193,16 +195,28 @@ class BargeInMonitor:
     that crosses the threshold while a response is playing. The
     threshold is what keeps a cough or chair creak from killing a
     response (see docs/DESIGN-echo-and-barge-in.md).
+
+    Governs Axis 1 only (docs/DESIGN-barge-in.md's two-axis grid) --
+    "what happens to the assistant's CURRENT turn". ``on_current_turn``
+    is one of ``interrupt_presets.OnCurrentTurn``'s three values,
+    resolved by the caller from the configured preset
+    (``resolve_preset(config.interaction.interrupt_preset).on_current_turn``),
+    not a raw string the caller invents. Axis 2 ("what happens to the
+    user's NEW words" -- drop/queue/now) is a separate concern handled
+    by the main loop + ``QueuedInterjection``, not this class -- the two
+    axes fire at different pipeline stages (this one at the raw-audio
+    level pre-STT, the other post-STT once there's a transcript to act
+    on).
     """
 
-    def __init__(self, mode: str, min_speech_ms: int) -> None:
-        self.mode = mode
+    def __init__(self, on_current_turn: str, min_speech_ms: int) -> None:
+        self.on_current_turn = on_current_turn
         self._min_speech_ms = min_speech_ms
         self._run_ms = 0.0
         self._fired = False
 
     def observe(self, in_speech: bool, playing: bool, chunk_ms: float) -> bool:
-        if self.mode == "none":
+        if self.on_current_turn == "let-finish":
             return False
         if not in_speech:
             # Speech episode ended: reset for the next one.
@@ -220,6 +234,45 @@ class BargeInMonitor:
             self._fired = True
             return True
         return False
+
+
+class QueuedInterjection:
+    """Axis 2's "queue" behavior (docs/DESIGN-barge-in.md's two-axis grid,
+    the ``patient`` preset: let-finish + queue) -- "it finishes, then does
+    your thing".
+
+    Pure state machine, like BargeInMonitor, so the hold/flush logic is
+    unit-testable without a real mic loop. A single pending slot, not a
+    list: a second queued utterance while one is already pending REPLACES
+    it (most-recent-wins) rather than stacking multiple deliveries for one
+    flush, since ``Orchestrator.handle_transcript`` takes one transcript
+    and delivering several back-to-back the instant the backend goes idle
+    would make only the first a fresh turn and turn the rest into
+    interjects on THAT new turn -- not the "queued and delivered once
+    idle" behavior this exists to provide.
+    """
+
+    def __init__(self) -> None:
+        self._pending: str | None = None
+
+    def offer(self, text: str) -> None:
+        if self._pending is not None:
+            log.info(
+                "queued interjection replaced by a newer one (most-recent-wins): "
+                "%r -> %r",
+                self._pending, text,
+            )
+        self._pending = text
+
+    def flush_if_idle(self, busy: bool, playing: bool) -> str | None:
+        """Call once per loop tick; returns (and clears) the pending
+        utterance once the backend is fully idle (not busy AND nothing
+        playing -- "finished", not just "no longer generating text" with a
+        TTS tail still running), else None."""
+        if self._pending is not None and not busy and not playing:
+            text, self._pending = self._pending, None
+            return text
+        return None
 
 
 class ListeningGate:
@@ -466,8 +519,15 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
     return device
 
 
-async def _working_watchdog(adapter, player, indicator: WorkingIndicator) -> None:  # type: ignore[no-untyped-def]
+async def _working_watchdog(  # type: ignore[no-untyped-def]
+    adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection
+) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
+    Also flushes any Axis-2 ``queue``-preset interjection once the backend
+    is fully idle (docs/DESIGN-barge-in.md's "patient" preset) -- this loop
+    already polls is_busy()/is_playing() every tick, so it's the natural
+    place for both: two unrelated jobs sharing one poll, not one job
+    growing a second responsibility.
 
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
@@ -475,13 +535,27 @@ async def _working_watchdog(adapter, player, indicator: WorkingIndicator) -> Non
     interval = 1.0
     while True:
         await asyncio.sleep(interval)
-        elapsed = indicator.observe(adapter.is_busy(), player.is_playing(), interval)
+        busy, playing = adapter.is_busy(), player.is_playing()
+        elapsed = indicator.observe(busy, playing, interval)
         if elapsed is not None:
             log.info(
                 "backend still working (%.0fs, no audio yet) -- thinking or running a "
                 "tool; say the safeword to abort",
                 elapsed,
             )
+        queued_text = interject_queue.flush_if_idle(busy, playing)
+        if queued_text is not None:
+            log.info("delivering queued interjection now that the turn is idle: %r", queued_text)
+            try:
+                await orchestrator.handle_transcript(queued_text)
+            except Exception as exc:  # noqa: BLE001
+                # Same defensive policy as the main loop's handle_transcript
+                # call: one delivery failure must not kill the watchdog (and
+                # with it, the heartbeat + all future queue flushes).
+                log.error(
+                    "couldn't deliver queued interjection to the backend (%s: %s)",
+                    type(exc).__name__, exc,
+                )
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -589,23 +663,28 @@ async def run(args: argparse.Namespace) -> None:
             " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
         )
 
+    interrupt_axes = resolve_preset(config.interaction.interrupt_preset)
     monitor = BargeInMonitor(
-        config.interaction.interrupt_mode, config.interaction.barge_in_min_speech_ms
+        interrupt_axes.on_current_turn, config.interaction.barge_in_min_speech_ms
     )
-    if monitor.mode != "none":
+    interject_queue = QueuedInterjection()
+    if monitor.on_current_turn != "let-finish":
         if canceller is None:
             # Not refused outright -- headphones make it legitimate -- but
             # with open speakers and no AEC the assistant's own voice trips
             # the VAD and it interrupts itself. Loud, specific warning.
             log.warning(
-                "interrupt_mode=%r without audio.echo_cancellation: with open "
-                "speakers the assistant will interrupt ITSELF. Only safe with "
-                "headphones. See docs/DESIGN-echo-and-barge-in.md.",
-                monitor.mode,
+                "interrupt_preset=%r (on_current_turn=%r) without "
+                "audio.echo_cancellation: with open speakers the assistant "
+                "will interrupt ITSELF. Only safe with headphones. See "
+                "docs/DESIGN-echo-and-barge-in.md.",
+                config.interaction.interrupt_preset, monitor.on_current_turn,
             )
         log.info(
-            "barge-in ON (%s after %dms of sustained speech)",
-            monitor.mode, config.interaction.barge_in_min_speech_ms,
+            "barge-in ON (preset=%s: on_current_turn=%s, on_new_words=%s; "
+            "after %dms of sustained speech)",
+            config.interaction.interrupt_preset, monitor.on_current_turn,
+            interrupt_axes.on_new_words, config.interaction.barge_in_min_speech_ms,
         )
     barge_in_pending = False
 
@@ -655,7 +734,7 @@ async def run(args: argparse.Namespace) -> None:
                 log.info("barge-in: sustained speech during playback -- stopping audio")
                 player.stop()
                 tts.stop()
-                if monitor.mode == "abort_turn":
+                if monitor.on_current_turn == "abort":
                     await adapter.send_hard_stop()
                 barge_in_pending = True
             yield processed
@@ -666,7 +745,9 @@ async def run(args: argparse.Namespace) -> None:
     # Heartbeat so a silently-busy backend (thinking, or grinding on a long
     # tool call) reads as "working", not "hung" -- the exact confusion a
     # philosophy.md write caused in live UAT.
-    watchdog_task = asyncio.create_task(_working_watchdog(adapter, player, WorkingIndicator()))
+    watchdog_task = asyncio.create_task(
+        _working_watchdog(adapter, player, WorkingIndicator(), orchestrator, interject_queue)
+    )
 
     try:
         with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
@@ -764,7 +845,27 @@ async def run(args: argparse.Namespace) -> None:
                     # The backend believes its whole response was delivered; it
                     # wasn't. The marker is our version of realtime APIs'
                     # history truncation (docs: "the truncation problem").
-                    text = BARGE_IN_MARKER + text
+                    marked_text = BARGE_IN_MARKER + text
+                    # Axis 2 (docs/DESIGN-barge-in.md's grid, "what happens to
+                    # the user's NEW words") -- BargeInMonitor already decided
+                    # Axis 1 (audio stopped/turn aborted, above); this decides
+                    # whether the words that interrupted it get delivered now,
+                    # held for later, or discarded.
+                    if interrupt_axes.on_new_words == "drop":
+                        log.info(
+                            "dropped (on_new_words=drop, preset=%s): %r",
+                            config.interaction.interrupt_preset, text,
+                        )
+                        continue
+                    if interrupt_axes.on_new_words == "queue":
+                        interject_queue.offer(marked_text)
+                        log.info(
+                            "queued (on_new_words=queue, preset=%s) for delivery "
+                            "once the current turn is fully idle: %r",
+                            config.interaction.interrupt_preset, text,
+                        )
+                        continue
+                    text = marked_text
                 try:
                     await orchestrator.handle_transcript(text)
                 except Exception as exc:  # noqa: BLE001

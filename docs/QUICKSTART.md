@@ -96,10 +96,12 @@ Speak a command; it transcribes, sends it to the agent, and speaks the reply.
 - **Interrupt / abort:** say a safeword — `stop stop stop` by default (add
   your own in the config). It hard-stops the agent's current work and keeps
   listening. Honored even mid-sentence.
-- **Barge-in** (talking over a response to redirect it) is off by default;
-  enable it with `interaction.interrupt_mode: stop_audio` once you have echo
+- **Barge-in** (talking over a response to redirect it) is off by default
+  (`interaction.interrupt_preset: do-not-disturb`); enable it with
+  `interaction.interrupt_preset: conversational` once you have echo
   cancellation on or are wearing headphones (otherwise the assistant hears
-  its own voice and interrupts itself).
+  its own voice and interrupts itself). Other presets (`patient`, `halt`,
+  `take-over`) trade off differently -- see `docs/DESIGN-barge-in.md`.
 - **Same-room speakers + mic?** Turn on `audio.echo_cancellation: true`
   (needs the `[aec]` extra) so it doesn't transcribe its own speech.
 

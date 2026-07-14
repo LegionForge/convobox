@@ -33,7 +33,7 @@ Interaction: A Review." *Computer Speech & Language* 67.**
 The best single entry point for putting turn-taking into a *machine* —
 surveys endpointing, overlap, backchannels, and continuous vs. turn-based
 models.
-**Adopt →** Read-this-first for the 0.2.1 barge-in design; use its taxonomy
+**Adopt →** Read-this-first for the 0.3.0 barge-in design; use its taxonomy
 as our vocabulary (endpointing, overlap-management, backchannel handling).
 
 ---
@@ -104,6 +104,55 @@ the upgrade path beyond Silero's silence-timer endpointing: predict
 turn-shift-vs-backchannel instead of waiting out a silence. A concrete
 roadmap target once the preset/grid control surface is in.
 
+**Pipecat (pipecat-ai/pipecat, Apache-2.0, 13.4k★, verified 2026-07-14 by
+reading real source, not just docs).** A production, Python, voice-agent
+*framework* (not a single app) — the closest architectural cousin to
+ConvoBox surveyed so far. Four concrete, source-verified findings:
+
+- **Pluggable turn-start *strategies***, not one hardcoded rule:
+  `BaseUserTurnStartStrategy` with swappable implementations —
+  `MinWordsUserTurnStartStrategy` (N words to interrupt while the bot is
+  speaking, 1 word when idle — read the actual class:
+  `src/pipecat/turns/user_start/min_words_user_turn_start_strategy.py`),
+  a transcription-based one, an external-signal one, even a commercial
+  voice-isolation vendor integration (Krisp VIVA). **Adopt →** Word-*count*
+  is a simpler, complementary backstop to our word-*list* backchannel
+  filter (`is_backchannel()`): our list precisely excludes known continuers
+  by name but says nothing about a short, garbled, off-list STT scrap
+  during playback. A future refinement: treat "short AND low-confidence
+  AND bot-speaking" as backchannel-shaped too, not just an exact word-list
+  hit. Also validates a pluggable-strategy shape as the eventual home for
+  our `trigger: speech | push-word` axis, if it grows a third option later.
+- **`AlwaysUserMuteStrategy`** — a named, first-class "the bot always
+  finishes talking, user input is suppressed until then" mode. **Adopt →**
+  Independent, real-production validation that our `do-not-disturb` preset
+  (`let-finish` + `drop`) is a legitimate, wanted mode, not
+  over-engineering a rarely-used cell.
+- **"Filter Incomplete Turns" example** — the framework asks the *LLM
+  itself* to classify the user's utterance as complete / cut-off-short /
+  needs-time-to-think (3 outcomes, each with its own reprompt delay) before
+  generating a real response, using the same model already in the loop, no
+  extra classifier needed. **Adopt →** A different mechanism than VAP
+  (semantic judgment of the *transcript* vs. VAP's acoustic prediction from
+  raw audio) solving a related-but-distinct problem (was the user's own
+  utterance cut off, not whether *our* response should be interrupted).
+  Doesn't transplant directly — ConvoBox is a thin client over external
+  coding-agent CLIs we don't control the system prompt of, unlike
+  Pipecat's direct LLM access — but a *cheap local heuristic* version
+  (trailing conjunction / no terminal punctuation → "sounds cut off") is a
+  candidate for the VAD/segmenter layer, distinct from `ContinueDetector`
+  (which is about the *assistant's* response, not the user's utterance).
+- **Frame-priority queue**: `SystemFrame`s (start/end/interruption
+  signals) preempt `DataFrame`/`ControlFrame`s via a dedicated
+  `asyncio.PriorityQueue`, guaranteeing an interrupt signal cuts ahead of
+  pipeline backlog regardless of load. **Adopt →** Different mechanism
+  (their whole architecture is frame-based; ours is procedural), same
+  *principle* already in our code: the safeword check runs unconditionally
+  before every other gate, and `BargeInMonitor` operates at the raw-audio
+  level specifically so it doesn't wait behind STT. Real-production
+  confirmation the principle is right, not something to restructure our
+  code to imitate mechanically.
+
 ---
 
 ## 5. Full-duplex generative models (the frontier / ceiling)
@@ -153,7 +202,7 @@ open barge-in = modern LLM voice modes).
 
 ---
 
-## What we're adopting for the 0.2.1 barge-in cycle
+## What we're adopting for the 0.3.0 barge-in cycle
 
 1. **Backchannels are continuers — filter them, don't interrupt** (Schegloff;
    Ward & Tsukahara). Short affirmation-class tokens never trigger barge-in.
