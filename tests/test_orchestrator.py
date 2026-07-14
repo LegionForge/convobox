@@ -422,6 +422,60 @@ async def test_a_new_response_replaces_the_previous_ones_remaining_tiers() -> No
 
 
 @pytest.mark.asyncio
+async def test_second_text_event_cancels_the_first_speak_task_before_it_completes() -> None:
+    # Real bug, live-confirmed 2026-07-14: a single backend turn can emit
+    # MULTIPLE TEXT events (tool-calling responses interleave text with
+    # tool work -- "let me check that file" ... [tool work] ... "found
+    # it, fixing now"). Before this fix, _speak_task was silently
+    # overwritten here without cancelling whatever the PREVIOUS TEXT
+    # segment's task was still doing -- letting it keep synthesizing (and,
+    # via EchoAwarePlayer's playback_ended_at tracking in
+    # scripts/run_convobox.py, keep advancing a shared "when did playback
+    # end" timestamp) for audio nobody ever actually heard, since
+    # AudioPlayer.play_stream() already replaces the underlying audio
+    # thread/stream regardless. Observed live as an entire multi-minute
+    # UAT session where nearly every utterance got dropped by the overlap
+    # gate as "echo" (see docs/KNOWN-ISSUES.md).
+    adapter = FakeBackendAdapter(busy=False)
+    safeword = SafewordDetector(["stop stop stop"])
+    release_first = asyncio.Event()
+
+    class SlowFirstSegmentTTSEngine(FakeTTSEngine):
+        async def synthesize_stream(self, text: str):  # type: ignore[override]
+            if text == "first segment":
+                # Blocks here until the test lets it go -- simulates a
+                # still-synthesizing first segment when the second
+                # segment's TEXT event arrives, the exact race that
+                # corrupted playback_ended_at live.
+                await release_first.wait()
+            self.synthesized.append(text)
+            yield np.ones(4, dtype=np.float32)
+
+    tts = SlowFirstSegmentTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first segment"))
+    first_task = orch._speak_task
+    assert first_task is not None
+    await asyncio.sleep(0)  # let it actually start and reach the blocking await
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="second segment"))
+    second_task = orch._speak_task
+    assert second_task is not None and second_task is not first_task
+
+    await second_task
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+
+    assert first_task.cancelled()
+    # "first segment" never finished synthesizing -- it never actually
+    # played, so it must never be counted as spoken.
+    assert tts.synthesized == ["second segment"]
+    assert len(player.played) == 1
+
+
+@pytest.mark.asyncio
 async def test_tiering_tiers_the_stripped_text_not_raw_markdown() -> None:
     # split_tiers() expects "\n\n"-separated paragraphs; strip_code_for_speech
     # already collapses 3+ newlines down to exactly that, so tiering must
