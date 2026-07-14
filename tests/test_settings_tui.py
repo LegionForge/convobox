@@ -71,10 +71,10 @@ def test_modal_edit_accepts_value_on_enter(monkeypatch: pytest.MonkeyPatch) -> N
 def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = FieldSpec(
         "interaction",
-        "interrupt_mode",
-        "Interrupt mode",
+        "interrupt_preset",
+        "Interrupt preset",
         "choice",
-        ("none", "stop_audio", "abort_turn"),
+        ("do-not-disturb", "conversational", "take-over"),
     )
     keys = iter([" ", "RIGHT", "ENTER"])
     drawn: list[str] = []
@@ -85,10 +85,10 @@ def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.Monke
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
     monkeypatch.setattr(settings_tui, "_draw_modal", _capture_draw)
 
-    accepted, value = settings_tui._edit_value_interactive(spec, "none")
+    accepted, value = settings_tui._edit_value_interactive(spec, "do-not-disturb")
     assert accepted is True
-    assert value == "abort_turn"
-    assert drawn == ["none", "stop_audio", "abort_turn"]
+    assert value == "take-over"
+    assert drawn == ["do-not-disturb", "conversational", "take-over"]
 
 
 def test_switching_backends_remembers_backend_specific_values() -> None:
@@ -275,16 +275,16 @@ def test_render_modal_marks_destructive_actions_more_strongly() -> None:
 
 def test_render_modal_shows_choice_selector() -> None:
     lines = render_modal(
-        "Edit Interrupt mode",
-        "Editing interaction.interrupt_mode",
-        ["Current: none", "Use Left/Right or Space to cycle choices."],
-        "stop_audio",
+        "Edit Interrupt preset",
+        "Editing interaction.interrupt_preset",
+        ["Current: do-not-disturb", "Use Left/Right or Space to cycle choices."],
+        "conversational",
         100,
         30,
-        choice_options=["none", "stop_audio", "abort_turn"],
-        choice_value="stop_audio",
+        choice_options=["do-not-disturb", "conversational", "take-over"],
+        choice_value="conversational",
     )
     joined = "\n".join(lines)
     assert "Options:" in joined
-    assert "| > stop_audio" in joined
-    assert "|   none" in joined
+    assert "| > conversational" in joined
+    assert "|   do-not-disturb" in joined

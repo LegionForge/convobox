@@ -267,6 +267,14 @@ config migration: existing `convobox.yaml` files using `interrupt_mode`
 aren't losing anything, they're being handed a name for what they already
 had plus two new options -- not a downgrade some users need to relearn.
 
+**Migrated 2026-07-14**: `config.py`'s `InteractionConfig.interrupt_mode`
+is now `interrupt_preset` (validated against `PRESETS` via
+`resolve_preset`), `BargeInMonitor` keys off the resolved
+`on_current_turn` axis, and `patient`'s `queue` behavior is implemented
+(`QueuedInterjection`, flushed by the existing working-watchdog once the
+backend is fully idle) -- see `docs/DESIGN-echo-and-barge-in.md`'s
+2026-07-14 status update for the concrete mechanism.
+
 ## Phasing
 
 **In 0.3.0:** the two-axis model + presets; the `speech`/`push-word` triggers
