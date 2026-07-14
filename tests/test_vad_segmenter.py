@@ -209,11 +209,16 @@ def test_max_utterance_cap_splits_continuous_speech(
 
     assert len(utterances) == 2
     assert all(u.shape[0] == cap_windows * _WINDOW for u in utterances)
+    # was_forced reflects the LAST completed utterance in this batch (both
+    # of which were cap-triggered here, so no ambiguity in this case).
+    assert seg.was_forced is True
     # The remainder (70 - 62 = 8 windows) is a new in-progress run.
     assert seg.in_speech
     tail = seg.flush()
     assert tail is not None
     assert tail.shape[0] == (70 - 2 * cap_windows) * _WINDOW
+    # flush() is neither a natural silence-end nor a cap -- always False.
+    assert seg.was_forced is False
 
 
 def test_natural_silence_end_wins_over_cap(
@@ -230,6 +235,39 @@ def test_natural_silence_end_wins_over_cap(
 
     assert len(utterances) == 1
     assert utterances[0].shape[0] == total_windows * _WINDOW
+    assert seg.was_forced is False
+
+
+def test_was_forced_false_before_any_utterance_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seg, _ = _make_capped_segmenter(monkeypatch, [0.9] * 5, max_utterance_s=1.0)
+    assert seg.was_forced is False  # nothing has completed yet
+
+
+def test_was_forced_true_only_for_the_capped_utterance_not_the_next_natural_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A capped utterance followed by a second, naturally-ended one in a
+    # SEPARATE feed() call must correctly flip was_forced back to False --
+    # it's not "sticky" from the earlier forced emit. The second run uses
+    # exactly _MIN_SPEECH_WINDOWS of speech so it clears the noise floor
+    # and actually emits (a shorter run would be silently discarded).
+    cap_windows = 31
+    probs = (
+        [0.9] * cap_windows
+        + [0.9] * _MIN_SPEECH_WINDOWS
+        + [0.0] * _MIN_SILENCE_WINDOWS
+    )
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    first_batch = seg.feed(_windows(cap_windows))
+    assert len(first_batch) == 1
+    assert seg.was_forced is True
+
+    second_batch = seg.feed(_windows(_MIN_SPEECH_WINDOWS + _MIN_SILENCE_WINDOWS))
+    assert len(second_batch) == 1
+    assert seg.was_forced is False
 
 
 def test_no_cap_preserves_unbounded_behavior(
