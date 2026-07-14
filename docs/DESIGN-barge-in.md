@@ -192,7 +192,11 @@ Human turn-transitions cluster around **~200 ms** (Stivers et al. 2009). So:
 
 ```yaml
 interaction:
-  wake_word: "ConvoBox"          # shared: push-word barge-in trigger AND pause/resume
+  wake_word: "Athena"            # shared: push-word barge-in trigger AND pause/resume
+                                  # (default was "ConvoBox" -- confidently
+                                  # mis-heard as "Control Box" by Whisper
+                                  # every time; verify any custom choice
+                                  # round-trips through STT before relying on it)
   pause_listening_phrases:       # enters the paused (wake-word-only) state; hard-stops in flight
     - "stop listening"
     - "pause listening"
