@@ -37,7 +37,7 @@ channel, editor as canvas.
   browse/audition/choose/persist flow stays while its
   catalog/download mechanics become engine-specific.
 
-### ConvoBox Settings TUI (decided)
+### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)
 that manages:
@@ -50,11 +50,21 @@ that manages:
   provider URLs, health checks);
 - the spoken-response contract and audio tunables (below).
 
+Not to be confused with the **live conversation TUI** that
+[DESIGN-0.3.0-interaction-and-safety.md](DESIGN-0.3.0-interaction-and-safety.md)'s
+Phase 1 adds -- this one edits `convobox.yaml` before/between sessions; the
+0.3.0 one runs *alongside* `run_convobox.py` showing the live transcript,
+full-detail response pane, and barge-in/approval status while talking.
+
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response
   routing: VERBALIZE vs DISPLAY (spoken summary + full text on screen).
 - For now: ride with backend defaults; this lands with the settings
   TUI. This is the #2 UX lever after barge-in.
+- **0.3.0 concrete design:** [DESIGN-0.3.0-interaction-and-safety.md](DESIGN-0.3.0-interaction-and-safety.md)'s
+  Phase 2 -- voice always gives the tiered/short version, a new TUI's
+  full-detail pane always shows the untruncated response, and a
+  `ContinueDetector` is the eyes-free "tell me more" escape hatch.
 
 ### Safety tiers for destructive actions (decided; design sketch)
 When the agent is about to do something destructive-classed and the
@@ -68,6 +78,11 @@ instruction arrived BY VOICE (where mishearing is a real input mode):
 - Architecture note: this is the inverse of the safeword -- the
   SafewordDetector pattern (deterministic, normalized, checked on raw
   transcript) is the right foundation for a ConfirmwordDetector.
+- **0.3.0 concrete design:** [DESIGN-0.3.0-interaction-and-safety.md](DESIGN-0.3.0-interaction-and-safety.md)'s
+  Phase 3 -- built for Codex first (it has a real live approval channel);
+  Claude Code's headless mode has none, so it gets an `--allowedTools`
+  investigation instead, with the PTY/interactive-mode rework explicitly
+  deferred past 0.3.0.
 
 ### Wake word (decided: post-0.5, designed now)
 - Optional "listening" states with an activation wake word

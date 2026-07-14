@@ -5,6 +5,12 @@
 > numbering rule it's a MINOR bump (0.3.0), not a 0.2.x patch. (0.2.x is
 > reserved for fixes to 0.2.0, e.g. the WASAPI octave bug in
 > [KNOWN-ISSUES.md](KNOWN-ISSUES.md).)
+>
+> This design is implemented as part of
+> [DESIGN-0.3.0-interaction-and-safety.md](DESIGN-0.3.0-interaction-and-safety.md)'s
+> Phase 1, alongside the 0.3.0 TUI — see that doc for the full bundle
+> (response tiering, approvals, and how they all share one underlying
+> primitive) and priority order.
 
 ## Goal
 
