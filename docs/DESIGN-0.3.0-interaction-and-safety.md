@@ -202,13 +202,43 @@ matching "the TUI always shows the full, untruncated response." 15 new
 tests, including the reset-on-new-response and stripped-vs-raw-boundary
 cases explicitly.
 
-Still needed before this is user-visible: a silence-timeout gate in
-`run_convobox.py`'s main loop (same shape as `ListeningGate`'s
-pause/resume gate) that listens for `ContinueDetector` after a tiered
-response (only when `orchestrator.has_more_to_reveal()` -- no point
-prompting for "more" a response never held back) and implies "no" after
-1-4s of silence, and exposing `tier_responses` as a real config field
-(currently only reachable by constructing `Orchestrator` directly).
+**Main-loop wiring + config field shipped (2026-07-14) -- Phase 2 complete
+end to end.** `ContinuePromptGate` (`scripts/run_convobox.py`, same
+pure-state-machine shape as `ListeningGate`/`BargeInMonitor`): the
+watchdog's existing 1s poll starts the wait the instant a response
+finishes speaking (`was_playing and not playing`) *and*
+`orchestrator.has_more_to_reveal()` -- no wait started for a response
+that already said everything -- and expires it silently after
+`continue_timeout_s` (1-4s range, 2.5s default) with no reply. The main
+loop checks `continue_gate.is_waiting` in the same early position as the
+pause/resume gate: a `"continue"` reply calls `speak_more()`, a
+`"decline"` reply just ends the wait, and critically an *unrelated* reply
+(`"pass"`) is NOT dropped the way a paused session drops everything --
+it falls through to normal processing, since the user just moved on to a
+new topic rather than still answering. Continue/decline replies bypass
+the overlap gate the same way a real barge-in does (they're *expected*
+right after a response, not suspect echo); a "pass" reply does not
+bypass it -- unknown whether it's genuine new speech or residual echo
+until the normal gates check it.
+
+`InteractionConfig` gained `tier_responses: bool = False` (off by
+default, zero behavior change for existing `convobox.yaml` files) and
+`continue_timeout_s: float = 2.5` (not yet live-UAT-tuned against a real
+"did that feel laggy or naggy" pass -- flagged as an open question
+below).
+
+**Live-verified against the real pipeline**: drove `Orchestrator`
+directly with `tier_responses=True` against a real running `opencode`
+server, asked for a genuine two-paragraph response -- confirmed only
+paragraph 1 was spoken first, `has_more_to_reveal()` correctly reported
+`True`, and `speak_more()` correctly delivered paragraph 2. **Honest
+limitation, same class as the TUI's**: this verifies the `Orchestrator`
+tiering logic against a real backend, not the full watchdog-trigger +
+main-loop `ContinuePromptGate` wiring through an actual spoken "continue"
+-- `ContinuePromptGate`'s pure state-machine logic (10 tests) and the
+full script's syntax/imports are verified, but saying "continue" into a
+real microphone after a real tiered response needs a live-mic UAT pass,
+which isn't possible in this environment.
 
 ## Phase 3 — Approvals
 
