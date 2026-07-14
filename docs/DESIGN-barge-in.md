@@ -302,3 +302,14 @@ TV can't trip the wake word); `duck` mode; full-duplex generative direction.
   short tone or "listening again"), or resume silently? Leaning toward a
   short acknowledgment (matches Alexa/Google's wake confirmation), but
   needs a live-UAT check against feeling naggy.
+- **False-interruption recovery (identified 2026-07-14, via LiveKit Agents
+  research — see `docs/CONVERSATION-DESIGN-REFERENCES.md` §4).**
+  `BargeInMonitor` fires purely from VAD-level sustained-speech timing,
+  before STT can confirm content — so a false positive (backchannel, cough,
+  ambient noise misclassified as speech) stops playback (and, on `abort`,
+  hard-stops the backend turn) for good, with no resume path once the
+  transcript comes back empty/backchannel-shaped. Would a resume mechanism
+  need to reconstruct "how much was already spoken" and interact with
+  `interaction.tier_responses`'s own reveal-state? Not scoped or built —
+  needs real design work, and the audio behavior can't be verified without
+  a live mic session.

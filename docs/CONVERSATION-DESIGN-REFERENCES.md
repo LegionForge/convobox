@@ -10,9 +10,9 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
-> Google Conversation Design) were web-verified July 2026 by reading real
-> primary-source pages/code, not secondhand summaries. The foundational
-> conversation-analysis and pragmatics classics are cited from the
+> LiveKit Agents, Google Conversation Design) were web-verified July 2026
+> by reading real primary-source pages/code, not secondhand summaries. The
+> foundational conversation-analysis and pragmatics classics are cited from the
 > standard literature; confirm against the primary source before any
 > formal/public citation. The Alexa Design Guide entry is explicitly
 > flagged as NOT primary-source-verified this pass (see that entry) --
@@ -157,6 +157,76 @@ ConvoBox surveyed so far. Four concrete, source-verified findings:
   confirmation the principle is right, not something to restructure our
   code to imitate mechanically.
 
+**LiveKit Agents (livekit/agents, Apache-2.0, verified 2026-07-14 by
+reading the real docs page (docs.livekit.io/agents/build/turns/) and the
+real turn-detector plugin source
+(livekit-plugins-turn-detector/livekit/plugins/turn_detector/base.py),
+not secondhand summaries).** A production, Python, real-time voice-agent
+framework — the other close architectural cousin to ConvoBox besides
+Pipecat, but built around a genuinely different endpointing mechanism
+worth contrasting. Three concrete, source-verified findings:
+
+- **A small, local, text-based end-of-turn classifier, not audio-based
+  VAP.** The shipped "Turn Detector Model" is an ONNX transformer that
+  takes the last 6 turns of CHAT TEXT (not raw audio), tokenizes up to
+  128 tokens, and outputs a single `eou_probability` float, compared
+  against a **language-specific** threshold loaded from `languages.json`.
+  Docs describe it as predicting end-of-turn "from both the meaning of
+  speech and its acoustic properties, on top of VAD" — i.e. explicitly
+  layered ON TOP of Silero VAD, not a replacement for it. **Adopt →** A
+  second, real, shipped answer to "beat a fixed silence timer" alongside
+  VAP (§4 above) — but semantic-from-transcript rather than
+  acoustic-from-audio, and notably *language-specific thresholds*, which
+  ConvoBox doesn't have anywhere today (our `min_silence_ms`/
+  `min_language_probability` gates are single global numbers regardless
+  of detected language). Not proposing to build a transformer classifier
+  for ConvoBox — the point is architectural validation that a lightweight
+  local *text* classifier over recent turns is a legitimate, shipped
+  complement to acoustic VAD, distinct from the heavier VAP/full-duplex
+  end of the spectrum (§5).
+- **`max_words`/`max_duration` + `on_user_turn_exceeded` callback caps a
+  user's turn and proactively intervenes**, rather than letting VAD buffer
+  an unbounded monologue. **Adopt →** This is real-production validation
+  of a gap ConvoBox already found and flagged, independently, in live UAT
+  five days before this research pass: `docs/UAT-checklist.md`'s **[V3]**
+  notes `vad.max_utterance_s=None` (uncapped) means "a long uninterrupted
+  monologue yields NO transcript until the speaker pauses (observed live
+  as a 30.5s single utterance)," with "candidate upstream improvement:
+  max-duration forced flush" written at the time but not built. LiveKit
+  shipping exactly this as a named, callback-driven feature is a strong
+  signal it's worth actually building, not just noting — a concrete
+  roadmap candidate, still not built this cycle (this is a research pass,
+  not a code pass; `UtteranceSegmenter` already has the field, wiring a
+  force-flush + callback is real, scoped follow-up work).
+- **False-interruption recovery** (`resume_false_interruption`,
+  `false_interruption_timeout`): when VAD-detected "speech" during agent
+  playback produces an empty transcription, LiveKit treats the
+  interruption as false and **resumes** the agent's speech rather than
+  leaving it cut off. **Adopt →** Traced this against ConvoBox's own
+  `BargeInMonitor` (`scripts/run_convobox.py`) and found the same gap,
+  unflagged anywhere in `docs/DESIGN-barge-in.md` or
+  `docs/DESIGN-echo-and-barge-in.md` until now: `BargeInMonitor.observe()`
+  fires — stopping playback, and for `on_current_turn == "abort"`,
+  hard-stopping the backend turn — purely from VAD-level sustained-speech
+  duration, entirely BEFORE STT produces a transcript. When the transcript
+  later arrives and turns out to be a backchannel (`is_backchannel(text)`)
+  or presumably an empty/noise-triggered false positive, the main loop
+  correctly DROPS it as "not a real interrupt attempt" — but the response
+  is already gone; there is no resume path, matched or not. For
+  `conversational`/`halt`/`take-over` presets (the only ones where
+  `BargeInMonitor` can fire at all — `let-finish` short-circuits it), a
+  false VAD trigger costs the user the rest of an in-progress answer for
+  free. **Not built this cycle, deliberately**: an actual resume mechanism
+  would need to reconstruct "how much of the response was already spoken"
+  and re-enter TTS mid-stream, which is a real architectural question
+  (how does this interact with `tier_responses`'s own tracked
+  reveal-state? does a resumed response re-announce itself?) — exactly
+  the kind of thing this session's discipline says to scope properly
+  rather than rush, and it's audio-behavior-dependent in a way this
+  environment can't live-verify. Flagged here and worth a line in
+  `docs/DESIGN-barge-in.md`'s open questions the next time that doc is
+  touched, not invented as unscoped code today.
+
 ---
 
 ## 5. Full-duplex generative models (the frontier / ceiling)
@@ -269,3 +339,15 @@ source-verified until it actually is.
 7. **Error-escalation ladder is a real, scoped gap** (Google Conversation
    Design) — low-confidence transcripts are silently dropped today with no
    escalating user-facing signal; a future candidate, not built this cycle.
+8. **Uncapped monologues are a real, independently-validated gap**
+   (LiveKit Agents' `max_words`/`max_duration`) — matches
+   `docs/UAT-checklist.md`'s own **[V3]** finding from live UAT
+   (2026-07-09); a scoped roadmap candidate, not built this cycle.
+9. **False-interruption recovery is a real, newly-identified gap**
+   (LiveKit Agents' `resume_false_interruption`) — `BargeInMonitor` fires
+   and stops playback purely from VAD timing, before STT can confirm the
+   "interruption" wasn't a backchannel/noise false positive, and there's
+   no resume path today; flagged for `docs/DESIGN-barge-in.md`, not built
+   this cycle (needs real design work on how a resume interacts with
+   response tiering, and can't be live-audio-verified in this
+   environment).
