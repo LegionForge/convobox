@@ -53,6 +53,23 @@ adapter was written. Key facts:
   observed live (this server version didn't trigger them in testing) --
   correctness by vendor-schema reading, not a live probe, for those two.
 
+- **A pending approval request survives a deliberate delay + unrelated
+  traffic on the same connection (confirmed live, 2026-07-14).** Probed
+  for the future "discuss" flow (`docs/DESIGN-0.3.0-interaction-and-safety.md`
+  phase 2 -- the user asks a question about a pending approval instead of
+  deciding immediately): captured a real pending
+  `item/commandExecution/requestApproval` request, left it deliberately
+  unanswered for 20s, sent a completely unrelated request on the *same*
+  JSON-RPC connection in the meantime (a second, independent
+  `thread/start` -- got a normal response, proving the pipe isn't
+  serialized behind the pending approval), then answered the *original*
+  request's id -- it resolved normally (`"exec command rejected by
+  user"`, clean `turn/completed`). The server does not time out or
+  invalidate a pending approval across an intervening exchange, at least
+  at this scale (one 20s delay, one interleaved request) -- not proof of
+  no-timeout at arbitrary scale, but enough to unblock building
+  "discuss" without a request-preservation workaround.
+
 Transport architecture differs from claude_code.py deliberately:
 JSON-RPC multiplexes request-responses and notifications on one pipe,
 so a single background reader task routes responses to their awaiting
