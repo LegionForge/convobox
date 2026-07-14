@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 
 import numpy as np
 import pytest
@@ -94,15 +94,22 @@ class FakePlayer(AudioPlayer):
 
 
 def make_orchestrator(
-    busy: bool, with_tts: bool = False
+    busy: bool,
+    with_tts: bool = False,
+    on_event: Callable[[BackendEvent], None] | None = None,
 ) -> tuple[Orchestrator, FakeBackendAdapter, FakeTTSEngine | None, FakePlayer | None]:
     adapter = FakeBackendAdapter(busy=busy)
     safeword = SafewordDetector(["stop stop stop"])
     if not with_tts:
-        return Orchestrator(adapter, safeword), adapter, None, None
+        return Orchestrator(adapter, safeword, on_event=on_event), adapter, None, None
     tts = FakeTTSEngine()
     player = FakePlayer()
-    return Orchestrator(adapter, safeword, tts=tts, player=player), adapter, tts, player
+    return (
+        Orchestrator(adapter, safeword, tts=tts, player=player, on_event=on_event),
+        adapter,
+        tts,
+        player,
+    )
 
 
 @pytest.mark.asyncio
@@ -216,6 +223,56 @@ async def test_text_event_without_tts_configured_is_noop() -> None:
     await asyncio.sleep(0)
 
     assert orch._speak_task is None
+
+
+@pytest.mark.asyncio
+async def test_on_event_hook_sees_every_event_type() -> None:
+    # The observer hook exists so a caller (e.g. a live TUI) can see the
+    # real backend activity -- not just TEXT (which _on_event itself acts
+    # on for speech), but TOOL_CALL/TOOL_RESULT/DONE/ERROR too.
+    seen: list[BackendEvent] = []
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, on_event=seen.append)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TOOL_CALL, tool="bash"))
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="hello"))
+    await asyncio.sleep(0)
+
+    assert [e.type for e in seen] == [BackendEventType.TOOL_CALL, BackendEventType.TEXT]
+    # And the hook doesn't interfere with the existing TTS behavior.
+    assert tts.synthesized == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_on_event_hook_none_is_a_noop() -> None:
+    # Default construction (no on_event passed) must behave exactly as
+    # before this hook existed.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="hello"))
+    await asyncio.sleep(0)
+
+    assert tts.synthesized == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_on_event_hook_exception_does_not_break_speech_or_crash() -> None:
+    # A buggy observer must not take down event consumption (is_busy()
+    # staleness) or block the core TTS/speech responsibility it's just
+    # observing, not gating.
+    def broken_hook(event: BackendEvent) -> None:
+        raise RuntimeError("observer bug")
+
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, on_event=broken_hook)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="hello"))
+    assert orch._speak_task is not None
+    await orch._speak_task
+
+    assert tts.synthesized == ["hello"]
+    assert len(player.played) == 1
 
 
 @pytest.mark.asyncio
