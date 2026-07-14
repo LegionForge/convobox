@@ -54,10 +54,11 @@ def test_wake_word_property_returns_original() -> None:
     assert detector.wake_word == "Hey Athena"
 
 
-def test_default_wake_word_is_the_product_name() -> None:
+def test_default_wake_word() -> None:
     detector = WakewordDetector()
     assert detector.wake_word == DEFAULT_WAKE_WORD
-    assert detector.check("hey ConvoBox, hold on") is True
+    assert DEFAULT_WAKE_WORD == "Athena"  # pins the value the round-trip STT test verified
+    assert detector.check("hey Athena, hold on") is True
 
 
 # --- the construction guard (shared with Safeword/Confirmword) ---

@@ -25,14 +25,36 @@ import re
 _NORMALIZE_RE = re.compile(r"[^a-z0-9\s]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 
-# The built-in default: the product's own name, the same convention
-# smart-speaker wake words use ("Alexa", "Siri", "Cortana"). Multisyllabic
-# and essentially never said in ordinary coding-agent conversation, unlike
-# a generic choice like "computer" (which people say constantly about their
-# own machine while coding -- a real false-fire risk specific to this
-# domain, ruled out for the default even though it's the classic sci-fi
-# wake word archetype named in docs/ROADMAP.md's Wake word section).
-DEFAULT_WAKE_WORD = "ConvoBox"
+# The built-in default. CORRECTED 2026-07-13: the original choice,
+# "ConvoBox" (the product's own name -- the smart-speaker convention, "Alexa"/
+# "Siri"/"Cortana"), was never actually verified against real speech-to-text
+# before shipping and turned out to be a real, live-reproducing bug --
+# faster-whisper confidently (0.93) mis-transcribes it as "Control Box"
+# every time (a compound/portmanteau word splitting into two real English
+# words Whisper's language model prefers), so the wake-word check silently
+# never matched and users got stuck unable to resume from a paused state.
+# Confirmed via a round-trip TTS-to-STT test through the real pipeline
+# (Piper -> faster-whisper), the same discipline this codebase uses
+# everywhere else ("verify against the real thing before shipping").
+#
+# "Athena" was chosen the same way: 5/5 correct transcriptions across varied
+# phrasings ("Athena", "hey Athena", "Athena, stop", "okay Athena",
+# "Athena?") through the same real pipeline. A single ordinary dictionary
+# word, not a portmanteau -- "Copilot"/"co-pilot" and "Voicebox"/"Boyspicks"
+# failed the same round-trip test for the same underlying reason as
+# "ConvoBox". Public-domain (deliberately not a trademarked AI-character
+# name like "Jarvis", which also tested well but carries IP baggage as a
+# shipped default). Multisyllabic, essentially never said in ordinary
+# coding-agent conversation, unlike "computer" (people say that constantly
+# about their own machine while coding -- a real false-fire risk specific
+# to this domain, and the classic sci-fi wake word archetype named in
+# docs/ROADMAP.md's Wake word section, ruled out for exactly that reason).
+#
+# Any user-CHOSEN wake word still needs the same verification -- that's the
+# setup-wizard "test-transcribe a few times" UX named in
+# docs/DESIGN-barge-in.md, not yet built. This constant being wrong for two
+# PRs is the concrete argument for building it.
+DEFAULT_WAKE_WORD = "Athena"
 
 
 def _normalize(text: str) -> str:

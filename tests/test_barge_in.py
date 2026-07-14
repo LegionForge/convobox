@@ -88,14 +88,14 @@ def test_interrupt_mode_rejects_unknown_values() -> None:
 
 def test_interaction_config_wake_word_and_pause_phrase_defaults() -> None:
     config = AppConfig()
-    assert config.interaction.wake_word == "ConvoBox"
+    assert config.interaction.wake_word == "Athena"
     assert config.interaction.pause_listening_phrases == ["stop listening", "pause listening"]
 
 
 # --- ListeningGate: pause/resume listening (docs/DESIGN-barge-in.md) ---
 
 
-def _gate(pause_phrases: list[str] | None = None, wake_word: str = "ConvoBox") -> ListeningGate:
+def _gate(pause_phrases: list[str] | None = None, wake_word: str = "Athena") -> ListeningGate:
     return ListeningGate(
         PauseListeningDetector(pause_phrases),
         WakewordDetector(wake_word),
@@ -117,7 +117,7 @@ def test_ordinary_speech_passes_through_when_not_paused() -> None:
 def test_wake_word_resumes_from_paused() -> None:
     gate = _gate()
     gate.observe("stop listening")
-    assert gate.observe("hey ConvoBox") == "resume"
+    assert gate.observe("hey Athena") == "resume"
     assert gate.is_paused is False
 
 
@@ -140,7 +140,7 @@ def test_pause_phrase_itself_is_ignored_while_already_paused() -> None:
 def test_resume_then_pause_again_is_a_fresh_cycle() -> None:
     gate = _gate()
     gate.observe("stop listening")
-    gate.observe("ConvoBox")  # resume
+    gate.observe("Athena")  # resume
     assert gate.observe("stop listening") == "pause"
     assert gate.is_paused is True
 
