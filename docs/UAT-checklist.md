@@ -269,3 +269,36 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   resume -- no tone/spoken confirmation. Note whether this feels
   unnervingly silent in practice; see DESIGN-barge-in.md's open question on
   this.
+
+## 8. Conversation TUI (`--tui`, `src/convobox/tui/`)
+
+Only startup/idle/shutdown against a real backend+mic is automation-
+verified so far (no scripted way to "speak" into this loop) -- this
+section is the live-mic pass that closes the gap.
+
+- **[U1] A real spoken utterance appears in the transcript pane** as a
+  "you:" turn, and the assistant's response appears as an "assistant:"
+  turn once it arrives -- confirms the `Orchestrator.on_event` wiring
+  actually threads real backend text through, not just the placeholder
+  states already verified.
+- **[U2] Full-detail pane shows the untruncated response**, and clears
+  when the NEXT utterance starts a fresh turn (not accumulating across
+  unrelated turns, not blanking on a gate-dropped/echo utterance that
+  never reaches the backend).
+- **[U3] Status label tracks reality closely, not frame-perfectly.**
+  Watch it cycle through listening/capturing/working/speaking/paused
+  during a real conversation. Since it's derived from the existing 1s
+  watchdog poll (not threaded through every call site), very brief states
+  may be skipped -- note whether that reads as "a little laggy" (expected,
+  documented) or "wrong" (a real bug) in practice.
+- **[U4] Barge-in flag appears/clears correctly** during a real barge-in
+  (requires a non-`none` `interaction.interrupt_mode` + AEC or
+  headphones).
+- **[U5] Log output doesn't corrupt the display.** Confirm ordinary log
+  lines (info/debug) never appear inside the alt-screen while `--tui` is
+  active -- they should be going to `convobox-tui.log` instead. Tail that
+  file during the session to confirm nothing is silently lost.
+- **[U6] Clean exit restores the terminal.** Ctrl+C during a `--tui`
+  session must leave the terminal in its normal (non-alt-screen, cursor
+  visible) state afterward -- no leftover garbled screen requiring a
+  manual `reset`/`cls`.
