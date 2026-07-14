@@ -147,6 +147,40 @@ truncation marker. Enabling a non-none mode without AEC logs a loud
 self-interruption warning (headphones users may proceed deliberately).
 Default flips to stop_audio only after room UAT signs off.
 
+### Status update (2026-07-14): OpenAI Realtime API citation verified against real docs
+
+The "cleanest public formalization" and `conversation.item.truncate`
+references above (2026-07-11) were written from general knowledge, never
+checked against OpenAI's actual published documentation -- same class of
+gap as the Alexa/Google citations elsewhere in this repo's research docs,
+now closed the same way (read the real page, don't cite from memory).
+Fetched `developers.openai.com/api/docs/guides/realtime-conversations`
+directly. Confirmed accurate and, in one respect, more nuanced than this
+doc implied:
+
+- `conversation.item.truncate` is real and behaves exactly as described:
+  a client-sent event, sent after `input_audio_buffer.speech_started` and
+  stopping playback, carrying `item_id`/`content_index`/`audio_end_ms` (where
+  to cut). Server response removes both the unplayed audio AND its
+  associated text transcript -- "the realtime model doesn't have enough
+  information to precisely align transcript and audio," so truncation
+  discards the transcript rather than trying to precisely trim it,
+  exactly the imprecision problem ConvoBox's own marker-based approach
+  (item 4 above) sidesteps differently (annotate, don't try to precisely
+  edit).
+- **New nuance, not previously captured**: OpenAI's truncation behavior
+  is connection-type-dependent. WebRTC/SIP gets AUTOMATIC server-side
+  truncation on speech-start detection -- no client action needed at all.
+  WebSocket connections are client-driven, same shape as `conversation.item.truncate`
+  above. **ConvoBox is architecturally the WebSocket case**: it has no
+  server-side buffer it controls the way OpenAI's WebRTC/SIP path does,
+  so client-driven truncation-equivalent (the `BARGE_IN_MARKER` text
+  annotation, since ConvoBox can't edit arbitrary backend session
+  history) is the correct analog for ConvoBox's architecture, not a
+  simplification of it. Worth knowing if a future full-duplex/VAP
+  upgrade ever considers a server-buffer model closer to WebRTC/SIP's
+  automatic path.
+
 ## Research grounding
 
 The turn-taking, barge-in, backchannel, and interrupt design here is
