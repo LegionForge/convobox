@@ -256,6 +256,22 @@ def test_resolve_flags_respects_an_explicit_user_permission_mode() -> None:
     assert "acceptEdits" not in flags  # that's in the user's own command, not here
 
 
+def test_resolve_flags_leaves_disallowed_tools_in_the_users_command_untouched() -> None:
+    # docs/DESIGN-0.3.0-interaction-and-safety.md's Phase 3 --disallowedTools
+    # question resolved to "command: already supports it, no new config
+    # field" -- this is the regression test for that claim: _resolve_flags
+    # must not inspect, reject, or duplicate anything besides
+    # --permission-mode. The user's own --disallowedTools survives in
+    # `command` itself (this function only returns what gets APPENDED),
+    # and the adapter still appends its own safe-default --permission-mode
+    # plan since the user didn't set one.
+    command = ["claude", "--disallowedTools", "Bash", "Write", "Edit"]
+    flags = _resolve_flags(command)
+    assert "--disallowedTools" not in flags  # untouched, stays in the user's command
+    assert "--permission-mode" in flags
+    assert flags[flags.index("--permission-mode") + 1] == "plan"
+
+
 def test_create_backend_adapter_claude_code() -> None:
     adapter = create_backend_adapter(
         BackendConfig(name="claude-code", command=["my-claude", "--model", "x"])

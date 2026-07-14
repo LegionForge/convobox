@@ -67,10 +67,27 @@ instead of after shipping a wrong adapter. Key empirical findings:
   a stall. Read-only tools (Read/Glob) kept working normally under the
   same flags. This is a more granular sibling to the
   ``--permission-mode plan`` fix above (name specific tools/patterns to
-  remove vs. plan mode's blanket no-writes stance) -- not yet wired
-  into this adapter's ``command`` construction; see
-  ``docs/DESIGN-0.3.0-interaction-and-safety.md``'s phase 3 for the
-  open feature-scoping question (default deny-list? user-configurable?).
+  remove vs. plan mode's blanket no-writes stance).
+
+  **No dedicated config field for this (resolved, 2026-07-14) -- use
+  ``command:`` directly, it already supports it with zero new code.**
+  ``_resolve_flags()`` only appends its own required protocol flags
+  after whatever the caller's ``command`` already contains; it doesn't
+  inspect or reject anything else. So::
+
+      backend:
+        name: claude-code
+        command: ["claude", "--disallowedTools", "Bash", "Write", "Edit"]
+
+  already works today. A dedicated config field or a hardcoded default
+  deny-list were both considered and rejected: ``--permission-mode
+  plan`` is already the universally-safe zero-config default (nothing
+  executes, full stop), so there's no safe default deny-list to pick
+  for the more-permissive case a user opts into by overriding
+  ``--permission-mode`` themselves -- the right tool list is inherently
+  workflow-specific, which is exactly what ``command:`` is already for.
+  See ``docs/DESIGN-0.3.0-interaction-and-safety.md``'s phase 3 for the
+  full reasoning.
 """
 
 from __future__ import annotations
