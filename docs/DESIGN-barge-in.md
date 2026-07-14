@@ -224,6 +224,49 @@ Mostly orchestration wiring, not new backend work:
 - `BARGE_IN_MARKER` already handles the truncation problem (annotate history
   since we can't edit the backend's).
 
+**The two axes fire at DIFFERENT pipeline stages -- this is the part that
+isn't just "orchestration wiring," found while actually implementing it.**
+Axis 1 for `mute`/`abort` must be decided at the RAW AUDIO level, chunk by
+chunk, before STT -- that's what `BargeInMonitor` already does, fast,
+because it can't wait for a transcript. Axis 1 = `let-finish` means that
+fast trigger never runs at all. Axis 2, by contrast, is decided at the
+TRANSCRIBED TEXT level, in the existing overlap-gate code that runs AFTER
+STT for any utterance that overlapped playback -- completely independent of
+whether axis 1's fast trigger fired:
+- `drop` -- today's existing overlap-gate behavior, unchanged.
+- `now` -- forward immediately with `BARGE_IN_MARKER` (today's existing
+  "barged_in" forwarding path, now gated on axis 2 explicitly rather than
+  implicitly following whenever axis 1 fired).
+- `queue` -- the one genuinely NEW mechanism: hold the utterance's text in a
+  small pending list, flush it (in order) once playback has ended AND the
+  backend is idle. Doesn't touch `BargeInMonitor`'s state machine at all --
+  it's an addition to the overlap-gate branch.
+
+This means `patient`/`do-not-disturb` (`let-finish` + queue/drop) never
+need to consult `BargeInMonitor`'s fast trigger in the first place -- they
+operate purely on the overlap gate's existing "did this utterance overlap
+playback" signal. `halt` (`abort` + `drop`) DOES need the fast trigger (to
+abort quickly) but its drop means the utterance that caused it is simply
+absorbed as "the stop," never forwarded -- same as `do-not-disturb`'s drop,
+the only difference being whether the trigger also fired the abort.
+
+**The migration is a strict superset, not a breaking redesign** (noticed
+while scoping the config/`BargeInMonitor` migration, `src/convobox/interrupt_presets.py`):
+today's three `interrupt_mode` values map cleanly onto three of the five new
+presets --
+
+| Old `interrupt_mode` | New preset | Why |
+|---|---|---|
+| `none` | `do-not-disturb` | half-duplex: assistant keeps talking (let-finish), your words during playback are simply dropped (drop) -- exactly that preset's axes. |
+| `stop_audio` | `conversational` | mute + forward now -- today's open-barge-in behavior IS the shipped default's axes. |
+| `abort_turn` | `take-over` | abort + forward now. |
+
+`patient` and `halt` are genuinely new capability, not expressible in the
+old three-mode scheme. Worth stating plainly in whatever PR does the actual
+config migration: existing `convobox.yaml` files using `interrupt_mode`
+aren't losing anything, they're being handed a name for what they already
+had plus two new options -- not a downgrade some users need to relearn.
+
 ## Phasing
 
 **In 0.3.0:** the two-axis model + presets; the `speech`/`push-word` triggers
