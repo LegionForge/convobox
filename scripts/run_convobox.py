@@ -111,6 +111,37 @@ def _norm_tokens(text: str) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
 
 
+# Backchannels/continuers -- "mm-hmm", "yeah", "right" -- signal "I'm
+# listening, keep going," the OPPOSITE of a bid for the floor (Schegloff
+# 1982; Ward & Tsukahara 2000; see docs/CONVERSATION-DESIGN-REFERENCES.md).
+# A speech-triggered barge-in must not fire on them (docs/DESIGN-barge-in.md,
+# "Backchannel filtering"). Deliberately small and auditable, like the
+# detector classes' phrase lists -- not exhaustive, covers the common
+# English continuers.
+_BACKCHANNEL_TOKENS: frozenset[str] = frozenset(
+    {
+        "mm", "mhm", "mmhmm", "uh", "huh", "uhhuh", "hmm",
+        "yeah", "yep", "yup", "right", "oh", "ok", "okay",
+        "sure", "wow", "really", "gotcha",
+    }
+)
+
+
+def is_backchannel(text: str) -> bool:
+    """True when `text` is made up ENTIRELY of backchannel/continuer tokens.
+
+    Whole-utterance classification, not phrase matching: "yeah, but stop
+    the deploy" is NOT a backchannel (real content beyond the continuer),
+    but "yeah" or "okay, right" alone is. Empty transcripts are not
+    backchannels -- other gates already drop empty text; this only
+    classifies utterances that actually said something.
+    """
+    tokens = _norm_tokens(text)
+    if not tokens:
+        return False
+    return tokens.issubset(_BACKCHANNEL_TOKENS)
+
+
 # Below this echo-to-ambient headroom there's effectively no echo present
 # to cancel -- reading attenuation as "success" here is meaningless.
 AEC_MEASURABLE_ECHO_DB = 3.0
@@ -703,6 +734,16 @@ async def run(args: argparse.Namespace) -> None:
                             )
                         else:
                             log.info("dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r", text)
+                        continue
+                    if barged_in and is_backchannel(text):
+                        # Playback already stopped (BargeInMonitor decided
+                        # from audio timing alone, before STT could know
+                        # content) -- but a bare "mm-hmm"/"okay" was never a
+                        # bid to redirect the conversation, so it must not be
+                        # forwarded as if it were one.
+                        log.info(
+                            "dropped (backchannel, not a real interrupt attempt): %r", text
+                        )
                         continue
                     if result.language_probability < config.stt.min_language_probability:
                         log.info(

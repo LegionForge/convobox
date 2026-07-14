@@ -5,7 +5,7 @@ import pytest
 from convobox.config import AppConfig, InteractionConfig
 from convobox.listening_pause import PauseListeningDetector
 from convobox.wakeword import WakewordDetector
-from scripts.run_convobox import BARGE_IN_MARKER, BargeInMonitor, ListeningGate
+from scripts.run_convobox import BARGE_IN_MARKER, BargeInMonitor, ListeningGate, is_backchannel
 
 CHUNK_MS = 32.0  # 512 samples at 16kHz, the real capture chunk size
 
@@ -205,3 +205,28 @@ def test_working_resets_when_idle() -> None:
     assert ind.observe(busy=False, playing=False, dt_s=1.0) is None  # idle resets
     after = _feed_working(ind, busy=True, playing=False, n=3)
     assert after[2] is not None
+
+
+# --- backchannel filtering (docs/DESIGN-barge-in.md, "Backchannel filtering") ---
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["mm-hmm", "yeah", "okay", "right", "uh-huh", "Mm-hmm!", "YEAH", "gotcha", "okay right"],
+)
+def test_pure_backchannel_utterances_are_detected(text: str) -> None:
+    assert is_backchannel(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "yeah, but stop the deploy",  # real content beyond the continuer
+        "stop",  # a real short command, not a continuer
+        "run the tests",
+        "",
+        "   ",
+    ],
+)
+def test_non_backchannel_utterances_are_not_flagged(text: str) -> None:
+    assert is_backchannel(text) is False
