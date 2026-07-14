@@ -10,10 +10,11 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
-> LiveKit Agents, Google Conversation Design) were web-verified July 2026
-> by reading real primary-source pages/code, not secondhand summaries. The
-> foundational conversation-analysis and pragmatics classics are cited from the
-> standard literature; confirm against the primary source before any
+> LiveKit Agents, Deepgram Flux, Vocode, Google Conversation Design) were
+> web-verified July 2026 by reading real primary-source pages/code, not
+> secondhand summaries. The foundational conversation-analysis and
+> pragmatics classics are cited from the standard literature; confirm
+> against the primary source before any
 > formal/public citation. The Alexa Design Guide entry is explicitly
 > flagged as NOT primary-source-verified this pass (see that entry) --
 > don't treat it as equally solid.
@@ -227,6 +228,75 @@ worth contrasting. Three concrete, source-verified findings:
   `docs/DESIGN-barge-in.md`'s open questions the next time that doc is
   touched, not invented as unscoped code today.
 
+**Deepgram Flux / Voice Agent API (developers.deepgram.com, verified
+2026-07-14 by reading the real Flux agent doc, not a secondhand
+summary).** A commercial STT vendor's own production voice-agent stack —
+useful because Deepgram builds the ASR itself, so their endpointing
+opinions are informed by owning that layer, not bolted on top of a
+third-party transcript stream the way ConvoBox's Whisper-based pipeline
+necessarily is.
+
+- **"Eager" end-of-turn: a two-stage speculative response pipeline.**
+  Flux emits `EagerEndOfTurn` at *medium* confidence — before final
+  certainty — letting the caller start LLM generation early; a
+  `TurnResumed` event cancels that speculative work if the user keeps
+  talking; a final `EndOfTurn` confirms and the prepared response
+  proceeds. Tunable via `eot_threshold` (final confidence),
+  `eager_eot_threshold` (speculative-start confidence), and
+  `eot_timeout_ms`. **Adopt →** A real, shipped instance of "predict
+  before you're sure, cancel if wrong" — the same family of idea as
+  VAP's turn-shift prediction (§4 above) and Pipecat's incomplete-turn
+  LLM classification, but applied to *response latency* specifically
+  rather than *when to yield the floor*. Doesn't transplant directly for
+  the same reason Pipecat's LLM-classification example didn't: ConvoBox
+  is a thin client over external coding-agent CLIs (opencode/Claude
+  Code/Codex) it doesn't control the generation of, so there's no
+  "start the LLM speculatively" lever to pull the way a framework with
+  direct model access has. Worth remembering as the shape a *future*
+  deeper backend integration could take, not something buildable at
+  ConvoBox's current architectural layer.
+
+**Vocode (docs.vocode.dev, open-source conversation framework, verified
+2026-07-14 by reading the real conversation-mechanics doc).** Smaller
+and older than Pipecat/LiveKit Agents, but two findings worth banking:
+
+- **`interrupt_sensitivity`: an explicit low/high toggle, with backchannel
+  filtering as the named "low" behavior.** Low sensitivity (their default)
+  "makes the bot ignore backchannels (e.g. 'sure', 'uh-huh') while the bot
+  is speaking"; high sensitivity "makes the agent treat any word from the
+  human as an interruption." **Adopt →** A third independent, real-
+  production validation (after Pipecat's word-count strategies and the
+  backchannel-filtering literature in §2) that filtering backchannels by
+  default — not treating every utterance as a bid for the floor — is the
+  correct default behavior, not an ConvoBox-specific judgment call. Their
+  binary low/high is coarser than ConvoBox's five-preset grid; the grid
+  is still the right level of control, this just confirms the *direction*
+  of the default.
+- **`conversation_speed` / `speed_coefficient`: response latency scales
+  with the CURRENT user's own observed speaking rate (words-per-minute),
+  not a fixed number.** "The amount of time the bot waits inversely
+  scales with the `conversation_speed` value," computed dynamically per
+  session. **Adopt →** A genuinely new idea for ConvoBox, distinct from
+  everything else in this doc: every timing knob here so far (`
+  min_silence_ms`, `continue_timeout_s`, Deepgram's `eot_timeout_ms`,
+  LiveKit's per-*language* thresholds) is static once configured — none
+  scale to the *individual* speaker's pace within a session. A fast
+  talker and a slow, deliberate talker get the same silence-timeout
+  today. Not built this cycle (needs a real design for what "observed
+  speaking rate" even means from VAD-only signal, and live-mic tuning to
+  validate it doesn't feel erratic) — but worth naming as a concrete,
+  distinct-from-everything-else-flagged roadmap candidate, since it's a
+  different axis than the presets/thresholds already designed.
+- **`utterance_cutoff_ms`/"mark final if no new words in X seconds"**
+  confirms Vocode's own DEFAULT endpointing is still a plain silence
+  timer, same family as ConvoBox's `min_silence_ms` — even a more
+  sophisticated production framework ships a silence-timer baseline and
+  treats semantic/adaptive endpointing as a layered addition, not a
+  replacement. **Adopt →** Reassurance, not a gap: ConvoBox's baseline
+  approach is the same starting point real frameworks use; VAP/semantic
+  upgrades (§4 above) are genuinely optional upgrades, not table stakes
+  ConvoBox is missing.
+
 ---
 
 ## 5. Full-duplex generative models (the frontier / ceiling)
@@ -351,3 +421,15 @@ source-verified until it actually is.
    this cycle (needs real design work on how a resume interacts with
    response tiering, and can't be live-audio-verified in this
    environment).
+10. **Backchannel filtering as the default, not the exception, is now
+    triply validated** (Pipecat's word-count strategies, the §2
+    literature, and Vocode's `interrupt_sensitivity` low/high split) —
+    the direction of ConvoBox's default is confirmed by three independent
+    production sources; no change needed.
+11. **Per-speaker adaptive timing is a genuinely new, distinct roadmap
+    candidate** (Vocode's `conversation_speed`) — every timing knob
+    ConvoBox has today is static once configured; scaling to the current
+    speaker's own observed pace is a different axis than the
+    presets/thresholds already designed, not built this cycle (needs a
+    real design for what "observed speaking rate" means from VAD-only
+    signal).
