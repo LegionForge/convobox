@@ -10,10 +10,11 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
-> LiveKit Agents, Google Conversation Design) were web-verified July 2026
-> by reading real primary-source pages/code, not secondhand summaries. The
-> foundational conversation-analysis and pragmatics classics are cited from the
-> standard literature; confirm against the primary source before any
+> LiveKit Agents, ElevenLabs Conversational AI, Google Conversation Design)
+> were web-verified July 2026 by reading real primary-source pages/code,
+> not secondhand summaries. The foundational conversation-analysis and
+> pragmatics classics are cited from the standard literature; confirm
+> against the primary source before any
 > formal/public citation. The Alexa Design Guide entry is explicitly
 > flagged as NOT primary-source-verified this pass (see that entry) --
 > don't treat it as equally solid.
@@ -227,6 +228,67 @@ worth contrasting. Three concrete, source-verified findings:
   `docs/DESIGN-barge-in.md`'s open questions the next time that doc is
   touched, not invented as unscoped code today.
 
+**ElevenLabs Conversational AI (elevenlabs.io/docs, commercial, verified
+2026-07-14 by reading the real conversation-flow and skip-turn docs
+pages).**
+
+- **`turn_eagerness`: a three-level named knob (`patient`/`normal`/
+  `eager`) for how quickly the assistant jumps in.** **Adopt →** Real,
+  independent, production validation that ConvoBox's own naming
+  choice — the `patient` preset (`let-finish` + `queue`,
+  `docs/DESIGN-barge-in.md`) — lands on the exact same word a major
+  commercial voice-agent platform uses for the same underlying axis.
+  Not a new idea to adopt, a confirmation an existing one already named
+  itself correctly.
+- **Faster response generation: TTS starts on "enough words and a
+  comma from the language model," not a complete sentence** — i.e.
+  speaking begins from PARTIAL, still-generating LLM output. **Adopt →**
+  Doesn't transplant to ConvoBox, and it's now the THIRD time this
+  exact shape of limitation has come up (Deepgram Flux's eager-EOT
+  speculative response, Pipecat's incomplete-turn LLM classification,
+  now this) — worth naming as a real, recurring architectural
+  boundary rather than three separate one-off caveats: **every
+  commercial/framework voice-agent surveyed this session gets its most
+  sophisticated latency tricks from direct access to LLM token
+  generation, and ConvoBox deliberately doesn't have that.** ConvoBox
+  is a thin client over external coding-agent CLIs (opencode/Claude
+  Code/Codex) that only surface COMPLETE messages/blocks, checked per
+  adapter rather than assumed: OpenCode and Codex both have real
+  delta-style events on the wire that this codebase's own docstrings
+  confirm are deliberately ignored in favor of the terminal
+  `text.ended`/`item.completed`-equivalent event (`opencode.py`'s
+  `_TEXT_ENDED` handling, `codex.py`'s module docstring: "deltas exist
+  too; ignored, same policy as OpenCode's text.ended-not-text.delta").
+  Claude Code's `stream-json` protocol, as consumed here, is
+  block-based rather than delta-based in the first place (`assistant`
+  messages arrive with complete `content` blocks) — no delta exists on
+  that wire to ignore, but the outcome is the same: no adapter exposes
+  a hook for "start speaking before the message is complete." This
+  isn't a gap to close; it's the actual shape of the "**Backend-agnostic
+  by design**" commitment `README.md` already states explicitly (a thin
+  `send_text`/`send_interject`/`send_hard_stop`/`is_busy` adapter
+  interface per backend, preferring each tool's native structured
+  interface over scraping). Worth stating plainly so a future session
+  doesn't mistake "we found this again" for "we should build it" — the
+  fix would require abandoning backend-agnosticism, not adding a
+  feature.
+- **"Skip turn": a system tool letting the LLM itself decide to go
+  silent** ("Give me a second," "let me think" -> the agent stops
+  speaking and waits for the user, not a timeout). **Adopt →**
+  Genuinely different from everything else in this doc: every other
+  mechanism surveyed decides interruption/turn-taking from the
+  CLIENT/audio side (VAD timing, backchannel word-lists, silence
+  timers); this is the ASSISTANT voluntarily yielding the floor based
+  on conversational content it detects. Also doesn't transplant for the
+  same reason as the point above — ConvoBox doesn't control what tools
+  the coding-agent CLIs it fronts expose, so there's no lever to add an
+  agent-side "stay silent" tool call even if the idea is sound. Filed
+  as an idea worth knowing exists, not a roadmap item; unlike the
+  `turn_eagerness`/generation-access points above, this one has no
+  ConvoBox-side equivalent to validate or contrast against (ConvoBox's
+  `PauseListeningDetector` is user-initiated silence, a different
+  direction entirely).
+
 ---
 
 ## 5. Full-duplex generative models (the frontier / ceiling)
@@ -351,3 +413,16 @@ source-verified until it actually is.
    this cycle (needs real design work on how a resume interacts with
    response tiering, and can't be live-audio-verified in this
    environment).
+10. **`patient` is validated, not new** (ElevenLabs' `turn_eagerness`) —
+    a major commercial platform names the same axis with the same word.
+11. **The "direct LLM access" limitation is a real, recurring
+    architectural boundary, not three unrelated caveats** (Deepgram
+    Flux's eager-EOT, Pipecat's incomplete-turn classification,
+    ElevenLabs' partial-generation TTS start and skip-turn tool) — every
+    framework surveyed gets its most sophisticated latency/turn-taking
+    tricks from direct LLM token-generation access, which ConvoBox
+    deliberately doesn't have (`README.md`'s "Backend-agnostic by
+    design"). Not a gap; the actual shape of the architecture. Worth
+    remembering so a future session doesn't propose building one of
+    these without first proposing abandoning backend-agnosticism, which
+    is the real trade being made.
