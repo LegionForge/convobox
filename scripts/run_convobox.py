@@ -1152,11 +1152,20 @@ async def run(args: argparse.Namespace) -> None:
                         continue
 
                 log.info(
-                    "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s%s",
+                    "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s%s%s",
                     text, result.language, result.language_probability,
                     math.exp(result.avg_logprob), adapter.is_busy(),
                     "  [HARD STOP]" if is_hard_stop else "",
                     "  [BARGE-IN]" if barged_in and not is_hard_stop else "",
+                    # was_forced reflects THIS utterance (set immediately
+                    # before the yield we just consumed -- see
+                    # UtteranceSegmenter.was_forced's own docstring for the
+                    # batching caveat, not a practical concern for live mic
+                    # chunks). vad.max_utterance_s is None by default, so
+                    # this never fires unless a user opts in -- purely
+                    # informational, see docs/UAT-checklist.md [V5].
+                    "  [FORCED: cut at max_utterance_s, still your turn]"
+                    if segmenter.was_forced else "",
                 )
                 if barged_in and not is_hard_stop:
                     # The backend believes its whole response was delivered; it

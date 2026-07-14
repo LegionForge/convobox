@@ -65,6 +65,16 @@ Implements in `src/convobox/vad/segmenter.py`. Config: `threshold=0.5`,
 - **[V4] `in_speech` signal** (exposed for UIs / future barge-in) flips True on
   first speech window and back to False at utterance end. Verify with a harness
   if a listening indicator depends on it.
+- **[V5] `was_forced` distinguishes a cap-triggered cutoff from a natural
+  pause.** Set `vad.max_utterance_s` to something short (e.g. 5) and talk
+  continuously past it. Confirm the main loop's transcript log line grows a
+  `[FORCED: cut at max_utterance_s, still your turn]` marker for the capped
+  utterance (`UtteranceSegmenter.was_forced`, `scripts/run_convobox.py`),
+  and that the marker does NOT appear on a normal utterance that ends via a
+  silence pause instead. This is purely a log-line signal for now (no
+  spoken/TUI notification) -- note during UAT whether that's sufficient or
+  whether a spoken cue (`docs/CONVERSATION-DESIGN-REFERENCES.md`'s
+  LiveKit-research gap) would actually be needed in practice.
 
 ## 3. Safeword / hard stop
 
