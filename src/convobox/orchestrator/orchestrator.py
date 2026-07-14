@@ -137,10 +137,19 @@ class Orchestrator:
         if self._events_task is None or self._events_task.done():
             self._events_task = asyncio.create_task(self._consume_events())
 
-    async def stop_event_loop(self) -> None:
+    def _cancel_speak_task(self) -> None:
+        """Cancel and clear any in-flight _speak_task.
+
+        Idempotent (a no-op if there's none, or it already finished) --
+        Task.cancel() on a done task is a safe no-op, so every call site
+        can call this unconditionally rather than checking first.
+        """
         if self._speak_task is not None:
             self._speak_task.cancel()
             self._speak_task = None
+
+    async def stop_event_loop(self) -> None:
+        self._cancel_speak_task()
         if self._events_task is None:
             return
         self._events_task.cancel()
@@ -191,12 +200,34 @@ class Orchestrator:
             spoken = self._tier_state.start(spoken)
             if not spoken:
                 return
+        # Real bug, live-confirmed 2026-07-14: a single backend turn can
+        # emit MULTIPLE TEXT events (text interleaved with tool calls --
+        # "Let me check that file" ... [tool work] ... "Found it, fixing
+        # now" ...), and _speak_task used to get silently overwritten here
+        # without cancelling whatever the PREVIOUS TEXT segment's task was
+        # still doing. The new play_stream() call already replaces the
+        # OLD task's AUDIO via AudioPlayer.stop() (same thread/stream, so
+        # only one text is ever actually heard) -- but the old task's own
+        # coroutine kept running uncancelled, continuing to pull chunks
+        # from ITS (now-superseded) synthesize_stream() and, critically,
+        # continuing to advance EchoAwarePlayer.playback_ended_at
+        # (scripts/run_convobox.py) for audio that was never written to
+        # the device. That corrupted timestamp fed the overlap gate,
+        # making it think playback was ongoing/had just ended far longer
+        # than reality -- observed live as an entire multi-minute UAT
+        # session where nearly every utterance got dropped as
+        # "overlapped" (reported as "AEC seems to be misfiring," but AEC
+        # itself was never the mechanism doing the dropping -- see
+        # docs/KNOWN-ISSUES.md). Cancelling here stops the wasted
+        # synthesis work too, not just the metadata corruption.
+        #
         # Fire-and-forget rather than awaited inline: synthesis can take
         # noticeably longer than draining the next backend event (e.g. a
         # DONE right behind this TEXT), and is_busy() staying fresh
         # matters more than serializing speech with event consumption.
         # AudioPlayer.play() is itself non-blocking (own thread), so this
         # task's own work is just the synthesize() await.
+        self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak(spoken))
 
     def has_more_to_reveal(self) -> bool:
@@ -219,6 +250,12 @@ class Orchestrator:
         chunk = self._tier_state.reveal_more()
         if chunk is None:
             return False
+        # Same cancellation as _on_event's TEXT handling (see its comment):
+        # by the time a caller reaches "continue," the prior tier's
+        # _speak_task should already be done (that's what let the
+        # continue-prompt gate start waiting in the first place), so this
+        # is defense-in-depth for the general case, not the common path.
+        self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak(chunk))
         return True
 
