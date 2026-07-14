@@ -112,6 +112,37 @@ existing:
   silence-timing machinery as barge-in's sustained-speech threshold —
   intentionally, per the shared-primitive section above.
 
+**Core tiering logic shipped (2026-07-14), wiring not yet started.**
+`src/convobox/response_tiering/tiering.py` — `split_tiers(text) ->
+list[str]` (paragraph-boundary split, pure function) and
+`ResponseTierState` (`start(full_text) -> str` returns tier 0 to actually
+speak; `reveal_more() -> str | None` is the `ContinueDetector`-triggered
+action, `None` once nothing's left; `has_more()` for callers that need to
+know before deciding whether to even listen for "continue"). Same
+"primitive first, review it, wire it later" pacing as the TUI work
+(#54/#55/#56): no `Orchestrator`/`run_convobox.py` changes in this PR.
+
+Picked **paragraph**, not sentence, as the v1 split unit (the design
+above says "first paragraph/sentence," left open) — reliable sentence-
+boundary detection has to handle abbreviations, decimals, ellipses, and
+code fragments correctly, which is genuinely hard to get right; paragraph
+splitting (blank line) is simple, robust, and already the boundary
+`Orchestrator.strip_code_for_speech` collapses onto. It also degrades
+correctly for the common case: most coding-agent replies are a single
+paragraph with nothing to hide, so tier 0 *is* the whole response and
+there's nothing to offer "more" of -- `has_more()` is `False`
+immediately, no dangling "want more detail?" prompt for a two-sentence
+answer. 13 new tests, including the reset-on-new-response semantics (an
+old response's remaining tiers are moot once a new one exists, same
+principle as the TUI's full-detail pane resetting per-turn).
+
+Still needed before this is user-visible: wiring into `Orchestrator`'s
+speak path (tier before calling TTS, not the full text), a
+silence-timeout gate in `run_convobox.py`'s main loop (same shape as
+`ListeningGate`'s pause/resume gate) that listens for
+`ContinueDetector` after a tiered response and implies "no" after 1-4s of
+silence, and exposing the tier policy as a real config field.
+
 ## Phase 3 — Approvals
 
 **Codex (built now — it has a real channel).** `codex.py`'s
