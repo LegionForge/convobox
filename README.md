@@ -67,6 +67,50 @@ loop, including tool use. Linux/macOS parity is on the roadmap
 [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) — notably WASAPI audio output
 on Windows (use an **MME** output device; see the known-issues doc).
 
+**Since 0.2.0: the interaction/safety bundle (`docs/DESIGN-0.3.0-interaction-and-safety.md`) is landing.**
+Phase 1 (barge-in + a live conversation TUI) and Phase 2 (response
+tiering) are both implemented and merged/merging into `main`; a version
+bump to reflect this as a real release is a separate, deliberate step
+(not yet done — package version tracks releases, not individual PRs),
+so `pyproject.toml` still says `0.2.0` as of this writing even though
+substantially more than that is now on `main`:
+
+- **Barge-in, migrated to a two-axis preset system**
+  (`interaction.interrupt_preset`): `conversational`/`patient`/
+  `do-not-disturb`/`halt`/`take-over`, replacing the old three-value
+  `interrupt_mode`. Default (`do-not-disturb`) is behaviorally identical
+  to the pre-migration default — no surprise behavior change for
+  existing configs.
+- **"Stop listening" / "pause listening"** puts ConvoBox into a
+  wake-word-only state (default wake word: `Athena` — round-trip
+  STT-verified, unlike the original `ConvoBox` default, which
+  Whisper confidently mis-heard as "Control Box" every time).
+- **Backchannel filtering** ("mm-hmm", "yeah", "right", ...) so a
+  listener's continuers never falsely trigger a barge-in.
+- **A live conversation TUI** (`--tui`): transcript pane, full-detail
+  response pane, and a status/barge-in indicator, alongside the
+  already-shipped Settings TUI (`scripts/settings_tui.py`, config
+  editing — a separate tool from the conversation view).
+- **Response tiering** (`interaction.tier_responses`): voice speaks only
+  the first paragraph of a multi-paragraph response by default when
+  enabled; saying "continue"/"go on" within `continue_timeout_s` speaks
+  the rest, already in hand, no backend round-trip. Off by default.
+- **A real safety bug found and fixed in the Codex adapter**: the
+  auto-decline approval path sent a schema-invalid response for 3 of 5
+  approval methods (only 2 were correct) — live-verified against a real
+  `codex app-server` that the auto-decline now actually works for every
+  reachable method, not just the one that happened to be tested first.
+
+Fully wired and config-driven, all with real-pipeline verification where
+a live microphone session was possible; several items (the TUI's full
+utterance-to-response render cycle, response tiering's spoken "continue"
+reply, the `patient` preset's queue-and-deliver behavior) are unit- and
+integration-tested but still need a live-mic UAT pass — see
+`docs/UAT-checklist.md`'s Conversation TUI, Response tiering, and
+Barge-in sections for the specific checklist items (named, not numbered,
+here on purpose -- section numbers have already drifted once this
+session as new sections were added).
+
 **Claude Code permission mode.** Headless (`--print`) mode has no way to
 answer a tool-permission prompt at runtime — a gated tool call would hang
 the session forever with no signal (see `src/convobox/adapters/claude_code.py`'s
@@ -413,10 +457,12 @@ cancellation (optional `[aec]` extra, WebRTC AEC3), open barge-in
 (`interaction.interrupt_preset`, defaults to `do-not-disturb` -- off), a
 single-instance mic lock, and a documented, validated `convobox.yaml`
 (see `convobox.example.yaml`
-and [docs/QUICKSTART.md](docs/QUICKSTART.md)) are all in. ~220 automated
-tests, mypy/ruff/bandit clean. Still open: Linux/macOS aren't validated
-yet, and a Settings TUI plus a second TTS/STT engine (Kokoro) are on the
-roadmap ([docs/ROADMAP.md](docs/ROADMAP.md)).
+and [docs/QUICKSTART.md](docs/QUICKSTART.md)) are all in. ~500 automated
+tests, mypy/ruff/bandit clean. A Settings TUI (`scripts/settings_tui.py`,
+config editing) and a live conversation TUI (`--tui`, see the "Since
+0.2.0" note above) are both shipped, not roadmap items anymore. Still
+open: Linux/macOS aren't validated yet, and a second TTS/STT engine
+(Kokoro) is on the roadmap ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 The rest of this section is the earlier progress log, kept for history.
 

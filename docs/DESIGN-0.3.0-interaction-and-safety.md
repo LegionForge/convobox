@@ -247,6 +247,31 @@ which isn't possible in this environment.
 request; today it hardcodes `decision: "decline"`. This phase replaces that
 hardcode with a real `PendingPrompt(approve/deny/discuss)`:
 
+**Classification primitive shipped (2026-07-14), wiring not yet started.**
+`ApprovalDetector` (`src/convobox/approval/detector.py`) is the sixth
+Safeword/Confirmword/Wakeword/PauseListening/ContinueDetector-shaped pure
+classifier: constructed with a required `ConfirmwordDetector`-shaped
+approval phrase (no safe default — the whole point is an operator-chosen
+word) plus a deny-phrase list (defaults to `DEFAULT_DENY_PHRASES`, real
+round-trip-verified — Piper TTS → faster-whisper STT, same methodology as
+`DEFAULT_WAKE_WORD`/the response-tiering vocabulary). `check()` returns
+`"approve"` / `"deny"` / `"discuss"` / `None` (empty transcript only) — never
+falls through to normal command routing the way `ContinueDetector`'s
+unmatched-utterance case does, since a pending approval must stay open and
+answerable across a discuss exchange (see the live-verified finding below).
+Still needed, in order, following this session's established "primitive
+first, wire it later" pacing: (1) a `PendingPrompt`-shaped gate in the main
+loop (same pure-state-machine shape as `ContinuePromptGate`, but with
+timeout-implies-**deny**, never timeout-implies-approve — see the safety
+invariant above); (2) replacing `codex.py`'s hardcoded
+`_answer_server_request` decline with the real approve/deny/discuss
+dispatch; (3) a config field for the approval phrase (validated the same way
+`ConfirmwordDetector` validates it standalone today, wherever that's
+eventually wired — currently unwired, see PR #29's own history); (4) the
+TUI's loud WARNING rendering for a pending approval. None of this is
+live-mic UAT-able without (1)-(3) existing, so no new UAT checklist items
+yet — those get added once there's an actual reachable prompt to test.
+
 - **Approve** — a dedicated `ConfirmwordDetector`-shaped approval word
   (never a common affirmation — see `ConfirmwordDetector`'s existing
   construction-time guard, PR #29, and `docs/ROADMAP.md`'s Safety-tiers

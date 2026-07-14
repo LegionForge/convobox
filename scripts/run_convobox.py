@@ -67,6 +67,7 @@ from _console import use_utf8_console
 
 from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.approval import ApprovalDetector
 from convobox.audio.playback import AudioPlayer
 from convobox.config import load_config
 from convobox.interrupt_presets import resolve_preset
@@ -366,6 +367,90 @@ class ContinuePromptGate:
         if outcome == "decline":
             return "decline"
         return "pass"
+
+
+class ApprovalPromptGate:
+    """Tracks whether ConvoBox is waiting for an approve/deny/discuss reply
+    to a pending destructive-action approval request
+    (docs/DESIGN-0.3.0-interaction-and-safety.md, Phase 3).
+
+    Pure state machine, same family as BargeInMonitor/ListeningGate/
+    ContinuePromptGate -- unit-testable independent of the mic loop, real
+    clocks, and (critically for this one) a real backend connection. NOT
+    wired to codex.py's approval dispatch yet; this is the gate half of
+    Phase 3 built ahead of that wiring, matching this session's established
+    "primitive first" pacing (see ContinuePromptGate's own history).
+
+    Deliberately shaped differently from ContinuePromptGate in three ways,
+    because approvals are the high-stakes tier and continue/decline is not:
+
+    1. `observe_timeout()` returns `"deny"` (an explicit outcome the caller
+       MUST act on -- forward a decline to the pending backend request) on
+       the tick it fires, not a silent `True`/nothing-to-do like
+       ContinuePromptGate's. "Silence on an approval prompt must never be
+       treated as consent, only as still waiting or an explicit
+       timeout-implies-decline" -- the design doc's central safety
+       invariant for this phase.
+    2. `observe_transcript()` does NOT end the wait for "discuss" -- an
+       approval prompt must stay open and answerable across a clarifying
+       exchange (confirmed live against a real codex app-server, see the
+       design doc's Phase 3 section: a 20s delay plus an interleaved
+       unrelated request didn't invalidate a pending approval). A discuss
+       reply also resets the waiting clock (`now` is re-recorded), so an
+       ongoing back-and-forth can't be cut off mid-conversation by the
+       timeout that exists to catch genuine silence, not genuine
+       engagement.
+    3. There is no "pass" outcome. `ApprovalDetector.check()` never falls
+       through to normal command routing the way `ContinueDetector` does --
+       every non-empty utterance while a decision is pending is
+       approve/deny/discuss, by construction.
+    """
+
+    def __init__(self, detector: ApprovalDetector, timeout_s: float) -> None:
+        self._detector = detector
+        self.timeout_s = timeout_s
+        self._waiting_since: float | None = None
+
+    @property
+    def is_waiting(self) -> bool:
+        return self._waiting_since is not None
+
+    def start_waiting(self, now: float) -> None:
+        self._waiting_since = now
+
+    def observe_timeout(self, now: float) -> Literal["deny"] | None:
+        """Call once per watchdog tick. Returns "deny" exactly once, the
+        tick the wait silently expires -- the caller must forward an
+        explicit decline to the pending approval request, this is not a
+        no-op like ContinuePromptGate's timeout.
+        """
+        if self._waiting_since is None:
+            return None
+        if now - self._waiting_since >= self.timeout_s:
+            self._waiting_since = None
+            return "deny"
+        return None
+
+    def observe_transcript(
+        self, transcript: str, now: float
+    ) -> Literal["approve", "deny", "discuss"] | None:
+        """Call for every utterance while is_waiting (caller checks
+        is_waiting first). "approve"/"deny" end the wait. "discuss" keeps
+        waiting and resets the clock (see class docstring, point 2). An
+        utterance that normalizes to nothing (pure noise/silence artifact)
+        returns None and changes nothing -- still waiting, clock unchanged.
+        """
+        outcome = self._detector.check(transcript)
+        if outcome == "approve":
+            self._waiting_since = None
+            return "approve"
+        if outcome == "deny":
+            self._waiting_since = None
+            return "deny"
+        if outcome == "discuss":
+            self._waiting_since = now
+            return "discuss"
+        return None
 
 
 class WorkingIndicator:

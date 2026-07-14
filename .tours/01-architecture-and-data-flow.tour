@@ -83,7 +83,7 @@
       "file": "src/convobox/adapters/base.py",
       "line": 32,
       "pattern": "class BackendAdapter\\(ABC\\):",
-      "description": "**The backend adapter contract.** One implementation per target CLI (OpenCode today; Claude Code/Codex are documented as intended, not yet built). The docstring draws a hard line: `send_interject` must never derail a running task, `send_hard_stop` must abort it — these are never allowed to collapse into one \"interrupt\" action.\n\nA paragraph further down is an honesty clause added after review: a hard stop's real-world guarantee is bounded by what the backend actually exposes (see the next step for the concrete case)."
+      "description": "**The backend adapter contract.** Three implementations exist and are each verified against a live instance: `OpenCodeAdapter` (HTTP+SSE), `ClaudeCodeAdapter` (bidirectional stream-json subprocess, `src/convobox/adapters/claude_code.py`), `CodexAdapter` (app-server JSON-RPC over stdio, `src/convobox/adapters/codex.py`). The docstring draws a hard line: `send_interject` must never derail a running task, `send_hard_stop` must abort it — these are never allowed to collapse into one \"interrupt\" action.\n\nA paragraph further down is an honesty clause added after review: a hard stop's real-world guarantee is bounded by what the backend actually exposes (see the next step for the concrete case)."
     },
     {
       "file": "src/convobox/adapters/opencode.py",
@@ -117,9 +117,9 @@
     },
     {
       "file": "src/convobox/orchestrator/orchestrator.py",
-      "line": 104,
+      "line": 225,
       "pattern": "async def _speak\\(self, text: str\\)",
-      "description": "**Final handoff: synthesized audio → speakers.** `_speak` awaits the (currently whole-utterance) `synthesize()` call and hands the resulting float32 array straight to `AudioPlayer.play()`.\n\nNote this uses `synthesize()`, not `synthesize_stream()` directly — a known, documented next step (see README Status) would be piping stream chunks straight into playback instead of waiting for the whole utterance."
+      "description": "**Final handoff: synthesized audio → speakers, genuinely streamed.** `_speak` calls `self._player.play_stream(self._tts.synthesize_stream(text), ...)` — chunks flow from Piper to the speakers as they're produced, not buffered into one array first. (This step used to describe a whole-utterance `synthesize()`/`play()` call as the current state with streaming as a \"known next step\" — that step has since landed; see the '2. Review Findings' tour for the measured before/after.)\n\nAlso worth knowing from here: `Orchestrator.__init__` takes an optional `on_event` callback (any caller can observe the raw backend event stream, e.g. the `--tui` conversation view) and an optional `tier_responses` flag (speaks only the first paragraph of a multi-paragraph response, with `has_more_to_reveal()`/`speak_more()` exposing the rest for a \"tell me more\" follow-up) — both off by default, zero behavior change unless a caller opts in."
     },
     {
       "file": "src/convobox/audio/playback.py",
@@ -129,7 +129,7 @@
     },
     {
       "title": "End of tour",
-      "description": "That's the full loop: **mic → VAD → STT → safeword → orchestrator → adapter → TTS → playback**, with a hard-stop escape hatch that can short-circuit at the orchestrator regardless of where the rest of the pipeline is.\n\nTwo follow-up tours: **\"2. Review Findings: Security & Performance\"** for the concrete bugs a review pass found and fixed in this exact code, and **\"3. Extension Points: Modularity & Pluggability\"** for exactly where a collaborator can plug in a new backend adapter or TTS engine (and where they deliberately can't). Command Palette → CodeTour: Start Tour."
+      "description": "That's the full `src/convobox/` loop: **mic → VAD → STT → safeword → orchestrator → adapter → TTS → playback**, with a hard-stop escape hatch that can short-circuit at the orchestrator regardless of where the rest of the pipeline is.\n\n**Not covered by this tour, since it lives in `scripts/run_convobox.py`'s main loop rather than `src/convobox/`**: several more pure state-machine gates sit between the safeword check and the orchestrator call in the REAL running loop -- `ListeningGate` (pause/resume: \"stop listening\" hard-stops and pauses, only the wake word resumes), `BargeInMonitor` + `QueuedInterjection` (the two-axis interrupt-preset grid: what happens to the current turn vs. the user's new words), and `ContinuePromptGate` (the response-tiering silence-timeout gate: \"continue\"/\"go on\" reveals the rest of a tiered response, silence implies done). All follow the exact same pure-state-machine shape as the classes this tour walked through, unit-tested independent of real audio/clocks -- see `docs/DESIGN-barge-in.md` and `docs/DESIGN-0.3.0-interaction-and-safety.md` for the design reasoning, not re-derived here.\n\nTwo follow-up tours: **\"2. Review Findings: Security & Performance\"** for the concrete bugs a review pass found and fixed in this exact code, and **\"3. Extension Points: Modularity & Pluggability\"** for exactly where a collaborator can plug in a new backend adapter or TTS engine (and where they deliberately can't). Command Palette → CodeTour: Start Tour."
     }
   ]
 }
