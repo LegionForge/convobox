@@ -11,11 +11,10 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
 > LiveKit Agents, Deepgram Flux, Vocode, ElevenLabs Conversational AI,
-> Google Conversation Design) were web-verified July 2026 by reading real
-> primary-source pages/code, not secondhand summaries. The foundational
-> conversation-analysis and pragmatics classics are cited from the
-> standard literature; confirm
-> against the primary source before any
+> Hume AI EVI, Google Conversation Design) were web-verified July 2026 by
+> reading real primary-source pages/code, not secondhand summaries. The
+> foundational conversation-analysis and pragmatics classics are cited
+> from the standard literature; confirm against the primary source before any
 > formal/public citation. The Alexa Design Guide entry is explicitly
 > flagged as NOT primary-source-verified this pass (see that entry) --
 > don't treat it as equally solid.
@@ -370,6 +369,33 @@ pages).**
   `PauseListeningDetector` is user-initiated silence, a different
   direction entirely).
 
+**Hume AI EVI / Empathic Voice Interface (dev.hume.ai/docs, commercial,
+verified 2026-07-14 by reading the real Interruptibility docs page).**
+Surveyed specifically for its emotion/prosody-aware angle, distinct from
+every other product covered so far — that angle didn't yield a strong,
+independently-verifiable finding beyond a generic "configurable
+sensitivity" mention the docs didn't detail further, so not overclaimed
+here. One concrete, directly relevant finding instead:
+
+- **"Discard queued audio from the previous assistant response" is a
+  named, explicit client requirement on interruption**, not an implicit
+  assumption: *"Clear queued audio: Discard any queued audio from the
+  previous assistant response"* — paired with an explicit warning that
+  skipping this makes the interruption imperceptible even though the
+  server already stopped generating: *"Although EVI halts response
+  generation, the user won't experience the interruption unless the
+  assistant's voice also stops."* **Adopt →** Direct, real-production
+  validation of the exact discipline behind this session's own
+  `Orchestrator._cancel_speak_task()` fix (see PR #71): a "new response
+  supersedes the old one" system needs to actively discard/cancel the
+  OLD response's in-flight state, not just start producing the new one
+  and assume the old one will quietly stop mattering. ConvoBox's bug was
+  narrower (a metadata-tracking corruption, not audible bleed-through —
+  `AudioPlayer.play_stream()` already replaced the audible stream
+  correctly), but the general principle EVI documents explicitly is the
+  same one that bug violated: superseding work must be actively
+  cancelled, not just outraced.
+
 ---
 
 ## 5. Full-duplex generative models (the frontier / ceiling)
@@ -523,3 +549,10 @@ source-verified until it actually is.
     remembering so a future session doesn't propose building one of
     these without first proposing abandoning backend-agnosticism, which
     is the real trade being made.
+14. **"Actively discard superseded work" is validated as a named
+    production requirement, not a ConvoBox-specific concern** (Hume EVI's
+    explicit "discard queued audio from the previous response") — the
+    same principle behind `Orchestrator._cancel_speak_task()` (PR #71,
+    2026-07-14), which fixed a real live bug where an old response's
+    speak task kept running uncancelled and corrupted the overlap gate's
+    timing state for phantom audio nobody heard.
