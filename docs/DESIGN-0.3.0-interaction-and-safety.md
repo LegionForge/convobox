@@ -83,6 +83,29 @@ reading a shared state file/socket? Lean toward same-process for phase 1
 (simpler, matches the working-indicator/heartbeat pattern already in
 `run_convobox.py`); revisit if that proves awkward.
 
+**Rendering layer shipped (2026-07-14), wiring not yet started.**
+`src/convobox/tui/` — `state.py` (`ConversationTuiState`, `TranscriptTurn`,
+pure dataclasses, no terminal I/O) and `render.py`
+(`render_conversation_frame(state, width, height, now) -> list[str]`, pure
+function, no stdout writes), split the exact way `settings_tui.py`
+separates `render_modal()` (pure, tested) from `_draw_modal()` (resolves
+the real terminal and writes). All three panes from the scope above exist
+and are covered by 18 unit tests: transcript (chronological, scrolls to
+most-recent-visible on overflow, ANSI-safe word wrapping that preserves
+every word — verified against a real bug caught while building this: a
+naive `len()`-based fit/truncate helper overcounted color-escape bytes as
+visible text and truncated lines that actually fit; fixed to measure
+visible length, ANSI codes included but not counted), full-detail pane
+(paragraph breaks preserved, not flattened by a naive wrapper), and the
+warning banner (phase 3 -- reserves zero space when unset, bordered
+top/bottom with `!` so it can't be mistaken for an ordinary line once
+set). **Deliberately scoped to just the rendering layer** — wiring this
+into `run_convobox.py`'s live loop (feeding real transcript/status/
+barge-in updates into the state as the pipeline runs, and the `_draw`
+wrapper that resolves the real terminal + writes to stdout) is a
+follow-up PR, so the visual design is reviewable on its own before the
+larger integration change.
+
 ## Phase 2 — Response tiering
 
 Implements the roadmap's already-decided "Spoken-response contract" (
