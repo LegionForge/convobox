@@ -136,12 +136,29 @@ answer. 13 new tests, including the reset-on-new-response semantics (an
 old response's remaining tiers are moot once a new one exists, same
 principle as the TUI's full-detail pane resetting per-turn).
 
-Still needed before this is user-visible: wiring into `Orchestrator`'s
-speak path (tier before calling TTS, not the full text), a
-silence-timeout gate in `run_convobox.py`'s main loop (same shape as
-`ListeningGate`'s pause/resume gate) that listens for
-`ContinueDetector` after a tiered response and implies "no" after 1-4s of
-silence, and exposing the tier policy as a real config field.
+**`Orchestrator` wiring shipped (2026-07-14), main-loop gate not yet
+started.** `Orchestrator(..., tier_responses: bool = False)`: off by
+default (zero behavior change for existing callers -- full text spoken
+exactly as before). When on, each `TEXT` event tiers the
+*already-stripped* speech text (not raw markdown -- `strip_code_for_speech`
+already collapses 3+ newlines to exactly `"\n\n"`, so tiering after
+stripping matches `split_tiers()`'s expected boundary, and avoids
+splitting mid-code-block on a blank line stripping was about to remove
+anyway) and speaks only tier 0. `has_more_to_reveal()` and
+`speak_more()` (the `ContinueDetector`-triggered action) expose the rest.
+The `on_event` observer hook (#55, so the TUI's full-detail pane) always
+sees the full, untiered raw content -- fires before tiering, by design,
+matching "the TUI always shows the full, untruncated response." 15 new
+tests, including the reset-on-new-response and stripped-vs-raw-boundary
+cases explicitly.
+
+Still needed before this is user-visible: a silence-timeout gate in
+`run_convobox.py`'s main loop (same shape as `ListeningGate`'s
+pause/resume gate) that listens for `ContinueDetector` after a tiered
+response (only when `orchestrator.has_more_to_reveal()` -- no point
+prompting for "more" a response never held back) and implies "no" after
+1-4s of silence, and exposing `tier_responses` as a real config field
+(currently only reachable by constructing `Orchestrator` directly).
 
 ## Phase 3 — Approvals
 
