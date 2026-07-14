@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import re
+
+# The third instance of the Safeword/Confirmword-shaped pattern: plain
+# normalized-substring match, no ML, no fuzzy matching, no LLM -- so a
+# human reading this file can predict exactly when it fires. See
+# docs/DESIGN-barge-in.md, "Wake word = the push-word trigger".
+#
+# DELIBERATELY DIFFERENT SAFETY TIER FROM ConfirmwordDetector: a wake word
+# is the push-word trigger for BARGE-IN (attention/interrupt), not an
+# approval gate for a destructive action. A false-fire here means the
+# assistant stops talking and listens when the user didn't quite mean it --
+# annoying, not dangerous. Per docs/DESIGN-0.3.0-interaction-and-safety.md's
+# safety invariant ("never let a PendingPrompt for an approval reuse the
+# low-stakes continue/barge-in vocabulary matching" -- and the inverse: don't
+# force a low-stakes primitive to carry high-stakes-only restrictions it
+# doesn't need), this detector does NOT ban common affirmations the way
+# ConfirmwordDetector does. Whether a chosen word is a *good* wake word
+# (distinctive, multisyllabic, rarely said by accident, reliably
+# transcribed) is setup-time UX guidance -- it needs live audio to actually
+# test transcription reliability, which a text-only constructor can't do --
+# not a hard construction-time rejection.
+
+_NORMALIZE_RE = re.compile(r"[^a-z0-9\s]+")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+# The built-in default: the product's own name, the same convention
+# smart-speaker wake words use ("Alexa", "Siri", "Cortana"). Multisyllabic
+# and essentially never said in ordinary coding-agent conversation, unlike
+# a generic choice like "computer" (which people say constantly about their
+# own machine while coding -- a real false-fire risk specific to this
+# domain, ruled out for the default even though it's the classic sci-fi
+# wake word archetype named in docs/ROADMAP.md's Wake word section).
+DEFAULT_WAKE_WORD = "ConvoBox"
+
+
+def _normalize(text: str) -> str:
+    lowered = text.lower()
+    stripped = _NORMALIZE_RE.sub(" ", lowered)
+    return _WHITESPACE_RE.sub(" ", stripped).strip()
+
+
+class WakewordDetector:
+    """Detects a user-chosen wake word/phrase in a transcript.
+
+    The push-word barge-in trigger (docs/DESIGN-barge-in.md): with this
+    trigger active, only an utterance containing the wake word counts as an
+    attempt to interrupt playback -- everything else is just speech, not a
+    barge-in attempt. Constructed with a single wake phrase; refuses (raises
+    ``ValueError``) only a phrase that normalizes to nothing, since that
+    could never match. Ship ``DEFAULT_WAKE_WORD`` for users who don't want
+    to choose one themselves; naming the assistant ("Hey Athena") is welcome
+    personalization for users who do.
+    """
+
+    def __init__(self, wake_word: str = DEFAULT_WAKE_WORD) -> None:
+        normalized = _normalize(wake_word)
+        if not normalized:
+            raise ValueError(
+                f"wake_word {wake_word!r} normalizes to nothing and could never match"
+            )
+        self._original = wake_word
+        self._normalized = normalized
+
+    @property
+    def wake_word(self) -> str:
+        """The original (un-normalized) wake word/phrase this detector matches."""
+        return self._original
+
+    def check(self, transcript: str) -> bool:
+        """True when the wake word appears in ``transcript``.
+
+        Word-boundary aware (padded match), like the safeword and
+        confirmword, so the phrase is recognized embedded in a sentence but
+        not as a substring of a larger word.
+        """
+        normalized = _normalize(transcript)
+        if not normalized:
+            return False
+        return f" {self._normalized} " in f" {normalized} "
