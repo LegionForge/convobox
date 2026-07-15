@@ -505,6 +505,35 @@ class ApprovalPromptGate:
         return None
 
 
+# Heartbeat color thresholds, live-validated (JP, 2026-07-14/15 headset
+# UAT): a real UX gap surfaced there -- the "backend still working" line
+# is the only feedback during a silent-busy stretch, but when the user is
+# interacting through a backend's own chat UI (not watching this
+# terminal), that feedback is effectively invisible, so a long stall
+# reads as "is it broken?" rather than "still thinking." Color makes the
+# SAME log line readable at a glance without tailing it: green = just
+# started, yellow = grinding a while, red = long stall worth a look.
+_HEARTBEAT_GREEN_MAX_S = 10.0
+_HEARTBEAT_YELLOW_MAX_S = 60.0
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_RED = "\x1b[31m"
+_ANSI_RESET = "\x1b[0m"
+
+
+def _heartbeat_color(elapsed_s: float) -> str:
+    """ANSI color for a heartbeat line's elapsed-seconds value.
+
+    Pure function (no I/O), so the threshold boundaries are unit-testable
+    without a real terminal.
+    """
+    if elapsed_s < _HEARTBEAT_GREEN_MAX_S:
+        return _ANSI_GREEN
+    if elapsed_s < _HEARTBEAT_YELLOW_MAX_S:
+        return _ANSI_YELLOW
+    return _ANSI_RED
+
+
 class WorkingIndicator:
     """Decides when to remind the user the backend is still working.
 
@@ -743,6 +772,22 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
     """
+    # Color only for a REAL, unpiped terminal -- not just "not --tui".
+    # `--tui` mode redirects logging to a FileHandler (_TUI_LOG_FILE),
+    # which doesn't change the real sys.stderr fd, so isatty() alone
+    # can't detect that case; checking tui_state too covers it. isatty()
+    # also correctly disables color for JP's own UAT crib's own
+    # `2>&1 | Tee-Object -Append uat-echo.log` pattern -- piping makes
+    # stderr not a tty, so the same check that enables color on a real
+    # terminal also keeps the diffable log file clean, with no separate
+    # "am I being redirected" logic needed.
+    use_color = tui_state is None and sys.stderr.isatty()
+    if use_color:
+        # Same VT-mode-enable idiom as the --tui branch below / voice_tui.py
+        # / settings_tui.py -- os.system("") with a hardcoded empty-string
+        # literal enables ANSI/VT100 escape processing in legacy Windows
+        # console hosts; it never executes a program.
+        os.system("")  # nosec B605 B607
     interval = 1.0
     was_playing = False
     while True:
@@ -750,10 +795,12 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         busy, playing = adapter.is_busy(), player.is_playing()
         elapsed = indicator.observe(busy, playing, interval)
         if elapsed is not None:
+            color = _heartbeat_color(elapsed) if use_color else ""
+            reset = _ANSI_RESET if color else ""
             log.info(
-                "backend still working (%.0fs, no audio yet) -- thinking or running a "
-                "tool; say the safeword to abort",
-                elapsed,
+                "%sbackend still working (%.0fs, no audio yet) -- thinking or "
+                "running a tool; say the safeword to abort%s",
+                color, elapsed, reset,
             )
         queued_text = interject_queue.flush_if_idle(busy, playing)
         if queued_text is not None:
