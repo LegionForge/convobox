@@ -44,6 +44,13 @@ tts:
                           # hear anything. Browse/download/audition with:
                           #   python scripts/voice_picker_tui.py
                           # (it can write your choice back here for you).
+  # Some Piper voices are genuinely multi-speaker (e.g. en_GB-semaine-medium:
+  # 4 named speakers, en_GB-aru-medium: 12, en_GB-vctk-medium: 109,
+  # en_US-libritts-high: 904) -- pick one by name from that voice's own
+  # speaker_id_map, or a raw numeric index. Leave unset for single-speaker
+  # voices or the voice's own default. An unknown name raises a clear error
+  # at startup listing the real available names for that voice.
+  # speaker: prudence
   rate: 1.0               # speech speed (1.0 normal, 1.2 faster, 0.8 slower)
   volume: 1.0             # loudness (1.0 normal, 0.5 half)
 

@@ -33,6 +33,7 @@ class PiperTTSEngine(TTSEngine):
         config_path: str | None = None,
         rate: float = 1.0,
         volume: float = 1.0,
+        speaker: str | None = None,
     ) -> None:
         self._model_path = model_path
         self._config_path = config_path
@@ -40,6 +41,7 @@ class PiperTTSEngine(TTSEngine):
         self._sample_rate = int(self._voice.config.sample_rate)
         self._speaking = False
         self._stopped = False
+        speaker_id = self._resolve_speaker(speaker)
         # rate is a speed multiplier (1.0 = normal, 2.0 = twice as fast) --
         # the intuitive unit for a config file. Piper's own length_scale is
         # the inverse (a duration multiplier: 0.5 = twice as fast), and
@@ -48,13 +50,46 @@ class PiperTTSEngine(TTSEngine):
         # today's synthesis output byte-identical to before this was wired
         # up, instead of forcing every voice through an explicit scale.
         self._syn_config: Any = None
-        if rate != 1.0 or volume != 1.0:
+        if rate != 1.0 or volume != 1.0 or speaker_id is not None:
             from piper.config import SynthesisConfig
 
             self._syn_config = SynthesisConfig(
                 length_scale=None if rate == 1.0 else 1.0 / rate,
                 volume=volume,
+                speaker_id=speaker_id,
             )
+
+    def _resolve_speaker(self, speaker: str | None) -> int | None:
+        """Resolve a config speaker name/index against this voice's own
+        speaker_id_map. Single-speaker voices have an empty map, so any
+        non-None speaker there falls straight through to the "not found"
+        error below -- correct, since there's nothing else to pick.
+
+        Real gap this closes, not hypothetical: several Piper voices
+        already downloaded in this repo (en_GB-semaine-medium,
+        en_GB-aru-medium, en_GB-vctk-medium, en_US-libritts-high) are
+        genuinely multi-speaker, confirmed by loading them directly and
+        reading voice.config.speaker_id_map/num_speakers, not guessed
+        from documentation.
+        """
+        if speaker is None:
+            return None
+        speaker_map: dict[str, int] = self._voice.config.speaker_id_map
+        if speaker in speaker_map:
+            return speaker_map[speaker]
+        try:
+            index = int(speaker)
+        except ValueError:
+            index = -1
+        num_speakers = self._voice.config.num_speakers
+        if 0 <= index < num_speakers:
+            return index
+        available = ", ".join(repr(name) for name in sorted(speaker_map)) or "none (single-speaker voice)"
+        raise ValueError(
+            f"speaker {speaker!r} not found for this voice "
+            f"(num_speakers={num_speakers}). Named speakers: {available}. "
+            f"A raw index (0-{num_speakers - 1}) also works."
+        )
 
     def _load_voice(self) -> Any:
         # Typed Any, not a real PiperVoice annotation: piper-tts ships no
