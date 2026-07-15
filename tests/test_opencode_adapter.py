@@ -62,8 +62,10 @@ class OpenCodeServer:
     different scripted event sequences can be replayed.
     """
 
-    def __init__(self, frames: list[dict[str, object]] | None = None) -> None:
-        self.frames = frames if frames is not None else list(_SINGLE_STEP_FRAMES)
+    def __init__(self, frames: list[dict[str, object] | str] | None = None) -> None:
+        self.frames: list[dict[str, object] | str] = (
+            frames if frames is not None else list(_SINGLE_STEP_FRAMES)
+        )
         self.created_sessions = 0
         self.created_session_bodies: list[dict[str, object]] = []
         self.posted_prompts: list[dict[str, object]] = []
@@ -78,6 +80,9 @@ class OpenCodeServer:
         # connection immediately instead of continuing — simulates a
         # dropped connection / server crash mid-response.
         self.close_after_first_frame = False
+        # When True, /interrupt responds 500 instead of 204 -- simulates a
+        # network/server failure on the safeword's hard-stop request itself.
+        self.interrupt_should_fail = False
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -165,7 +170,10 @@ class OpenCodeServer:
 
     async def _interrupt(self, writer: asyncio.StreamWriter) -> None:
         self.interrupt_count += 1
-        await self._respond(writer, 204, b"")
+        if self.interrupt_should_fail:
+            await self._respond(writer, 500, b'{"error":"boom"}')
+        else:
+            await self._respond(writer, 204, b"")
 
     async def _events(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -188,8 +196,12 @@ class OpenCodeServer:
             if reader.at_eof():
                 self.client_disconnected.set()
                 return
+            # A str frame is written as a raw SSE data line, unencoded --
+            # for tests that need to inject a genuinely malformed payload
+            # (real dict frames always round-trip through json.dumps).
+            payload = frame if isinstance(frame, str) else json.dumps(frame)
             try:
-                writer.write(f"data: {json.dumps(frame)}\n\n".encode())
+                writer.write(f"data: {payload}\n\n".encode())
                 await writer.drain()
             except (ConnectionResetError, BrokenPipeError):
                 self.client_disconnected.set()
@@ -402,6 +414,61 @@ async def test_events_yield_typed_backend_events_from_real_shape(
 
 
 @pytest.mark.asyncio
+async def test_malformed_sse_frame_is_skipped_not_crashed(server: OpenCodeServer) -> None:
+    # A genuinely malformed data line (not valid JSON) must not crash the
+    # generator or the events it's driving for -- _safe_json_loads()
+    # returns None for it and events() just continues to the next frame.
+    # Untested before this: every other test's frames are always real
+    # dicts that round-trip cleanly through json.dumps.
+    server.frames = [
+        "not valid json at all {{{",
+        _frame(1, "session.next.text.ended", {"textID": "text-0", "text": "still works"}),
+    ]
+    adapter = OpenCodeAdapter(server.base_url)
+    events = []
+
+    async def collect() -> None:
+        async for event in adapter.events():
+            events.append(event)
+
+    collector = asyncio.ensure_future(collect())
+    try:
+        await _release_all_gates(server, len(server.frames))
+        await asyncio.wait_for(collector, timeout=5)
+    finally:
+        collector.cancel()
+        await adapter._client.aclose()
+
+    assert [e.type for e in events] == [BackendEventType.TEXT]
+    assert events[0].content == "still works"
+
+
+@pytest.mark.asyncio
+async def test_tool_failed_event_maps_to_error_event(server: OpenCodeServer) -> None:
+    # Shape inferred from OpenCode's OpenAPI spec (SessionNextToolFailed),
+    # not empirically observed live -- see the comment in opencode.py.
+    # Untested before this: no test ever sent a tool.failed frame.
+    server.frames = [_frame(1, "session.next.tool.failed", {"error": "command not found"})]
+    adapter = OpenCodeAdapter(server.base_url)
+    events = []
+
+    async def collect() -> None:
+        async for event in adapter.events():
+            events.append(event)
+
+    collector = asyncio.ensure_future(collect())
+    try:
+        await _release_all_gates(server, len(server.frames))
+        await asyncio.wait_for(collector, timeout=5)
+    finally:
+        collector.cancel()
+        await adapter._client.aclose()
+
+    assert [e.type for e in events] == [BackendEventType.ERROR]
+    assert json.loads(events[0].tool_output or "null") == "command not found"
+
+
+@pytest.mark.asyncio
 async def test_is_busy_true_after_send_text_and_false_after_terminal_step_ended(
     server: OpenCodeServer,
 ) -> None:
@@ -513,6 +580,26 @@ async def test_send_hard_stop_calls_interrupt_and_leaves_sse_open(
 
 
 @pytest.mark.asyncio
+async def test_send_hard_stop_survives_a_failed_interrupt_request(
+    server: OpenCodeServer,
+) -> None:
+    # The safeword must never raise even if the interrupt POST itself
+    # fails (network blip, server 500) -- a hard stop that crashes on its
+    # own failure path would be strictly worse than the thing it's trying
+    # to abort. Untested before this: every other hard-stop test hits a
+    # server that always succeeds.
+    server.interrupt_should_fail = True
+    adapter = OpenCodeAdapter(server.base_url)
+    try:
+        await adapter.send_text("go")
+        await adapter.send_hard_stop()  # must not raise
+        assert adapter.is_busy() is False
+        assert server.interrupt_count == 1
+    finally:
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_send_hard_stop_is_safe_with_no_prior_prompt(server: OpenCodeServer) -> None:
     # send_hard_stop must not require a session/prompt to already exist --
     # e.g. a stray safeword before anything was ever sent.
@@ -606,6 +693,33 @@ async def test_wait_listening_returns_once_sse_subscription_starts(
         # response headers are needed either: the real opencode server
         # holds SSE headers back until the first event exists.
         await asyncio.wait_for(adapter.wait_listening(timeout=5.0), timeout=4.0)
+
+        first_future.cancel()
+        try:
+            await first_future
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await stream.aclose()
+        await adapter._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_listening_returns_immediately_when_already_set(
+    server: OpenCodeServer,
+) -> None:
+    # The early return (self._listening.is_set() -> return, before ever
+    # touching asyncio.wait_for) -- untested before this, since every
+    # other wait_listening test calls it exactly once per adapter.
+    adapter = OpenCodeAdapter(server.base_url)
+    stream = adapter.events()
+    try:
+        first_future = asyncio.ensure_future(stream.__anext__())
+        await asyncio.wait_for(adapter.wait_listening(timeout=5.0), timeout=4.0)
+
+        # Second call, already listening -- must return well inside a tiny
+        # timeout, not fall through to the wait_for/TimeoutError path.
+        await asyncio.wait_for(adapter.wait_listening(timeout=5.0), timeout=0.1)
 
         first_future.cancel()
         try:
