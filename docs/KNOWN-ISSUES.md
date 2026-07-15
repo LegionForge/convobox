@@ -70,6 +70,48 @@ falling back to the network only if nothing is cached yet (first-time
 setup) -- every recovery after the first successful load is now fully
 offline. See the commit message on the fix for verification details.
 
+**Follow-up (2026-07-14): the recovery ITSELF could crash the process --
+now fixed.** JP hit this live, mid-UAT, and reported it directly ("malloc
+error... I thought I had enough memory"): the reload path
+(`self._model = self._model_factory()`) was not itself wrapped in a
+try/except. When the reload's OWN `WhisperModel` construction hit the
+same native-allocator failure -- not a hypothetical, this is exactly
+what happened in JP's session, a second, unhandled
+`RuntimeError: mkl_malloc: failed to allocate memory` raised from
+`ctranslate2.models.Whisper.__init__` -- it propagated all the way up
+through `asyncio.run(run(args))` uncaught and killed the whole voice
+loop, exactly the crash this whole mitigation exists to prevent.
+
+Two changes:
+1. `LocalTranscriber._reload_model()` now wraps the factory call in its
+   own try/except. On success, `self._model` holds the new model as
+   before. On failure, `self._model` is set to `None` (not left pointing
+   at the old, still-broken instance) and the transcriber stays in a
+   degraded-but-alive state; the NEXT `transcribe()` call detects
+   `self._model is None` and retries the reload automatically -- no
+   background timer, no permanent breakage, bounded by real utterances
+   rather than a busy-retry loop.
+2. The old model reference is dropped and `gc.collect()` is called
+   **before** rebuilding, not after (or never). While `self._model`
+   still pointed at the broken instance during the old reload code,
+   calling the factory again meant asking the allocator to hold both the
+   old and new model's native memory simultaneously -- exactly the wrong
+   move when the allocator is already under enough pressure to be
+   failing. This doesn't touch the underlying LEAK (still native C++
+   heap, still not something Python GC reaches, per the existing
+   explanation above) but it does reduce peak usage during the reload
+   window itself, which is a real, distinct lever.
+
+**Also added: a memory diagnostic in the failure log lines**
+(`_memory_diagnostic()`), directly answering the question a tester asks
+the moment they see "failed to allocate memory" -- Windows-only
+(`ctypes` + `GlobalMemoryStatusEx`, no new dependency), reports real
+available RAM, and if it's comfortably high, says outright that this
+looks like the known allocator quirk rather than a real shortage
+(matching this issue's own already-confirmed 26-28GB-free pattern from
+earlier in the same session) -- no separate out-of-band check needed the
+next time this recurs.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")

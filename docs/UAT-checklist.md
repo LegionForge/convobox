@@ -439,3 +439,18 @@ correctly when the real bug recurs.
   confirm subsequent transcriptions still use the same `stt.model`/
   `stt.language`/etc. as before -- the reload rebuilds from the original
   `STTConfig` via `model_factory`, not a fresh-defaults model.
+- **[ST4] A failed reload doesn't crash the process either.** Live-confirmed
+  2026-07-14: JP hit a real session where the RELOAD itself (not just the
+  original `transcribe()` call) hit the same native-allocator failure --
+  an unhandled `RuntimeError` from `WhisperModel.__init__`/`ctranslate2.
+  models.Whisper.__init__`, which crashed the whole process before this
+  fix. If the log ever shows `"STT model reload ALSO failed -- staying
+  unavailable, will retry on the next utterance..."`, confirm the app
+  keeps running (doesn't crash) and that a LATER utterance (not
+  necessarily the very next one -- retries on every call while
+  unavailable) eventually transcribes normally again once the underlying
+  pressure eases. Also check the log line's memory diagnostic (e.g.
+  `"30208MB RAM available -- likely the known ctranslate2/MKL allocator
+  quirk, not a real memory shortage"`) reads sane against what Task
+  Manager / `Get-CimInstance Win32_OperatingSystem` actually shows at
+  the time.
