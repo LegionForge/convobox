@@ -149,6 +149,37 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   log shows `FLOOR-LIMITED` or genuine `UNDER-CANCELLING` with a
   MUCH smaller headroom gap, not the same near-total failure -- this is
   the live validation the original incident couldn't get to.
+
+  **Follow-up, verified against WebRTC's own source (2026-07-15):** read
+  the real `set_stream_delay_ms` documentation in
+  `webrtc.googlesource.com/src/+/refs/heads/main/api/audio/audio_processing.h`
+  (not a secondhand summary) -- confirms ConvoBox's existing delay
+  semantics are exactly right: "the delay in ms between
+  ProcessReverseStream() receiving a far-end frame and ProcessStream()
+  receiving a near-end frame containing the corresponding echo,"
+  `delay = (t_render - t_analyze) + (t_process - t_capture)`, matching
+  `EchoCanceller.__init__`'s own docstring. Also found (via the real
+  `modules/audio_processing/aec3/` source tree, specifically
+  `echo_path_delay_estimator_unittest.cc`/`render_delay_buffer.cc`, and
+  WebRTC's own changelogs) that AEC3 has its OWN internal delay
+  estimator that continuously detects/adapts the true delay from the
+  audio itself -- `set_stream_delay_ms()`'s hint is used to seed the
+  INITIAL alignment "before the AEC has been able to detect the delay"
+  itself, not as a permanent fixed value AEC3 blindly trusts forever.
+  This explains something the original incident didn't: why a
+  122ms-off hint caused *total* non-convergence for an entire
+  10+-minute session rather than just a slow initial ramp-up --
+  `EchoCanceller`'s AEC3 instance persists for the whole process
+  lifetime (constructed once in `run()`, never rebuilt per-response;
+  `reset_stats()` only clears ConvoBox's own telemetry deques, not
+  AEC3's filter state), so it had ample time to self-correct if a bad
+  initial seed only cost convergence speed. A stale-enough initial
+  hint most likely placed the true echo path outside the delay
+  estimator's effective search window, blocking convergence entirely
+  rather than just delaying it -- consistent with, and a stronger
+  validation of, the fix already shipped above (a genuinely accurate
+  initial estimate matters more than "AEC3 will sort it out
+  eventually").
 - **[E9] Overlap gate's grace window now extends after an
   UNDER-CANCELLING response (2026-07-15, candidate -- needs live
   tuning).** The `[E8]` incident's log stayed `UNDER-CANCELLING` for
