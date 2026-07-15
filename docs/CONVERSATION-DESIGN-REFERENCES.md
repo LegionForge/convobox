@@ -11,7 +11,8 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
 > LiveKit Agents, Deepgram Flux, Vocode, ElevenLabs Conversational AI,
-> Hume AI EVI, Google Conversation Design) were web-verified July 2026 by
+> Hume AI EVI, Google Conversation Design, Wyoming protocol) were
+> web-verified July 2026 by
 > reading real primary-source pages/code, not secondhand summaries. The
 > foundational conversation-analysis and pragmatics classics are cited
 > from the standard literature; confirm against the primary source before any
@@ -545,6 +546,40 @@ one finding is concrete and directly actionable:
   CLIs it fronts). `proactive_audio`'s specific shape (agent-initiated
   silence based on relevance) is closest to ElevenLabs' already-covered
   "skip turn" tool, not a new pattern.
+
+**Wyoming protocol (github.com/rhasspy/wyoming, verified 2026-07-15 by
+reading the real GitHub README, not a secondhand summary).** Home
+Assistant's official local voice-assistant protocol -- a genuinely
+different comparison class from §5's full-duplex models or the cloud
+APIs above: a modular, network-transparent pipeline of swappable
+wake-word/STT/TTS *services* over JSONL + raw PCM, using the exact same
+open-source stack ConvoBox does (Whisper for STT, Piper for TTS). The
+closest architectural relative surveyed this session -- worth checking
+for what a comparable, widely-deployed, backend-agnostic pipeline
+considers must-have. Real message types confirmed in the spec:
+`voice-started`/`voice-stopped` (VAD boundary events), `audio-start`/
+`audio-chunk`/`audio-stop` (streaming), `transcript`, `synthesize`,
+`detection`/`not-detected`/`not-recognized`/`not-handled`.
+
+- **This is a validation-by-omission, not a borrow-this finding.** The
+  protocol documents no barge-in/interruption mechanism at all --
+  TTS playback is unidirectional (`synthesize` in, `audio-chunk`s out,
+  nothing documented to halt it mid-stream) -- and no application-level
+  error or timeout signaling; recovery is left entirely to raw TCP
+  disconnection. **Adopt →** nothing to change in ConvoBox; the opposite
+  conclusion. The two axes this session has spent the most effort
+  hardening -- barge-in (`interrupt_presets.py`, `BargeInMonitor`,
+  PR #71's orphaned-speak-task fix, PR #87's event-loop wiring coverage)
+  and failure recovery (the STT allocator crash-recovery in PR #65/#77,
+  the heartbeat in PR #18/#83) -- are problems the most comparable
+  widely-deployed open, swappable-backend voice protocol doesn't attempt
+  to solve at the protocol level at all. Real corroboration that this
+  wasn't wasted effort on an already-solved problem.
+- **`voice-started`/`voice-stopped` corroborates, doesn't add.** Same
+  concept as `UtteranceSegmenter.in_speech`'s existing boundary state,
+  independently named the same way by a comparable system -- not a new
+  primitive to adopt, just another data point that the boundary concept
+  itself is the right one.
 
 ---
 
