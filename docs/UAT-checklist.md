@@ -39,6 +39,20 @@ Additions from the 2026-07-11 live log:
   only names `backend: opencode` (no model field). Recorded for UAT
   provenance; do not assert a deliberate model choice from this evidence
   alone.
+- **[L3] Headset UAT: AEC is ON but has no echo to cancel -- turn it OFF for
+  headsets.** Live-confirmed during the 2026-07-14/15 audio UAT with a
+  headset (mic does not hear the speaker): 54 of 59 responses logged
+  `NO ECHO DETECTED: barely any speaker sound is reaching the mic`, i.e. AEC
+  had essentially nothing to cancel. With AEC still running
+  (`echo_cancellation: true`), the operator reports audible artifacts
+  ("artifacting from automatic echo cancellation") on the mic path. This
+  same no-echo condition directly caused the spoken-echo filter to drop
+  genuine barge-in speech on no-echo responses (see [L1] context: the
+  "Yeah, you got it." barge-in was dropped as self-echo because
+  `NO ECHO DETECTED` was misread as "this speech is our own echo"). For
+  headset use, AEC should be OFF -- it has nothing to cancel and risks
+  artifacts plus dropped real barge-ins. AEC remains valuable for
+  open-speaker/laptop use. Not yet changed in code; recorded for assessment.
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
