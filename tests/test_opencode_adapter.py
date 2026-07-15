@@ -65,6 +65,7 @@ class OpenCodeServer:
     def __init__(self, frames: list[dict[str, object]] | None = None) -> None:
         self.frames = frames if frames is not None else list(_SINGLE_STEP_FRAMES)
         self.created_sessions = 0
+        self.created_session_bodies: list[dict[str, object]] = []
         self.posted_prompts: list[dict[str, object]] = []
         self.interrupt_count = 0
         self.event_gate = asyncio.Event()
@@ -118,7 +119,7 @@ class OpenCodeServer:
             body = await reader.readexactly(content_length) if content_length else b""
 
             if method == "POST" and path == "/api/session":
-                await self._create_session(writer)
+                await self._create_session(writer, body)
             elif method == "POST" and path == f"/api/session/{_SESSION_ID}/prompt":
                 await self._post_prompt(writer, body)
             elif method == "GET" and path == f"/api/session/{_SESSION_ID}/event":
@@ -144,8 +145,9 @@ class OpenCodeServer:
         )
         await writer.drain()
 
-    async def _create_session(self, writer: asyncio.StreamWriter) -> None:
+    async def _create_session(self, writer: asyncio.StreamWriter, body: bytes) -> None:
         self.created_sessions += 1
+        self.created_session_bodies.append(json.loads(body) if body else {})
         await self._respond(writer, 200, json.dumps({"data": {"id": _SESSION_ID}}).encode())
 
     async def _post_prompt(self, writer: asyncio.StreamWriter, body: bytes) -> None:
@@ -257,6 +259,47 @@ async def test_send_text_creates_session_and_posts_prompt_with_queue_delivery(
         {"prompt": {"text": "do the thing"}, "delivery": "queue"}
     ]
     assert adapter.is_busy() is True
+
+
+@pytest.mark.asyncio
+async def test_no_model_configured_posts_an_empty_session_body(
+    server: OpenCodeServer,
+) -> None:
+    # Default, unchanged behavior: omitting model entirely lets opencode
+    # pick its own default -- confirmed live, 2026-07-14, that this can
+    # silently be a hosted free-tier model rather than the user's own
+    # configured provider, with no error either way.
+    adapter = OpenCodeAdapter(server.base_url)
+    try:
+        await adapter.send_text("do the thing")
+    finally:
+        await adapter._client.aclose()
+
+    assert server.created_session_bodies == [{}]
+
+
+@pytest.mark.asyncio
+async def test_configured_model_is_sent_on_session_creation(
+    server: OpenCodeServer,
+) -> None:
+    # Real mechanism, confirmed against a live server's own OpenAPI spec
+    # (GET /doc): POST /api/session's optional model: {providerID, id}
+    # field -- NOT a CLI flag (opencode serve has no -m/--model option at
+    # all, confirmed via `opencode serve --help`).
+    adapter = OpenCodeAdapter(server.base_url, model="openai/gpt-5.6-sol")
+    try:
+        await adapter.send_text("do the thing")
+    finally:
+        await adapter._client.aclose()
+
+    assert server.created_session_bodies == [
+        {"model": {"providerID": "openai", "id": "gpt-5.6-sol"}}
+    ]
+
+
+def test_model_without_a_slash_raises_at_construction() -> None:
+    with pytest.raises(ValueError, match="provider/model-id"):
+        OpenCodeAdapter("http://localhost:4096", model="gpt-5.6-sol")
 
 
 @pytest.mark.asyncio
