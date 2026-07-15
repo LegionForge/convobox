@@ -7,10 +7,20 @@ same discipline as fake_claude_cli.py and the real-socket OpenCodeServer.
 Message shapes mirror the installed CLI's own schema bundle
 (`codex app-server generate-json-schema`, codex-cli 0.144.1) and a live
 probe -- see src/convobox/adapters/codex.py's module docstring.
+Set FAKE_CODEX_NO_THREAD_ID=1 in the environment to make thread/start
+respond with no thread id (an empty thread object) -- there's no turn
+text to script this by, since it happens before any turn is ever sent.
+
 Turn behavior is scripted by the prompt text:
 
   contains "use a tool" -> commandExecution item + agentMessage + completed
   contains "hang"       -> turn/started only; completes on turn/interrupt
+  contains "hang and vanish on interrupt" -> like "hang", but exits without
+                            responding to turn/interrupt (checked before the
+                            plain "hang" match) -- simulates the app-server
+                            dying while a request is genuinely in flight
+  contains "emit garbage first" -> writes one malformed (non-JSON) stdout
+                            line before the normal echo response
   contains "needs approval" -> server->client approval request first (current
                             protocol method); echoes the decision back
   contains "needs file edit approval" -> item/fileChange/requestApproval
@@ -30,6 +40,7 @@ Turn behavior is scripted by the prompt text:
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 THREAD_ID = "thr_test"
@@ -71,6 +82,7 @@ def main() -> None:
     active_turn: str | None = None
     pending_approval_turn: str | None = None
     approval_req_id = 900
+    die_on_interrupt = False
 
     for line in sys.stdin:
         try:
@@ -85,7 +97,10 @@ def main() -> None:
         elif method == "initialized":
             pass
         elif method == "thread/start":
-            respond(req_id, {"thread": {"id": THREAD_ID}})
+            if os.environ.get("FAKE_CODEX_NO_THREAD_ID"):
+                respond(req_id, {"thread": {}})
+            else:
+                respond(req_id, {"thread": {"id": THREAD_ID}})
         elif method == "turn/start":
             turn_seq += 1
             turn_id = f"turn_{turn_seq}"
@@ -96,6 +111,10 @@ def main() -> None:
             notify("turn/started", {"threadId": THREAD_ID, "turn": {"id": turn_id, "status": "inProgress"}})
             if "die" in text:
                 sys.exit(0)
+            if "hang and vanish on interrupt" in text:
+                active_turn = turn_id
+                die_on_interrupt = True
+                continue
             if "hang" in text:
                 active_turn = turn_id
                 continue
@@ -152,6 +171,12 @@ def main() -> None:
                     "params": {"threadId": THREAD_ID, "turnId": turn_id, "command": "rm -rf /"},
                 })
                 continue
+            if "emit garbage first" in text:
+                sys.stdout.write("not valid json at all {{{\n")
+                sys.stdout.flush()
+                agent_message(f"echo: {text}")
+                turn_completed(turn_id)
+                continue
             if "use a tool" in text:
                 notify("item/started", {
                     "threadId": THREAD_ID,
@@ -181,6 +206,11 @@ def main() -> None:
             active_turn = None
         elif method == "turn/interrupt":
             turn_id = msg["params"].get("turnId")
+            if die_on_interrupt and active_turn == turn_id:
+                # Exit without responding -- the read loop's death must
+                # fail this pending turn/interrupt request rather than
+                # leave it (and the caller awaiting it) hanging forever.
+                sys.exit(0)
             respond(req_id, {})
             if active_turn == turn_id:
                 turn_completed(turn_id, status="interrupted")
