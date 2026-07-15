@@ -301,3 +301,47 @@ for real for the first time finds bugs the layer below's tests were
 structurally incapable of showing.** Adapter-level live runs couldn't
 catch these because a single task drove everything; the Orchestrator's
 concurrency is what exposed them.
+
+## Session creation supports pinning a model -- not exposed until now (2026-07-14/15)
+
+JP reported live: opencode picked a hosted free-tier model (OpenCode
+Zen's `hy3-free`) rather than his own configured provider, and asked for
+a way to control this from ConvoBox. First instinct -- pass a CLI flag
+like `opencode -m openai/gpt-5.6-sol` -- **doesn't work for this
+project's use case**: confirmed via `opencode serve --help` (the actual
+mode this adapter connects to) that `serve` has no `-m`/`--model` option
+at all. That flag only exists on `opencode run`/the default interactive
+TUI command, neither of which exposes the `/api/` HTTP+SSE surface this
+adapter needs.
+
+**The real mechanism, confirmed against a live server's own OpenAPI
+spec** (`GET /doc` against JP's actual running `opencode serve` instance
+-- read-only, no session/prompt/interrupt calls made, respecting the
+standing "don't inject test traffic into JP's live server" boundary):
+`POST /api/session`'s request body accepts an optional `model` field,
+schema `ModelRef = {id: string, providerID: string, variant?: string}`
+(`id`/`providerID` both required). The adapter's `_ensure_session()`
+currently posts an empty body (`{}`) unconditionally -- confirmed by
+reading the actual code, not assumed -- which is exactly why opencode's
+own default silently won under no explicit config, with no error either
+way.
+
+Also confirmed real, via `opencode models` (the CLI's own catalog):
+`openai/gpt-5.6-sol` (JP's requested model) genuinely exists as a
+provider/model pair, alongside `opencode/*` (the OpenCode Zen catalog,
+including `hy3-free`), `anthropic/*`, `inception/*`, and `ollama-remote/*`.
+`provider/model-id` (opencode's own CLI output format) is what
+`BackendConfig.model` expects; the adapter splits on the first `/` and
+maps to `{providerID, id}`.
+
+**Honest verification gap, not glossed over**: the OpenAPI schema
+confirms the server *accepts* this shape at the type level -- it does
+NOT confirm a live session actually gets created successfully with a
+real model reference, or that opencode genuinely honors it for
+generation rather than silently falling back again. Verifying that would
+mean creating a real session against JP's live server, which the
+standing "no test traffic on JP's live server" boundary correctly
+blocked (Claude Code's own permission classifier caught the attempt).
+This needs a real UAT pass to close out -- flagged in
+`docs/UAT-checklist.md` and the shipping PR, not claimed as fully
+live-verified.

@@ -120,11 +120,24 @@ def test_switching_backends_remembers_backend_specific_values() -> None:
     assert state.working.backend.url == "http://localhost:4096"
 
 
+def test_switching_backends_remembers_opencodes_model() -> None:
+    config = _make_config(**{"backend.name": "opencode"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.working.backend.model = "openai/gpt-5.6-sol"
+
+    settings_tui._switch_backend(state.working, "codex")
+    assert state.working.backend.model is None
+    assert state.working.backend_profiles["opencode"].model == "openai/gpt-5.6-sol"
+
+    settings_tui._switch_backend(state.working, "opencode")
+    assert state.working.backend.model == "openai/gpt-5.6-sol"
+
+
 def test_backend_section_hides_irrelevant_field_per_backend() -> None:
     config = _make_config(**{"backend.name": "opencode"})
     state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
     state.selected_section = next(i for i, section in enumerate(state.sections) if section.key == "backend")
-    assert [field.key for field in state.current_fields()] == ["name", "url"]
+    assert [field.key for field in state.current_fields()] == ["name", "url", "model"]
 
     settings_tui._switch_backend(state.working, "codex")
     assert [field.key for field in state.current_fields()] == ["name", "command"]

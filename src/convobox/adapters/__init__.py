@@ -15,7 +15,7 @@ __all__ = [
 
 def create_backend_adapter(config: BackendConfig) -> BackendAdapter:
     if config.name == "opencode":
-        return OpenCodeAdapter(config.url)
+        return OpenCodeAdapter(config.url, model=config.model)
     if config.name == "claude-code":
         return ClaudeCodeAdapter(config.command)
     if config.name == "codex":

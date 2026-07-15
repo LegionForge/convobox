@@ -186,6 +186,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("backend", "name", "Name", "choice", _CHOICE_BACKENDS, help_text="Which coding agent ConvoBox should drive."),
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
+            FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
         ),
     ),
@@ -220,7 +221,7 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
         return section.fields
     backend_name = config.backend.name
     if backend_name == "opencode":
-        return tuple(field for field in section.fields if field.key in {"name", "url"})
+        return tuple(field for field in section.fields if field.key in {"name", "url", "model"})
     if backend_name in {"claude-code", "codex"}:
         return tuple(field for field in section.fields if field.key in {"name", "command"})
     return section.fields
@@ -281,7 +282,7 @@ def _set_backend_profile(config: AppConfig, name: str, profile: BackendProfileCo
 
 def _backend_profile_from_active(config: AppConfig, name: str) -> BackendProfileConfig:
     if name == "opencode":
-        return BackendProfileConfig(url=config.backend.url)
+        return BackendProfileConfig(url=config.backend.url, model=config.backend.model)
     if name in {"claude-code", "codex"}:
         return BackendProfileConfig(
             url=config.backend.url,
@@ -302,10 +303,13 @@ def _apply_backend_profile(config: AppConfig, name: str) -> None:
         config.backend.url = resolved_url
     if name == "opencode":
         config.backend.command = None
-    elif profile.command is not None:
-        config.backend.command = list(profile.command)
+        config.backend.model = profile.model if profile.model is not None else defaults.model
     else:
-        config.backend.command = list(defaults.command) if defaults.command is not None else None
+        config.backend.model = None
+        if profile.command is not None:
+            config.backend.command = list(profile.command)
+        else:
+            config.backend.command = list(defaults.command) if defaults.command is not None else None
 
 
 def _switch_backend(config: AppConfig, new_name: str) -> None:
@@ -554,6 +558,22 @@ def validate_config(config: AppConfig) -> ValidationReport:
     if config.backend.name == "opencode" and not config.backend.url.startswith(("http://", "https://")):
         report.warnings.append(
             "backend.url does not start with http:// or https://; the connection may fail"
+        )
+    if (
+        config.backend.name == "opencode"
+        and config.backend.model is not None
+        and "/" not in config.backend.model
+    ):
+        # BackendConfig's own field_validator catches this at model
+        # CONSTRUCTION time, but the TUI mutates an already-constructed
+        # AppConfig's fields via plain setattr() (no validate_assignment),
+        # so a bad value typed into this field would otherwise sit
+        # unflagged until the next full config reload -- surface it here
+        # too, at save time, matching every other backend field's own
+        # save-time check on this same code path.
+        report.errors.append(
+            f'backend.model {config.backend.model!r} must be "provider/model-id" '
+            f'(e.g. "openai/gpt-5.6-sol") -- see `opencode models` for the full list'
         )
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
