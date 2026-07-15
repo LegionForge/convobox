@@ -149,6 +149,28 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   log shows `FLOOR-LIMITED` or genuine `UNDER-CANCELLING` with a
   MUCH smaller headroom gap, not the same near-total failure -- this is
   the live validation the original incident couldn't get to.
+- **[E9] Overlap gate's grace window now extends after an
+  UNDER-CANCELLING response (2026-07-15, candidate -- needs live
+  tuning).** The `[E8]` incident's log stayed `UNDER-CANCELLING` for
+  nearly the whole session even accounting for the delay-hint bug --
+  same-room mic+speaker echo may genuinely be a harder acoustic problem
+  than a wrong delay hint alone explains. `grace_s_for_last_response()`
+  (`scripts/run_convobox.py`) now widens `ECHO_GRACE_S` (the window
+  after playback ends that still counts as "overlapping," protecting
+  against reverb-tail false positives) proportionally to the JUST-
+  finished response's remaining echo headroom, capped at `_MAX_GRACE_S`
+  (1.0s) -- a `FLOOR-LIMITED` or `NO ECHO DETECTED` response leaves the
+  window unchanged. **The exact constants
+  (`_GRACE_EXTENSION_PER_DB=0.05`, cap `1.0s`) are derived from the
+  `[E8]` log's own headroom numbers (8-14dB -> ~0.4-0.7s extra), NOT
+  live-tuned** -- unit-tested for correctness of the logic (pure
+  function, `tests/test_run_convobox_echo.py`), but whether these
+  specific numbers feel right in practice needs a real mic+speaker UAT
+  pass. Watch the new `overlap-gate grace window: Xs -> Ys` log line
+  after each response; confirm it widens during a genuinely bad
+  `UNDER-CANCELLING` stretch and settles back to `0.30s` once AEC
+  recovers, and that the wider window doesn't make the assistant feel
+  sluggish to respond to real speech right after it stops talking.
 
 ## 2. VAD segmentation
 

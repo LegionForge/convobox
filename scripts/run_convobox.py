@@ -88,6 +88,16 @@ _TUI_LOG_FILE = "convobox-tui.log"
 # as overlapping it: room reverb plus VAD/timestamp slop.
 ECHO_GRACE_S = 0.3
 
+# Bounds for grace_s_for_last_response()'s extension: how much extra grace
+# an UNDER-CANCELLING verdict earns, per dB of remaining echo headroom, and
+# the hard ceiling on the total window regardless of how bad the reading
+# was. NOT live-tuned -- derived from the [E8] incident log's own numbers
+# (headroom commonly 8-14dB during a bad mic+speaker session, which this
+# maps to roughly 0.4-0.7s of extra grace) but the exact constants need a
+# real UAT pass on real hardware to confirm; see docs/UAT-checklist.md.
+_GRACE_EXTENSION_PER_DB = 0.05
+_MAX_GRACE_S = 1.0
+
 # Cross-process mutex for mic mode: an arbitrary fixed localhost port held
 # for the process lifetime. A socket bind (unlike a lockfile) can't go
 # stale -- the OS releases it the instant the holder dies, however it dies.
@@ -183,6 +193,33 @@ def interpret_aec_stats(attenuation_db: float | None, ceiling_db: float | None) 
         f"  [UNDER-CANCELLING: ~{ceiling_db - attenuation_db:.1f}dB of echo headroom "
         "remains -- try tuning aec_delay_ms]"
     )
+
+
+def grace_s_for_last_response(
+    attenuation_db: float | None, ceiling_db: float | None, base_grace_s: float = ECHO_GRACE_S
+) -> float:
+    """How long to protect the overlap gate's window after the NEXT
+    playback ends, given the AEC verdict from the response that JUST
+    finished (see interpret_aec_stats -- same thresholds, so a reading
+    that logs FLOOR-LIMITED here also returns base_grace_s here).
+
+    A response that came back FLOOR-LIMITED or with no measurable echo at
+    all (NO ECHO DETECTED) gives no reason to extend past the base grace
+    window -- nothing suggests residual echo is likely to leak through as
+    apparent "new speech" in the tail right after playback. A response
+    that came back UNDER-CANCELLING means real, uncancelled echo energy
+    was present; extends proportionally to the remaining headroom,
+    capped at _MAX_GRACE_S so a single bad reading can't suppress
+    listening for an unbounded stretch. This is a bounded, well-reasoned
+    default derived directly from the [E8] incident's own log data, NOT
+    a live-tuned value -- see the module-level constants' own comment.
+    """
+    if attenuation_db is None or ceiling_db is None or ceiling_db < AEC_MEASURABLE_ECHO_DB:
+        return base_grace_s
+    headroom_db = ceiling_db - attenuation_db
+    if headroom_db <= 2.0:  # matches interpret_aec_stats's FLOOR-LIMITED threshold
+        return base_grace_s
+    return min(base_grace_s + headroom_db * _GRACE_EXTENSION_PER_DB, _MAX_GRACE_S)
 
 
 # Prefixed to a barge-in utterance so the backend knows its previous
@@ -1056,6 +1093,11 @@ async def run(args: argparse.Namespace) -> None:
             interrupt_axes.on_new_words, config.interaction.barge_in_min_speech_ms,
         )
     barge_in_pending = False
+    # Updated after every response's AEC stats are read (in _mic_chunks,
+    # below), consumed at the overlap-gate call site further down in this
+    # same function -- see grace_s_for_last_response()'s own docstring.
+    # Starts at the base grace: nothing's played yet to have a verdict on.
+    next_overlap_grace_s = ECHO_GRACE_S
 
     listening_gate = ListeningGate(
         PauseListeningDetector(config.interaction.pause_listening_phrases),
@@ -1068,7 +1110,7 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
-        nonlocal barge_in_pending
+        nonlocal barge_in_pending, next_overlap_grace_s
         was_playing = False
         async for chunk in mic.stream():
             processed = canceller.process(chunk) if canceller is not None else chunk
@@ -1093,6 +1135,14 @@ async def run(args: argparse.Namespace) -> None:
                     canceller.delay_ms, canceller.reverse_frames, canceller.capture_frames,
                     interpret_aec_stats(attenuation, ceiling),
                 )
+                new_grace = grace_s_for_last_response(attenuation, ceiling)
+                if new_grace != next_overlap_grace_s:
+                    log.info(
+                        "overlap-gate grace window: %.2fs -> %.2fs for the next utterance "
+                        "(last response's AEC verdict)",
+                        next_overlap_grace_s, new_grace,
+                    )
+                next_overlap_grace_s = new_grace
                 canceller.reset_stats()
             was_playing = playing
             # in_speech reflects the segmenter's state as of the PREVIOUS
@@ -1224,6 +1274,7 @@ async def run(args: argparse.Namespace) -> None:
                             stt_latency_ms=result.latency_ms,
                             min_silence_ms=config.vad.min_silence_ms,
                             playback_ended_at=player.playback_ended_at,
+                            grace_s=next_overlap_grace_s,
                         )
                     ):
                         # Reports the REAL canceller state, not a hardcoded

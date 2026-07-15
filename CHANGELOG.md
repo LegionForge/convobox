@@ -15,6 +15,19 @@ minor versions carry feature and behavior changes.
 > **[L2]**.
 
 ### Added
+- **Overlap gate's grace window now widens after a poorly-cancelled response**
+  (`scripts/run_convobox.py`). `Attribution: Claude Code; Provider:
+  Anthropic; Model: claude-opus-4-8; Scope: this entry.` The `[E8]`
+  self-barge-in incident's log stayed `UNDER-CANCELLING` for nearly the
+  whole session even after fixing the delay hint -- same-room mic+speaker
+  echo can leave real, uncancelled energy that leaks through as apparent
+  "new speech" right after playback ends. `grace_s_for_last_response()`
+  widens the overlap gate's protected window (`ECHO_GRACE_S`)
+  proportionally to the just-finished response's remaining echo headroom,
+  capped at 1.0s; a `FLOOR-LIMITED` or `NO ECHO DETECTED` response leaves
+  it unchanged. The exact constants are derived from the `[E8]` log's own
+  numbers, not live-tuned -- see `docs/UAT-checklist.md` **[E9]** for the
+  live validation this still needs.
 - **AEC delay auto-tune is now the real default, and Settings TUI saves only
   write fields you actually changed** (`src/convobox/config.py`,
   `scripts/run_convobox.py`, `scripts/settings_tui.py`). `Attribution: Claude
