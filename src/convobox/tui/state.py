@@ -47,6 +47,14 @@ class ConversationTuiState:
     - warning: phase 3's approval banner. None = no active warning; the
       render function reserves no space for it when unset, so it costs
       nothing before approvals ship.
+    - backend_name/aec_enabled: set once at startup (config.backend.name,
+      config.audio.echo_cancellation) -- static for the process lifetime,
+      unlike everything else here.
+    - aec_verdict: the last response's interpret_aec_stats() tag
+      (run_convobox.py) -- "" until the first response with AEC on.
+    - heartbeat_elapsed_s: continuous silent-busy seconds from
+      WorkingIndicator.silent_busy_s, None when not silently busy (backend
+      idle, or audio is already playing its own feedback).
     """
 
     turns: list[TranscriptTurn] = field(default_factory=list)
@@ -55,6 +63,10 @@ class ConversationTuiState:
     warning: str | None = None
     barge_in_active: bool = False
     started: float = field(default_factory=time.monotonic)
+    backend_name: str = ""
+    aec_enabled: bool = False
+    aec_verdict: str = ""
+    heartbeat_elapsed_s: float | None = None
 
     def add_turn(self, speaker: Speaker, text: str, timestamp: str | None = None) -> None:
         self.turns.append(
