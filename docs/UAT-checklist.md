@@ -12,6 +12,18 @@ Additions from the 2026-07-11 live log:
 - **[E6] Whisper hallucination loops on far-field echo.** Observed live
   (one transcript repeated a clause five times). Currently caught by the
   overlap window; any future gate reordering must keep these out.
+- **[L1] Agent replies are now in the log.** Live-confirmed gap during the
+  2026-07-14 audio UAT: the `on_event` hook forwarded backend replies
+  straight to TTS and logged none of them (and was only wired up under
+  `--tui`, so a plain listening session never observed replies at all).
+  Fixed in `scripts/run_convobox.py`: every backend TEXT reply is now
+  logged as `response: <raw text>`, plus `response(spoken): <spoken text>`
+  when the spoken form (`strip_code_for_speech`) differs from the raw
+  reply. UAT: confirm that, in a plain (non-`--tui`) listening session,
+  each assistant turn produces a `response:` log line, and that a reply
+  containing markdown (e.g. `**bold**` / `` `code` ``) also emits a
+  `response(spoken):` line with the decoration stripped. The hook is now
+  installed unconditionally regardless of `--tui`.
 - **[N5] Numbered lists keep their numbers** -- deliberate: spoken
   enumeration is natural, unlike asterisks.
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances

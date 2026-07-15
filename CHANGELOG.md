@@ -4,6 +4,29 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
+## [Unreleased]
+
+### Added
+- **Agent response logging in the UAT/echo log** (`scripts/run_convobox.py`):
+  the orchestrator's `on_event` hook now records every backend reply, not
+  just the user's transcript. Each reply is logged as `response: <raw text>`
+  and, when the spoken form differs from the raw reply, `response(spoken):
+  <spoken text>` — so the log now shows what the agent said back (and what
+  was actually spoken aloud, making markdown-readout bugs like Piper saying
+  "asterisk asterisk" visible). Live-confirmed during the 2026-07-14 audio
+  UAT: agent replies were previously forwarded straight to TTS and captured
+  nowhere, leaving the most useful lines of an audio test invisible in the
+  log. See `docs/UAT-checklist.md` **[L1]**.
+
+### Fixed
+- **Response hook was not wired outside `--tui` mode**: `Orchestrator`'s
+  `on_event` was passed `None` unless `--tui` was set, so a plain
+  listening/UAT session never observed assistant replies at all. The hook is
+  now installed unconditionally (it safely handles `tui_state=None`).
+- **Accidental duplicate definitions** of `_on_backend_event`,
+  `_draw_conversation_tui`, and `_tui_render_loop` in `scripts/run_convobox.py`
+  (the second copy silently overrode the first). Collapsed to a single copy.
+
 ## [0.2.0] — 2026-07-12
 
 The first release where the **whole product loop works end-to-end**: speak,
