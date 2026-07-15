@@ -176,6 +176,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. Piper is the first supported local engine."),
             FieldSpec("tts", "voice", "Voice", "optional_str", help_text="Installed Piper voice key, such as en_US-lessac-medium."),
+            FieldSpec("tts", "speaker", "Speaker", "optional_str", help_text="Only for multi-speaker voices (e.g. en_GB-semaine-medium, en_GB-aru-medium, en_GB-vctk-medium, en_US-libritts-high) -- a speaker name from that voice's own list, or a raw numeric index. Leave unset for single-speaker voices or the voice's own default speaker. [t] will report an error naming the available speakers if this doesn't match."),
             FieldSpec("tts", "rate", "Rate", "float", help_text="Speech speed multiplier. 1.0 is normal."),
             FieldSpec("tts", "volume", "Volume", "float", help_text="Speech loudness multiplier. 1.0 is normal."),
         ),

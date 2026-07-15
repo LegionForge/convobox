@@ -221,6 +221,18 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 - **[T4] Replacing playback.** Calling play/play_stream while something is
   playing must replace it cleanly (AudioPlayer.play calls stop() first). Test
   rapid successive responses.
+- **[T5] Multi-speaker voice selection.** Real, not hypothetical: several
+  Piper voices already downloaded in this repo are genuinely multi-speaker
+  (`en_GB-semaine-medium`: 4 named speakers -- prudence/spike/obadiah/poppy
+  -- `en_GB-aru-medium`: 12, `en_GB-vctk-medium`: 109,
+  `en_US-libritts-high`: 904). Set `tts.voice: en_GB-semaine-medium` and
+  `tts.speaker: spike`, confirm it synthesizes without error and *sounds*
+  different from `tts.speaker: poppy` (this needs a real ear -- the
+  automated verification only confirmed the two produced different sample
+  counts for similar text, not that they're audibly distinct). Then set
+  `tts.speaker: nobody` (a name that doesn't exist) and confirm `[t]` on
+  the TTS section reports a clear error naming the real available speakers
+  for that voice, not a raw traceback.
 
 ## 7. Scriptable / non-mic modes
 

@@ -64,6 +64,21 @@ class TTSConfig(BaseModel):
     voice: str | None = None
     rate: float = 1.0
     volume: float = 1.0
+    # piper only: select a speaker for a multi-speaker voice, by name
+    # (matching the voice's own speaker_id_map, e.g. "prudence" for
+    # en_GB-semaine-medium) or a raw numeric index. None (default) uses
+    # the voice's own default speaker (index 0) -- unchanged behavior
+    # for the single-speaker voices this project has used until now.
+    # Real, not hypothetical: several already-downloaded Piper voices in
+    # this repo (en_GB-semaine-medium: 4 named speakers, en_GB-aru-medium:
+    # 12, en_GB-vctk-medium: 109, en_US-libritts-high: 904) are genuinely
+    # multi-speaker and this had no way to select anything but the
+    # implicit default. No pydantic-level format validation here -- unlike
+    # backend.model's cheap "/" check, resolving a speaker name requires
+    # the actual voice model loaded (PiperVoice.load), which only happens
+    # in PiperTTSEngine's own construction; see that class for the real
+    # validation and error message.
+    speaker: str | None = None
 
 
 class InteractionConfig(BaseModel):
