@@ -7,9 +7,12 @@ minor versions carry feature and behavior changes.
 ## [Unreleased]
 
 > **Attribution:** Changes in this Unreleased section were authored by the
-> **ConvoBox** AI coding agent during live audio UAT on 2026-07-14
+> **ConvoBox** AI coding agent during live audio UAT on 2026-07-14/15
 > (submitted via the `jp-cruz` account, PR #78). ConvoBox is the product
-> under test; its own agent made these modifications.
+> under test; its own agent made these modifications. The agent was observed
+> running on opencode's `hy3-free` model (OpenCode Zen provider) — verified
+> from the live backend's session records, not assumed. See `docs/UAT-checklist.md`
+> **[L2]**.
 
 ### Added
 - **Agent response logging in the UAT/echo log** (`scripts/run_convobox.py`):

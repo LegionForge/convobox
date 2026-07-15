@@ -26,6 +26,19 @@ Additions from the 2026-07-11 live log:
   installed unconditionally regardless of `--tui`.
 - **[N5] Numbered lists keep their numbers** -- deliberate: spoken
   enumeration is natural, unlike asterisks.
+- **[L2] Runtime stack is opencode + `hy3-free` (OpenCode Zen).** Verified
+  live during the 2026-07-14/15 audio UAT by reading the opencode server's
+  own session message records (two separate sessions, 35 and 7 assistant
+  messages respectively -- 100% `model.id=hy3-free`, `providerID=opencode`).
+  The provider list from the live server shows `opencode` -> "OpenCode Zen"
+  (`https://opencode.ai/zen/v1`, `apiKey: "public"`); the local
+  `~/.config/opencode/opencode.json` pins **no** default model, so
+  `hy3-free` is being used as opencode's built-in default public model, not
+  an explicitly configured one. NOT verified: whether the user set this up
+  intentionally, or available OpenCode Zen usage/quota. `convobox.yaml`
+  only names `backend: opencode` (no model field). Recorded for UAT
+  provenance; do not assert a deliberate model choice from this evidence
+  alone.
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
