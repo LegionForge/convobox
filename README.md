@@ -100,6 +100,32 @@ substantially more than that is now on `main`:
   approval methods (only 2 were correct) — live-verified against a real
   `codex app-server` that the auto-decline now actually works for every
   reachable method, not just the one that happened to be tested first.
+- **A real concurrency bug found and fixed from a live UAT log**: a
+  single backend turn emitting multiple TEXT segments (text interleaved
+  with tool calls, exactly what a coding agent doing real multi-step
+  work looks like) used to leave the previous segment's speak task
+  running uncancelled, corrupting the overlap gate's echo-detection
+  timing for the rest of the session — reported live as "AEC seems to
+  be misfiring," though AEC itself was never the actual cause. Fixed by
+  cancelling any in-flight speak task before starting a new one.
+- **faster-whisper's known, unresolved native-allocator failure**
+  (ctranslate2/MKL leaking memory across repeated calls in a long-lived
+  process — `SYSTRAN/faster-whisper#660`) is now recovered from instead
+  of crashing the session: one lost utterance instead of a dead
+  process, with the model reload preferring the local cache instead of
+  making a network call on every recovery — see `docs/KNOWN-ISSUES.md`
+  for the full writeup.
+- **Settings TUI gained a real audio device picker**
+  (`scripts/settings_tui.py`): cycle through actually-discovered,
+  deduped input/output devices (the same logic `python
+  scripts/audio_devices.py --setup` uses) instead of typing a device
+  name blind, plus an in-TUI test that plays a real tone and reports a
+  real mic level reading.
+- **The onset of an utterance is no longer clipped.** `UtteranceSegmenter`
+  already padded the trailing silence of an utterance to avoid cutting
+  off the last phoneme; it now pads the START the same way, so the
+  first phoneme of a phrase — including the safeword — isn't lost while
+  the VAD is still building confidence to trigger.
 
 Fully wired and config-driven, all with real-pipeline verification where
 a live microphone session was possible; several items (the TUI's full
