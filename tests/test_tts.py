@@ -77,6 +77,45 @@ def _make_engine(
     return engine, voice
 
 
+# --- __init__/_load_voice: every other test in this file bypasses the real
+# constructor (PiperTTSEngine.__new__ + manual attribute assignment, via
+# _make_engine above) specifically to avoid needing a real downloaded voice
+# file -- which meant the actual construction path (loading the voice,
+# computing sample_rate, deciding whether to build a SynthesisConfig) had
+# ZERO test coverage. Mocking piper.PiperVoice.load (not skipping when a
+# real .onnx file is absent, the way test_aec.py's optional-dependency skip
+# works) means these run in CI every time, not just on a machine that
+# happens to have voices downloaded (.models/ is gitignored, so CI never
+# does). ---
+
+from unittest.mock import patch  # noqa: E402
+
+
+def test_init_loads_the_voice_and_computes_sample_rate() -> None:
+    fake_voice = _FakeVoice([])
+    with patch("piper.PiperVoice.load", return_value=fake_voice) as mock_load:
+        engine = PiperTTSEngine("model.onnx", config_path="model.onnx.json")
+
+    mock_load.assert_called_once_with("model.onnx", config_path="model.onnx.json")
+    assert engine.sample_rate == 22050
+    assert engine.is_speaking() is False
+    # Default rate/volume -- no SynthesisConfig needed, keeps synthesis
+    # output byte-identical to before rate/volume/speaker existed at all.
+    assert engine._syn_config is None
+
+
+def test_init_builds_a_syn_config_when_rate_or_volume_is_non_default() -> None:
+    from piper.config import SynthesisConfig
+
+    fake_voice = _FakeVoice([])
+    with patch("piper.PiperVoice.load", return_value=fake_voice):
+        engine = PiperTTSEngine("model.onnx", rate=1.5, volume=0.8)
+
+    assert isinstance(engine._syn_config, SynthesisConfig)
+    assert engine._syn_config.length_scale == pytest.approx(1.0 / 1.5)
+    assert engine._syn_config.volume == pytest.approx(0.8)
+
+
 def test_sanitize_text_strips_control_chars_and_caps_length() -> None:
     assert sanitize_text("hello\x00\x07world") == "helloworld"
     assert sanitize_text("keep\ttab\nand\rnewline") == "keep\ttab\nand\rnewline"
