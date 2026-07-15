@@ -22,16 +22,29 @@ _EXIT_HYSTERESIS = 0.15
 
 # Windows of raw audio kept from BEFORE a speech trigger and prepended once
 # one fires, so the very onset of speech isn't clipped while the VAD is
-# still building enough confidence to cross `threshold`. Google's Gemini
-# Live API independently validates this exact gap under the name
-# `prefix_padding_ms` (real primary-source docs, verified 2026-07-14):
-# "the amount of audio to include before speech is detected". 2 windows
-# (64ms) is a modest safety margin above Gemini's own ~20ms default, sized
-# to the granularity this segmenter can actually buffer at (whole 32ms
-# windows, not sub-window slices). Symmetric with the trailing-silence
-# padding this class already applies unconditionally -- not exposed as a
-# VADConfig field, same treatment as _EXIT_HYSTERESIS: an implementation
-# constant fixing a correctness gap, not a user-facing tuning knob.
+# still building enough confidence to cross `threshold`. Most directly
+# authoritative source: Silero VAD's OWN reference implementation (the same
+# model this segmenter calls via load_silero_vad) ships exactly this
+# concept -- `speech_pad_ms` (real primary-source read of
+# src/silero_vad/utils_vad.py, verified 2026-07-14), default 30, documented
+# as "Final speech chunks are padded by speech_pad_ms each side." Google's
+# Gemini Live API independently validates the same gap under the name
+# `prefix_padding_ms` ("the amount of audio to include before speech is
+# detected", ~20ms default) -- a second, unrelated product converging on
+# the same fix. 2 windows (64ms, ~2x Silero's own 30ms default -- a little
+# extra margin, not a deviation) is sized to the granularity this segmenter
+# can actually buffer at (whole 32ms windows, not sub-window slices).
+# Deliberately NOT Silero's own VADIterator mechanism, which pads reported
+# TIMESTAMPS and expects the caller to re-extract audio from a retained
+# raw-stream buffer -- this segmenter's callers want ready audio arrays,
+# not timestamps, and nothing here retains raw audio history once
+# windows are consumed, so a small forward-buffered rolling window of
+# actual audio is the correct adaptation of the same idea to this
+# architecture, not an oversight of Silero's own approach. Symmetric with
+# the trailing-silence padding this class already applies unconditionally
+# -- not exposed as a VADConfig field, same treatment as _EXIT_HYSTERESIS:
+# an implementation constant fixing a correctness gap, not a user-facing
+# tuning knob.
 _PREFIX_PADDING_WINDOWS = 2
 
 

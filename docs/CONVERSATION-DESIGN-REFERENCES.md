@@ -507,7 +507,23 @@ one finding is concrete and directly actionable:
   `_PREFIX_PADDING_WINDOWS` (64ms, a rolling buffer of raw audio from just
   before the trigger, prepended once it fires) -- same file, same PR as
   this research entry. Matters most for exactly the phrases that must
-  never be misheard: the safeword.
+  never be misheard: the safeword. **Follow-up, verified 2026-07-14**:
+  found an even more directly authoritative confirmation after shipping
+  the fix -- Silero VAD's OWN reference implementation (the literal model
+  this segmenter calls) ships the identical concept under `speech_pad_ms`
+  (real primary-source read of `src/silero_vad/utils_vad.py`, default 30,
+  documented as *"Final speech chunks are padded by speech_pad_ms each
+  side"*). Two independent products (Gemini Live, and now the actual
+  upstream dependency ConvoBox already depends on) converging on the same
+  fix is stronger evidence than either alone. Also confirmed a real
+  architectural difference worth noting: Silero's own streaming
+  `VADIterator` pads reported *timestamps*, not audio -- it expects the
+  caller to re-extract padded audio from a retained raw-stream buffer.
+  `UtteranceSegmenter`'s callers want ready audio arrays, not timestamps,
+  and nothing here retains raw history once windows are consumed, so a
+  small forward-buffered rolling window of actual audio (what got built)
+  is the correct adaptation of the same idea to this architecture, not a
+  deviation from Silero's own approach.
 - **Manual VAD (`activityStart`/`activityEnd`) is a validation, not a
   gap** -- it's the same "client owns VAD, not the model" architecture
   ConvoBox already uses (Silero, client-side), just offered as an
