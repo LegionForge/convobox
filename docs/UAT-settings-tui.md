@@ -48,3 +48,41 @@ Verify the settings screen can be used without hand-editing YAML:
 - Revert and quit are visually stronger than save.
 - No YAML is written unless the save confirmation is accepted.
 
+## Audio device picker (added 2026-07-14, JP asked for "same logic as
+`python scripts/audio_devices.py --setup`")
+
+`input_device`/`output_device` are no longer plain free-text fields --
+Space/Left/Right cycles through REAL, deduped, discovered devices (the
+exact same `collect_devices`/`dedupe_devices` logic `--setup` uses), and
+`[t]` plays a real short tone + records a real short sample with a level
+meter, reusing `audio_devices.py`'s own functions directly. Unit-tested
+against a fake device list (`tests/test_settings_tui.py`) and verified
+once against real hardware on this machine (found the real connected
+devices, including a Shokz OpenComm headset, and genuinely played a tone
+through one), but the FEEL of it -- does cycling read cleanly on a real
+terminal, does `[t]`'s ~2 second pause feel responsive enough -- hasn't
+had a live UAT pass.
+
+14. Go to the `Audio` tab, select `Input device`, press `Space` repeatedly.
+    Confirm it cycles through your REAL connected microphones (not a
+    static/empty list) and eventually wraps back to `(unset)` -- not the
+    literal text `(system default)` showing up as a saved value.
+15. Do the same for `Output device`.
+16. Press `Enter` on `Output device` to open the edit modal; confirm
+    `Left`/`Right`/`Space` all cycle the same way inside the modal, and
+    `Enter` accepts whichever device is currently shown (including
+    accepting back to unset if you cycled all the way around).
+17. With the `Audio` tab selected, press `[t]`. Confirm you actually HEAR
+    a short tone from the configured speaker, and the status line reports
+    something like `speaker OK: played 0.6s tone on '...' | mic: [...]
+    rms ... dBFS ... -- <verdict>`. Say something while it's recording (it
+    listens for about 1.2s) and confirm the reported level looks sane
+    (not stuck at `SILENT`).
+18. Type a device name/index by hand (bypass cycling) into `Input device`
+    or `Output device` and confirm free typing still works exactly as
+    before -- this is still available for advanced users, not replaced by
+    the picker.
+19. Save, quit, and reopen the settings TUI (or re-run
+    `python scripts/run_convobox.py`) and confirm the picked device
+    actually took effect -- not just visually selected in the TUI.
+
