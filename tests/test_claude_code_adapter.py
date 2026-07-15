@@ -8,7 +8,7 @@ import pytest
 
 from convobox.adapters import ClaudeCodeAdapter, create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
-from convobox.adapters.claude_code import _resolve_flags
+from convobox.adapters.claude_code import _resolve_flags, _safe_json_loads
 from convobox.config import BackendConfig
 
 _FAKE_CLI = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))]
@@ -327,3 +327,97 @@ async def test_concurrent_consume_and_send_spawn_exactly_one_process() -> None:
     finally:
         mod.asyncio.create_subprocess_exec = original  # type: ignore[assignment]
         await _shutdown(adapter)
+
+
+# --- send_hard_stop: the interrupt write itself can fail (a real, distinct
+# failure mode from "no process to interrupt") ---
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_write_failure_does_not_raise_and_still_clears_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    try:
+        await adapter.send_text("hi")
+        assert adapter.is_busy() is True
+
+        async def _raise(payload: dict[str, object]) -> None:
+            raise OSError("pipe closed")
+
+        monkeypatch.setattr(adapter, "_write_line", _raise)
+
+        await adapter.send_hard_stop()  # must not propagate the OSError
+
+        # Same "no result messages are coming" reasoning as a successful
+        # interrupt -- pending is zeroed regardless of whether the
+        # interrupt request itself actually reached the process.
+        assert adapter.is_busy() is False
+    finally:
+        await _shutdown(adapter)
+
+
+# --- aclose: a process that ignores terminate() must still be reaped ---
+
+
+@pytest.mark.asyncio
+async def test_aclose_force_kills_a_process_that_ignores_terminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.claude_code as mod
+
+    class _StubbornProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.terminate_called = False
+            self.kill_called = False
+
+        def terminate(self) -> None:
+            self.terminate_called = True
+
+        def kill(self) -> None:
+            self.kill_called = True
+            self.returncode = -9
+
+        async def wait(self) -> int | None:
+            return self.returncode
+
+    async def _fake_wait_for(coro: object, timeout: float) -> None:
+        # Simulates the outer asyncio.wait_for(proc.wait(), timeout=5.0)
+        # genuinely timing out -- no real 5s sleep needed for the test to
+        # exercise the force-kill path.
+        coro.close()  # type: ignore[attr-defined]
+        raise TimeoutError
+
+    monkeypatch.setattr(mod.asyncio, "wait_for", _fake_wait_for)
+
+    adapter = ClaudeCodeAdapter(_FAKE_CLI)
+    proc = _StubbornProcess()
+    adapter._proc = proc  # type: ignore[assignment]
+
+    await adapter.aclose()
+
+    assert proc.terminate_called is True
+    assert proc.kill_called is True
+    assert adapter._proc is None
+
+
+# --- _safe_json_loads: malformed lines from the subprocess must not crash
+# the reader loop, just be skipped (events()'s "if outer is None: continue") ---
+
+
+def test_safe_json_loads_returns_none_for_malformed_json() -> None:
+    assert _safe_json_loads("not json at all {") is None
+
+
+def test_safe_json_loads_returns_none_for_valid_json_that_is_not_an_object() -> None:
+    # A bare JSON array or scalar parses fine but has no .get() -- the
+    # dict-only contract downstream (_content_blocks etc.) requires this.
+    assert _safe_json_loads("[1, 2, 3]") is None
+    assert _safe_json_loads("42") is None
+    assert _safe_json_loads('"just a string"') is None
+
+
+def test_safe_json_loads_returns_the_dict_for_valid_object_json() -> None:
+    assert _safe_json_loads('{"type": "result"}') == {"type": "result"}
