@@ -53,6 +53,25 @@ Additions from the 2026-07-11 live log:
   headset use, AEC should be OFF -- it has nothing to cancel and risks
   artifacts plus dropped real barge-ins. AEC remains valuable for
   open-speaker/laptop use. Not yet changed in code; recorded for assessment.
+- **[L4] Heartbeat coloring for the silent-busy indicator.** Live-confirmed
+  gap during the same 2026-07-14/15 headset UAT, continued into the
+  overnight session: the "backend still working" heartbeat (`WorkingIndicator`)
+  is the only feedback during a silent-busy stretch, but it's log-only --
+  invisible when interacting through a backend's own chat UI rather than
+  watching this terminal, so a long stall (one observed run: 618s / over
+  10 minutes) reads as "is it broken?" rather than "still thinking." Fixed
+  in `scripts/run_convobox.py`: the SAME log line is now color-coded
+  (green < 10s, yellow 10-60s, red > 60s) when connected to a real
+  terminal (`sys.stderr.isatty()`, also correctly OFF for `--tui` mode's
+  file-redirected log and for the UAT crib's own
+  `2>&1 | Tee-Object -Append uat-echo.log` pattern -- piping makes
+  `isatty()` false, so the diffable log file stays plain-text automatically,
+  no separate "am I being redirected" check needed). UAT: run a session,
+  provoke a long silent-busy stretch (a real multi-step tool-calling
+  response works well), and confirm the heartbeat line visibly shifts
+  green -> yellow -> red as it ages, in a real unpiped terminal; then
+  confirm running under the `2>&1 | Tee-Object` crib pattern produces a
+  plain, uncolored log file.
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
