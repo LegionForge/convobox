@@ -127,6 +127,28 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   detects the real bug) but not live-mic re-verified against a fresh
   session, to avoid interfering with an in-progress UAT session on a
   shared local backend server when this was found and fixed.
+- **[E8] AEC delay hint: a stale fixed value causes near-total
+  under-cancellation, and it could get silently re-baked on every
+  Settings TUI save (fixed 2026-07-15).** Live-confirmed root cause of a
+  session where mic+speakers (not headphones) self-triggered barge-in on
+  nearly every response: `convobox.yaml` had `aec_delay_ms: 100`
+  explicit, but the real measured render-to-capture delay on that
+  machine was ~222ms -- WebRTC AEC3 can't converge with a hint that far
+  off, so attenuation stayed at 0.2-4dB (`UNDER-CANCELLING`) instead of
+  the 6-16dB actually available, and the assistant's own TTS output kept
+  tripping the overlap gate. Root cause of the stale value itself: the
+  Settings TUI's save function used to write EVERY field on every save
+  (not just ones you changed), so opening and saving the TUI even once
+  silently locked in whatever `aec_delay_ms` happened to be at the time.
+  Two fixes: `aec_delay_ms` is now `None` by default (auto-tune, the
+  recommended state) instead of a literal `100`, and saves now only
+  write fields that actually differ from their default
+  (`exclude_defaults=True` -- see `docs/UAT-settings-tui.md`'s matching
+  section for the save-behavior UAT steps). Re-run the mic+speaker
+  self-barge-in scenario with `aec_delay_ms` left unset and confirm the
+  log shows `FLOOR-LIMITED` or genuine `UNDER-CANCELLING` with a
+  MUCH smaller headroom gap, not the same near-total failure -- this is
+  the live validation the original incident couldn't get to.
 
 ## 2. VAD segmentation
 

@@ -15,6 +15,24 @@ minor versions carry feature and behavior changes.
 > **[L2]**.
 
 ### Added
+- **AEC delay auto-tune is now the real default, and Settings TUI saves only
+  write fields you actually changed** (`src/convobox/config.py`,
+  `scripts/run_convobox.py`, `scripts/settings_tui.py`). `Attribution: Claude
+  Code; Provider: Anthropic; Model: claude-opus-4-8; Scope: this entry.`
+  `audio.aec_delay_ms` defaults to `None` (auto-tune from real measured
+  stream latencies) instead of a literal `100`. Root-caused a real live
+  incident: the Settings TUI's save used to write every field on every
+  save, so opening and saving it even once silently baked a stale
+  `aec_delay_ms: 100` into `convobox.yaml`, permanently disabling
+  auto-tuning -- explaining a mic+speaker session where the real delay
+  was ~222ms and AEC could never converge, so the assistant kept
+  self-triggering barge-in on its own TTS output. Saves now use
+  `exclude_defaults=True`. The field is also user-editable in the
+  Settings TUI (`optional_int`, `-` clears it back to auto-tune) and its
+  help panel shows the last real auto-detected value, read from a
+  diagnostic sidecar file `run_convobox.py` writes (`<config>.aec-estimate.json`,
+  never `convobox.yaml` itself). See `docs/UAT-checklist.md` **[E8]** and
+  `docs/UAT-settings-tui.md`.
 - **Agent response logging in the UAT/echo log** (`scripts/run_convobox.py`):
   the orchestrator's `on_event` hook now records every backend reply, not
   just the user's transcript. Each reply is logged as `response: <raw text>`

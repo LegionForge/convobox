@@ -69,7 +69,7 @@ from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.approval import ApprovalDetector
 from convobox.audio.playback import AudioPlayer
-from convobox.config import load_config
+from convobox.config import load_config, resolve_config_path, write_aec_estimate
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
@@ -901,6 +901,7 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
+    config_path = resolve_config_path(args.config)
     config = load_config(args.config)
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
@@ -980,15 +981,19 @@ async def run(args: argparse.Namespace) -> None:
     if config.audio.echo_cancellation:
         from convobox.audio.aec import EchoCanceller
 
-        canceller = EchoCanceller(delay_ms=config.audio.aec_delay_ms)
-        # A wrong delay hint is the #1 cause of weak in-room suppression
-        # (F1 in the 2026-07-11 UAT): Windows host APIs commonly buffer
-        # 100-500ms of output, dwarfing any fixed guess. Once both streams
-        # report their real latencies, estimate the true render-to-capture
-        # delay and apply it -- unless the user explicitly configured
-        # aec_delay_ms, in which case respect it but still LOG the
-        # estimate so UAT learns the right number.
-        delay_explicit = "aec_delay_ms" in config.audio.model_fields_set
+        # aec_delay_ms=None (the default) means auto-tune -- confirmed
+        # live (2026-07-15) that a stale/wrong FIXED hint (measured
+        # ~222ms vs a leftover 100ms) keeps WebRTC AEC3 from converging,
+        # so the assistant's own voice leaks into the mic and trips the
+        # barge-in overlap gate. _INITIAL_AEC_DELAY_MS is only the
+        # starting guess fed to APM before the real estimate lands on
+        # first playback -- set_delay() below replaces it immediately in
+        # the auto-tune case, same as before this was a sentinel.
+        _INITIAL_AEC_DELAY_MS = 100
+        delay_explicit = config.audio.aec_delay_ms is not None
+        canceller = EchoCanceller(
+            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS
+        )
         delay_estimated = False
 
         def _feed_reference(block, sample_rate) -> None:  # type: ignore[no-untyped-def]
@@ -1015,12 +1020,15 @@ async def run(args: argparse.Namespace) -> None:
                             "AEC delay auto-estimated: %dms (out %.0fms + in %.0fms + 10ms)",
                             estimate, float(out_lat) * 1000, float(in_lat) * 1000,
                         )
+                        write_aec_estimate(
+                            config_path, estimate, float(out_lat) * 1000, float(in_lat) * 1000
+                        )
             canceller.feed_reverse(block, sample_rate)
 
         player.on_block_played = _feed_reference
         log.info(
             "acoustic echo cancellation ON (delay hint %dms%s)",
-            config.audio.aec_delay_ms,
+            config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
             " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
         )
 
