@@ -281,6 +281,58 @@ class QueuedInterjection:
         return None
 
 
+class RecognitionErrorLadder:
+    """Tracks consecutive no-input/no-match recognition failures and
+    reports an escalation tier, per Google's Conversation Design error-
+    escalation guidance (docs/CONVERSATION-DESIGN-REFERENCES.md, section 6,
+    read from the real live docs pages 2026-07-14): "Users should
+    experience no more than 3 No Input or No Match errors in a row, after
+    which your Action should play the appropriate max error prompt and
+    exit."
+
+    "No input" = an utterance whose transcript is empty/whitespace-only --
+    STT heard nothing recognizable (live-confirmed in UAT 2026-07-09: a
+    VAD trigger on ambient/background audio yielded transcript=''). "No
+    match" = a non-empty transcript dropped by the
+    ``stt.min_language_probability`` gate -- STT heard something but
+    wasn't confident what. Any utterance that clears both checks resets
+    the streak to zero, regardless of what a LATER gate (overlap/echo/
+    backchannel/queue) does with it -- those all imply STT already
+    succeeded with confidence, a different concern from this ladder.
+
+    Pure counter, no side effects, same family as BargeInMonitor/
+    ListeningGate -- unit-testable independent of the mic loop. Currently
+    surfaced as a log marker only (``[ERROR-LADDER: tier N]``); this is
+    deliberately NOT wired to speak a reprompt or change any gate's
+    behavior -- what to say at each tier (or whether to say anything at
+    all) is a real product decision, same caution as
+    ``UtteranceSegmenter.was_forced``'s log-only wiring (PR #69).
+    """
+
+    def __init__(self, max_tier: int = 3) -> None:
+        if max_tier < 1:
+            raise ValueError(f"max_tier must be >= 1, got {max_tier}")
+        self.max_tier = max_tier
+        self._consecutive = 0
+
+    @property
+    def tier(self) -> int:
+        """0 = no active streak. 1..max_tier = the current streak's
+        escalation tier, capped at max_tier (matching Google's "play the
+        max error prompt" plateau rather than growing unbounded)."""
+        return min(self._consecutive, self.max_tier)
+
+    def observe_failure(self) -> int:
+        """Call on a no-input or no-match event. Returns the new tier."""
+        self._consecutive += 1
+        return self.tier
+
+    def reset(self) -> None:
+        """Call on any utterance that cleared both the no-input and
+        no-match checks."""
+        self._consecutive = 0
+
+
 class ListeningGate:
     """Tracks the paused (wake-word-only) listening state (docs/DESIGN-barge-in.md,
     "Pause/resume listening").
@@ -842,6 +894,7 @@ async def run(args: argparse.Namespace) -> None:
         tier_responses=config.interaction.tier_responses,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
+    error_ladder = RecognitionErrorLadder()
 
     log.info(
         "backend=%s  voice=%s  safeword=%r  pid=%d",
@@ -1058,6 +1111,20 @@ async def run(args: argparse.Namespace) -> None:
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
                 if not is_hard_stop:
+                    # No-input (Google Conversation Design's term, see
+                    # RecognitionErrorLadder's docstring): STT heard nothing
+                    # recognizable at all. Checked before every other gate --
+                    # empty text can't match a wake word/pause phrase/gate
+                    # condition anyway, and previously flowed silently all
+                    # the way to Orchestrator.handle_transcript's own empty
+                    # guard with no log line at all. Now observable.
+                    if not text.strip():
+                        tier = error_ladder.observe_failure()
+                        log.info(
+                            "dropped (no input, STT heard nothing recognizable) "
+                            "[ERROR-LADDER: tier %d]", tier,
+                        )
+                        continue
                     # Pause/resume gate runs before every other gate, same
                     # reasoning as the safeword: while paused, NOTHING except
                     # the wake word should reach the overlap/echo/confidence
@@ -1144,13 +1211,23 @@ async def run(args: argparse.Namespace) -> None:
                         )
                         continue
                     if result.language_probability < config.stt.min_language_probability:
+                        tier = error_ladder.observe_failure()
                         log.info(
-                            "dropped low-confidence transcript=%r lang=%s (%.2f < %.2f)",
+                            "dropped low-confidence transcript=%r lang=%s (%.2f < %.2f) "
+                            "[ERROR-LADDER: tier %d]",
                             text, result.language,
                             result.language_probability, config.stt.min_language_probability,
+                            tier,
                         )
                         continue
 
+                # Reached only once STT has cleared both no-input and
+                # no-match (or the safeword matched, an even stronger
+                # signal STT worked) -- resets the consecutive-failure
+                # streak regardless of what a later gate (overlap/echo/
+                # backchannel/queue) does with this utterance, since those
+                # all imply recognition already succeeded.
+                error_ladder.reset()
                 log.info(
                     "transcript=%r lang=%s (%.2f) dec=%.2f busy=%s%s%s%s",
                     text, result.language, result.language_probability,

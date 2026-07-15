@@ -83,6 +83,7 @@ class FieldSpec:
         "float",
         "bool",
         "choice",
+        "device",
         "list_str",
         "command",
     ]
@@ -150,8 +151,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         key="audio",
         label="Audio",
         fields=(
-            FieldSpec("audio", "input_device", "Input device", "optional_str", help_text="Optional capture device name or index; leave unset to use the system default."),
-            FieldSpec("audio", "output_device", "Output device", "optional_str", help_text="Optional playback device name or index; use the full host-API-qualified name when pinning a Windows device."),
+            FieldSpec("audio", "input_device", "Input device", "device", help_text="Space/Left/Right cycles real discovered microphones (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
+            FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
             FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
             FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "int", help_text="Estimated render-to-capture delay in milliseconds. Leave this near the default unless live testing suggests a better value."),
@@ -369,7 +370,12 @@ def _parse_value(spec: FieldSpec, raw: str, current: Any) -> Any:
         if not text:
             return current
         return [item.strip() for item in text.split(",") if item.strip()]
-    if spec.kind == "optional_str":
+    if spec.kind in ("optional_str", "device"):
+        # device's cycled-to-sentinel case (_SYSTEM_DEFAULT -> None) is
+        # handled by the caller before this is ever reached (see
+        # _edit_value_interactive) -- this branch only sees typed text, so
+        # it can mirror optional_str's convention exactly: '-' clears,
+        # empty keeps current, unchanged.
         if text == "-":
             return None
         if not text:
@@ -380,24 +386,73 @@ def _parse_value(spec: FieldSpec, raw: str, current: Any) -> Any:
     return text
 
 
-def _choice_index(spec: FieldSpec, current: Any) -> int:
-    if not spec.choices:
-        return -1
+# The device picker's "leave unset" choice. Deliberately NOT "" -- an empty
+# buffer already means something else in the edit modal (user backspaced
+# everything / never typed anything -> _parse_value's "keep current"
+# convention, same as every other optional_str-shaped field). Using a
+# visually distinct, unambiguous sentinel means cycling here vs. typing an
+# empty buffer can never be confused with each other.
+_SYSTEM_DEFAULT = "(system default)"
+
+
+def _device_choices(kind: Literal["input", "output"]) -> list[str]:
+    """Real, deduped device names for the picker.
+
+    Same discovery/dedup logic as `python scripts/audio_devices.py --setup`
+    (collect_devices + dedupe_devices, imported and called directly, not
+    reimplemented) -- so the choices offered here exactly match what that
+    tool would suggest. `_SYSTEM_DEFAULT` is always first so cycling can
+    return to "leave unset". Device enumeration must never crash the TUI --
+    if sounddevice/PortAudio can't be queried for any reason, degrade to
+    just the default sentinel rather than raising into the render loop.
+    """
     try:
-        return spec.choices.index(current)
+        import sounddevice as sd
+
+        import audio_devices as ad
+    except Exception:  # noqa: BLE001
+        return [_SYSTEM_DEFAULT]
+    try:
+        devices = ad.dedupe_devices(ad.collect_devices(sd, kind))
+    except Exception:  # noqa: BLE001
+        return [_SYSTEM_DEFAULT]
+    return [_SYSTEM_DEFAULT] + [f"{d['name']}, {d['hostapi']}" for d in devices]
+
+
+def _choices_for(spec: FieldSpec) -> tuple[str, ...]:
+    """The live choice list for a field -- static for `choice` fields,
+    freshly enumerated (real connected devices) for `device` fields.
+    """
+    if spec.kind == "device":
+        kind: Literal["input", "output"] = "input" if spec.key == "input_device" else "output"
+        return tuple(_device_choices(kind))
+    return spec.choices
+
+
+def _choice_index(spec: FieldSpec, current: Any) -> int:
+    choices = _choices_for(spec)
+    if not choices:
+        return -1
+    # Device fields are str | None; None maps to _SYSTEM_DEFAULT (always
+    # index 0, see _device_choices) so cycling from unset advances to the
+    # first real device instead of appearing to do nothing.
+    lookup = current if current is not None else _SYSTEM_DEFAULT
+    try:
+        return choices.index(lookup)
     except ValueError:
-        text = str(current).lower()
-        for index, choice in enumerate(spec.choices):
+        text = str(lookup).lower()
+        for index, choice in enumerate(choices):
             if choice.lower() == text:
                 return index
     return -1
 
 
 def _cycle_choice(spec: FieldSpec, current: Any, delta: int) -> str:
-    if not spec.choices:
+    choices = _choices_for(spec)
+    if not choices:
         raise ValueError("no choices configured")
     idx = _choice_index(spec, current)
-    return spec.choices[(idx + delta) % len(spec.choices)]
+    return choices[(idx + delta) % len(choices)]
 
 
 def _read_leading_header(path: Path) -> list[str]:
@@ -562,6 +617,54 @@ async def probe_backend(config: AppConfig) -> str:
     return f"Backend probe started for {config.backend.name!r}"
 
 
+async def probe_audio(config: AppConfig) -> str:
+    """Play a short tone on the configured speaker; record + meter a short
+    sample from the configured mic.
+
+    Reuses scripts/audio_devices.py's own device-resolution, tone, and
+    level functions directly (collect_devices/resolve_spec/play_test_tone/
+    record_test/level_meter/format_level) -- the same logic
+    `python scripts/audio_devices.py --setup` uses, not a reimplementation
+    -- shortened for a quick in-TUI check and silenced (that script is a
+    CLI tool that prints; every other probe here reports through
+    state.status, not stdout, so stray prints would flicker across the
+    render loop until the next redraw wipes them).
+    """
+    import io
+
+    import sounddevice as sd
+
+    import audio_devices as ad
+
+    results: list[str] = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_devices = ad.collect_devices(sd, "output")
+        if config.audio.output_device:
+            out_idx, out_err = ad.resolve_spec(config.audio.output_device, out_devices)
+        else:
+            out_idx, out_err = ad._default_index(sd, "output"), None
+        if out_idx is not None:
+            name = sd.query_devices(out_idx)["name"]
+            ad.play_test_tone(sd, out_idx, seconds=0.6)
+            results.append(f"speaker OK: played 0.6s tone on {name!r}")
+        else:
+            results.append(f"speaker: {out_err or 'no device found'}")
+
+        in_devices = ad.collect_devices(sd, "input")
+        if config.audio.input_device:
+            in_idx, in_err = ad.resolve_spec(config.audio.input_device, in_devices)
+        else:
+            in_idx, in_err = ad._default_index(sd, "input"), None
+        if in_idx is not None:
+            audio = ad.record_test(sd, in_idx, seconds=1.2)
+            rms_db, peak_db = ad.level_meter(audio)
+            results.append(f"mic: {ad.format_level(rms_db, peak_db)}")
+        else:
+            results.append(f"mic: {in_err or 'no device found'}")
+
+    return " | ".join(results)
+
+
 def _section_summary(config: AppConfig) -> list[str]:
     report = validate_config(config)
     lines = [
@@ -591,6 +694,8 @@ def _section_tabs(state: TuiState, width: int) -> str:
 def _field_hint(spec: FieldSpec) -> str:
     if spec.kind == "choice":
         return f"choices: {', '.join(spec.choices)}"
+    if spec.kind == "device":
+        return "Space/Left/Right cycles discovered devices, or type a name/index ('-' to clear)"
     if spec.kind == "command":
         return "enter command line text, or '-' to clear"
     if spec.kind == "list_str":
@@ -746,10 +851,19 @@ def _draw_modal(
 
 
 def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
-    buffer = _format_value(current)
+    is_pickable = spec.kind in ("choice", "device")
+    # Device fields are str | None; _format_value(None) is the display
+    # string "(unset)", which isn't in _choices_for's list and would break
+    # cycling/index-lookup. Seed the buffer with the picker's own sentinel
+    # instead so an unset device field starts aligned with choice index 0,
+    # same as a "choice" field (which is never None) already is.
+    if spec.kind == "device" and current is None:
+        buffer = _SYSTEM_DEFAULT
+    else:
+        buffer = _format_value(current)
     hint = spec.help_text or _field_hint(spec)
     prompt = f"Editing {spec.section}.{spec.key}"
-    if spec.kind == "choice":
+    if is_pickable:
         detail_lines = [
             f"Current: {_format_value(current)}",
             hint,
@@ -757,22 +871,29 @@ def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
         ]
     else:
         detail_lines = [f"Current: {_format_value(current)}", hint]
-    choice_options = list(spec.choices) if spec.kind == "choice" else None
+    choice_options = list(_choices_for(spec)) if is_pickable else None
     _draw_modal(
         f"Edit {spec.label}",
         prompt,
         detail_lines,
         buffer,
         choice_options=choice_options,
-        choice_value=buffer if spec.kind == "choice" else None,
+        choice_value=buffer if is_pickable else None,
     )
     while True:
         key = read_key()
         if key == "ESC":
             return False, current
         if key == "ENTER":
-            return True, _parse_value(spec, buffer, current)
-        if spec.kind == "choice":
+            accepted = buffer
+            if spec.kind == "device" and buffer == _SYSTEM_DEFAULT:
+                # Unambiguous: this only happens via cycling (typing never
+                # produces this exact sentinel text), so it always means
+                # "the user explicitly picked system default," never
+                # _parse_value's "buffer is empty, keep current" case.
+                return True, None
+            return True, _parse_value(spec, accepted, current)
+        if is_pickable:
             if key in {"LEFT", "UP"}:
                 buffer = _cycle_choice(spec, buffer, -1)
                 _draw_modal(
@@ -805,7 +926,7 @@ def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
             [f"Current: {_format_value(current)}", hint],
             buffer,
             choice_options=choice_options,
-            choice_value=buffer if spec.kind == "choice" else None,
+            choice_value=buffer if is_pickable else None,
         )
 
 
@@ -937,19 +1058,19 @@ def _toggle_or_cycle(state: TuiState) -> None:
         state.status = "nothing to change in this section"
         return
     current = _get_value(state.working, spec)
-    new_value: bool | str
+    new_value: bool | str | None
     if spec.kind == "bool":
         new_value = not bool(current)
-    elif spec.kind == "choice":
-        choices = spec.choices
-        if not choices:
+    elif spec.kind in ("choice", "device"):
+        try:
+            new_value = _cycle_choice(spec, current, 1)
+        except ValueError:
             state.status = "no choices configured"
             return
-        try:
-            idx = choices.index(current)
-        except ValueError:
-            idx = -1
-        new_value = choices[(idx + 1) % len(choices)]
+        if spec.kind == "device" and new_value == _SYSTEM_DEFAULT:
+            # The underlying field is str | None; unset means None, not
+            # the display sentinel.
+            new_value = None
     else:
         state.status = "space toggles booleans and cycles choices only"
         return
@@ -1038,6 +1159,8 @@ async def _test_state(state: TuiState) -> None:
             state.status = await probe_stt(state.working)
         elif section == "backend":
             state.status = await probe_backend(state.working)
+        elif section == "audio":
+            state.status = await probe_audio(state.working)
         else:
             state.status = f"{section} configuration validated"
     except Exception as exc:  # noqa: BLE001

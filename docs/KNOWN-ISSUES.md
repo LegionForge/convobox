@@ -56,6 +56,20 @@ turns out to be insufficient (e.g. recurring often enough within a single
 session to be disruptive) during a longer live-mic UAT pass than this
 session's own testing has covered.
 
+**Follow-up (2026-07-14): the reload used to make things worse under
+load, now fixed.** Found live while investigating an unrelated UAT log
+that surfaced an unexpected `huggingface.co` call: `WhisperModel(...)`
+construction makes a real network request by default (a model-revision
+freshness check) *even when the model is already fully cached* -- and
+since every allocator-failure recovery above calls the exact same
+construction path, a session recurring the native-allocator bug several
+times would ALSO re-attempt that network call on every single recovery,
+right when things are already degraded, with no guaranteed timeout.
+`_build_whisper_model()` now tries `local_files_only=True` first,
+falling back to the network only if nothing is cached yet (first-time
+setup) -- every recovery after the first successful load is now fully
+offline. See the commit message on the fix for verification details.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")

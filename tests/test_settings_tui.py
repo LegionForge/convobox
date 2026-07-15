@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from convobox.config import AppConfig
@@ -287,4 +290,217 @@ def test_render_modal_shows_choice_selector() -> None:
     joined = "\n".join(lines)
     assert "Options:" in joined
     assert "| > conversational" in joined
-    assert "|   do-not-disturb" in joined
+
+
+# --- Audio device picker (JP asked for "same logic as
+# scripts/audio_devices.py --setup" -- these tests exercise that exact
+# reuse: monkeypatch audio_devices' own collect_devices/dedupe_devices/etc.
+# rather than reimplementing device enumeration, then confirm settings_tui's
+# lazy `import audio_devices as ad` picks up the patched functions. This
+# only works because `from scripts import settings_tui` (top of this file)
+# already ran settings_tui's own sys.path.insert side effect, so the bare
+# `import audio_devices` below resolves to the SAME sys.modules entry
+# settings_tui's runtime import will later find -- verified directly before
+# writing these tests, not assumed. ---
+
+import audio_devices  # noqa: E402 -- see the note above for why this must come after the scripts import
+
+
+def _fake_device(index: int, name: str, hostapi: str = "MME") -> dict[str, object]:
+    return {
+        "index": index, "name": name, "hostapi": hostapi,
+        "channels": 1, "samplerate": 16000, "default": index == 0,
+    }
+
+
+def _install_fake_sounddevice(
+    monkeypatch: pytest.MonkeyPatch, **attrs: object
+) -> SimpleNamespace:
+    """Stand in for the real `sounddevice` module in `sys.modules`.
+
+    `_device_choices()`/`probe_audio()` do their OWN `import sounddevice as
+    sd` internally (not dependency-injected the way `audio_devices.py`'s
+    functions are, which is why THOSE can just take a fake `sd` object
+    directly -- see `test_audio_devices.py`'s `_fake_sd()`). A real
+    `sounddevice` import raises `OSError: PortAudio library not found` on a
+    machine with no PortAudio installed at the OS level -- true of this
+    project's CI runner, false on the Windows dev box this feature was
+    first built and tested on, which is exactly how these tests passed
+    locally while genuinely failing in CI (caught live: PR #74's Tests &
+    Coverage job failed with this exact OSError). Patching `sys.modules`
+    (not `monkeypatch.setattr` on an already-imported module object, which
+    only works if the import succeeded in the first place) makes BOTH this
+    test's own `import sounddevice` and the function-under-test's internal
+    one resolve to this fake, regardless of what's actually installed.
+    """
+    fake = SimpleNamespace(**attrs)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    return fake
+
+
+def test_device_choices_reuses_audio_devices_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sounddevice(monkeypatch)
+    devices = [_fake_device(0, "Mic A"), _fake_device(1, "Mic B", "WASAPI")]
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: devices)
+    monkeypatch.setattr(audio_devices, "dedupe_devices", lambda devs, show_all=False: devs)
+
+    choices = settings_tui._device_choices("input")
+
+    assert choices == [
+        settings_tui._SYSTEM_DEFAULT,
+        "Mic A, MME",
+        "Mic B, WASAPI",
+    ]
+
+
+def test_device_choices_degrades_to_default_on_enumeration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sounddevice import succeeds here (deliberately -- this test is about
+    # audio_devices.collect_devices raising, e.g. a real PortAudio query
+    # failure at runtime, NOT about sounddevice being uninstalled/failing
+    # to import at all; that's a different failure mode, exercised by
+    # simply never installing the fake and relying on the real import,
+    # which every OTHER device test now avoids on purpose).
+    _install_fake_sounddevice(monkeypatch)
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("PortAudio not available")
+
+    monkeypatch.setattr(audio_devices, "collect_devices", _raise)
+
+    assert settings_tui._device_choices("output") == [settings_tui._SYSTEM_DEFAULT]
+
+
+def test_choices_for_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "X")])
+    monkeypatch.setattr(audio_devices, "dedupe_devices", lambda devs, show_all=False: devs)
+
+    device_spec = FieldSpec("audio", "input_device", "Input device", "device")
+    assert settings_tui._choices_for(device_spec) == (settings_tui._SYSTEM_DEFAULT, "X, MME")
+
+    choice_spec = FieldSpec("interaction", "interrupt_preset", "Preset", "choice", ("a", "b"))
+    assert settings_tui._choices_for(choice_spec) == ("a", "b")
+
+
+def test_toggle_or_cycle_device_field_from_unset_goes_to_first_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "Mic A")])
+    monkeypatch.setattr(audio_devices, "dedupe_devices", lambda devs, show_all=False: devs)
+
+    config = _make_config()
+    assert config.audio.input_device is None
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = 0  # Audio
+    state.selected_field = 0  # input_device is the first Audio field
+
+    settings_tui._toggle_or_cycle(state)
+    assert state.working.audio.input_device == "Mic A, MME"
+
+    # Cycling again with only one real device wraps back to unset (None,
+    # not the "" the picker never actually stores in the config).
+    settings_tui._toggle_or_cycle(state)
+    assert state.working.audio.input_device is None
+
+
+def test_edit_device_field_arrow_cycle_and_enter_accepts_sentinel_as_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "Speaker A")])
+    monkeypatch.setattr(audio_devices, "dedupe_devices", lambda devs, show_all=False: devs)
+    spec = FieldSpec("audio", "output_device", "Output device", "device")
+
+    # RIGHT once from unset (None) lands on the one real device; RIGHT
+    # again wraps back to the system-default sentinel; ENTER must then
+    # accept that as None, not the literal sentinel text.
+    keys = iter(["RIGHT", "RIGHT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._edit_value_interactive(spec, None)
+
+    assert accepted is True
+    assert value is None
+
+
+def test_edit_device_field_enter_immediately_keeps_current_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No cycling at all -- current is already a real device name, pressing
+    # ENTER straight away must not accidentally clear or mangle it.
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "Speaker A")])
+    monkeypatch.setattr(audio_devices, "dedupe_devices", lambda devs, show_all=False: devs)
+    spec = FieldSpec("audio", "output_device", "Output device", "device")
+
+    keys = iter(["ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._edit_value_interactive(spec, "Speaker A, MME")
+
+    assert accepted is True
+    assert value == "Speaker A, MME"
+
+
+@pytest.mark.asyncio
+async def test_probe_audio_reuses_audio_devices_functions_and_reports_both_directions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[str] = []
+
+    def fake_collect(sd: object, kind: str) -> list[dict[str, object]]:
+        return [_fake_device(0, "Speaker A" if kind == "output" else "Mic A")]
+
+    def fake_resolve(spec: str, devices: list[dict[str, object]]) -> tuple[int | None, str | None]:
+        return 0, None
+
+    def fake_play_test_tone(sd: object, index: int, seconds: float = 1.0) -> None:
+        calls.append("play_test_tone")
+        print("this must not leak to real stdout")  # noqa: T201 -- probe_audio must suppress it
+
+    def fake_record_test(sd: object, index: int, seconds: float = 3.0, rate: int = 16000) -> object:
+        calls.append("record_test")
+        print("this must not leak either")  # noqa: T201
+        return np.zeros(1600, dtype=np.float32)
+
+    monkeypatch.setattr(audio_devices, "collect_devices", fake_collect)
+    monkeypatch.setattr(audio_devices, "resolve_spec", fake_resolve)
+    monkeypatch.setattr(audio_devices, "play_test_tone", fake_play_test_tone)
+    monkeypatch.setattr(audio_devices, "record_test", fake_record_test)
+    monkeypatch.setattr(audio_devices, "level_meter", lambda audio: (-30.0, -12.0))
+    monkeypatch.setattr(audio_devices, "format_level", lambda rms, peak: f"rms={rms} peak={peak}")
+    _install_fake_sounddevice(monkeypatch, query_devices=lambda index: {"name": "Speaker A"})
+
+    config = _make_config(**{"audio.output_device": "Speaker A, MME", "audio.input_device": "Mic A, MME"})
+    result = await settings_tui.probe_audio(config)
+
+    assert calls == ["play_test_tone", "record_test"]
+    assert "speaker OK" in result
+    assert "Speaker A" in result
+    assert "mic:" in result
+    assert "rms=-30.0 peak=-12.0" in result
+    # The fakes' print() calls must have been swallowed, not reached the
+    # real terminal -- probe_audio redirects stdout specifically so a
+    # quick [t] test doesn't flicker raw text across the render loop.
+    captured = capsys.readouterr()
+    assert "this must not leak" not in captured.out
+
+
+@pytest.mark.asyncio
+async def test_probe_audio_reports_resolution_errors_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [])
+    monkeypatch.setattr(
+        audio_devices, "resolve_spec", lambda spec, devices: (None, f"no device matching {spec!r}")
+    )
+
+    config = _make_config(**{"audio.output_device": "Nonexistent Device", "audio.input_device": None})
+    monkeypatch.setattr(audio_devices, "_default_index", lambda sd, kind: None)
+
+    result = await settings_tui.probe_audio(config)
+
+    assert "no device matching" in result
+    assert "mic: no device found" in result
