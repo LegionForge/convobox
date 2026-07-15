@@ -99,6 +99,22 @@ Implements in `src/convobox/vad/segmenter.py`. Config: `threshold=0.5`,
   spoken/TUI notification) -- note during UAT whether that's sufficient or
   whether a spoken cue (`docs/CONVERSATION-DESIGN-REFERENCES.md`'s
   LiveKit-research gap) would actually be needed in practice.
+- **[V6] `RecognitionErrorLadder` tracks consecutive no-input/no-match
+  failures** (`scripts/run_convobox.py`, per Google's Conversation Design
+  error-escalation guidance in `docs/CONVERSATION-DESIGN-REFERENCES.md`
+  section 6). Trigger a no-input event (stay silent long enough to make
+  the VAD fire on room noise, or cough sharply) 2-3 times in a row and
+  confirm the log grows `dropped (no input, STT heard nothing
+  recognizable) [ERROR-LADDER: tier N]` with N incrementing each time, up
+  to tier 3 where it plateaus rather than growing further. Then say
+  something normally and confirm the NEXT no-input event starts back at
+  tier 1 (the streak reset). Separately, with `stt.min_language_probability`
+  raised (e.g. 0.6) to make low-confidence drops easy to trigger, confirm
+  `dropped low-confidence transcript=...` lines also carry the same
+  `[ERROR-LADDER: tier N]` marker and share the same counter/reset with
+  no-input events. Like V5, this is purely a log-line signal for now --
+  no reprompt is spoken at any tier (a real product decision, deliberately
+  not made blind -- see the design reference doc's own note on this gap).
 
 ## 3. Safeword / hard stop
 
