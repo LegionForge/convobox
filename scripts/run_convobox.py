@@ -1131,6 +1131,20 @@ async def run(args: argparse.Namespace) -> None:
         was_playing = False
         async for chunk in mic.stream():
             processed = canceller.process(chunk) if canceller is not None else chunk
+            if tui_state is not None:
+                # Post-AEC (if on): the signal VAD/STT actually sees, not
+                # the raw pre-cancellation mic. Live per-chunk RMS -- no
+                # smoothing (see docs/UAT-checklist.md [U7]'s note that
+                # this hasn't been watched live; if it reads as too
+                # flickery in practice, that's the first thing to add,
+                # not something to guess at blind here). Speaker-side
+                # level is a deliberately deferred candidate: it would
+                # need a cross-thread write from AudioPlayer.on_block_played
+                # (the playback THREAD, not this async loop), more care
+                # than this same-thread mic update needs.
+                import audio_devices as ad
+
+                tui_state.mic_level_db, _ = ad.level_meter(processed)
             playing = player.is_playing()
             if canceller is not None and was_playing and not playing:
                 # Response just finished: one stats line per response.

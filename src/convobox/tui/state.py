@@ -55,6 +55,12 @@ class ConversationTuiState:
     - heartbeat_elapsed_s: continuous silent-busy seconds from
       WorkingIndicator.silent_busy_s, None when not silently busy (backend
       idle, or audio is already playing its own feedback).
+    - mic_level_db: live mic RMS in dBFS, updated per mic chunk (post-AEC
+      if echo cancellation is on -- the signal VAD/STT actually sees).
+      None until the first chunk arrives. Speaker-side live level is a
+      deliberately deferred candidate (see run_convobox.py's comment at
+      the wiring site) -- it would need a cross-thread write from the
+      playback callback, more care than mic level's same-thread update.
     """
 
     turns: list[TranscriptTurn] = field(default_factory=list)
@@ -67,6 +73,7 @@ class ConversationTuiState:
     aec_enabled: bool = False
     aec_verdict: str = ""
     heartbeat_elapsed_s: float | None = None
+    mic_level_db: float | None = None
 
     def add_turn(self, speaker: Speaker, text: str, timestamp: str | None = None) -> None:
         self.turns.append(

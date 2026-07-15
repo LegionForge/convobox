@@ -518,6 +518,24 @@ section is the live-mic pass that closes the gap.
   silently-busy stretch (appears after ~10s, turns yellow at 10s, red
   at 60s, disappears the instant audio starts playing or the backend
   goes idle) without visibly lagging the 0.1s redraw.
+- **[U8] Live mic level (dBFS), added to the same diagnostics line
+  (2026-07-15).** `mic: -XXdBFS`, updated per mic chunk (post-AEC if
+  echo cancellation is on -- the same signal VAD/STT sees), reusing
+  `audio_devices.level_meter()`'s existing RMS math. Deliberately NOT
+  smoothed -- unit-tested and a real rendered-frame smoke test confirm
+  the number appears/formats correctly, but the raw per-chunk value has
+  never been watched live. If it reads as too flickery to be useful in
+  practice, that's the first improvement to make (a decay-based VU-meter
+  smoothing, same idea `audio_devices.py --setup`'s own live meter
+  already uses) -- not something to guess at blind here. Speaker-side
+  live level was deliberately NOT built this pass: it would need a
+  cross-thread write from `AudioPlayer.on_block_played` (the playback
+  THREAD, not the async mic loop), more care than this same-thread
+  update needed -- noted as a follow-up candidate, not attempted
+  half-verified. Confirm during a live run: the number moves with real
+  speech/silence, tracks roughly what `audio_devices.py --test-input`
+  reports for the same device, and reads AEC-cancelled (much quieter)
+  during the assistant's own playback when AEC is on and converged.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 

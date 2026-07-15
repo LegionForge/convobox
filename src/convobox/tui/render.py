@@ -134,6 +134,8 @@ def _diagnostics_line(state: ConversationTuiState, width: int) -> str:
         parts.append(f"AEC: on{' ' + tag if tag else ''}")
     else:
         parts.append("AEC: off")
+    if state.mic_level_db is not None:
+        parts.append(f"mic: {state.mic_level_db:.0f}dBFS")
     if state.heartbeat_elapsed_s is not None:
         color = _heartbeat_color(state.heartbeat_elapsed_s)
         parts.append(f"{color}still working: {state.heartbeat_elapsed_s:.0f}s{_RESET}")

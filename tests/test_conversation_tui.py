@@ -186,6 +186,18 @@ def test_diagnostics_line_shows_heartbeat_elapsed_seconds() -> None:
     assert "still working: 42s" in lines[1]
 
 
+def test_diagnostics_line_omits_mic_level_before_first_chunk() -> None:
+    state = ConversationTuiState(started=0.0, mic_level_db=None)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "dBFS" not in lines[1]
+
+
+def test_diagnostics_line_shows_mic_level() -> None:
+    state = ConversationTuiState(started=0.0, mic_level_db=-42.3)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "mic: -42dBFS" in lines[1]
+
+
 def test_heartbeat_color_thresholds_match_run_convobox_pys_own() -> None:
     # Mirrors scripts/run_convobox.py's _heartbeat_color boundary tests
     # (test_barge_in.py) -- must stay in sync with that copy.

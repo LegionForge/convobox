@@ -25,8 +25,11 @@ minor versions carry feature and behavior changes.
   last response's compact verdict tag once available), and, only while
   silently busy, a green/yellow/red `still working: Ns` heartbeat
   (`WorkingIndicator.silent_busy_s`, a new continuous counterpart to
-  `observe()`'s sparse notification-tick return value). See
-  `docs/UAT-checklist.md` **[U7]**.
+  `observe()`'s sparse notification-tick return value). Also shows a
+  live mic level in dBFS (post-AEC, reusing `audio_devices.level_meter()`'s
+  existing math) on the same line -- speaker-side level deliberately
+  deferred (would need a cross-thread write from the playback callback).
+  See `docs/UAT-checklist.md` **[U7]**/**[U8]**.
 - **Overlap gate's grace window now widens after a poorly-cancelled response**
   (`scripts/run_convobox.py`). `Attribution: Claude Code; Provider:
   Anthropic; Model: claude-opus-4-8; Scope: this entry.` The `[E8]`
