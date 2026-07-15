@@ -396,3 +396,42 @@ def test_codex_adapter_resolves_windows_cmd_shim(monkeypatch: pytest.MonkeyPatch
 
     adapter = CodexAdapter(["codex"])
     assert adapter._command == ["C:/bin/codex.cmd"]
+
+
+def test_resolve_command_never_consults_which_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PATHEXT/.cmd-shim resolution is a Windows-only concern; on other
+    # platforms `codex` on PATH is directly executable, no guessing
+    # needed. Asserts which() is never even CALLED, not just that the
+    # final result happens to be unchanged -- a stronger check than
+    # comparing output alone would give.
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(mod.os, "name", "posix", raising=False)
+
+    def _unexpected_which(name: str) -> str | None:
+        raise AssertionError(f"shutil.which({name!r}) should not be called on non-Windows")
+
+    monkeypatch.setattr(mod.shutil, "which", _unexpected_which)
+
+    adapter = CodexAdapter(["codex"])
+    assert adapter._command == ["codex"]
+
+
+def test_resolve_command_falls_back_to_bare_name_when_nothing_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # codex isn't found anywhere on PATH under any of the tried names --
+    # passes the original command through unchanged (including any extra
+    # args) rather than raising here; the real FileNotFoundError surfaces
+    # naturally when asyncio.create_subprocess_exec actually tries to
+    # spawn it, matching how a missing claude-code/opencode command is
+    # already handled elsewhere (Settings TUI's own shutil.which warning).
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    adapter = CodexAdapter(["codex", "--flag"])
+    assert adapter._command == ["codex", "--flag"]
