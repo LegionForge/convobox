@@ -455,22 +455,26 @@ findings:
   reversible/self-evident vs. irreversible/destructive line is the same
   line ConvoBox already drew, not a new idea to import.
 - **The No-Input / No-Match error-escalation ladder is a genuinely new,
-  adoptable pattern — ConvoBox doesn't have this today.** *"Users should
-  experience no more than 3 No Input or No Match errors in a row, after
-  which your Action should play the appropriate max error prompt and
-  exit."* The ladder itself: 1st attempt — brief rephrase, no
+  adoptable pattern — ConvoBox didn't have this when first surveyed.**
+  *"Users should experience no more than 3 No Input or No Match errors in
+  a row, after which your Action should play the appropriate max error
+  prompt and exit."* The ladder itself: 1st attempt — brief rephrase, no
   over-explaining; 2nd attempt — escalate with examples/options (Google's
   own note: examples work better than instructions, since they model the
   expected response implicitly); max attempt (2-3) — end gracefully with
   a concrete next step, never a vague "try again later." **Adopt →**
-  ConvoBox's `min_language_probability` gate today just silently drops a
-  low-confidence transcript with no user-facing signal and no escalation
-  state — a real gap next to this pattern. A future improvement: track
-  consecutive low-confidence/empty-transcript counts per session, and
-  after N in a row, speak something (not just log it) rather than sitting
-  in silence indefinitely from the user's perspective. Not built this
-  cycle — flagged as a concrete, scoped roadmap candidate, not vague
-  "add error handling."
+  the counting half is now built: `RecognitionErrorLadder`
+  (`scripts/run_convobox.py`) tracks consecutive no-input (empty
+  transcript) and no-match (`min_language_probability`-gated) failures,
+  capped at tier 3 matching Google's own plateau, resetting the streak
+  the moment STT clears both checks. Surfaced today as a
+  `[ERROR-LADDER: tier N]` log marker only (`docs/UAT-checklist.md`
+  [V6]) — deliberately NOT wired to actually speak a rephrase/example/
+  graceful-exit at each tier yet, since what to say (or whether to say
+  anything at all, versus a TUI cue) is still a real product decision this
+  session keeps declining to guess at, same caution as `was_forced`'s
+  log-only wiring. That UX decision remains the open follow-up, not the
+  counting mechanism.
 
 **Amazon Alexa Design Guide (alexa.design/guide, developer.amazon.com/.../design).**
 Attempted the same live-read verification this cycle; the guide is
@@ -505,9 +509,11 @@ source-verified until it actually is.
 6. **Confirmation policy is validated, not new** (Google Conversation
    Design) — `ConfirmwordDetector`'s strict-vs-lightweight split already
    matches Google's irreversible/reversible line.
-7. **Error-escalation ladder is a real, scoped gap** (Google Conversation
-   Design) — low-confidence transcripts are silently dropped today with no
-   escalating user-facing signal; a future candidate, not built this cycle.
+7. **Error-escalation ladder counting is now built** (Google Conversation
+   Design) — `RecognitionErrorLadder` tracks consecutive no-input/no-match
+   failures, capped at tier 3, surfaced as a `[ERROR-LADDER: tier N]` log
+   marker. What to actually SAY at each tier (or whether to say anything)
+   remains an open product decision, deliberately not guessed at.
 8. **Corrected (2026-07-14): the monologue force-flush already exists**
    (`UtteranceSegmenter`'s `max_utterance_s` cap, PR #1/`4aa61ac`,
    2026-07-10) — this entry originally claimed it was still missing,
