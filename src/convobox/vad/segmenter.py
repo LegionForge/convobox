@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator
 
 import numpy as np
@@ -19,6 +20,20 @@ _SAMPLE_RATE = 16000
 # threshold does not chatter between speech and silence mid-utterance.
 _EXIT_HYSTERESIS = 0.15
 
+# Windows of raw audio kept from BEFORE a speech trigger and prepended once
+# one fires, so the very onset of speech isn't clipped while the VAD is
+# still building enough confidence to cross `threshold`. Google's Gemini
+# Live API independently validates this exact gap under the name
+# `prefix_padding_ms` (real primary-source docs, verified 2026-07-14):
+# "the amount of audio to include before speech is detected". 2 windows
+# (64ms) is a modest safety margin above Gemini's own ~20ms default, sized
+# to the granularity this segmenter can actually buffer at (whole 32ms
+# windows, not sub-window slices). Symmetric with the trailing-silence
+# padding this class already applies unconditionally -- not exposed as a
+# VADConfig field, same treatment as _EXIT_HYSTERESIS: an implementation
+# constant fixing a correctness gap, not a user-facing tuning knob.
+_PREFIX_PADDING_WINDOWS = 2
+
 
 class UtteranceSegmenter:
     """Turns a stream of 16kHz mono float32 audio chunks into utterances.
@@ -33,6 +48,13 @@ class UtteranceSegmenter:
     silence helps STT models avoid clipping the last phoneme), so callers
     should expect each utterance to run ~``min_silence_ms`` longer than the
     actual speech.
+
+    Also prepends ``_PREFIX_PADDING_WINDOWS`` of audio from just BEFORE a
+    speech trigger fires (see that constant's docstring) -- the mirror-image
+    fix for the START of an utterance: without it, the onset of speech
+    (e.g. the "s" in "stop") can be clipped while the VAD is still building
+    confidence, which matters most for exactly the phrases that must never
+    be misheard (the safeword).
     """
 
     def __init__(self, config: VADConfig | None = None) -> None:
@@ -43,7 +65,9 @@ class UtteranceSegmenter:
         self._min_speech_windows = _ms_to_windows(self._config.min_speech_ms)
         # In buffered windows (speech + silence + band), not speech windows:
         # the cap bounds memory and time-to-first-transcript, both of which
-        # grow with everything buffered, not just with confident speech.
+        # grow with everything buffered, not just with confident speech --
+        # this also means prefix-padding windows (below) count toward it,
+        # consistent with that same "everything buffered" rationale.
         self._max_run_windows = (
             None
             if self._config.max_utterance_s is None
@@ -56,6 +80,11 @@ class UtteranceSegmenter:
         self._speech_windows = 0
         self._trailing_silence_windows = 0
         self._last_forced = False
+        # Rolling window of pre-trigger audio, oldest evicted automatically.
+        # A maxlen of 0 makes every append/extend/clear below a correct
+        # no-op, so _PREFIX_PADDING_WINDOWS = 0 disables this cleanly with
+        # no separate branch.
+        self._pretrigger: deque[np.ndarray] = deque(maxlen=_PREFIX_PADDING_WINDOWS)
 
     @property
     def in_speech(self) -> bool:
@@ -133,9 +162,19 @@ class UtteranceSegmenter:
         if not self._triggered:
             if is_speech:
                 self._triggered = True
+                # Prepend buffered pre-trigger audio, THEN clear it -- not
+                # cleared-then-reused, so a max_utterance_s-forced split of
+                # continuous speech (which re-triggers on the very next
+                # window, with nothing having passed through the `else`
+                # branch below to refill this) correctly gets an empty
+                # buffer instead of stale audio from before the split.
+                self._speech.extend(self._pretrigger)
+                self._pretrigger.clear()
                 self._speech.append(window)
                 self._speech_windows = 1
                 self._trailing_silence_windows = 0
+            else:
+                self._pretrigger.append(window)
             return None
 
         self._speech.append(window)

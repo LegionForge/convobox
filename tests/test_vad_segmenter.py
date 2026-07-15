@@ -7,7 +7,7 @@ import pytest
 
 from convobox.config import VADConfig
 from convobox.vad import segmenter as segmenter_module
-from convobox.vad.segmenter import UtteranceSegmenter
+from convobox.vad.segmenter import _PREFIX_PADDING_WINDOWS, UtteranceSegmenter
 
 _WINDOW = 512
 # With the default VADConfig (min_silence_ms=500, min_speech_ms=250) at 16kHz:
@@ -283,6 +283,121 @@ def test_no_cap_preserves_unbounded_behavior(
     tail = seg.flush()
     assert tail is not None
     assert tail.shape[0] == 100 * _WINDOW
+
+
+def test_leading_silence_up_to_the_padding_cap_is_prepended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Exactly _PREFIX_PADDING_WINDOWS of silence before the trigger: all of
+    # it should be kept, none discarded.
+    speech_windows = 10
+    probs = (
+        [0.0] * _PREFIX_PADDING_WINDOWS
+        + [0.9] * speech_windows
+        + [0.0] * _MIN_SILENCE_WINDOWS
+    )
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    utterances = seg.feed(_windows(len(probs)))
+
+    assert len(utterances) == 1
+    expected = (_PREFIX_PADDING_WINDOWS + speech_windows + _MIN_SILENCE_WINDOWS) * _WINDOW
+    assert utterances[0].shape[0] == expected
+
+
+def test_leading_silence_beyond_the_padding_cap_is_evicted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # More silence precedes the trigger than the padding buffer holds: only
+    # the LAST _PREFIX_PADDING_WINDOWS windows (closest to the trigger) are
+    # kept, the older ones fall off the rolling buffer.
+    extra_silence = 5
+    speech_windows = 10
+    probs = (
+        [0.0] * (extra_silence + _PREFIX_PADDING_WINDOWS)
+        + [0.9] * speech_windows
+        + [0.0] * _MIN_SILENCE_WINDOWS
+    )
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    utterances = seg.feed(_windows(len(probs)))
+
+    assert len(utterances) == 1
+    # NOT (extra_silence + _PREFIX_PADDING_WINDOWS + ...) -- the extra
+    # leading silence must not appear in the emitted utterance at all.
+    expected = (_PREFIX_PADDING_WINDOWS + speech_windows + _MIN_SILENCE_WINDOWS) * _WINDOW
+    assert utterances[0].shape[0] == expected
+
+
+def test_no_leading_silence_prepends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Speech starts on the very first window fed (no pre-trigger context
+    # available at all) -- the padding buffer is empty, so this must behave
+    # exactly as before the padding feature existed.
+    speech_windows = 10
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    utterances = seg.feed(_windows(len(probs)))
+
+    assert len(utterances) == 1
+    assert utterances[0].shape[0] == (speech_windows + _MIN_SILENCE_WINDOWS) * _WINDOW
+
+
+def _tagged_windows(n: int) -> np.ndarray:
+    """n windows of 512 samples, every sample in window i equal to float(i) --
+    lets a test recover exactly which ORIGINAL window indices survived into
+    an emitted utterance (unlike `_windows()`'s all-ones fixture, where every
+    window is indistinguishable, so a length match alone can't prove which
+    windows -- old, stale ones or fresh ones -- actually ended up there)."""
+    return np.concatenate([np.full(_WINDOW, float(i), dtype=np.float32) for i in range(n)])
+
+
+def _window_indices(utterance: np.ndarray) -> list[int]:
+    return [int(utterance[i * _WINDOW]) for i in range(utterance.shape[0] // _WINDOW)]
+
+
+def test_forced_split_does_not_reuse_stale_prefix_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Leading silence pads the FIRST (capped) utterance correctly, but the
+    # cap-triggered second utterance re-triggers on the very next window of
+    # continuous speech -- nothing passes through the pre-trigger buffer in
+    # between, so it must be empty, not reusing the first utterance's
+    # already-consumed lead-up silence. NOTE: the cap (`max_run_windows`)
+    # bounds TOTAL buffered windows including padding (matches the existing
+    # "bounds memory... grows with everything buffered" rationale), so both
+    # utterances still come out to exactly `cap_windows` long either way --
+    # length alone can't distinguish stale-padding-reused from correct, only
+    # WHICH original windows ended up inside can, hence `_tagged_windows`.
+    cap_windows = 31
+    leading_silence = _PREFIX_PADDING_WINDOWS + 3
+    probs = [0.0] * leading_silence + [0.9] * 70
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    utterances = seg.feed(_tagged_windows(len(probs)))
+
+    assert len(utterances) == 2
+    assert utterances[0].shape[0] == cap_windows * _WINDOW
+    assert utterances[1].shape[0] == cap_windows * _WINDOW
+
+    first_indices = _window_indices(utterances[0])
+    second_indices = _window_indices(utterances[1])
+
+    # First utterance: the LAST _PREFIX_PADDING_WINDOWS silence windows
+    # (closest to the trigger -- indices 3,4, not 0,1) prepended, then real
+    # speech windows starting at `leading_silence`.
+    assert first_indices[:_PREFIX_PADDING_WINDOWS] == list(
+        range(leading_silence - _PREFIX_PADDING_WINDOWS, leading_silence)
+    )
+    assert first_indices[_PREFIX_PADDING_WINDOWS:] == list(
+        range(leading_silence, leading_silence + (cap_windows - _PREFIX_PADDING_WINDOWS))
+    )
+    # Second utterance: purely contiguous real speech windows immediately
+    # following the first utterance's -- none of the stale leading-silence
+    # indices (0..leading_silence-1) reappear.
+    first_real_speech_count = cap_windows - _PREFIX_PADDING_WINDOWS
+    second_start = leading_silence + first_real_speech_count
+    assert second_indices == list(range(second_start, second_start + cap_windows))
 
 
 def test_in_speech_reflects_run_state(monkeypatch: pytest.MonkeyPatch) -> None:

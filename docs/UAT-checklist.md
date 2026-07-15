@@ -99,6 +99,18 @@ Implements in `src/convobox/vad/segmenter.py`. Config: `threshold=0.5`,
   spoken/TUI notification) -- note during UAT whether that's sufficient or
   whether a spoken cue (`docs/CONVERSATION-DESIGN-REFERENCES.md`'s
   LiveKit-research gap) would actually be needed in practice.
+- **[V6] Pre-speech padding prevents onset clipping**
+  (`UtteranceSegmenter`'s `_PREFIX_PADDING_WINDOWS`, per
+  `docs/CONVERSATION-DESIGN-REFERENCES.md`'s Gemini Live API
+  `prefix_padding_ms` finding). Hard to A/B by ear directly, but worth a
+  specific listen during safeword UAT ([S1]-[S3]): say the safeword
+  crisply, right after a pause (cold start, no vocal warm-up into it --
+  the scenario most likely to clip an onset before this fix). If a hard
+  stop is ever missed or mis-transcribed with a clean, unambiguous
+  "stop stop stop" clearly spoken, note whether the transcript looks
+  truncated at the start (e.g. "top stop stop") -- that specific failure
+  signature would mean 64ms isn't enough padding and needs revisiting,
+  as opposed to an unrelated STT/echo issue.
 
 ## 3. Safeword / hard stop
 
