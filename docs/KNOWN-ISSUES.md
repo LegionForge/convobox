@@ -170,3 +170,37 @@ looked right offline and still needed a live listen.
 latency is fine for the prototype. WASAPI's ~22 ms is an optimization, not a
 blocker, and the fix touches the playback core plus the AEC reference — worth
 doing carefully, not rushing mid-UAT.
+
+---
+
+## WebRTC APM's noise suppression / auto gain control are unused (candidate, untried)
+
+**Status:** candidate, not built. Deliberately not touched this cycle --
+see "Why not now" below.
+
+**What's there but unused.** `EchoCanceller.__init__`
+(`src/convobox/audio/aec.py`) constructs `AudioProcessor(enable_aec=True,
+enable_ns=False, enable_agc=False, enable_vad=False)` -- only the echo
+canceller itself is on. Confirmed by inspecting the actual installed
+package (`aec_audio_processing.AudioProcessor`, real attribute list, not
+assumed): it exposes `ns_enabled`/`agc_enabled`/`vad_enabled` as
+independent toggles alongside `aec_enabled` -- the same WebRTC Audio
+Processing Module ConvoBox already depends on for AEC also ships noise
+suppression and automatic gain control, neither wired up.
+
+**Why this might matter, concretely, not speculatively.** AGC (automatic
+gain control) directly targets an already-documented, real finding: PR
+#74's live hardware smoke test (`probe_audio()`, Settings TUI) reported
+`"mic: ... very quiet -- raise the input gain or move closer"` against
+this machine's actual default mic -- the exact condition AGC exists to
+correct. Not a guess; a real reading against real hardware, already in
+the codebase's own test output.
+
+**Why not now.** This touches the exact same `AudioProcessor` construction
+JP is actively mid-assessment on for a different reason (his own PR #78
+`[L3]` finding: AEC produces artifacts and drops real barge-in with a
+headset, "recorded for assessment," not yet decided). Adding more moving
+parts (NS/AGC) to that same construction call right now would complicate
+attributing whatever he finds -- is a future artifact from AEC, or from a
+newly-enabled NS/AGC path? Worth revisiting once `[L3]` resolves, not
+before.
