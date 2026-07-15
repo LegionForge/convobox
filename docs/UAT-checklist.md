@@ -12,8 +12,47 @@ Additions from the 2026-07-11 live log:
 - **[E6] Whisper hallucination loops on far-field echo.** Observed live
   (one transcript repeated a clause five times). Currently caught by the
   overlap window; any future gate reordering must keep these out.
+- **[L1] Agent replies are now in the log.** Live-confirmed gap during the
+  2026-07-14 audio UAT: the `on_event` hook forwarded backend replies
+  straight to TTS and logged none of them (and was only wired up under
+  `--tui`, so a plain listening session never observed replies at all).
+  Fixed in `scripts/run_convobox.py`: every backend TEXT reply is now
+  logged as `response: <raw text>`, plus `response(spoken): <spoken text>`
+  when the spoken form (`strip_code_for_speech`) differs from the raw
+  reply. UAT: confirm that, in a plain (non-`--tui`) listening session,
+  each assistant turn produces a `response:` log line, and that a reply
+  containing markdown (e.g. `**bold**` / `` `code` ``) also emits a
+  `response(spoken):` line with the decoration stripped. The hook is now
+  installed unconditionally regardless of `--tui`.
 - **[N5] Numbered lists keep their numbers** -- deliberate: spoken
   enumeration is natural, unlike asterisks.
+- **[L2] Runtime stack is opencode + `hy3-free` (OpenCode Zen).** Verified
+  live during the 2026-07-14/15 audio UAT by reading the opencode server's
+  own session message records (two separate sessions, 35 and 7 assistant
+  messages respectively -- 100% `model.id=hy3-free`, `providerID=opencode`).
+  The provider list from the live server shows `opencode` -> "OpenCode Zen"
+  (`https://opencode.ai/zen/v1`, `apiKey: "public"`); the local
+  `~/.config/opencode/opencode.json` pins **no** default model, so
+  `hy3-free` is being used as opencode's built-in default public model, not
+  an explicitly configured one. NOT verified: whether the user set this up
+  intentionally, or available OpenCode Zen usage/quota. `convobox.yaml`
+  only names `backend: opencode` (no model field). Recorded for UAT
+  provenance; do not assert a deliberate model choice from this evidence
+  alone.
+- **[L3] Headset UAT: AEC is ON but has no echo to cancel -- turn it OFF for
+  headsets.** Live-confirmed during the 2026-07-14/15 audio UAT with a
+  headset (mic does not hear the speaker): 54 of 59 responses logged
+  `NO ECHO DETECTED: barely any speaker sound is reaching the mic`, i.e. AEC
+  had essentially nothing to cancel. With AEC still running
+  (`echo_cancellation: true`), the operator reports audible artifacts
+  ("artifacting from automatic echo cancellation") on the mic path. This
+  same no-echo condition directly caused the spoken-echo filter to drop
+  genuine barge-in speech on no-echo responses (see [L1] context: the
+  "Yeah, you got it." barge-in was dropped as self-echo because
+  `NO ECHO DETECTED` was misread as "this speech is our own echo"). For
+  headset use, AEC should be OFF -- it has nothing to cancel and risks
+  artifacts plus dropped real barge-ins. AEC remains valuable for
+  open-speaker/laptop use. Not yet changed in code; recorded for assessment.
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).

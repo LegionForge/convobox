@@ -72,7 +72,7 @@ from convobox.audio.playback import AudioPlayer
 from convobox.config import load_config
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
-from convobox.orchestrator.orchestrator import Orchestrator
+from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.response_tiering import ContinueDetector
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
@@ -798,62 +798,45 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                 tui_state.status = "listening"
 
 
-def _on_backend_event(tui_state: ConversationTuiState, event: BackendEvent) -> None:
+def _on_backend_event(
+    tui_state: ConversationTuiState | None, event: BackendEvent
+) -> None:
     """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
-    and full-detail panes from the real backend event stream. Only TEXT
-    is handled -- TOOL_CALL/TOOL_RESULT visibility is future work, not
-    dropped silently forever, just out of this pass's scope (matches the
-    design doc's "deliberately minimal, built to be extended" phase-1
-    mandate).
+    and full-detail panes from the real backend event stream, AND records
+    the assistant's response to the UAT/echo log. Only TEXT is handled --
+    TOOL_CALL/TOOL_RESULT visibility is future work, not dropped silently
+    forever, just out of this pass's scope (matches the design doc's
+    "deliberately minimal, built to be extended" phase-1 mandate).
 
     full_detail accumulates WITHIN one turn (a backend can emit more than
     one agentMessage per turn -- e.g. reasoning-then-answer) and is reset
     by the caller when a new user utterance starts a fresh turn, so it
     always reflects "the current response," not a running transcript of
     the whole session (that's what the transcript pane is for).
+
+    Logging the response text (not just the spoken form) is what makes a
+    UAT session replayable: the live mic loop used to forward assistant
+    TEXT straight to TTS and capture it nowhere, so the agent's replies --
+    the most insightful lines for audio UAT -- were invisible in the log.
+    We log the raw content AND the stripped-for-speech form so a reader can
+    compare what the backend said against what was actually spoken aloud
+    (e.g. catch markdown read-out bugs like Piper saying "asterisk
+    asterisk"). tui_state may be None (non-TUI UAT mode), in which case we
+    only log.
     """
     if event.type != BackendEventType.TEXT or not event.content:
         return
-    tui_state.add_turn("assistant", event.content)
-    tui_state.full_detail = (
-        f"{tui_state.full_detail}\n\n{event.content}" if tui_state.full_detail else event.content
-    )
-
-
-def _draw_conversation_tui(tui_state: ConversationTuiState) -> None:
-    cols, rows = shutil.get_terminal_size()
-    lines = render_conversation_frame(tui_state, cols, rows, time.monotonic())
-    frame = "\x1b[H" + "\x1b[K\n".join(lines) + "\x1b[K\x1b[J"
-    sys.stdout.write(frame)
-    sys.stdout.flush()
-
-
-async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
-    while True:
-        _draw_conversation_tui(tui_state)
-        await asyncio.sleep(0.1)
-
-
-def _on_backend_event(tui_state: ConversationTuiState, event: BackendEvent) -> None:
-    """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
-    and full-detail panes from the real backend event stream. Only TEXT
-    is handled -- TOOL_CALL/TOOL_RESULT visibility is future work, not
-    dropped silently forever, just out of this pass's scope (matches the
-    design doc's "deliberately minimal, built to be extended" phase-1
-    mandate).
-
-    full_detail accumulates WITHIN one turn (a backend can emit more than
-    one agentMessage per turn -- e.g. reasoning-then-answer) and is reset
-    by the caller when a new user utterance starts a fresh turn, so it
-    always reflects "the current response," not a running transcript of
-    the whole session (that's what the transcript pane is for).
-    """
-    if event.type != BackendEventType.TEXT or not event.content:
-        return
-    tui_state.add_turn("assistant", event.content)
-    tui_state.full_detail = (
-        f"{tui_state.full_detail}\n\n{event.content}" if tui_state.full_detail else event.content
-    )
+    log.info("response: %s", event.content)
+    spoken = strip_code_for_speech(event.content)
+    if spoken and spoken != event.content:
+        log.info("response(spoken): %s", spoken)
+    if tui_state is not None:
+        tui_state.add_turn("assistant", event.content)
+        tui_state.full_detail = (
+            f"{tui_state.full_detail}\n\n{event.content}"
+            if tui_state.full_detail
+            else event.content
+        )
 
 
 def _draw_conversation_tui(tui_state: ConversationTuiState) -> None:
@@ -883,14 +866,18 @@ async def run(args: argparse.Namespace) -> None:
     # returns before the mic loop even exists, below) -- constructed here
     # regardless so it's in scope for the Orchestrator on_event wiring,
     # but never entered into alt-screen or rendered unless the mic loop
-    # actually runs.
+    # actually runs. The on_event hook is wired UNCONDITIONALLY (even with
+    # tui_state=None) so the assistant's responses are recorded to the log
+    # in every mode -- without it, a plain listening/UAT session forwarded
+    # replies straight to TTS and captured them nowhere, leaving the most
+    # useful lines of an audio UAT invisible in the log.
     tui_state = ConversationTuiState() if (args.tui and args.text is None) else None
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
         tts=tts,
         player=player,
-        on_event=(lambda e: _on_backend_event(tui_state, e)) if tui_state is not None else None,
+        on_event=lambda e: _on_backend_event(tui_state, e),
         tier_responses=config.interaction.tier_responses,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
