@@ -8,7 +8,7 @@ import pytest
 from huggingface_hub.errors import LocalEntryNotFoundError
 
 from convobox.config import STTConfig
-from convobox.stt.transcriber import LocalTranscriber, _build_whisper_model
+from convobox.stt.transcriber import LocalTranscriber, _memory_diagnostic, _build_whisper_model
 
 
 @dataclass
@@ -131,6 +131,90 @@ def test_recovery_does_not_swallow_the_utterance_permanently() -> None:
     second = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
     assert first.text == ""
     assert second.text == "hello world"
+
+
+def test_reload_failure_does_not_crash_the_process() -> None:
+    # Real gap found + fixed live, 2026-07-14: a real UAT session crashed
+    # with an UNHANDLED RuntimeError raised from the reload attempt
+    # itself (constructing the replacement WhisperModel also hit the
+    # native allocator failure). The reload's own construction call --
+    # not just the original transcribe() call -- must be caught too.
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            # Construction succeeds; the model fails on its first
+            # transcribe() call, triggering the reload path below.
+            return _FakeModel(fail_times=1)
+        # The reload's OWN construction fails -- this is what crashed
+        # the real session (an unhandled RuntimeError, not caught by
+        # the original transcribe()-only try/except).
+        raise RuntimeError("mkl_malloc: failed to allocate memory")
+
+    transcriber = LocalTranscriber(_config(), model_factory=factory)
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))  # must not raise
+
+    assert result.text == ""
+    assert calls["count"] == 2
+
+
+def test_model_stays_unavailable_after_a_failed_reload_and_retries_next_call() -> None:
+    # After a failed reload, the transcriber has no usable model -- the
+    # NEXT transcribe() call (not just a background timer) must retry
+    # building one rather than staying permanently broken for the rest
+    # of the session.
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _FakeModel(fail_times=1)
+        if calls["count"] == 2:
+            raise RuntimeError("mkl_malloc: failed to allocate memory")
+        return _FakeModel(fail_times=0)  # third build (retry) succeeds
+
+    transcriber = LocalTranscriber(_config(), model_factory=factory)
+    first = transcriber.transcribe(np.zeros(16000, dtype=np.float32))  # fails, reload also fails
+    assert first.text == ""
+    assert calls["count"] == 2
+
+    second = transcriber.transcribe(np.zeros(16000, dtype=np.float32))  # retries the reload
+    assert second.text == "hello world"
+    assert calls["count"] == 3
+
+
+def test_reload_drops_the_old_model_reference_before_rebuilding() -> None:
+    # The old (broken) model must be released (self._model set to None)
+    # BEFORE the factory is called again for the replacement -- reduces
+    # peak native memory during the reload window itself, which matters
+    # specifically because the allocator is already under pressure when
+    # this path runs at all (asking it to hold both the old and new
+    # model simultaneously is exactly the wrong move here).
+    holder: dict[str, LocalTranscriber] = {}
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        if calls["count"] == 2:
+            transcriber = holder["transcriber"]
+            assert transcriber._model is None
+        fail = 1 if calls["count"] == 1 else 0
+        return _FakeModel(fail_times=fail)
+
+    transcriber = LocalTranscriber(_config(), model_factory=factory)
+    holder["transcriber"] = transcriber
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert calls["count"] == 2
+
+
+def test_memory_diagnostic_never_raises_and_returns_a_string() -> None:
+    # Diagnostic-only helper for the failure log lines -- must never
+    # itself raise, since it only ever runs inside an already-failing
+    # path and must not compound it.
+    result = _memory_diagnostic()
+    assert isinstance(result, str)
+    assert result != ""
 
 
 # --- _build_whisper_model: prefers the local cache, avoiding the
