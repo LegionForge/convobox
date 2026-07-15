@@ -491,6 +491,61 @@ this wasn't verified against primary-source text this pass.
 detail becomes load-bearing for a future decision; don't cite it as
 source-verified until it actually is.
 
+**Google Gemini Live API (ai.google.dev/gemini-api/docs/live-api/capabilities,
+verified 2026-07-14 by reading the real live docs page).** A native
+full-duplex speech-to-speech model, closer to the Moshi/dGSLM frontier
+(§5) than a pipeline like ConvoBox -- most of its features are the same
+"needs direct model access" class already covered (see item 13 below), but
+one finding is concrete and directly actionable:
+
+- **`prefix_padding_ms` names a real gap ConvoBox had.** Their own docs:
+  *"the amount of audio to include before speech is detected"* (default
+  ~20ms). The mirror-image of ConvoBox's own already-shipped trailing-
+  silence padding (`UtteranceSegmenter`'s docstring: kept deliberately "so
+  STT models avoid clipping the last phoneme") -- but nothing symmetric
+  existed for the START of an utterance. Checked the actual code (not
+  assumed): `_process_window`'s trigger branch appended only the window
+  that crossed `threshold`, nothing from before it, so the very onset of
+  speech (the "s" in "stop") could be clipped while the VAD was still
+  building confidence. **Adopt →** built `UtteranceSegmenter`'s own
+  `_PREFIX_PADDING_WINDOWS` (64ms, a rolling buffer of raw audio from just
+  before the trigger, prepended once it fires) -- same file, same PR as
+  this research entry. Matters most for exactly the phrases that must
+  never be misheard: the safeword. **Follow-up, verified 2026-07-14**:
+  found an even more directly authoritative confirmation after shipping
+  the fix -- Silero VAD's OWN reference implementation (the literal model
+  this segmenter calls) ships the identical concept under `speech_pad_ms`
+  (real primary-source read of `src/silero_vad/utils_vad.py`, default 30,
+  documented as *"Final speech chunks are padded by speech_pad_ms each
+  side"*). Two independent products (Gemini Live, and now the actual
+  upstream dependency ConvoBox already depends on) converging on the same
+  fix is stronger evidence than either alone. Also confirmed a real
+  architectural difference worth noting: Silero's own streaming
+  `VADIterator` pads reported *timestamps*, not audio -- it expects the
+  caller to re-extract padded audio from a retained raw-stream buffer.
+  `UtteranceSegmenter`'s callers want ready audio arrays, not timestamps,
+  and nothing here retains raw history once windows are consumed, so a
+  small forward-buffered rolling window of actual audio (what got built)
+  is the correct adaptation of the same idea to this architecture, not a
+  deviation from Silero's own approach.
+- **Manual VAD (`activityStart`/`activityEnd`) is a validation, not a
+  gap** -- it's the same "client owns VAD, not the model" architecture
+  ConvoBox already uses (Silero, client-side), just offered as an
+  *alternative* to Gemini's own default automatic/server-side VAD. Nothing
+  to adopt; already the chosen design.
+- **Interruption handling is a fourth independent validation** of
+  `_cancel_speak_task()`'s (PR #71) principle -- their docs: *"you should
+  stop playing audio and clear queued playback"* on interruption. Same
+  family as ElevenLabs/Hume EVI's already-cited confirmations; not a new
+  finding, just another data point.
+- **Affective dialog / proactive audio** (adapting tone to the user,
+  deciding not to respond if irrelevant) are both direct-model-generation
+  features -- the same recurring "doesn't transplant" boundary as item 13
+  below, for the same reason (ConvoBox doesn't control generation on the
+  CLIs it fronts). `proactive_audio`'s specific shape (agent-initiated
+  silence based on relevance) is closest to ElevenLabs' already-covered
+  "skip turn" tool, not a new pattern.
+
 ---
 
 ## What we're adopting for the 0.3.0 barge-in cycle
@@ -562,3 +617,11 @@ source-verified until it actually is.
     2026-07-14), which fixed a real live bug where an old response's
     speak task kept running uncancelled and corrupted the overlap gate's
     timing state for phantom audio nobody heard.
+15. **Pre-speech padding was a real, previously-undocumented gap, now
+    fixed** (Gemini Live API's `prefix_padding_ms`) — `UtteranceSegmenter`
+    already padded the TRAILING silence of an utterance (to avoid clipping
+    the last phoneme) but had nothing symmetric for the start; the "s" in
+    a safeword could be clipped while the VAD was still building
+    confidence to trigger. Fixed with a small rolling pre-trigger buffer
+    (`_PREFIX_PADDING_WINDOWS`, 64ms), same file, same cycle as this
+    entry.
