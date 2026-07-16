@@ -52,6 +52,11 @@ def test_parse_optional_and_list_values() -> None:
     assert settings_tui._parse_value(float_spec, "-", 12.0) is None
     assert settings_tui._parse_value(float_spec, "17.5", None) == 17.5
 
+    int_spec = FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int")
+    assert settings_tui._parse_value(int_spec, "-", 150) is None
+    assert settings_tui._parse_value(int_spec, "", 150) == 150  # empty keeps current
+    assert settings_tui._parse_value(int_spec, "222", None) == 222
+
 
 def test_modal_edit_can_cancel_with_escape(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str")
@@ -240,6 +245,70 @@ def test_save_with_backup_restores_original_on_write_failure(
 
 def test_backup_config_returns_none_for_new_file(tmp_path: Path) -> None:
     assert backup_config(tmp_path / "missing.yaml") is None
+
+
+def test_save_only_writes_fields_that_actually_differ_from_defaults(tmp_path: Path) -> None:
+    # The 2026-07-15 incident this guards against: a plain model_dump()
+    # writes EVERY field, including ones the user never touched -- so a
+    # single save silently baked a stale aec_delay_ms=100 into
+    # convobox.yaml and permanently disabled AEC delay auto-tuning. Only
+    # the one field actually changed here (tts.voice) should appear.
+    path = tmp_path / "convobox.yaml"
+    config = _make_config(**{"tts.voice": "en_US-lessac-medium"})
+
+    save_with_backup(path, config)
+    saved = path.read_text(encoding="utf-8")
+
+    assert "voice: en_US-lessac-medium" in saved
+    assert "aec_delay_ms" not in saved  # untouched -- must stay unset (None = auto-tune)
+    assert "sample_rate" not in saved  # untouched -- equals the schema default
+
+
+def test_save_then_reload_round_trips_to_an_identical_config(tmp_path: Path) -> None:
+    from convobox.config import load_config
+
+    path = tmp_path / "convobox.yaml"
+    config = _make_config(**{"tts.voice": "en_US-lessac-medium", "audio.aec_delay_ms": 222})
+
+    save_with_backup(path, config)
+    reloaded = load_config(path)
+
+    assert reloaded == config
+
+
+def test_aec_delay_help_panel_shows_last_auto_detected_estimate(tmp_path: Path) -> None:
+    from convobox.config import write_aec_estimate
+
+    path = tmp_path / "convobox.yaml"
+    write_aec_estimate(path, 222, 180.0, 32.0)
+    state = TuiState(path=path, original=AppConfig(), working=AppConfig())
+    spec = FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int")
+
+    lines = settings_tui._help_panel_lines(
+        _state_with_field(state, spec), width=80, height=40
+    )
+
+    assert any("Last auto-detected: 222ms" in line for line in lines)
+
+
+def test_aec_delay_help_panel_placeholder_when_never_measured(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    state = TuiState(path=path, original=AppConfig(), working=AppConfig())
+    spec = FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int")
+
+    lines = settings_tui._help_panel_lines(
+        _state_with_field(state, spec), width=80, height=40
+    )
+
+    assert any("Last auto-detected: none yet" in line for line in lines)
+
+
+def _state_with_field(state: TuiState, spec: FieldSpec) -> TuiState:
+    # _help_panel_lines reads state.current_field(), which is derived from
+    # the section/field cursor position, not settable directly -- easier
+    # to monkeypatch the lookup than to navigate the real section list.
+    state.current_field = lambda: spec  # type: ignore[method-assign]
+    return state
 
 
 def test_render_includes_sections_and_dirty_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

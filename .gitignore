@@ -13,8 +13,17 @@ build/
 *.log
 .DS_Store
 
-# Per-machine local config (copy convobox.example.yaml to create it).
-convobox.yaml
+# Per-machine local config and its variants (copy convobox.example.yaml to
+# create one) -- these carry real device names and other per-machine
+# specifics, same rationale as convobox.yaml itself. convobox.example.yaml
+# is the one deliberately-tracked exception.
+convobox*.yaml
+!convobox.example.yaml
+convobox.yaml.backup-*
+
+# run_convobox.py's AEC delay auto-tune diagnostic sidecar (config.py's
+# write_aec_estimate/read_aec_estimate) -- runtime-measured, not config.
+*.aec-estimate.json
 
 # Personal working notes kept out of the public repo -- philosophy.md is
 # JP's running voice-dialogue log (archived separately in the vault);
@@ -24,3 +33,8 @@ convobox.yaml
 philosophy.md
 scripts/_diag.py
 scripts/_tone.py
+
+# Leading-underscore convention for repo-root scratch/throwaway files
+# (message-log dumps, one-off test artifacts) -- generalizes the same
+# pattern _diag.py/_tone.py already used above.
+/_*

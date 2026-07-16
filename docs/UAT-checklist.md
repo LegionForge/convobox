@@ -127,6 +127,81 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   detects the real bug) but not live-mic re-verified against a fresh
   session, to avoid interfering with an in-progress UAT session on a
   shared local backend server when this was found and fixed.
+- **[E8] AEC delay hint: a stale fixed value causes near-total
+  under-cancellation, and it could get silently re-baked on every
+  Settings TUI save (fixed 2026-07-15).** Live-confirmed root cause of a
+  session where mic+speakers (not headphones) self-triggered barge-in on
+  nearly every response: `convobox.yaml` had `aec_delay_ms: 100`
+  explicit, but the real measured render-to-capture delay on that
+  machine was ~222ms -- WebRTC AEC3 can't converge with a hint that far
+  off, so attenuation stayed at 0.2-4dB (`UNDER-CANCELLING`) instead of
+  the 6-16dB actually available, and the assistant's own TTS output kept
+  tripping the overlap gate. Root cause of the stale value itself: the
+  Settings TUI's save function used to write EVERY field on every save
+  (not just ones you changed), so opening and saving the TUI even once
+  silently locked in whatever `aec_delay_ms` happened to be at the time.
+  Two fixes: `aec_delay_ms` is now `None` by default (auto-tune, the
+  recommended state) instead of a literal `100`, and saves now only
+  write fields that actually differ from their default
+  (`exclude_defaults=True` -- see `docs/UAT-settings-tui.md`'s matching
+  section for the save-behavior UAT steps). Re-run the mic+speaker
+  self-barge-in scenario with `aec_delay_ms` left unset and confirm the
+  log shows `FLOOR-LIMITED` or genuine `UNDER-CANCELLING` with a
+  MUCH smaller headroom gap, not the same near-total failure -- this is
+  the live validation the original incident couldn't get to.
+
+  **Follow-up, verified against WebRTC's own source (2026-07-15):** read
+  the real `set_stream_delay_ms` documentation in
+  `webrtc.googlesource.com/src/+/refs/heads/main/api/audio/audio_processing.h`
+  (not a secondhand summary) -- confirms ConvoBox's existing delay
+  semantics are exactly right: "the delay in ms between
+  ProcessReverseStream() receiving a far-end frame and ProcessStream()
+  receiving a near-end frame containing the corresponding echo,"
+  `delay = (t_render - t_analyze) + (t_process - t_capture)`, matching
+  `EchoCanceller.__init__`'s own docstring. Also found (via the real
+  `modules/audio_processing/aec3/` source tree, specifically
+  `echo_path_delay_estimator_unittest.cc`/`render_delay_buffer.cc`, and
+  WebRTC's own changelogs) that AEC3 has its OWN internal delay
+  estimator that continuously detects/adapts the true delay from the
+  audio itself -- `set_stream_delay_ms()`'s hint is used to seed the
+  INITIAL alignment "before the AEC has been able to detect the delay"
+  itself, not as a permanent fixed value AEC3 blindly trusts forever.
+  This explains something the original incident didn't: why a
+  122ms-off hint caused *total* non-convergence for an entire
+  10+-minute session rather than just a slow initial ramp-up --
+  `EchoCanceller`'s AEC3 instance persists for the whole process
+  lifetime (constructed once in `run()`, never rebuilt per-response;
+  `reset_stats()` only clears ConvoBox's own telemetry deques, not
+  AEC3's filter state), so it had ample time to self-correct if a bad
+  initial seed only cost convergence speed. A stale-enough initial
+  hint most likely placed the true echo path outside the delay
+  estimator's effective search window, blocking convergence entirely
+  rather than just delaying it -- consistent with, and a stronger
+  validation of, the fix already shipped above (a genuinely accurate
+  initial estimate matters more than "AEC3 will sort it out
+  eventually").
+- **[E9] Overlap gate's grace window now extends after an
+  UNDER-CANCELLING response (2026-07-15, candidate -- needs live
+  tuning).** The `[E8]` incident's log stayed `UNDER-CANCELLING` for
+  nearly the whole session even accounting for the delay-hint bug --
+  same-room mic+speaker echo may genuinely be a harder acoustic problem
+  than a wrong delay hint alone explains. `grace_s_for_last_response()`
+  (`scripts/run_convobox.py`) now widens `ECHO_GRACE_S` (the window
+  after playback ends that still counts as "overlapping," protecting
+  against reverb-tail false positives) proportionally to the JUST-
+  finished response's remaining echo headroom, capped at `_MAX_GRACE_S`
+  (1.0s) -- a `FLOOR-LIMITED` or `NO ECHO DETECTED` response leaves the
+  window unchanged. **The exact constants
+  (`_GRACE_EXTENSION_PER_DB=0.05`, cap `1.0s`) are derived from the
+  `[E8]` log's own headroom numbers (8-14dB -> ~0.4-0.7s extra), NOT
+  live-tuned** -- unit-tested for correctness of the logic (pure
+  function, `tests/test_run_convobox_echo.py`), but whether these
+  specific numbers feel right in practice needs a real mic+speaker UAT
+  pass. Watch the new `overlap-gate grace window: Xs -> Ys` log line
+  after each response; confirm it widens during a genuinely bad
+  `UNDER-CANCELLING` stretch and settles back to `0.30s` once AEC
+  recovers, and that the wider window doesn't make the assistant feel
+  sluggish to respond to real speech right after it stops talking.
 
 ## 2. VAD segmentation
 

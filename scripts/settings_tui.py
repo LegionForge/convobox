@@ -45,6 +45,8 @@ from convobox.config import (
     AppConfig,
     BackendProfileConfig,
     load_config,
+    read_aec_estimate,
+    resolve_config_path,
 )
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
@@ -79,6 +81,7 @@ class FieldSpec:
         "str",
         "optional_str",
         "int",
+        "optional_int",
         "optional_float",
         "float",
         "bool",
@@ -155,7 +158,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
             FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
-            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "int", help_text="Estimated render-to-capture delay in milliseconds. Leave this near the default unless live testing suggests a better value."),
+            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression."),
         ),
     ),
     SectionSpec(
@@ -248,7 +251,7 @@ def viewport_start(selected: int, total: int, height: int, current_start: int) -
 
 
 def default_config_path() -> Path:
-    return Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+    return resolve_config_path()
 
 
 def _section_model(config: AppConfig, section: str) -> Any:
@@ -363,6 +366,12 @@ def _parse_value(spec: FieldSpec, raw: str, current: Any) -> Any:
         if not text:
             return current
         return float(text)
+    if spec.kind == "optional_int":
+        if text == "-":
+            return None
+        if not text:
+            return current
+        return int(text)
     if spec.kind == "command":
         if text == "-":
             return None
@@ -473,7 +482,18 @@ def _read_leading_header(path: Path) -> list[str]:
 
 
 def _dump_config(config: AppConfig) -> str:
-    return yaml.safe_dump(config.model_dump(mode="python"), sort_keys=False)
+    # exclude_defaults=True: only fields whose value actually differs from
+    # AppConfig's own schema default get written. Confirmed live (2026-07-15
+    # incident): a plain model_dump() writes EVERY field, including ones a
+    # user never touched, so a single save silently baked a stale
+    # aec_delay_ms=100 into convobox.yaml and permanently disabled AEC
+    # delay auto-tuning -- the user had no way to tell "set on purpose"
+    # from "just what a full dump happened to produce". A field omitted
+    # from the YAML loads back to the exact same default value via
+    # load_config()/AppConfig's own defaults, so this changes what gets
+    # WRITTEN, not what gets LOADED -- verified via a real save/reload
+    # round-trip in tests/test_settings_tui.py.
+    return yaml.safe_dump(config.model_dump(mode="python", exclude_defaults=True), sort_keys=False)
 
 
 def backup_config(path: Path) -> Path | None:
@@ -578,7 +598,7 @@ def validate_config(config: AppConfig) -> ValidationReport:
         )
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
-    if config.audio.aec_delay_ms < 0:
+    if config.audio.aec_delay_ms is not None and config.audio.aec_delay_ms < 0:
         report.errors.append("audio.aec_delay_ms must be non-negative")
     if config.vad.threshold < 0 or config.vad.threshold > 1:
         report.errors.append("vad.threshold must be between 0 and 1")
@@ -721,7 +741,7 @@ def _field_hint(spec: FieldSpec) -> str:
         return "enter command line text, or '-' to clear"
     if spec.kind == "list_str":
         return "comma-separated list, or '-' to clear"
-    if spec.kind in {"optional_str", "optional_float"}:
+    if spec.kind in {"optional_str", "optional_float", "optional_int"}:
         return "enter text, or '-' to clear"
     if spec.kind == "bool":
         return "enter yes/no, true/false, or 1/0"
@@ -733,6 +753,23 @@ def _wrap_text(text: str, width: int) -> list[str]:
         return [""]
     wrapped = textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False)
     return wrapped or [""]
+
+
+def _aec_estimate_summary(config_path: Path) -> str:
+    """Read-only diagnostic for the aec_delay_ms field's help panel --
+    what run_convobox.py last auto-detected on this machine, from the
+    sidecar file it writes (never convobox.yaml itself; see
+    config.write_aec_estimate's docstring for why). Best-effort: never
+    raises, degrades to an explanatory placeholder if nothing's been
+    measured yet."""
+    estimate = read_aec_estimate(config_path)
+    if estimate is None:
+        return "Last auto-detected: none yet -- run a live session with AEC on at least once."
+    return (
+        f"Last auto-detected: {estimate.get('delay_ms')}ms "
+        f"(out {estimate.get('output_latency_ms')}ms + in {estimate.get('input_latency_ms')}ms "
+        f"+ 10ms, measured {estimate.get('measured_at')})"
+    )
 
 
 def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
@@ -755,6 +792,9 @@ def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
     if spec.kind == "choice" and spec.choices:
         lines.append("")
         lines.extend(_wrap_text("Choices: " + ", ".join(spec.choices), width))
+    if spec.section == "audio" and spec.key == "aec_delay_ms":
+        lines.append("")
+        lines.extend(_wrap_text(_aec_estimate_summary(state.path), width))
     extra = [
         f"Key: {spec.section}.{spec.key}",
         f"Type: {spec.kind}",

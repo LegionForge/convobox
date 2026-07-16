@@ -88,9 +88,15 @@ audio:
                           # Requires the optional extra:  pip install -e ".[aec]"
                           # Strongly recommended for same-room speakers+mic;
                           # unnecessary with headphones.
-  aec_delay_ms: 100       # render->capture delay hint. Auto-estimated from
-                          # the real stream latencies when you DON'T set this,
-                          # which is usually best -- leave it out to auto-tune.
+  # aec_delay_ms: 222     # render->capture delay hint. Left OUT (the
+                          # default) so it auto-estimates from the real
+                          # stream latencies on every startup -- usually
+                          # best. Set a fixed number ONLY if you've
+                          # measured a specific value for this exact
+                          # hardware: a wrong fixed value is the #1 cause
+                          # of weak echo suppression (confirmed live,
+                          # 2026-07-15 -- a stale 100ms hint kept AEC3
+                          # from converging against a real ~222ms delay).
 
 # ---------------------------------------------------------------------------
 # interaction -- barge-in (talking over a response).
