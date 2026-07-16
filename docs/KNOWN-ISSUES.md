@@ -173,6 +173,59 @@ doing carefully, not rushing mid-UAT.
 
 ---
 
+## AEC builds from source on macOS — PyPI just doesn't ship a wheel for it
+
+**Status:** verified 2026-07-16 on Apple Silicon (M4, macOS 26.5). Not a
+bug — a gap in what was previously assumed. `aec.py`'s docstring and the
+`aec` extra's comment in `pyproject.toml` both said the AEC package's
+"wheels are Windows-only today," which reads like a platform limitation
+of the underlying code. It isn't: `aec-audio-processing`'s sdist
+(`setup.py`) already has full Darwin build support wired in — it builds
+`webrtc-audio-processing` (the same WebRTC APM/AEC3 engine used on
+Windows) via meson into a `.dylib`, with `-DWEBRTC_MAC` and ARM64 NEON
+flags already set, correct macOS rpath handling for the built dylib, the
+works. PyPI just only hosts prebuilt `win_amd64` wheels for it (1.0.0,
+1.0.1); nobody has published a macOS wheel, so a plain `pip install`
+silently falls back to failing rather than to a source build succeeding.
+
+**Verified working, zero code changes to `EchoCanceller`.** Build
+prerequisites (`meson`, `ninja`, `swig` — none installed by uv/pip)
+installed via `brew install meson ninja swig`; Xcode CLT's `clang` was
+already present. Then:
+
+```
+uv pip install --no-binary aec-audio-processing aec-audio-processing
+```
+
+builds cleanly in about 30s and produces a working extension —
+`AudioProcessor(enable_aec=True, ...)` constructs, `process_reverse_stream`/
+`process_stream` run, and all 13 existing `tests/test_aec.py` tests pass
+against the real binding (previously these could only run on Windows).
+
+**What this unblocks.** Signal-level AEC — and therefore live
+mic+speaker attenuation UAT, analogous to JP's 2026-07-15 Windows run
+(see the NS/AGC entry below and `docs/UAT-checklist.md` **[E8]**/**[E9]**)
+— can now actually be exercised on macOS. Before this, macOS testing of
+the barge-in/self-interruption problem was necessarily software-only
+(overlap-gate, text-echo-filter), since `EchoCanceller.__init__` raised
+immediately without the package installed.
+
+**Not yet done.** A live mic+speaker attenuation measurement on macOS
+hardware (the Mac equivalent of JP's Windows UAT run) hasn't been run —
+this entry only confirms the canceller constructs and passes its unit
+tests here, not that it converges well against this machine's actual
+room/speaker/mic acoustics. `docs/KNOWN-ISSUES.md`'s existing note below
+(erratic 0.5-12dB attenuation on Windows) may or may not reproduce
+identically on macOS; that's a separate, still-open question.
+
+**Not done as part of this pass, deliberately:** publishing a macOS wheel
+upstream, or vendoring/prebuilding one for this repo's CI — out of scope
+for a documentation-only note; would need its own decision about where
+built artifacts live and how they're kept in sync with the pinned
+`aec-audio-processing` version.
+
+---
+
 ## WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
 
 **Status:** candidate, not built. Offered to JP directly (2026-07-15

@@ -27,10 +27,18 @@ dev = [
     "bandit>=1.9",
 ]
 # Acoustic echo cancellation (WebRTC APM, BSD-3). A separate extra, NOT
-# part of dev: its wheels are Windows-only today and CI's Linux runners
-# must keep installing cleanly. Code paths degrade gracefully without it
-# (audio.echo_cancellation defaults off; enabling it without the package
-# raises with install instructions). AEC tests skip when it's absent.
+# part of dev: PyPI only ships prebuilt wheels for Windows, and CI's Linux
+# runners must keep installing cleanly. Code paths degrade gracefully
+# without it (audio.echo_cancellation defaults off; enabling it without
+# the package raises with install instructions). AEC tests skip when it's
+# absent.
+#
+# macOS: the sdist's build system already supports Darwin (meson build of
+# the webrtc-audio-processing dylib, -DWEBRTC_MAC flags, ARM64 NEON) --
+# verified 2026-07-16 on Apple Silicon. It just needs build tools uv/pip
+# won't install for you: `brew install meson ninja swig`, then
+# `uv pip install --no-binary aec-audio-processing aec-audio-processing`.
+# See docs/KNOWN-ISSUES.md for the full note.
 aec = [
     "aec-audio-processing>=1.0",
 ]
