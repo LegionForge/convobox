@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from convobox.tui.render import (
     _GREEN,
     _RED,
@@ -255,3 +257,29 @@ def test_fit_truncates_when_visible_text_actually_overflows() -> None:
     fitted = _fit("this is definitely too long for ten", 10)
     assert _visible_len(fitted) == 10
     assert fitted.endswith("...")
+
+
+def test_update_mic_level_takes_first_reading_as_is() -> None:
+    state = ConversationTuiState()
+    state.update_mic_level(-30.0)
+    assert state.mic_level_db == -30.0
+
+
+def test_update_mic_level_jumps_immediately_to_a_louder_reading() -> None:
+    state = ConversationTuiState(mic_level_db=-50.0)
+    state.update_mic_level(-20.0)
+    assert state.mic_level_db == -20.0
+
+
+def test_update_mic_level_eases_toward_a_quieter_reading() -> None:
+    state = ConversationTuiState(mic_level_db=-20.0)
+    state.update_mic_level(-50.0)
+    # Partway there, not all the way (decay, not an instant drop).
+    assert -50.0 < state.mic_level_db < -20.0
+
+
+def test_update_mic_level_converges_to_a_sustained_quieter_reading() -> None:
+    state = ConversationTuiState(mic_level_db=-20.0)
+    for _ in range(50):
+        state.update_mic_level(-50.0)
+    assert state.mic_level_db == pytest.approx(-50.0, abs=0.1)
