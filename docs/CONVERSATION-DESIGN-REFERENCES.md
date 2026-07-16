@@ -11,8 +11,8 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
 > LiveKit Agents, Deepgram Flux, Vocode, ElevenLabs Conversational AI,
-> Hume AI EVI, Google Conversation Design, Wyoming protocol) were
-> web-verified July 2026 by
+> Hume AI EVI, Google Conversation Design, Wyoming protocol, Kyutai
+> Unmute) were web-verified July 2026 by
 > reading real primary-source pages/code, not secondhand summaries. The
 > foundational conversation-analysis and pragmatics classics are cited
 > from the standard literature; confirm against the primary source before any
@@ -580,6 +580,42 @@ considers must-have. Real message types confirmed in the spec:
   independently named the same way by a comparable system -- not a new
   primitive to adopt, just another data point that the boundary concept
   itself is the right one.
+
+**Kyutai Unmute (kyutai-labs-unmute.mintlify.app, github.com/kyutai-labs/unmute,
+kyutai.org/stt -- verified 2026-07-15 by reading the real primary docs,
+not a secondhand summary).** An even closer architectural relative than
+Wyoming: unlike Kyutai's own Moshi (§5, a monolithic end-to-end model,
+already cited), Unmute is explicitly a *modular* STT → LLM → TTS
+pipeline that "works with any OpenAI-compatible LLM server" -- the same
+backend-agnostic design principle ConvoBox is built around, not a
+protocol for smart-home services (Wyoming) or a single fused model
+(Moshi). Confirmed against Unmute's own docs, not assumed.
+
+- **Semantic VAD names a real, known limitation in ConvoBox's own
+  turn-taking, but doesn't transplant directly.** Kyutai STT's own docs
+  (kyutai.org/stt, primary-source-quoted): conventional VAD "determines
+  whether the user is speaking or not, and wait[s] a fixed amount of
+  time after the user is done talking" -- naive because "people often
+  make long pauses during their sentences, which lead to false
+  positives." Their fix: the STT model "predicts not only the text but
+  also the probability that the user is done talking," using both
+  content and intonation, jointly with transcription. This is exactly
+  `UtteranceSegmenter`'s own tradeoff today -- a fixed `min_silence_ms`
+  (500ms default) that must either risk cutting off a mid-thought pause
+  or add latency to every genuine end-of-turn. **Adopt →** not
+  buildable as a bolt-on: it requires an STT model that predicts
+  end-of-turn probability jointly with transcription (Kyutai's own docs
+  note even their semantic VAD "is available in the Rust server but not
+  yet in the other implementations" -- a real architectural commitment,
+  not a small feature flag). faster-whisper (ConvoBox's STT) has no
+  equivalent. Recorded honestly as a frontier/known-limitation citation,
+  same treatment as §5's full-duplex models -- not a v1 target, but the
+  clearest primary-source articulation yet of exactly what
+  `min_silence_ms`'s fixed-timer approach trades away.
+- **The backend-agnostic design itself is validated, independently,
+  by a second real product** (the first being Wyoming) built around
+  the identical principle ConvoBox already committed to -- corroborates
+  the architecture choice, doesn't suggest a change.
 
 ---
 
