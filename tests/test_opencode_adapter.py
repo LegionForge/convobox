@@ -332,6 +332,7 @@ class _RecordingClient:
 
     def __init__(self) -> None:
         self.prompt_timeout: object = "unset"
+        self.session_timeout: object = "unset"
         self.closed = False
 
     async def aclose(self) -> None:
@@ -340,6 +341,8 @@ class _RecordingClient:
     async def post(self, path: str, json: object = None, timeout: object = None) -> object:
         if path.endswith("/prompt"):
             self.prompt_timeout = timeout
+        elif path == "/api/session":
+            self.session_timeout = timeout
 
         class _Resp:
             def raise_for_status(self) -> None:
@@ -379,6 +382,21 @@ async def test_prompt_post_uses_generous_read_timeout() -> None:
     await adapter.send_interject("steer me while busy")
     assert client.prompt_timeout is not None and client.prompt_timeout != "unset"
     assert getattr(client.prompt_timeout, "read", None) == 30.0
+
+
+@pytest.mark.asyncio
+async def test_session_creation_post_uses_generous_read_timeout() -> None:
+    # Real live incident (2026-07-15): _ensure_session()'s POST /api/session
+    # had no explicit timeout, so it used httpx's bare 5s default -- and a
+    # busy/cold opencode server took longer than that to respond, raising
+    # httpx.ReadTimeout inside Orchestrator._consume_events()'s task
+    # uncaught, silently killing event consumption for over a minute of a
+    # live session. Same generous-timeout treatment as the prompt POST.
+    client = _RecordingClient()
+    adapter = OpenCodeAdapter("http://localhost:4096", client=client)  # type: ignore[arg-type]
+    await adapter.send_text("first message, creates the session")
+    assert client.session_timeout is not None and client.session_timeout != "unset"
+    assert getattr(client.session_timeout, "read", None) == 30.0
 
 
 @pytest.mark.asyncio

@@ -160,8 +160,45 @@ class Orchestrator:
         self._events_task = None
 
     async def _consume_events(self) -> None:
-        async for event in self._adapter.events():
-            self._on_event(event)
+        """Drains the adapter's event stream, resubscribing immediately if
+        it ever fails with an exception rather than dying silently.
+
+        Real live incident (2026-07-15): OpenCodeAdapter.events() raised
+        httpx.ReadTimeout mid-session (opencode itself slow to respond
+        while busy). Unhandled, that killed this whole task with only
+        asyncio's own generic "Task exception was never retrieved"
+        warning -- not a clear log line -- and nothing re-created the task
+        until the NEXT handle_transcript() call happened to notice
+        _events_task was done and started a fresh one. In that session the
+        user's own response sat unlogged for over a minute, only
+        surfacing once a second, unrelated utterance incidentally
+        triggered a fresh subscription. Retrying here closes that gap
+        immediately instead of depending on some later, unrelated call.
+
+        Deliberately does NOT retry when events() ends WITHOUT an
+        exception (a plain generator return/StopAsyncIteration) -- that's
+        each adapter's own documented lazy-respawn contract (e.g. a dead
+        subprocess: claude_code.py/codex.py's events() call
+        _ensure_proc()/_ensure_thread() internally and are meant to
+        respawn on the NEXT send, not be proactively re-subscribed here;
+        existing tests already pin that contract). Eagerly retrying on
+        every normal return would silently change that to "respawn the
+        instant the process dies," a real behavior change for adapters
+        this incident has no evidence about. Only the exception case -- an
+        unambiguous failure with no such contract, confirmed live for
+        OpenCodeAdapter -- gets this treatment.
+        """
+        while True:
+            try:
+                async for event in self._adapter.events():
+                    self._on_event(event)
+            except Exception:
+                logger.warning(
+                    "backend event stream failed; resubscribing", exc_info=True
+                )
+                await asyncio.sleep(1.0)
+                continue
+            return
 
     def _on_event(self, event: BackendEvent) -> None:
         logger.debug(
