@@ -173,34 +173,51 @@ doing carefully, not rushing mid-UAT.
 
 ---
 
-## WebRTC APM's noise suppression / auto gain control are unused (candidate, untried)
+## WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
 
-**Status:** candidate, not built. Deliberately not touched this cycle --
-see "Why not now" below.
+**Status:** candidate, not built. Offered to JP directly (2026-07-15
+evening, in response to his live report that mic+speaker AEC is still
+leaking despite the delay-hint fix); awaiting his go-ahead before
+touching this. The original "why not now" reasoning below is stale (it
+predated the extensive AEC investigation this session has since done)
+and is kept for history, not as the current blocker.
 
-**What's there but unused.** `EchoCanceller.__init__`
-(`src/convobox/audio/aec.py`) constructs `AudioProcessor(enable_aec=True,
-enable_ns=False, enable_agc=False, enable_vad=False)` -- only the echo
-canceller itself is on. Confirmed by inspecting the actual installed
-package (`aec_audio_processing.AudioProcessor`, real attribute list, not
-assumed): it exposes `ns_enabled`/`agc_enabled`/`vad_enabled` as
-independent toggles alongside `aec_enabled` -- the same WebRTC Audio
-Processing Module ConvoBox already depends on for AEC also ships noise
-suppression and automatic gain control, neither wired up.
+**What's there but unused, with more real detail than previously
+recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
+constructs `AudioProcessor(enable_aec=True, enable_ns=False,
+enable_agc=False, enable_vad=False)`. Re-inspected the installed
+package's real constructor signature (2026-07-16, `inspect.signature`,
+not assumed): `AudioProcessor.__init__(self, enable_aec=True,
+enable_ns=True, ns_level=2, enable_agc=True, agc_mode=1,
+enable_vad=True)` -- the binding's OWN defaults have NS and AGC ON,
+with real tunable aggressiveness parameters (`ns_level`, `agc_mode`)
+neither previously documented here nor exposed anywhere in ConvoBox.
+`aec.py` deliberately overrides both to off. This means a future PR
+needs to pick real values for `ns_level`/`agc_mode`, not just flip two
+booleans -- worth live-testing a couple of settings rather than
+guessing at the "right" level, same discipline as everything else this
+session has verified against real hardware before committing to it.
 
-**Why this might matter, concretely, not speculatively.** AGC (automatic
-gain control) directly targets an already-documented, real finding: PR
-#74's live hardware smoke test (`probe_audio()`, Settings TUI) reported
-`"mic: ... very quiet -- raise the input gain or move closer"` against
-this machine's actual default mic -- the exact condition AGC exists to
-correct. Not a guess; a real reading against real hardware, already in
-the codebase's own test output.
+**Why this might matter, concretely, not speculatively.** AGC directly
+targets an already-documented, real finding: PR #74's live hardware
+smoke test (`probe_audio()`, Settings TUI) reported `"mic: ... very
+quiet -- raise the input gain or move closer"` against this machine's
+actual default mic -- the exact condition AGC exists to correct. More
+recently (2026-07-15 evening), JP's own live mic+speaker UAT log showed
+persistently erratic, often poor echo attenuation (0.5-12dB, swinging
+response to response) even with a correct AEC delay hint -- a genuinely
+hard open-air acoustic coupling problem, not a leftover config bug (see
+`docs/UAT-checklist.md` **[E8]**/**[E9]**). NS/AGC won't fix delay
+estimation, but AGC in particular could reduce how hot the mic signal
+runs from close speaker proximity, which plausibly makes AEC3's own
+adaptive filter's job easier -- untested, not asserted as a fix.
 
-**Why not now.** This touches the exact same `AudioProcessor` construction
-JP is actively mid-assessment on for a different reason (his own PR #78
-`[L3]` finding: AEC produces artifacts and drops real barge-in with a
-headset, "recorded for assessment," not yet decided). Adding more moving
-parts (NS/AGC) to that same construction call right now would complicate
-attributing whatever he finds -- is a future artifact from AEC, or from a
-newly-enabled NS/AGC path? Worth revisiting once `[L3]` resolves, not
-before.
+**Original "why not now" reasoning (2026-07-14, superseded, kept for
+history).** This touches the exact same `AudioProcessor` construction
+JP was then actively mid-assessment on for a different reason (his own
+PR #78 `[L3]` finding: AEC produces artifacts and drops real barge-in
+with a headset, "recorded for assessment," not yet decided at the
+time). That assessment has since resolved through extensive live UAT
+(`[L4]`-`[L6]`, `[E8]`, `[E9]`) -- the attribution-ambiguity concern
+that justified waiting no longer applies. The live JP go-ahead question
+is the only remaining gate now.
