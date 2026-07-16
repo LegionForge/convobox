@@ -527,6 +527,46 @@ section is the live-mic pass that closes the gap.
   session must leave the terminal in its normal (non-alt-screen, cursor
   visible) state afterward -- no leftover garbled screen requiring a
   manual `reset`/`cls`.
+- **[U7] Diagnostics line (backend/AEC/heartbeat), added 2026-07-15 per
+  JP's direct request for "voice status information... back-end
+  interpreter... any other information you deem necessary."** A second
+  header line now shows `backend: <name>` (from `config.backend.name`,
+  static for the session), `AEC: on/off` (+ the last response's compact
+  verdict tag -- `FLOOR-LIMITED`/`UNDER-CANCELLING`/`NO ECHO DETECTED`
+  -- once at least one response has finished), and, only while the
+  backend is silently busy, a color-coded `still working: Ns` (same
+  green/yellow/red thresholds as the log-line heartbeat from PR #83,
+  duplicated intentionally in `src/convobox/tui/render.py` to keep
+  package layering clean -- `src/convobox` must not import from
+  `scripts/`). Unit-tested (`tests/test_conversation_tui.py`,
+  `tests/test_barge_in.py`'s new `WorkingIndicator.silent_busy_s`
+  tests) and a real rendered-frame smoke test confirmed the layout
+  looks right, but never watched update live frame-by-frame during an
+  actual session. Confirm during a live `--tui` run: the backend name
+  is right immediately at startup, the AEC tag appears/changes after
+  each response finishes (matching the log's own "AEC stats for last
+  response" line), and the heartbeat color/countdown tracks a real
+  silently-busy stretch (appears after ~10s, turns yellow at 10s, red
+  at 60s, disappears the instant audio starts playing or the backend
+  goes idle) without visibly lagging the 0.1s redraw.
+- **[U8] Live mic level (dBFS), added to the same diagnostics line
+  (2026-07-15).** `mic: -XXdBFS`, updated per mic chunk (post-AEC if
+  echo cancellation is on -- the same signal VAD/STT sees), reusing
+  `audio_devices.level_meter()`'s existing RMS math. Deliberately NOT
+  smoothed -- unit-tested and a real rendered-frame smoke test confirm
+  the number appears/formats correctly, but the raw per-chunk value has
+  never been watched live. If it reads as too flickery to be useful in
+  practice, that's the first improvement to make (a decay-based VU-meter
+  smoothing, same idea `audio_devices.py --setup`'s own live meter
+  already uses) -- not something to guess at blind here. Speaker-side
+  live level was deliberately NOT built this pass: it would need a
+  cross-thread write from `AudioPlayer.on_block_played` (the playback
+  THREAD, not the async mic loop), more care than this same-thread
+  update needed -- noted as a follow-up candidate, not attempted
+  half-verified. Confirm during a live run: the number moves with real
+  speech/silence, tracks roughly what `audio_devices.py --test-input`
+  reports for the same device, and reads AEC-cancelled (much quieter)
+  during the assistant's own playback when AEC is on and converged.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 

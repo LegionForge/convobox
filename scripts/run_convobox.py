@@ -592,6 +592,15 @@ class WorkingIndicator:
         self._silent_busy_s = 0.0
         self._next_notice_at = first_notice_s
 
+    @property
+    def silent_busy_s(self) -> float:
+        """The continuous elapsed silent-busy time, updated every observe()
+        call -- unlike observe()'s own return value, which is None except
+        on the sparse notification ticks. For a continuously-redrawn
+        consumer (the TUI's heartbeat indicator) that needs a live number
+        every frame, not just at first_notice_s/repeat_s intervals."""
+        return self._silent_busy_s
+
     def observe(self, busy: bool, playing: bool, dt_s: float) -> float | None:
         """Advance by dt_s; return elapsed silent-busy seconds when a
         heartbeat is due, else None.
@@ -831,6 +840,11 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         await asyncio.sleep(interval)
         busy, playing = adapter.is_busy(), player.is_playing()
         elapsed = indicator.observe(busy, playing, interval)
+        if tui_state is not None:
+            # Continuous, unlike observe()'s own sparse return value --
+            # the TUI redraws every 0.1s (_tui_render_loop) and needs a
+            # live number every frame, not just at first_notice_s/repeat_s.
+            tui_state.heartbeat_elapsed_s = indicator.silent_busy_s if (busy and not playing) else None
         if elapsed is not None:
             color = _heartbeat_color(elapsed) if use_color else ""
             reset = _ANSI_RESET if color else ""
@@ -957,6 +971,9 @@ async def run(args: argparse.Namespace) -> None:
     # replies straight to TTS and captured them nowhere, leaving the most
     # useful lines of an audio UAT invisible in the log.
     tui_state = ConversationTuiState() if (args.tui and args.text is None) else None
+    if tui_state is not None:
+        tui_state.backend_name = config.backend.name
+        tui_state.aec_enabled = config.audio.echo_cancellation
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
@@ -1114,6 +1131,20 @@ async def run(args: argparse.Namespace) -> None:
         was_playing = False
         async for chunk in mic.stream():
             processed = canceller.process(chunk) if canceller is not None else chunk
+            if tui_state is not None:
+                # Post-AEC (if on): the signal VAD/STT actually sees, not
+                # the raw pre-cancellation mic. Live per-chunk RMS -- no
+                # smoothing (see docs/UAT-checklist.md [U7]'s note that
+                # this hasn't been watched live; if it reads as too
+                # flickery in practice, that's the first thing to add,
+                # not something to guess at blind here). Speaker-side
+                # level is a deliberately deferred candidate: it would
+                # need a cross-thread write from AudioPlayer.on_block_played
+                # (the playback THREAD, not this async loop), more care
+                # than this same-thread mic update needs.
+                import audio_devices as ad
+
+                tui_state.mic_level_db, _ = ad.level_meter(processed)
             playing = player.is_playing()
             if canceller is not None and was_playing and not playing:
                 # Response just finished: one stats line per response.
@@ -1127,14 +1158,17 @@ async def run(args: argparse.Namespace) -> None:
                 # weak filter.
                 attenuation = canceller.attenuation_db()
                 ceiling = canceller.measurable_ceiling_db()
+                verdict = interpret_aec_stats(attenuation, ceiling)
                 log.info(
                     "AEC stats for last response: attenuation=%s of ~%s measurable  "
                     "delay=%dms  frames(reverse=%d, capture=%d)%s",
                     f"{attenuation:.1f}dB" if attenuation is not None else "n/a",
                     f"{ceiling:.1f}dB" if ceiling is not None else "?",
                     canceller.delay_ms, canceller.reverse_frames, canceller.capture_frames,
-                    interpret_aec_stats(attenuation, ceiling),
+                    verdict,
                 )
+                if tui_state is not None:
+                    tui_state.aec_verdict = verdict
                 new_grace = grace_s_for_last_response(attenuation, ceiling)
                 if new_grace != next_overlap_grace_s:
                     log.info(

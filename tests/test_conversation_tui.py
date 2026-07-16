@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from convobox.tui.render import _fit, _visible_len, _wrap, render_conversation_frame
+from convobox.tui.render import (
+    _GREEN,
+    _RED,
+    _YELLOW,
+    _fit,
+    _heartbeat_color,
+    _visible_len,
+    _wrap,
+    render_conversation_frame,
+)
 from convobox.tui.state import ConversationTuiState
 
 
@@ -127,6 +136,76 @@ def test_barge_in_flag_shown_only_when_active() -> None:
     inactive_line = _plain(render_conversation_frame(inactive, width=80, height=24, now=0.0))[0]
     assert "BARGE-IN" in active_line
     assert "BARGE-IN" not in inactive_line
+
+
+# --- diagnostics line: backend name, AEC status, heartbeat ---
+
+
+def test_diagnostics_line_shows_backend_name() -> None:
+    state = ConversationTuiState(started=0.0, backend_name="claude-code")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "backend: claude-code" in lines[1]
+
+
+def test_diagnostics_line_shows_aec_off_by_default() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "AEC: off" in lines[1]
+
+
+def test_diagnostics_line_shows_aec_on_with_no_verdict_yet() -> None:
+    # AEC enabled but no response has finished yet -- aec_verdict is still
+    # "", so no tag should appear, but "AEC: on" must.
+    state = ConversationTuiState(started=0.0, aec_enabled=True)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "AEC: on" in lines[1]
+
+
+def test_diagnostics_line_shows_aec_verdict_tag() -> None:
+    state = ConversationTuiState(
+        started=0.0,
+        aec_enabled=True,
+        aec_verdict="  [FLOOR-LIMITED: echo cancelled down to room noise -- success]",
+    )
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "AEC: on FLOOR-LIMITED" in lines[1]
+    # The full explanation text must NOT leak into the fixed-width status
+    # line -- that's what the log line is for, this is a compact tag.
+    assert "success" not in lines[1]
+
+
+def test_diagnostics_line_omits_heartbeat_when_not_silently_busy() -> None:
+    state = ConversationTuiState(started=0.0, heartbeat_elapsed_s=None)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "still working" not in lines[1]
+
+
+def test_diagnostics_line_shows_heartbeat_elapsed_seconds() -> None:
+    state = ConversationTuiState(started=0.0, heartbeat_elapsed_s=42.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "still working: 42s" in lines[1]
+
+
+def test_diagnostics_line_omits_mic_level_before_first_chunk() -> None:
+    state = ConversationTuiState(started=0.0, mic_level_db=None)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "dBFS" not in lines[1]
+
+
+def test_diagnostics_line_shows_mic_level() -> None:
+    state = ConversationTuiState(started=0.0, mic_level_db=-42.3)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "mic: -42dBFS" in lines[1]
+
+
+def test_heartbeat_color_thresholds_match_run_convobox_pys_own() -> None:
+    # Mirrors scripts/run_convobox.py's _heartbeat_color boundary tests
+    # (test_barge_in.py) -- must stay in sync with that copy.
+    assert _heartbeat_color(9.9) == _GREEN
+    assert _heartbeat_color(10.0) == _YELLOW
+    assert _heartbeat_color(59.9) == _YELLOW
+    assert _heartbeat_color(60.0) == _RED
+    assert _heartbeat_color(600.0) == _RED
 
 
 def test_elapsed_time_formats_minutes_and_seconds() -> None:
