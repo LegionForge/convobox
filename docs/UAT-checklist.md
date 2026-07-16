@@ -75,6 +75,40 @@ Additions from the 2026-07-11 live log:
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
+- **[L5] Backend event stream could die silently mid-session, losing the
+  LLM's response from the log for over a minute (fixed 2026-07-15).**
+  Note: numbered against `main`'s current `[L1]`-`[L4]` -- if JP's own
+  `[L5]`/`[L6]` findings from earlier this session are still uncommitted,
+  renumber whichever lands second, same as PR #83's precedent. JP
+  reported "I am not always seeing the LLM output in the logs" and
+  pasted a live UAT log that showed the real mechanism: 74 seconds into
+  a silently-busy turn, `OpenCodeAdapter.events()` raised
+  `httpx.ReadTimeout` from inside `_ensure_session()`'s session-creation
+  POST (no explicit timeout set on that call, unlike the prompt POST --
+  a busy/cold opencode server took longer than httpx's bare 5s default
+  to respond). `Orchestrator._consume_events()` had no exception
+  handling at all, so this silently killed the whole event-consuming
+  task with only asyncio's own generic `"Task exception was never
+  retrieved"` warning -- not a clear log line. Nothing re-created the
+  task until the NEXT unrelated utterance's `handle_transcript()` call
+  happened to notice `_events_task` was done and started a fresh one --
+  in the live log, the user's first real question sat completely
+  unlogged for over a minute, only surfacing (all at once, in a burst)
+  once that second, unrelated utterance incidentally triggered a fresh
+  subscription. Two fixes: `_ensure_session()`'s session-creation POST
+  now gets the same generous read timeout the prompt POST already had
+  (`src/convobox/adapters/opencode.py`), and
+  `Orchestrator._consume_events()` now resubscribes immediately on any
+  exception instead of dying silently, with a clear
+  `"backend event stream failed; resubscribing"` warning log line
+  (`src/convobox/orchestrator/orchestrator.py`). Deliberately does
+  **not** retry when `events()` ends normally without an exception --
+  that's each adapter's own documented lazy-respawn contract for a dead
+  subprocess (claude-code/codex), preserved unchanged. UAT: provoke a
+  long busy stretch on a loaded/slow backend and confirm responses now
+  appear in the log promptly even if the connection hiccups mid-session;
+  if a `ReadTimeout` (or similar) does occur, confirm the new warning
+  line appears immediately, not a silent gap.
 
 ---
 ## 1. Echo / half-duplex overlap handling

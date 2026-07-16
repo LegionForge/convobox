@@ -73,6 +73,23 @@ minor versions carry feature and behavior changes.
   log. See `docs/UAT-checklist.md` **[L1]**.
 
 ### Fixed
+- **Backend event stream could die silently mid-session, losing the LLM's
+  response from the log for over a minute** (`src/convobox/orchestrator/orchestrator.py`,
+  `src/convobox/adapters/opencode.py`). `Attribution: Claude Code; Provider:
+  Anthropic; Model: claude-opus-4-8; Scope: this entry.` JP reported "I am
+  not always seeing the LLM output in the logs" and pasted a live UAT log
+  showing the real cause: `_ensure_session()`'s session-creation POST had
+  no explicit timeout (unlike the prompt POST), so a busy/cold opencode
+  server exceeded httpx's bare 5s default and raised `ReadTimeout` --
+  which `Orchestrator._consume_events()` had no exception handling for at
+  all, silently killing the whole event-consuming task. Nothing re-created
+  it until an unrelated later utterance happened to trigger a fresh
+  subscription; in the live log, an entire real response sat unlogged for
+  over a minute. Fixed both: the session-creation POST now gets the same
+  generous read timeout as the prompt POST, and `_consume_events()` now
+  resubscribes immediately on any exception (clearly logged), while
+  deliberately preserving each adapter's existing lazy-respawn contract
+  for a normal (non-exception) end. See `docs/UAT-checklist.md` **[L5]**.
 - **Response hook was not wired outside `--tui` mode**: `Orchestrator`'s
   `on_event` was passed `None` unless `--tui` was set, so a plain
   listening/UAT session never observed assistant replies at all. The hook is

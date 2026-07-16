@@ -27,6 +27,12 @@ class FakeBackendAdapter(BackendAdapter):
         # below): every OTHER test in this file calls orch._on_event(...)
         # directly, which never exercises that loop body at all.
         self._events_to_yield = events_to_yield
+        # How many of the next events() calls should raise instead of
+        # iterating -- for _consume_events()'s retry-on-exception tests.
+        # Decremented on each call; 0 (default) never raises, matching
+        # every existing test's behavior exactly.
+        self.fail_events_calls = 0
+        self.events_call_count = 0
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -41,6 +47,10 @@ class FakeBackendAdapter(BackendAdapter):
         return self._busy
 
     async def events(self) -> AsyncGenerator[BackendEvent, None]:
+        self.events_call_count += 1
+        if self.fail_events_calls > 0:
+            self.fail_events_calls -= 1
+            raise ConnectionError("simulated transient backend failure")
         if not self._events_to_yield:  # pragma: no cover -- the default, exercised everywhere else
             return
         for event in self._events_to_yield:
@@ -246,6 +256,77 @@ async def test_consume_events_dispatches_real_events_through_the_task_loop() -> 
     assert tts.synthesized == ["done."]
     assert len(player.played) == 1
     await orch.stop_event_loop()
+
+
+# --- _consume_events() resubscribes on failure instead of dying silently
+# (real live incident, 2026-07-15: an uncaught httpx.ReadTimeout from
+# OpenCodeAdapter.events() killed this task with no clear log line, and
+# the user's own response sat unlogged for over a minute) ---
+
+
+@pytest.mark.asyncio
+async def test_consume_events_retries_after_an_exception_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.orchestrator.orchestrator as orch_mod
+
+    async def fast_sleep(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(orch_mod.asyncio, "sleep", fast_sleep)
+
+    events = [BackendEvent(type=BackendEventType.TEXT, content="recovered.")]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    adapter.fail_events_calls = 1  # first call raises; second succeeds
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task
+
+    assert adapter.events_call_count == 2  # failed once, retried once
+    assert tts.synthesized == ["recovered."]
+    await orch.stop_event_loop()
+
+
+@pytest.mark.asyncio
+async def test_consume_events_does_not_retry_when_it_ends_without_an_error() -> None:
+    # Preserves each adapter's own lazy-respawn contract (claude_code.py/
+    # codex.py's events() call _ensure_proc()/_ensure_thread() and are
+    # meant to respawn on the NEXT send, not be proactively re-subscribed
+    # here) -- a plain generator return must NOT trigger a retry, only a
+    # genuine exception should.
+    events = [BackendEvent(type=BackendEventType.TEXT, content="done.")]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    safeword = SafewordDetector(["stop stop stop"])
+    orch = Orchestrator(adapter, safeword)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task
+
+    assert adapter.events_call_count == 1  # no retry after a clean end
+    await orch.stop_event_loop()
+
+
+@pytest.mark.asyncio
+async def test_consume_events_retry_loop_is_still_cancellable() -> None:
+    # A persistently-failing backend must not prevent shutdown: cancelling
+    # _events_task while it's asleep between retries must still work.
+    adapter = FakeBackendAdapter(busy=False)
+    adapter.fail_events_calls = 1_000_000  # effectively "always fails"
+    safeword = SafewordDetector(["stop stop stop"])
+    orch = Orchestrator(adapter, safeword)
+
+    orch.start_event_loop()
+    await asyncio.sleep(0.05)  # let it fail at least once and start sleeping
+
+    await asyncio.wait_for(orch.stop_event_loop(), timeout=2.0)  # must not hang
+
+    assert orch._events_task is None
 
 
 @pytest.mark.asyncio

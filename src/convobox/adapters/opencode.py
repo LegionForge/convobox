@@ -125,7 +125,18 @@ class OpenCodeAdapter(BackendAdapter):
                 body: dict[str, Any] = {}
                 if self._model_ref is not None:
                     body["model"] = self._model_ref
-                resp = await self._client.post("/api/session", json=body)
+                # Same generous-read-timeout reasoning as _PROMPT_TIMEOUT
+                # below (defined on this class, referenced here -- Python
+                # resolves class attributes at call time, not definition
+                # order): observed live, this POST can take several
+                # seconds when opencode itself is busy/cold, and httpx's
+                # bare 5s default spuriously failed it -- the exact
+                # ReadTimeout that killed Orchestrator._consume_events()'s
+                # task uncaught (see the sibling fix there) and delayed a
+                # real response by over a minute in a live UAT session.
+                resp = await self._client.post(
+                    "/api/session", json=body, timeout=self._PROMPT_TIMEOUT
+                )
                 resp.raise_for_status()
                 self._session_id = resp.json()["data"]["id"]
             return self._session_id
