@@ -221,3 +221,43 @@ time). That assessment has since resolved through extensive live UAT
 (`[L4]`-`[L6]`, `[E8]`, `[E9]`) -- the attribution-ambiguity concern
 that justified waiting no longer applies. The live JP go-ahead question
 is the only remaining gate now.
+
+---
+
+## opencode 1.18.3: session-level model pin silently never generates (upstream)
+
+**Status:** diagnosed live 2026-07-18, upstream bug, no fix available
+(1.18.3 is the latest release as of this entry). ConvoBox's
+`backend.model` feature is effectively dead against this server version.
+
+**Symptom.** With `backend.model` set (e.g. `openai/gpt-5.4-mini`), a
+voice session creates its opencode session and POSTs the prompt (both
+200 OK, prompt `admittedSeq` returned) but no assistant message is ever
+created -- ConvoBox waits out its 120s busy window and gives up. No
+error appears in the session's message list, the session object, or the
+server's own console output; the session's `time.updated` never
+advances past creation.
+
+**Isolated with curl against a live 1.18.3 server** (ConvoBox not
+involved), same prompt in all cases:
+
+- unpinned session -> assistant reply in seconds (server default model)
+- session pinned `{"providerID":"openai","id":"gpt-5.4-mini"}` -> never runs
+- pinned to the Zen twin (`opencode/gpt-5.4-mini`) -> never runs
+- pinned with explicit `"variant":"default"` and/or `"agent":"build"` -> never runs
+
+So the pin MECHANISM is broken, not any one provider/credential. The
+shape ConvoBox sends is still exactly what the server's own OpenAPI spec
+(`GET /doc`) declares for `POST /api/session`.
+
+**Also broken in 1.18.3:** the server ignores config-level default
+models for API sessions. With `"model": "openai/gpt-5.4-mini"` (and even
+`agent.build.model`) set in `~/.config/opencode/opencode.json`,
+`opencode run` correctly uses gpt-5.4-mini, but API-created sessions
+still answer with the built-in Zen default (`hy3-free`). CLI and server
+resolve the default differently.
+
+**Workaround for now:** leave `backend.model` unset (voice sessions run
+on the server's own default) and treat model choice as pending an
+upstream fix. Re-verify with the curl matrix above after any opencode
+upgrade before re-adding a pin.
