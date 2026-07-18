@@ -53,6 +53,92 @@ Additions from the 2026-07-11 live log:
   headset use, AEC should be OFF -- it has nothing to cancel and risks
   artifacts plus dropped real barge-ins. AEC remains valuable for
   open-speaker/laptop use. Not yet changed in code; recorded for assessment.
+- **[L6] Headset barge-in test PASSED under AEC-off config (session #81,
+  2026-07-15).** NOTE on provenance: [L3] is **recorded for assessment, not
+  changed in code** (authored by jp-cruz, not applied). The running
+  `convobox.yaml` is **untracked** and sets `echo_cancellation: false` with
+  a comment citing [L3]'s reasoning (54/59 NO ECHO DETECTED) — so it likely
+  reflects the [L3] recommendation, but this is an operator runtime choice,
+  not a committed code change, and causation is inferred not proven.
+  Under that config (`echo_cancellation: false` + headphones +
+  `interrupt_preset: conversational`: `on_current_turn=mute`,
+  `on_new_words=now`, `barge_in_min_speech_ms: 250`), a deliberate barge-in
+  test produced 8 user speech events during interruption windows — every
+  one transcribed AND forwarded to the backend (transcript lines each
+  immediately followed by a `POST …/prompt`). Playback-mute barge-ins
+  (`barge-in: sustained speech during playback -- stopping audio` →
+  replacement utterance) at 01:57:40/43, 01:57:54/55, 01:58:49/51;
+  while-busy (`busy=True`, `on_new_words=now`) barge-ins at 01:57:46,
+  01:57:50, 01:57:53, 01:57:55, 01:58:51. **Zero `NO ECHO DETECTED` lines**
+  in the whole test — the exact condition that armed the [L1] self-echo
+  drop path never occurred, so the [L1] failure mode did NOT recur here.
+  Marginal-confidence speech was still kept and tagged `[BARGE-IN]` ("Don't
+  okay?" at dec=0.48, "just barged in." at dec=0.52) — the 250 ms min-speech
+  threshold is not over-filtering. Scope: this confirms barge-in works under
+  the AEC-off headset config; it is evidence *consistent with* [L3] but is
+  NOT a validation that [L3] is correct (no AEC-on contrast test was run to
+  confirm [L3]'s predicted artifact/drop downside actually recurs). [L1]
+  regression is closed **for this AEC-off path only**. Non-blocking note: a
+  ~54 s backend "still working" stretch (01:58:02→38) overlapped several
+  barge-ins with no stacking problem — latency observation only.
+- **[L7] AEC-on + headset contrast: [L3]'s predicted drop did NOT recur
+  (session #82, 2026-07-15).** This is the "before" half of the [L3]
+  before/after contrast (`docs/UAT-L3-contrast.md`, config
+  `convobox.uat-aec-on.yaml`), finally run. With the headset and
+  `audio.echo_cancellation: true` (forced via `settings_tui.py` into the
+  default `convobox.yaml`, live session pid 27000 → `uat-echo3-aec-on.log`),
+  AEC logged `NO ECHO DETECTED` on essentially every response (the exact
+  [L3] "nothing to cancel" premise held — mic barely hears the speaker).
+  **8/8 genuine *user* barge-ins were preserved and forwarded** (mix of
+  mid-playback `barge-in: sustained speech during playback -- stopping
+  audio`, tagged `[BARGE-IN]`, and while-busy `busy=True` / `on_new_words=now`,
+  not tagged but still forwarded via `POST …/prompt`); lowest-decision-score
+  utterances (dec=0.43, 0.46, 0.44, 0.37) survived — the 250 ms min-speech
+  threshold is not over-filtering. **So [L3]'s specific predicted failure
+  mode — AEC-on + headset dropping *genuine user* barge-ins as self-echo —
+  did NOT occur.** However, the run was NOT drop-free: one real
+  `dropped (` event fired (03:00:43) — `dropped (overlap gate,
+  echo-cancellation active): 'AAC could be left on with a headset. We can
+  try to AAC off as an option, but I think the default should be owned.'`
+  That dropped text is a *mis-transcription of the assistant's own prior
+  spoken response* (not user speech), caught by the overlap/echo gate as if
+  it were echoed playback — i.e. the [L1] self-echo drop path DID re-arm
+  here, but it dropped ConvoBox's own words, not the user's. This is the
+  opposite of [L3]'s concern (which was about dropping the *user*), and is
+  harmless to the conversation (it just suppresses a repeated spoken phrase),
+  but it confirms the [L1] overlap-gate can misfire in the AEC-on/NO-ECHO
+  regime — the exact mechanism [L3] flagged, just pointed at the wrong
+  speaker. **Conclusion:** [L3]'s *user-barge-in* downside is **not
+  reproduced** on this hardware/config, so "AEC OFF is required for headsets"
+  is wrong — AEC (AAC) is a fine default and can stay ON. But [L3]'s root
+  mechanism (NO-ECHO → overlap gate misfires) is alive; it bit the assistant's
+  own speech rather than the user's this time. Resolution: **[L3] is
+  overstated for the user-barge-in case, but its underlying drop mechanism is
+  real and should be tracked** (see [L8]). The open-speaker caveat in [L3]
+  still stands. Caveat: the *subjective* "mic artifacts" half of [L3] is
+  operator-perceived only and was not re-raised during this run; if artifacts
+  recur, reopen. Evidence artifacts: `uat-echo3-aec-on.log` (AEC-on) and
+  `uat-echo2-aec-on.log`/`uat-echo.log` (the AEC-off baseline, session #81)
+  — kept as diffable proof. The still-unexplained operator "artifacting"
+  report from [L3] remains a known unknown (possible external to AEC, e.g.
+  mic/OS processing); flagged for follow-up, not blocking.
+- **[L8] Overlap/echo gate dropped the assistant's OWN speech (AEC-on,
+  NO-ECHO regime), not the user's (found 2026-07-15, session #82,
+  `uat-echo3-aec-on.log`).** During the [L7] AEC-on headset run, one genuine
+  `dropped (` event fired: `dropped (overlap gate, echo-cancellation
+  active): 'AAC could be left on with a headset. We can try to AAC off as an
+  option, but I think the default should be owned.'` (03:00:43). The dropped
+  text is a mis-transcription of ConvoBox's *own prior spoken response*,
+  caught by the overlap gate as if it were echoed playback — the inverse of
+  the [L1] user-barge-in drop failure mode. Harmless to the conversation (it
+  suppresses a repeated spoken phrase, not user input), but it proves the
+  [L1] overlap-gate misfire mechanism [L3] warned about is live in the
+  AEC-on/NO-ECHO condition; it happened to land on ConvoBox's words this
+  time. Follow-up: investigate whether the overlap/`SpokenEchoFilter` should
+  exclude the assistant's own just-spoken text from the drop decision (or
+  require token overlap with the *currently* playing segment, not any recent
+  response), so a re-spoken assistant phrase can't be suppressed. Severity:
+  low (no user input lost). Not blocking.
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
