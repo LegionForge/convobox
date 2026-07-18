@@ -5,6 +5,11 @@ A local, backend-agnostic voice frontend for CLI coding agents.
 **New here? → [docs/QUICKSTART.md](docs/QUICKSTART.md)** — from install to
 talking to a coding agent in five steps.
 
+AI-assisted change attribution is documented in
+[docs/AI-ATTRIBUTION.md](docs/AI-ATTRIBUTION.md).
+The repo also includes a commit template at [`.gitmessage.txt`](.gitmessage.txt)
+for local AI-assisted commits.
+
 ## Purpose
 
 ConvoBox sits between you and whichever coding agent CLI you're driving —

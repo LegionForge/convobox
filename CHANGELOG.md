@@ -15,6 +15,10 @@ minor versions carry feature and behavior changes.
 > **[L2]**.
 
 ### Added
+- **Repo-wide AI attribution convention**: `docs/AI-ATTRIBUTION.md` now
+  defines how to record Codex, Claude Code, and opencode edits in PRs,
+  changelog entries, commit trailers, or file-level notes when those notes
+  are genuinely useful.
 - **Agent response logging in the UAT/echo log** (`scripts/run_convobox.py`):
   the orchestrator's `on_event` hook now records every backend reply, not
   just the user's transcript. Each reply is logged as `response: <raw text>`
