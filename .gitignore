@@ -11,10 +11,13 @@ build/
 .env
 *.wav
 *.log
+uat-acoustic-calibration/
 .DS_Store
 
 # Per-machine local config (copy convobox.example.yaml to create it).
 convobox.yaml
+# Per-machine UAT contrast config (see docs/UAT-L3-contrast.md).
+convobox.uat-aec-on.yaml
 
 # Personal working notes kept out of the public repo -- philosophy.md is
 # JP's running voice-dialogue log (archived separately in the vault);
