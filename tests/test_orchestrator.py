@@ -14,11 +14,25 @@ from convobox.tts.base import TTSEngine
 
 
 class FakeBackendAdapter(BackendAdapter):
-    def __init__(self, busy: bool = False) -> None:
+    def __init__(self, busy: bool = False, events_to_yield: list[BackendEvent] | None = None) -> None:
         self._busy = busy
         self.sent_text: list[str] = []
         self.sent_interject: list[str] = []
         self.hard_stops = 0
+        # None (the default) keeps every existing test's behavior
+        # byte-identical -- events() ends immediately, same as before this
+        # param existed. A real list is for tests that need to drive
+        # _consume_events()'s actual async-for loop (see
+        # test_consume_events_dispatches_real_events_through_the_task_loop
+        # below): every OTHER test in this file calls orch._on_event(...)
+        # directly, which never exercises that loop body at all.
+        self._events_to_yield = events_to_yield
+        # How many of the next events() calls should raise instead of
+        # iterating -- for _consume_events()'s retry-on-exception tests.
+        # Decremented on each call; 0 (default) never raises, matching
+        # every existing test's behavior exactly.
+        self.fail_events_calls = 0
+        self.events_call_count = 0
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -32,9 +46,16 @@ class FakeBackendAdapter(BackendAdapter):
     def is_busy(self) -> bool:
         return self._busy
 
-    async def events(self) -> AsyncGenerator[BackendEvent, None]:  # pragma: no cover
-        return
-        yield
+    async def events(self) -> AsyncGenerator[BackendEvent, None]:
+        self.events_call_count += 1
+        if self.fail_events_calls > 0:
+            self.fail_events_calls -= 1
+            raise ConnectionError("simulated transient backend failure")
+        if not self._events_to_yield:  # pragma: no cover -- the default, exercised everywhere else
+            return
+        for event in self._events_to_yield:
+            await asyncio.sleep(0)  # a real yield point, not a synchronous drain
+            yield event
 
 
 class FakeTTSEngine(TTSEngine):
@@ -191,6 +212,144 @@ async def test_handle_transcript_starts_event_loop_automatically() -> None:
 
     assert orch._events_task is not None
     await orch.stop_event_loop()
+
+
+@pytest.mark.asyncio
+async def test_stop_event_loop_before_start_is_a_safe_noop() -> None:
+    # A caller can legitimately call stop_event_loop() without ever having
+    # started one (e.g. a shutdown path that runs unconditionally). Every
+    # other stop_event_loop() call in this file follows a real
+    # start_event_loop()/handle_transcript() -- this is the only test that
+    # exercises the early-return branch for "there was never one running."
+    orch, _, _, _ = make_orchestrator(busy=False)
+    assert orch._events_task is None
+    await orch.stop_event_loop()  # must not raise
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
+async def test_consume_events_dispatches_real_events_through_the_task_loop() -> None:
+    # Every other TEXT/TOOL_CALL/etc. dispatch test in this file calls
+    # orch._on_event(...) directly -- realistic for testing _on_event's own
+    # branching, but it means the ACTUAL production path (a real adapter's
+    # events() async generator, drained by _consume_events()'s async-for
+    # loop inside a background asyncio.Task) had never been exercised
+    # end-to-end by anything in this file. This drives a real fake
+    # adapter's events() through start_event_loop() exactly the way
+    # handle_transcript() wires it, and confirms dispatch (TEXT -> speech,
+    # TOOL_CALL -> no speech) genuinely happens via that path, not just via
+    # calling the handler function directly.
+    events = [
+        BackendEvent(type=BackendEventType.TOOL_CALL, tool="bash"),
+        BackendEvent(type=BackendEventType.TEXT, content="done."),
+    ]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task  # the fake adapter's generator ends on its own
+
+    assert tts.synthesized == ["done."]
+    assert len(player.played) == 1
+    await orch.stop_event_loop()
+
+
+# --- _consume_events() resubscribes on failure instead of dying silently
+# (real live incident, 2026-07-15: an uncaught httpx.ReadTimeout from
+# OpenCodeAdapter.events() killed this task with no clear log line, and
+# the user's own response sat unlogged for over a minute) ---
+
+
+@pytest.mark.asyncio
+async def test_consume_events_retries_after_an_exception_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.orchestrator.orchestrator as orch_mod
+
+    async def fast_sleep(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(orch_mod.asyncio, "sleep", fast_sleep)
+
+    events = [BackendEvent(type=BackendEventType.TEXT, content="recovered.")]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    adapter.fail_events_calls = 1  # first call raises; second succeeds
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task
+
+    assert adapter.events_call_count == 2  # failed once, retried once
+    assert tts.synthesized == ["recovered."]
+    await orch.stop_event_loop()
+
+
+@pytest.mark.asyncio
+async def test_consume_events_does_not_retry_when_it_ends_without_an_error() -> None:
+    # Preserves each adapter's own lazy-respawn contract (claude_code.py/
+    # codex.py's events() call _ensure_proc()/_ensure_thread() and are
+    # meant to respawn on the NEXT send, not be proactively re-subscribed
+    # here) -- a plain generator return must NOT trigger a retry, only a
+    # genuine exception should.
+    events = [BackendEvent(type=BackendEventType.TEXT, content="done.")]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    safeword = SafewordDetector(["stop stop stop"])
+    orch = Orchestrator(adapter, safeword)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task
+
+    assert adapter.events_call_count == 1  # no retry after a clean end
+    await orch.stop_event_loop()
+
+
+@pytest.mark.asyncio
+async def test_consume_events_retry_loop_is_still_cancellable() -> None:
+    # A persistently-failing backend must not prevent shutdown: cancelling
+    # _events_task while it's asleep between retries must still work.
+    adapter = FakeBackendAdapter(busy=False)
+    adapter.fail_events_calls = 1_000_000  # effectively "always fails"
+    safeword = SafewordDetector(["stop stop stop"])
+    orch = Orchestrator(adapter, safeword)
+
+    orch.start_event_loop()
+    await asyncio.sleep(0.05)  # let it fail at least once and start sleeping
+
+    await asyncio.wait_for(orch.stop_event_loop(), timeout=2.0)  # must not hang
+
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
+async def test_tier_state_start_returning_no_tiers_does_not_speak() -> None:
+    # split_tiers()'s own docstring guarantees it's "never empty for
+    # non-whitespace input," and _on_event only ever calls
+    # tier_state.start() with already-non-empty `spoken` text -- so this
+    # branch (orchestrator.py's "if not spoken: return" after tiering) is
+    # unreachable via any real input today. Still worth confirming the
+    # defensive guard actually holds if that invariant ever changes:
+    # monkeypatch the tier state directly rather than hunting for a real
+    # input that can't exist.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, tier_responses=True)
+    assert tts is not None and player is not None
+    assert orch._tier_state is not None
+    orch._tier_state.start = lambda full_text: ""  # type: ignore[method-assign]
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="hello"))
+    await asyncio.sleep(0)
+
+    assert orch._speak_task is None
+    assert tts.synthesized == []
+    assert player.played == []
 
 
 @pytest.mark.asyncio

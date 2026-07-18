@@ -45,6 +45,8 @@ from convobox.config import (
     AppConfig,
     BackendProfileConfig,
     load_config,
+    read_aec_estimate,
+    resolve_config_path,
 )
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
@@ -79,6 +81,7 @@ class FieldSpec:
         "str",
         "optional_str",
         "int",
+        "optional_int",
         "optional_float",
         "float",
         "bool",
@@ -155,7 +158,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
             FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
-            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "int", help_text="Estimated render-to-capture delay in milliseconds. Leave this near the default unless live testing suggests a better value."),
+            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression."),
         ),
     ),
     SectionSpec(
@@ -176,6 +179,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. Piper is the first supported local engine."),
             FieldSpec("tts", "voice", "Voice", "optional_str", help_text="Installed Piper voice key, such as en_US-lessac-medium."),
+            FieldSpec("tts", "speaker", "Speaker", "optional_str", help_text="Only for multi-speaker voices (e.g. en_GB-semaine-medium, en_GB-aru-medium, en_GB-vctk-medium, en_US-libritts-high) -- a speaker name from that voice's own list, or a raw numeric index. Leave unset for single-speaker voices or the voice's own default speaker. [t] will report an error naming the available speakers if this doesn't match."),
             FieldSpec("tts", "rate", "Rate", "float", help_text="Speech speed multiplier. 1.0 is normal."),
             FieldSpec("tts", "volume", "Volume", "float", help_text="Speech loudness multiplier. 1.0 is normal."),
         ),
@@ -186,6 +190,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("backend", "name", "Name", "choice", _CHOICE_BACKENDS, help_text="Which coding agent ConvoBox should drive."),
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
+            FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
         ),
     ),
@@ -220,7 +225,7 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
         return section.fields
     backend_name = config.backend.name
     if backend_name == "opencode":
-        return tuple(field for field in section.fields if field.key in {"name", "url"})
+        return tuple(field for field in section.fields if field.key in {"name", "url", "model"})
     if backend_name in {"claude-code", "codex"}:
         return tuple(field for field in section.fields if field.key in {"name", "command"})
     return section.fields
@@ -246,7 +251,7 @@ def viewport_start(selected: int, total: int, height: int, current_start: int) -
 
 
 def default_config_path() -> Path:
-    return Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+    return resolve_config_path()
 
 
 def _section_model(config: AppConfig, section: str) -> Any:
@@ -281,7 +286,7 @@ def _set_backend_profile(config: AppConfig, name: str, profile: BackendProfileCo
 
 def _backend_profile_from_active(config: AppConfig, name: str) -> BackendProfileConfig:
     if name == "opencode":
-        return BackendProfileConfig(url=config.backend.url)
+        return BackendProfileConfig(url=config.backend.url, model=config.backend.model)
     if name in {"claude-code", "codex"}:
         return BackendProfileConfig(
             url=config.backend.url,
@@ -302,10 +307,13 @@ def _apply_backend_profile(config: AppConfig, name: str) -> None:
         config.backend.url = resolved_url
     if name == "opencode":
         config.backend.command = None
-    elif profile.command is not None:
-        config.backend.command = list(profile.command)
+        config.backend.model = profile.model if profile.model is not None else defaults.model
     else:
-        config.backend.command = list(defaults.command) if defaults.command is not None else None
+        config.backend.model = None
+        if profile.command is not None:
+            config.backend.command = list(profile.command)
+        else:
+            config.backend.command = list(defaults.command) if defaults.command is not None else None
 
 
 def _switch_backend(config: AppConfig, new_name: str) -> None:
@@ -358,6 +366,12 @@ def _parse_value(spec: FieldSpec, raw: str, current: Any) -> Any:
         if not text:
             return current
         return float(text)
+    if spec.kind == "optional_int":
+        if text == "-":
+            return None
+        if not text:
+            return current
+        return int(text)
     if spec.kind == "command":
         if text == "-":
             return None
@@ -468,7 +482,18 @@ def _read_leading_header(path: Path) -> list[str]:
 
 
 def _dump_config(config: AppConfig) -> str:
-    return yaml.safe_dump(config.model_dump(mode="python"), sort_keys=False)
+    # exclude_defaults=True: only fields whose value actually differs from
+    # AppConfig's own schema default get written. Confirmed live (2026-07-15
+    # incident): a plain model_dump() writes EVERY field, including ones a
+    # user never touched, so a single save silently baked a stale
+    # aec_delay_ms=100 into convobox.yaml and permanently disabled AEC
+    # delay auto-tuning -- the user had no way to tell "set on purpose"
+    # from "just what a full dump happened to produce". A field omitted
+    # from the YAML loads back to the exact same default value via
+    # load_config()/AppConfig's own defaults, so this changes what gets
+    # WRITTEN, not what gets LOADED -- verified via a real save/reload
+    # round-trip in tests/test_settings_tui.py.
+    return yaml.safe_dump(config.model_dump(mode="python", exclude_defaults=True), sort_keys=False)
 
 
 def backup_config(path: Path) -> Path | None:
@@ -555,9 +580,25 @@ def validate_config(config: AppConfig) -> ValidationReport:
         report.warnings.append(
             "backend.url does not start with http:// or https://; the connection may fail"
         )
+    if (
+        config.backend.name == "opencode"
+        and config.backend.model is not None
+        and "/" not in config.backend.model
+    ):
+        # BackendConfig's own field_validator catches this at model
+        # CONSTRUCTION time, but the TUI mutates an already-constructed
+        # AppConfig's fields via plain setattr() (no validate_assignment),
+        # so a bad value typed into this field would otherwise sit
+        # unflagged until the next full config reload -- surface it here
+        # too, at save time, matching every other backend field's own
+        # save-time check on this same code path.
+        report.errors.append(
+            f'backend.model {config.backend.model!r} must be "provider/model-id" '
+            f'(e.g. "openai/gpt-5.6-sol") -- see `opencode models` for the full list'
+        )
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
-    if config.audio.aec_delay_ms < 0:
+    if config.audio.aec_delay_ms is not None and config.audio.aec_delay_ms < 0:
         report.errors.append("audio.aec_delay_ms must be non-negative")
     if config.vad.threshold < 0 or config.vad.threshold > 1:
         report.errors.append("vad.threshold must be between 0 and 1")
@@ -700,7 +741,7 @@ def _field_hint(spec: FieldSpec) -> str:
         return "enter command line text, or '-' to clear"
     if spec.kind == "list_str":
         return "comma-separated list, or '-' to clear"
-    if spec.kind in {"optional_str", "optional_float"}:
+    if spec.kind in {"optional_str", "optional_float", "optional_int"}:
         return "enter text, or '-' to clear"
     if spec.kind == "bool":
         return "enter yes/no, true/false, or 1/0"
@@ -712,6 +753,23 @@ def _wrap_text(text: str, width: int) -> list[str]:
         return [""]
     wrapped = textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False)
     return wrapped or [""]
+
+
+def _aec_estimate_summary(config_path: Path) -> str:
+    """Read-only diagnostic for the aec_delay_ms field's help panel --
+    what run_convobox.py last auto-detected on this machine, from the
+    sidecar file it writes (never convobox.yaml itself; see
+    config.write_aec_estimate's docstring for why). Best-effort: never
+    raises, degrades to an explanatory placeholder if nothing's been
+    measured yet."""
+    estimate = read_aec_estimate(config_path)
+    if estimate is None:
+        return "Last auto-detected: none yet -- run a live session with AEC on at least once."
+    return (
+        f"Last auto-detected: {estimate.get('delay_ms')}ms "
+        f"(out {estimate.get('output_latency_ms')}ms + in {estimate.get('input_latency_ms')}ms "
+        f"+ 10ms, measured {estimate.get('measured_at')})"
+    )
 
 
 def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
@@ -734,6 +792,9 @@ def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
     if spec.kind == "choice" and spec.choices:
         lines.append("")
         lines.extend(_wrap_text("Choices: " + ", ".join(spec.choices), width))
+    if spec.section == "audio" and spec.key == "aec_delay_ms":
+        lines.append("")
+        lines.extend(_wrap_text(_aec_estimate_summary(state.path), width))
     extra = [
         f"Key: {spec.section}.{spec.key}",
         f"Type: {spec.kind}",

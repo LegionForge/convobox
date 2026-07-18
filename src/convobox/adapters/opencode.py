@@ -77,7 +77,12 @@ class OpenCodeAdapter(BackendAdapter):
     case -- see OPENCODE_API_NOTES.md for the full investigation.
     """
 
-    def __init__(self, url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        client: httpx.AsyncClient | None = None,
+        model: str | None = None,
+    ) -> None:
         self._base_url = url.rstrip("/")
         self._client = client if client is not None else httpx.AsyncClient(base_url=self._base_url)
         # Only close a client we created; an injected one (tests) is the
@@ -88,6 +93,22 @@ class OpenCodeAdapter(BackendAdapter):
         self._busy = False
         self._sse_context: Any = None
         self._listening = asyncio.Event()
+        # "provider/model-id" -> the real POST /api/session body shape
+        # (confirmed against a live server's own OpenAPI spec, GET /doc):
+        # {"model": {"providerID": ..., "id": ...}}. None (default) omits
+        # the field entirely, matching the pre-existing empty-body
+        # behavior exactly -- opencode picks its own default, unchanged.
+        # Validated here too (not just BackendConfig's own field_validator)
+        # since this class is constructed directly in tests without going
+        # through config loading.
+        if model is not None and "/" not in model:
+            raise ValueError(
+                f'model {model!r} must be "provider/model-id" '
+                f'(e.g. "openai/gpt-5.6-sol")'
+            )
+        self._model_ref: dict[str, str] | None = (
+            None if model is None else {"providerID": model.split("/", 1)[0], "id": model.split("/", 1)[1]}
+        )
         warn_if_insecure(self._base_url)
 
     async def _ensure_session(self) -> str:
@@ -101,7 +122,21 @@ class OpenCodeAdapter(BackendAdapter):
         # Orchestrator-level run against a real server did exactly this.
         async with self._session_lock:
             if self._session_id is None:
-                resp = await self._client.post("/api/session", json={})
+                body: dict[str, Any] = {}
+                if self._model_ref is not None:
+                    body["model"] = self._model_ref
+                # Same generous-read-timeout reasoning as _PROMPT_TIMEOUT
+                # below (defined on this class, referenced here -- Python
+                # resolves class attributes at call time, not definition
+                # order): observed live, this POST can take several
+                # seconds when opencode itself is busy/cold, and httpx's
+                # bare 5s default spuriously failed it -- the exact
+                # ReadTimeout that killed Orchestrator._consume_events()'s
+                # task uncaught (see the sibling fix there) and delayed a
+                # real response by over a minute in a live UAT session.
+                resp = await self._client.post(
+                    "/api/session", json=body, timeout=self._PROMPT_TIMEOUT
+                )
                 resp.raise_for_status()
                 self._session_id = resp.json()["data"]["id"]
             return self._session_id

@@ -49,4 +49,5 @@ def create_tts_engine(config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR) 
         config_path=str(config_path),
         rate=config.rate,
         volume=config.volume,
+        speaker=config.speaker,
     )

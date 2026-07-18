@@ -257,6 +257,59 @@ def test_working_resets_when_idle() -> None:
     assert after[2] is not None
 
 
+def test_silent_busy_s_is_continuous_unlike_observes_sparse_return() -> None:
+    # For a continuously-redrawn consumer (the TUI's heartbeat indicator)
+    # that needs a live number every frame, not just at the sparse
+    # first_notice_s/repeat_s notification ticks observe() itself returns.
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    assert ind.silent_busy_s == 0.0
+    ind.observe(busy=True, playing=False, dt_s=1.0)
+    assert ind.silent_busy_s == pytest.approx(1.0)
+    ind.observe(busy=True, playing=False, dt_s=1.0)  # still below first_notice_s
+    assert ind.silent_busy_s == pytest.approx(2.0)
+
+
+def test_silent_busy_s_resets_with_observe() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    _feed_working(ind, busy=True, playing=False, n=2)
+    assert ind.silent_busy_s == pytest.approx(2.0)
+    ind.observe(busy=True, playing=True, dt_s=1.0)  # playing resets
+    assert ind.silent_busy_s == 0.0
+
+
+# --- heartbeat coloring (live-validated thresholds, JP's 2026-07-14/15
+# headset UAT: the heartbeat is the only feedback during a silent-busy
+# stretch, but is invisible when interacting through a backend's own chat
+# UI rather than watching this terminal -- color makes it glanceable) ---
+
+from scripts.run_convobox import (  # noqa: E402
+    _ANSI_GREEN,
+    _ANSI_RED,
+    _ANSI_YELLOW,
+    _heartbeat_color,
+)
+
+
+def test_heartbeat_color_green_just_under_ten_seconds() -> None:
+    assert _heartbeat_color(9.9) == _ANSI_GREEN
+
+
+def test_heartbeat_color_yellow_at_ten_seconds() -> None:
+    assert _heartbeat_color(10.0) == _ANSI_YELLOW
+
+
+def test_heartbeat_color_yellow_just_under_sixty_seconds() -> None:
+    assert _heartbeat_color(59.9) == _ANSI_YELLOW
+
+
+def test_heartbeat_color_red_at_sixty_seconds() -> None:
+    assert _heartbeat_color(60.0) == _ANSI_RED
+
+
+def test_heartbeat_color_red_for_a_long_stall() -> None:
+    assert _heartbeat_color(600.0) == _ANSI_RED
+
+
 # --- backchannel filtering (docs/DESIGN-barge-in.md, "Backchannel filtering") ---
 
 

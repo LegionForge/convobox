@@ -69,7 +69,7 @@ from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.approval import ApprovalDetector
 from convobox.audio.playback import AudioPlayer
-from convobox.config import load_config
+from convobox.config import load_config, resolve_config_path, write_aec_estimate
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
@@ -87,6 +87,16 @@ _TUI_LOG_FILE = "convobox-tui.log"
 # Utterances that started up to this long after playback ended still count
 # as overlapping it: room reverb plus VAD/timestamp slop.
 ECHO_GRACE_S = 0.3
+
+# Bounds for grace_s_for_last_response()'s extension: how much extra grace
+# an UNDER-CANCELLING verdict earns, per dB of remaining echo headroom, and
+# the hard ceiling on the total window regardless of how bad the reading
+# was. NOT live-tuned -- derived from the [E8] incident log's own numbers
+# (headroom commonly 8-14dB during a bad mic+speaker session, which this
+# maps to roughly 0.4-0.7s of extra grace) but the exact constants need a
+# real UAT pass on real hardware to confirm; see docs/UAT-checklist.md.
+_GRACE_EXTENSION_PER_DB = 0.05
+_MAX_GRACE_S = 1.0
 
 # Cross-process mutex for mic mode: an arbitrary fixed localhost port held
 # for the process lifetime. A socket bind (unlike a lockfile) can't go
@@ -183,6 +193,33 @@ def interpret_aec_stats(attenuation_db: float | None, ceiling_db: float | None) 
         f"  [UNDER-CANCELLING: ~{ceiling_db - attenuation_db:.1f}dB of echo headroom "
         "remains -- try tuning aec_delay_ms]"
     )
+
+
+def grace_s_for_last_response(
+    attenuation_db: float | None, ceiling_db: float | None, base_grace_s: float = ECHO_GRACE_S
+) -> float:
+    """How long to protect the overlap gate's window after the NEXT
+    playback ends, given the AEC verdict from the response that JUST
+    finished (see interpret_aec_stats -- same thresholds, so a reading
+    that logs FLOOR-LIMITED here also returns base_grace_s here).
+
+    A response that came back FLOOR-LIMITED or with no measurable echo at
+    all (NO ECHO DETECTED) gives no reason to extend past the base grace
+    window -- nothing suggests residual echo is likely to leak through as
+    apparent "new speech" in the tail right after playback. A response
+    that came back UNDER-CANCELLING means real, uncancelled echo energy
+    was present; extends proportionally to the remaining headroom,
+    capped at _MAX_GRACE_S so a single bad reading can't suppress
+    listening for an unbounded stretch. This is a bounded, well-reasoned
+    default derived directly from the [E8] incident's own log data, NOT
+    a live-tuned value -- see the module-level constants' own comment.
+    """
+    if attenuation_db is None or ceiling_db is None or ceiling_db < AEC_MEASURABLE_ECHO_DB:
+        return base_grace_s
+    headroom_db = ceiling_db - attenuation_db
+    if headroom_db <= 2.0:  # matches interpret_aec_stats's FLOOR-LIMITED threshold
+        return base_grace_s
+    return min(base_grace_s + headroom_db * _GRACE_EXTENSION_PER_DB, _MAX_GRACE_S)
 
 
 # Prefixed to a barge-in utterance so the backend knows its previous
@@ -505,6 +542,35 @@ class ApprovalPromptGate:
         return None
 
 
+# Heartbeat color thresholds, live-validated (JP, 2026-07-14/15 headset
+# UAT): a real UX gap surfaced there -- the "backend still working" line
+# is the only feedback during a silent-busy stretch, but when the user is
+# interacting through a backend's own chat UI (not watching this
+# terminal), that feedback is effectively invisible, so a long stall
+# reads as "is it broken?" rather than "still thinking." Color makes the
+# SAME log line readable at a glance without tailing it: green = just
+# started, yellow = grinding a while, red = long stall worth a look.
+_HEARTBEAT_GREEN_MAX_S = 10.0
+_HEARTBEAT_YELLOW_MAX_S = 60.0
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_RED = "\x1b[31m"
+_ANSI_RESET = "\x1b[0m"
+
+
+def _heartbeat_color(elapsed_s: float) -> str:
+    """ANSI color for a heartbeat line's elapsed-seconds value.
+
+    Pure function (no I/O), so the threshold boundaries are unit-testable
+    without a real terminal.
+    """
+    if elapsed_s < _HEARTBEAT_GREEN_MAX_S:
+        return _ANSI_GREEN
+    if elapsed_s < _HEARTBEAT_YELLOW_MAX_S:
+        return _ANSI_YELLOW
+    return _ANSI_RED
+
+
 class WorkingIndicator:
     """Decides when to remind the user the backend is still working.
 
@@ -525,6 +591,15 @@ class WorkingIndicator:
         self._repeat_s = repeat_s
         self._silent_busy_s = 0.0
         self._next_notice_at = first_notice_s
+
+    @property
+    def silent_busy_s(self) -> float:
+        """The continuous elapsed silent-busy time, updated every observe()
+        call -- unlike observe()'s own return value, which is None except
+        on the sparse notification ticks. For a continuously-redrawn
+        consumer (the TUI's heartbeat indicator) that needs a live number
+        every frame, not just at first_notice_s/repeat_s intervals."""
+        return self._silent_busy_s
 
     def observe(self, busy: bool, playing: bool, dt_s: float) -> float | None:
         """Advance by dt_s; return elapsed silent-busy seconds when a
@@ -743,17 +818,40 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
     """
+    # Color only for a REAL, unpiped terminal -- not just "not --tui".
+    # `--tui` mode redirects logging to a FileHandler (_TUI_LOG_FILE),
+    # which doesn't change the real sys.stderr fd, so isatty() alone
+    # can't detect that case; checking tui_state too covers it. isatty()
+    # also correctly disables color for JP's own UAT crib's own
+    # `2>&1 | Tee-Object -Append uat-echo.log` pattern -- piping makes
+    # stderr not a tty, so the same check that enables color on a real
+    # terminal also keeps the diffable log file clean, with no separate
+    # "am I being redirected" logic needed.
+    use_color = tui_state is None and sys.stderr.isatty()
+    if use_color:
+        # Same VT-mode-enable idiom as the --tui branch below / voice_tui.py
+        # / settings_tui.py -- os.system("") with a hardcoded empty-string
+        # literal enables ANSI/VT100 escape processing in legacy Windows
+        # console hosts; it never executes a program.
+        os.system("")  # nosec B605 B607
     interval = 1.0
     was_playing = False
     while True:
         await asyncio.sleep(interval)
         busy, playing = adapter.is_busy(), player.is_playing()
         elapsed = indicator.observe(busy, playing, interval)
+        if tui_state is not None:
+            # Continuous, unlike observe()'s own sparse return value --
+            # the TUI redraws every 0.1s (_tui_render_loop) and needs a
+            # live number every frame, not just at first_notice_s/repeat_s.
+            tui_state.heartbeat_elapsed_s = indicator.silent_busy_s if (busy and not playing) else None
         if elapsed is not None:
+            color = _heartbeat_color(elapsed) if use_color else ""
+            reset = _ANSI_RESET if color else ""
             log.info(
-                "backend still working (%.0fs, no audio yet) -- thinking or running a "
-                "tool; say the safeword to abort",
-                elapsed,
+                "%sbackend still working (%.0fs, no audio yet) -- thinking or "
+                "running a tool; say the safeword to abort%s",
+                color, elapsed, reset,
             )
         queued_text = interject_queue.flush_if_idle(busy, playing)
         if queued_text is not None:
@@ -854,6 +952,7 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
+    config_path = resolve_config_path(args.config)
     config = load_config(args.config)
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
@@ -872,6 +971,9 @@ async def run(args: argparse.Namespace) -> None:
     # replies straight to TTS and captured them nowhere, leaving the most
     # useful lines of an audio UAT invisible in the log.
     tui_state = ConversationTuiState() if (args.tui and args.text is None) else None
+    if tui_state is not None:
+        tui_state.backend_name = config.backend.name
+        tui_state.aec_enabled = config.audio.echo_cancellation
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
@@ -933,15 +1035,19 @@ async def run(args: argparse.Namespace) -> None:
     if config.audio.echo_cancellation:
         from convobox.audio.aec import EchoCanceller
 
-        canceller = EchoCanceller(delay_ms=config.audio.aec_delay_ms)
-        # A wrong delay hint is the #1 cause of weak in-room suppression
-        # (F1 in the 2026-07-11 UAT): Windows host APIs commonly buffer
-        # 100-500ms of output, dwarfing any fixed guess. Once both streams
-        # report their real latencies, estimate the true render-to-capture
-        # delay and apply it -- unless the user explicitly configured
-        # aec_delay_ms, in which case respect it but still LOG the
-        # estimate so UAT learns the right number.
-        delay_explicit = "aec_delay_ms" in config.audio.model_fields_set
+        # aec_delay_ms=None (the default) means auto-tune -- confirmed
+        # live (2026-07-15) that a stale/wrong FIXED hint (measured
+        # ~222ms vs a leftover 100ms) keeps WebRTC AEC3 from converging,
+        # so the assistant's own voice leaks into the mic and trips the
+        # barge-in overlap gate. _INITIAL_AEC_DELAY_MS is only the
+        # starting guess fed to APM before the real estimate lands on
+        # first playback -- set_delay() below replaces it immediately in
+        # the auto-tune case, same as before this was a sentinel.
+        _INITIAL_AEC_DELAY_MS = 100
+        delay_explicit = config.audio.aec_delay_ms is not None
+        canceller = EchoCanceller(
+            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS
+        )
         delay_estimated = False
 
         def _feed_reference(block, sample_rate) -> None:  # type: ignore[no-untyped-def]
@@ -968,12 +1074,15 @@ async def run(args: argparse.Namespace) -> None:
                             "AEC delay auto-estimated: %dms (out %.0fms + in %.0fms + 10ms)",
                             estimate, float(out_lat) * 1000, float(in_lat) * 1000,
                         )
+                        write_aec_estimate(
+                            config_path, estimate, float(out_lat) * 1000, float(in_lat) * 1000
+                        )
             canceller.feed_reverse(block, sample_rate)
 
         player.on_block_played = _feed_reference
         log.info(
             "acoustic echo cancellation ON (delay hint %dms%s)",
-            config.audio.aec_delay_ms,
+            config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
             " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
         )
 
@@ -1001,6 +1110,11 @@ async def run(args: argparse.Namespace) -> None:
             interrupt_axes.on_new_words, config.interaction.barge_in_min_speech_ms,
         )
     barge_in_pending = False
+    # Updated after every response's AEC stats are read (in _mic_chunks,
+    # below), consumed at the overlap-gate call site further down in this
+    # same function -- see grace_s_for_last_response()'s own docstring.
+    # Starts at the base grace: nothing's played yet to have a verdict on.
+    next_overlap_grace_s = ECHO_GRACE_S
 
     listening_gate = ListeningGate(
         PauseListeningDetector(config.interaction.pause_listening_phrases),
@@ -1013,10 +1127,24 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
-        nonlocal barge_in_pending
+        nonlocal barge_in_pending, next_overlap_grace_s
         was_playing = False
         async for chunk in mic.stream():
             processed = canceller.process(chunk) if canceller is not None else chunk
+            if tui_state is not None:
+                # Post-AEC (if on): the signal VAD/STT actually sees, not
+                # the raw pre-cancellation mic. Live per-chunk RMS -- no
+                # smoothing (see docs/UAT-checklist.md [U7]'s note that
+                # this hasn't been watched live; if it reads as too
+                # flickery in practice, that's the first thing to add,
+                # not something to guess at blind here). Speaker-side
+                # level is a deliberately deferred candidate: it would
+                # need a cross-thread write from AudioPlayer.on_block_played
+                # (the playback THREAD, not this async loop), more care
+                # than this same-thread mic update needs.
+                import audio_devices as ad
+
+                tui_state.mic_level_db, _ = ad.level_meter(processed)
             playing = player.is_playing()
             if canceller is not None and was_playing and not playing:
                 # Response just finished: one stats line per response.
@@ -1030,14 +1158,25 @@ async def run(args: argparse.Namespace) -> None:
                 # weak filter.
                 attenuation = canceller.attenuation_db()
                 ceiling = canceller.measurable_ceiling_db()
+                verdict = interpret_aec_stats(attenuation, ceiling)
                 log.info(
                     "AEC stats for last response: attenuation=%s of ~%s measurable  "
                     "delay=%dms  frames(reverse=%d, capture=%d)%s",
                     f"{attenuation:.1f}dB" if attenuation is not None else "n/a",
                     f"{ceiling:.1f}dB" if ceiling is not None else "?",
                     canceller.delay_ms, canceller.reverse_frames, canceller.capture_frames,
-                    interpret_aec_stats(attenuation, ceiling),
+                    verdict,
                 )
+                if tui_state is not None:
+                    tui_state.aec_verdict = verdict
+                new_grace = grace_s_for_last_response(attenuation, ceiling)
+                if new_grace != next_overlap_grace_s:
+                    log.info(
+                        "overlap-gate grace window: %.2fs -> %.2fs for the next utterance "
+                        "(last response's AEC verdict)",
+                        next_overlap_grace_s, new_grace,
+                    )
+                next_overlap_grace_s = new_grace
                 canceller.reset_stats()
             was_playing = playing
             # in_speech reflects the segmenter's state as of the PREVIOUS
@@ -1169,6 +1308,7 @@ async def run(args: argparse.Namespace) -> None:
                             stt_latency_ms=result.latency_ms,
                             min_silence_ms=config.vad.min_silence_ms,
                             playback_ended_at=player.playback_ended_at,
+                            grace_s=next_overlap_grace_s,
                         )
                     ):
                         # Reports the REAL canceller state, not a hardcoded

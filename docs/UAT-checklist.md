@@ -53,6 +53,25 @@ Additions from the 2026-07-11 live log:
   headset use, AEC should be OFF -- it has nothing to cancel and risks
   artifacts plus dropped real barge-ins. AEC remains valuable for
   open-speaker/laptop use. Not yet changed in code; recorded for assessment.
+- **[L4] Heartbeat coloring for the silent-busy indicator.** Live-confirmed
+  gap during the same 2026-07-14/15 headset UAT, continued into the
+  overnight session: the "backend still working" heartbeat (`WorkingIndicator`)
+  is the only feedback during a silent-busy stretch, but it's log-only --
+  invisible when interacting through a backend's own chat UI rather than
+  watching this terminal, so a long stall (one observed run: 618s / over
+  10 minutes) reads as "is it broken?" rather than "still thinking." Fixed
+  in `scripts/run_convobox.py`: the SAME log line is now color-coded
+  (green < 10s, yellow 10-60s, red > 60s) when connected to a real
+  terminal (`sys.stderr.isatty()`, also correctly OFF for `--tui` mode's
+  file-redirected log and for the UAT crib's own
+  `2>&1 | Tee-Object -Append uat-echo.log` pattern -- piping makes
+  `isatty()` false, so the diffable log file stays plain-text automatically,
+  no separate "am I being redirected" check needed). UAT: run a session,
+  provoke a long silent-busy stretch (a real multi-step tool-calling
+  response works well), and confirm the heartbeat line visibly shifts
+  green -> yellow -> red as it ages, in a real unpiped terminal; then
+  confirm running under the `2>&1 | Tee-Object` crib pattern produces a
+  plain, uncolored log file.
 - **[L6] Headset barge-in test PASSED under AEC-off config (session #81,
   2026-07-15).** NOTE on provenance: [L3] is **recorded for assessment, not
   changed in code** (authored by jp-cruz, not applied). The running
@@ -142,6 +161,40 @@ Additions from the 2026-07-11 live log:
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
+- **[L5] Backend event stream could die silently mid-session, losing the
+  LLM's response from the log for over a minute (fixed 2026-07-15).**
+  Note: numbered against `main`'s current `[L1]`-`[L4]` -- if JP's own
+  `[L5]`/`[L6]` findings from earlier this session are still uncommitted,
+  renumber whichever lands second, same as PR #83's precedent. JP
+  reported "I am not always seeing the LLM output in the logs" and
+  pasted a live UAT log that showed the real mechanism: 74 seconds into
+  a silently-busy turn, `OpenCodeAdapter.events()` raised
+  `httpx.ReadTimeout` from inside `_ensure_session()`'s session-creation
+  POST (no explicit timeout set on that call, unlike the prompt POST --
+  a busy/cold opencode server took longer than httpx's bare 5s default
+  to respond). `Orchestrator._consume_events()` had no exception
+  handling at all, so this silently killed the whole event-consuming
+  task with only asyncio's own generic `"Task exception was never
+  retrieved"` warning -- not a clear log line. Nothing re-created the
+  task until the NEXT unrelated utterance's `handle_transcript()` call
+  happened to notice `_events_task` was done and started a fresh one --
+  in the live log, the user's first real question sat completely
+  unlogged for over a minute, only surfacing (all at once, in a burst)
+  once that second, unrelated utterance incidentally triggered a fresh
+  subscription. Two fixes: `_ensure_session()`'s session-creation POST
+  now gets the same generous read timeout the prompt POST already had
+  (`src/convobox/adapters/opencode.py`), and
+  `Orchestrator._consume_events()` now resubscribes immediately on any
+  exception instead of dying silently, with a clear
+  `"backend event stream failed; resubscribing"` warning log line
+  (`src/convobox/orchestrator/orchestrator.py`). Deliberately does
+  **not** retry when `events()` ends normally without an exception --
+  that's each adapter's own documented lazy-respawn contract for a dead
+  subprocess (claude-code/codex), preserved unchanged. UAT: provoke a
+  long busy stretch on a loaded/slow backend and confirm responses now
+  appear in the log promptly even if the connection hiccups mid-session;
+  if a `ReadTimeout` (or similar) does occur, confirm the new warning
+  line appears immediately, not a silent gap.
 
 ---
 ## 1. Echo / half-duplex overlap handling
@@ -194,6 +247,81 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   detects the real bug) but not live-mic re-verified against a fresh
   session, to avoid interfering with an in-progress UAT session on a
   shared local backend server when this was found and fixed.
+- **[E8] AEC delay hint: a stale fixed value causes near-total
+  under-cancellation, and it could get silently re-baked on every
+  Settings TUI save (fixed 2026-07-15).** Live-confirmed root cause of a
+  session where mic+speakers (not headphones) self-triggered barge-in on
+  nearly every response: `convobox.yaml` had `aec_delay_ms: 100`
+  explicit, but the real measured render-to-capture delay on that
+  machine was ~222ms -- WebRTC AEC3 can't converge with a hint that far
+  off, so attenuation stayed at 0.2-4dB (`UNDER-CANCELLING`) instead of
+  the 6-16dB actually available, and the assistant's own TTS output kept
+  tripping the overlap gate. Root cause of the stale value itself: the
+  Settings TUI's save function used to write EVERY field on every save
+  (not just ones you changed), so opening and saving the TUI even once
+  silently locked in whatever `aec_delay_ms` happened to be at the time.
+  Two fixes: `aec_delay_ms` is now `None` by default (auto-tune, the
+  recommended state) instead of a literal `100`, and saves now only
+  write fields that actually differ from their default
+  (`exclude_defaults=True` -- see `docs/UAT-settings-tui.md`'s matching
+  section for the save-behavior UAT steps). Re-run the mic+speaker
+  self-barge-in scenario with `aec_delay_ms` left unset and confirm the
+  log shows `FLOOR-LIMITED` or genuine `UNDER-CANCELLING` with a
+  MUCH smaller headroom gap, not the same near-total failure -- this is
+  the live validation the original incident couldn't get to.
+
+  **Follow-up, verified against WebRTC's own source (2026-07-15):** read
+  the real `set_stream_delay_ms` documentation in
+  `webrtc.googlesource.com/src/+/refs/heads/main/api/audio/audio_processing.h`
+  (not a secondhand summary) -- confirms ConvoBox's existing delay
+  semantics are exactly right: "the delay in ms between
+  ProcessReverseStream() receiving a far-end frame and ProcessStream()
+  receiving a near-end frame containing the corresponding echo,"
+  `delay = (t_render - t_analyze) + (t_process - t_capture)`, matching
+  `EchoCanceller.__init__`'s own docstring. Also found (via the real
+  `modules/audio_processing/aec3/` source tree, specifically
+  `echo_path_delay_estimator_unittest.cc`/`render_delay_buffer.cc`, and
+  WebRTC's own changelogs) that AEC3 has its OWN internal delay
+  estimator that continuously detects/adapts the true delay from the
+  audio itself -- `set_stream_delay_ms()`'s hint is used to seed the
+  INITIAL alignment "before the AEC has been able to detect the delay"
+  itself, not as a permanent fixed value AEC3 blindly trusts forever.
+  This explains something the original incident didn't: why a
+  122ms-off hint caused *total* non-convergence for an entire
+  10+-minute session rather than just a slow initial ramp-up --
+  `EchoCanceller`'s AEC3 instance persists for the whole process
+  lifetime (constructed once in `run()`, never rebuilt per-response;
+  `reset_stats()` only clears ConvoBox's own telemetry deques, not
+  AEC3's filter state), so it had ample time to self-correct if a bad
+  initial seed only cost convergence speed. A stale-enough initial
+  hint most likely placed the true echo path outside the delay
+  estimator's effective search window, blocking convergence entirely
+  rather than just delaying it -- consistent with, and a stronger
+  validation of, the fix already shipped above (a genuinely accurate
+  initial estimate matters more than "AEC3 will sort it out
+  eventually").
+- **[E9] Overlap gate's grace window now extends after an
+  UNDER-CANCELLING response (2026-07-15, candidate -- needs live
+  tuning).** The `[E8]` incident's log stayed `UNDER-CANCELLING` for
+  nearly the whole session even accounting for the delay-hint bug --
+  same-room mic+speaker echo may genuinely be a harder acoustic problem
+  than a wrong delay hint alone explains. `grace_s_for_last_response()`
+  (`scripts/run_convobox.py`) now widens `ECHO_GRACE_S` (the window
+  after playback ends that still counts as "overlapping," protecting
+  against reverb-tail false positives) proportionally to the JUST-
+  finished response's remaining echo headroom, capped at `_MAX_GRACE_S`
+  (1.0s) -- a `FLOOR-LIMITED` or `NO ECHO DETECTED` response leaves the
+  window unchanged. **The exact constants
+  (`_GRACE_EXTENSION_PER_DB=0.05`, cap `1.0s`) are derived from the
+  `[E8]` log's own headroom numbers (8-14dB -> ~0.4-0.7s extra), NOT
+  live-tuned** -- unit-tested for correctness of the logic (pure
+  function, `tests/test_run_convobox_echo.py`), but whether these
+  specific numbers feel right in practice needs a real mic+speaker UAT
+  pass. Watch the new `overlap-gate grace window: Xs -> Ys` log line
+  after each response; confirm it widens during a genuinely bad
+  `UNDER-CANCELLING` stretch and settles back to `0.30s` once AEC
+  recovers, and that the wider window doesn't make the assistant feel
+  sluggish to respond to real speech right after it stops talking.
 
 ## 2. VAD segmentation
 
@@ -307,6 +435,18 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
 - **[T4] Replacing playback.** Calling play/play_stream while something is
   playing must replace it cleanly (AudioPlayer.play calls stop() first). Test
   rapid successive responses.
+- **[T5] Multi-speaker voice selection.** Real, not hypothetical: several
+  Piper voices already downloaded in this repo are genuinely multi-speaker
+  (`en_GB-semaine-medium`: 4 named speakers -- prudence/spike/obadiah/poppy
+  -- `en_GB-aru-medium`: 12, `en_GB-vctk-medium`: 109,
+  `en_US-libritts-high`: 904). Set `tts.voice: en_GB-semaine-medium` and
+  `tts.speaker: spike`, confirm it synthesizes without error and *sounds*
+  different from `tts.speaker: poppy` (this needs a real ear -- the
+  automated verification only confirmed the two produced different sample
+  counts for similar text, not that they're audibly distinct). Then set
+  `tts.speaker: nobody` (a name that doesn't exist) and confirm `[t]` on
+  the TTS section reports a clear error naming the real available speakers
+  for that voice, not a raw traceback.
 
 ## 7. Scriptable / non-mic modes
 
@@ -507,6 +647,46 @@ section is the live-mic pass that closes the gap.
   session must leave the terminal in its normal (non-alt-screen, cursor
   visible) state afterward -- no leftover garbled screen requiring a
   manual `reset`/`cls`.
+- **[U7] Diagnostics line (backend/AEC/heartbeat), added 2026-07-15 per
+  JP's direct request for "voice status information... back-end
+  interpreter... any other information you deem necessary."** A second
+  header line now shows `backend: <name>` (from `config.backend.name`,
+  static for the session), `AEC: on/off` (+ the last response's compact
+  verdict tag -- `FLOOR-LIMITED`/`UNDER-CANCELLING`/`NO ECHO DETECTED`
+  -- once at least one response has finished), and, only while the
+  backend is silently busy, a color-coded `still working: Ns` (same
+  green/yellow/red thresholds as the log-line heartbeat from PR #83,
+  duplicated intentionally in `src/convobox/tui/render.py` to keep
+  package layering clean -- `src/convobox` must not import from
+  `scripts/`). Unit-tested (`tests/test_conversation_tui.py`,
+  `tests/test_barge_in.py`'s new `WorkingIndicator.silent_busy_s`
+  tests) and a real rendered-frame smoke test confirmed the layout
+  looks right, but never watched update live frame-by-frame during an
+  actual session. Confirm during a live `--tui` run: the backend name
+  is right immediately at startup, the AEC tag appears/changes after
+  each response finishes (matching the log's own "AEC stats for last
+  response" line), and the heartbeat color/countdown tracks a real
+  silently-busy stretch (appears after ~10s, turns yellow at 10s, red
+  at 60s, disappears the instant audio starts playing or the backend
+  goes idle) without visibly lagging the 0.1s redraw.
+- **[U8] Live mic level (dBFS), added to the same diagnostics line
+  (2026-07-15).** `mic: -XXdBFS`, updated per mic chunk (post-AEC if
+  echo cancellation is on -- the same signal VAD/STT sees), reusing
+  `audio_devices.level_meter()`'s existing RMS math. Deliberately NOT
+  smoothed -- unit-tested and a real rendered-frame smoke test confirm
+  the number appears/formats correctly, but the raw per-chunk value has
+  never been watched live. If it reads as too flickery to be useful in
+  practice, that's the first improvement to make (a decay-based VU-meter
+  smoothing, same idea `audio_devices.py --setup`'s own live meter
+  already uses) -- not something to guess at blind here. Speaker-side
+  live level was deliberately NOT built this pass: it would need a
+  cross-thread write from `AudioPlayer.on_block_played` (the playback
+  THREAD, not the async mic loop), more care than this same-thread
+  update needed -- noted as a follow-up candidate, not attempted
+  half-verified. Confirm during a live run: the number moves with real
+  speech/silence, tracks roughly what `audio_devices.py --test-input`
+  reports for the same device, and reads AEC-cancelled (much quieter)
+  during the assistant's own playback when AEC is on and converged.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 
@@ -576,3 +756,64 @@ correctly when the real bug recurs.
   confirm subsequent transcriptions still use the same `stt.model`/
   `stt.language`/etc. as before -- the reload rebuilds from the original
   `STTConfig` via `model_factory`, not a fresh-defaults model.
+- **[ST4] A failed reload doesn't crash the process either.** Live-confirmed
+  2026-07-14: JP hit a real session where the RELOAD itself (not just the
+  original `transcribe()` call) hit the same native-allocator failure --
+  an unhandled `RuntimeError` from `WhisperModel.__init__`/`ctranslate2.
+  models.Whisper.__init__`, which crashed the whole process before this
+  fix. If the log ever shows `"STT model reload ALSO failed -- staying
+  unavailable, will retry on the next utterance..."`, confirm the app
+  keeps running (doesn't crash) and that a LATER utterance (not
+  necessarily the very next one -- retries on every call while
+  unavailable) eventually transcribes normally again once the underlying
+  pressure eases. Also check the log line's memory diagnostic (e.g.
+  `"30208MB RAM available -- likely the known ctranslate2/MKL allocator
+  quirk, not a real memory shortage"`) reads sane against what Task
+  Manager / `Get-CimInstance Win32_OperatingSystem` actually shows at
+  the time.
+
+## 12. OpenCode model selection (`backend.model`, `src/convobox/adapters/opencode.py`)
+
+JP asked directly, 2026-07-14/15: opencode picked a hosted free-tier
+model (`hy3-free`, OpenCode Zen) rather than his own configured provider,
+with no error or indication either way. Root-caused and fixed: `POST
+/api/session`'s optional `model: {providerID, id}` field was never sent
+(the adapter posted an empty body unconditionally) -- see
+`OPENCODE_API_NOTES.md`'s "Session creation supports pinning a model"
+section for the full investigation, including why a CLI flag (`opencode
+-m ...`) doesn't work for this project's use case (`opencode serve` has
+no `-m` option at all).
+
+**Verification gap, explicitly not closed by unit tests alone**: the
+request SHAPE is confirmed correct against a live server's own OpenAPI
+spec (read-only `GET /doc`, no session actually created -- respecting
+the standing "no test traffic on JP's live server" boundary), and the
+adapter's construction/request-building logic is fully unit-tested
+against a fake server. What's NOT verified: whether opencode's real
+`POST /api/session` genuinely accepts a live request with this shape and
+actually honors the pinned model for generation, rather than silently
+falling back again for some other reason.
+
+- **[BM1] A configured model actually gets used.** Settings TUI ->
+  Backend -> Model, set e.g. `openai/gpt-5.6-sol` (or another real
+  `provider/model-id` from `opencode models`), save, and start a real
+  mic session. Confirm the response is genuinely generated by that
+  model, not silently falling back to opencode's own default -- opencode
+  itself may report which model answered (check its own logs/session
+  export, `opencode export <sessionID>`), or ask the agent directly
+  which model it is.
+- **[BM2] An invalid model is a clear, early error, not a silent
+  fallback.** Set `backend.model` to a real `provider/` prefix but a
+  bogus model id (e.g. `openai/does-not-exist`). Confirm `[t]` on the
+  Backend section (or the first real utterance) surfaces a clear error
+  from the real `POST /api/session` call, rather than opencode silently
+  substituting a different model with no signal.
+- **[BM3] Leaving Model unset behaves exactly as before.** With
+  `backend.model` unset (the default), confirm behavior is unchanged
+  from before this feature existed -- opencode picks its own default,
+  no `model` field appears in the session-creation request at all.
+- **[BM4] Switching backends and back preserves the configured model.**
+  In the Settings TUI, set a model on opencode, switch to `codex` or
+  `claude-code`, then switch back to `opencode`. Confirm the model is
+  still there (per-backend memory, `backend_profiles`), not reset to
+  unset.

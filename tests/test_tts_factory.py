@@ -72,5 +72,28 @@ def test_create_tts_engine_constructs_piper_with_resolved_paths_and_config(
             "config_path": str(tmp_path / "en_US-lessac-medium.onnx.json"),
             "rate": 1.5,
             "volume": 0.8,
+            "speaker": None,
         }
     ]
+
+
+def test_create_tts_engine_passes_speaker_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _touch(tmp_path / "en_GB-semaine-medium.onnx")
+    _touch(tmp_path / "en_GB-semaine-medium.onnx.json")
+
+    calls: list[dict[str, object]] = []
+
+    class _FakePiperTTSEngine:
+        def __init__(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(factory_module, "PiperTTSEngine", _FakePiperTTSEngine)
+
+    create_tts_engine(
+        TTSConfig(voice="en_GB-semaine-medium", speaker="prudence"),
+        voices_dir=tmp_path,
+    )
+
+    assert calls[0]["speaker"] == "prudence"

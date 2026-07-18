@@ -86,3 +86,51 @@ had a live UAT pass.
     `python scripts/run_convobox.py`) and confirm the picked device
     actually took effect -- not just visually selected in the TUI.
 
+## Save only writes fields you actually changed (fixed 2026-07-15)
+
+Real incident: a plain `model_dump()` used to write EVERY field on every
+save, including ones never touched -- so a single Settings TUI save
+silently baked a stale `aec_delay_ms: 100` into `convobox.yaml`,
+permanently disabling AEC delay auto-tuning (see the AEC delay item in
+`docs/UAT-checklist.md`'s Echo section for the live symptom this caused).
+Fixed via `exclude_defaults=True`; unit-tested (`tests/test_settings_tui.py`)
+but a real save/reload/inspect pass closes the loop.
+
+20. Open the settings TUI against a `convobox.yaml` you've never touched
+    (or a fresh one). Without changing anything, save. Open the file and
+    confirm it's empty or very close to it (no long list of every
+    default value) -- an all-defaults save should write next to nothing.
+21. Change exactly one field (e.g. `TTS > Voice`), save, and open the
+    file. Confirm ONLY that field (plus its section header) appears --
+    not every other field in that section, not `aec_delay_ms`.
+22. Re-run `python scripts/run_convobox.py` against that saved file and
+    confirm it loads with the same effective config as before (defaults
+    for everything you didn't touch) -- the loaded behavior must be
+    identical to a full-field dump, only the written FILE should differ.
+
+## AEC delay auto-tune (fixed 2026-07-15)
+
+`Audio > AEC delay ms` is now optional -- leave it `(unset)` (the
+default) to auto-tune from real measured stream latencies on every
+`run_convobox.py` startup, or set a fixed number to override. The help
+panel shows a `Last auto-detected: ...ms` line read from a diagnostic
+sidecar file (`<config>.aec-estimate.json`) that `run_convobox.py` writes
+the first time it measures real latencies -- it never touches
+`convobox.yaml` itself.
+
+23. With `aec_delay_ms` unset and `echo_cancellation: true`, run a live
+    session, say something, let it respond. Confirm the log shows
+    `AEC delay auto-estimated: ...ms`, not `... explicit`.
+24. Reopen the settings TUI, go to `Audio > AEC delay ms`. Confirm the
+    help panel shows `Last auto-detected: <the same number>ms` with a
+    real-looking timestamp -- not the placeholder text.
+25. Before ever running a live session against a fresh config, check the
+    same field's help panel and confirm it shows the
+    `none yet -- run a live session...` placeholder instead of crashing
+    or showing stale data from a different config file.
+26. Type a fixed number into the field and save. Confirm the next
+    `run_convobox.py` run logs `... explicit` and does NOT log the
+    auto-estimated value as what it's using (it still logs the
+    measured-vs-configured comparison for reference, per the existing
+    "consider updating aec_delay_ms or removing it" line).
+

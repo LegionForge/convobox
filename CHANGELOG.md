@@ -15,6 +15,52 @@ minor versions carry feature and behavior changes.
 > **[L2]**.
 
 ### Added
+- **Conversation TUI now shows backend name, AEC status, and a
+  color-coded working heartbeat** (`src/convobox/tui/state.py`,
+  `src/convobox/tui/render.py`, `scripts/run_convobox.py`). `Attribution:
+  Claude Code; Provider: Anthropic; Model: claude-opus-4-8; Scope: this
+  entry.` Per JP's direct request for "voice status information...
+  back-end interpreter... any other information you deem necessary": a
+  new diagnostics line shows `backend: <name>`, `AEC: on/off` (+ the
+  last response's compact verdict tag once available), and, only while
+  silently busy, a green/yellow/red `still working: Ns` heartbeat
+  (`WorkingIndicator.silent_busy_s`, a new continuous counterpart to
+  `observe()`'s sparse notification-tick return value). Also shows a
+  live mic level in dBFS (post-AEC, reusing `audio_devices.level_meter()`'s
+  existing math) on the same line -- speaker-side level deliberately
+  deferred (would need a cross-thread write from the playback callback).
+  See `docs/UAT-checklist.md` **[U7]**/**[U8]**.
+- **Overlap gate's grace window now widens after a poorly-cancelled response**
+  (`scripts/run_convobox.py`). `Attribution: Claude Code; Provider:
+  Anthropic; Model: claude-opus-4-8; Scope: this entry.` The `[E8]`
+  self-barge-in incident's log stayed `UNDER-CANCELLING` for nearly the
+  whole session even after fixing the delay hint -- same-room mic+speaker
+  echo can leave real, uncancelled energy that leaks through as apparent
+  "new speech" right after playback ends. `grace_s_for_last_response()`
+  widens the overlap gate's protected window (`ECHO_GRACE_S`)
+  proportionally to the just-finished response's remaining echo headroom,
+  capped at 1.0s; a `FLOOR-LIMITED` or `NO ECHO DETECTED` response leaves
+  it unchanged. The exact constants are derived from the `[E8]` log's own
+  numbers, not live-tuned -- see `docs/UAT-checklist.md` **[E9]** for the
+  live validation this still needs.
+- **AEC delay auto-tune is now the real default, and Settings TUI saves only
+  write fields you actually changed** (`src/convobox/config.py`,
+  `scripts/run_convobox.py`, `scripts/settings_tui.py`). `Attribution: Claude
+  Code; Provider: Anthropic; Model: claude-opus-4-8; Scope: this entry.`
+  `audio.aec_delay_ms` defaults to `None` (auto-tune from real measured
+  stream latencies) instead of a literal `100`. Root-caused a real live
+  incident: the Settings TUI's save used to write every field on every
+  save, so opening and saving it even once silently baked a stale
+  `aec_delay_ms: 100` into `convobox.yaml`, permanently disabling
+  auto-tuning -- explaining a mic+speaker session where the real delay
+  was ~222ms and AEC could never converge, so the assistant kept
+  self-triggering barge-in on its own TTS output. Saves now use
+  `exclude_defaults=True`. The field is also user-editable in the
+  Settings TUI (`optional_int`, `-` clears it back to auto-tune) and its
+  help panel shows the last real auto-detected value, read from a
+  diagnostic sidecar file `run_convobox.py` writes (`<config>.aec-estimate.json`,
+  never `convobox.yaml` itself). See `docs/UAT-checklist.md` **[E8]** and
+  `docs/UAT-settings-tui.md`.
 - **Repo-wide AI attribution convention**: `docs/AI-ATTRIBUTION.md` now
   defines how to record Codex, Claude Code, and opencode edits in PRs,
   changelog entries, commit trailers, or file-level notes when those notes
@@ -31,6 +77,23 @@ minor versions carry feature and behavior changes.
   log. See `docs/UAT-checklist.md` **[L1]**.
 
 ### Fixed
+- **Backend event stream could die silently mid-session, losing the LLM's
+  response from the log for over a minute** (`src/convobox/orchestrator/orchestrator.py`,
+  `src/convobox/adapters/opencode.py`). `Attribution: Claude Code; Provider:
+  Anthropic; Model: claude-opus-4-8; Scope: this entry.` JP reported "I am
+  not always seeing the LLM output in the logs" and pasted a live UAT log
+  showing the real cause: `_ensure_session()`'s session-creation POST had
+  no explicit timeout (unlike the prompt POST), so a busy/cold opencode
+  server exceeded httpx's bare 5s default and raised `ReadTimeout` --
+  which `Orchestrator._consume_events()` had no exception handling for at
+  all, silently killing the whole event-consuming task. Nothing re-created
+  it until an unrelated later utterance happened to trigger a fresh
+  subscription; in the live log, an entire real response sat unlogged for
+  over a minute. Fixed both: the session-creation POST now gets the same
+  generous read timeout as the prompt POST, and `_consume_events()` now
+  resubscribes immediately on any exception (clearly logged), while
+  deliberately preserving each adapter's existing lazy-respawn contract
+  for a normal (non-exception) end. See `docs/UAT-checklist.md` **[L5]**.
 - **Response hook was not wired outside `--tui` mode**: `Orchestrator`'s
   `on_event` was passed `None` unless `--tui` was set, so a plain
   listening/UAT session never observed assistant replies at all. The hook is

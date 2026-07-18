@@ -10,7 +10,12 @@ from convobox.tts.piper import PiperTTSEngine
 
 
 class _FakeConfig:
-    sample_rate = 22050
+    def __init__(
+        self, speaker_id_map: dict[str, int] | None = None, num_speakers: int = 1
+    ) -> None:
+        self.sample_rate = 22050
+        self.speaker_id_map = speaker_id_map if speaker_id_map is not None else {}
+        self.num_speakers = num_speakers
 
 
 class _FakeChunk:
@@ -21,8 +26,13 @@ class _FakeChunk:
 class _FakeVoice:
     """Mimics piper's PiperVoice: .config.sample_rate + a synthesize() generator."""
 
-    def __init__(self, chunks_per_call: list[list[np.ndarray]]) -> None:
-        self.config = _FakeConfig()
+    def __init__(
+        self,
+        chunks_per_call: list[list[np.ndarray]],
+        speaker_id_map: dict[str, int] | None = None,
+        num_speakers: int = 1,
+    ) -> None:
+        self.config = _FakeConfig(speaker_id_map, num_speakers)
         self._chunks_per_call = chunks_per_call
         self.calls: list[str] = []
         self.syn_configs: list[object] = []
@@ -39,24 +49,71 @@ class _FakeVoice:
 
 
 def _make_engine(
-    chunks_per_call: list[list[np.ndarray]], rate: float = 1.0, volume: float = 1.0
+    chunks_per_call: list[list[np.ndarray]],
+    rate: float = 1.0,
+    volume: float = 1.0,
+    speaker: str | None = None,
+    speaker_id_map: dict[str, int] | None = None,
+    num_speakers: int = 1,
 ) -> tuple[PiperTTSEngine, _FakeVoice]:
     engine = PiperTTSEngine.__new__(PiperTTSEngine)
-    voice = _FakeVoice(chunks_per_call)
+    voice = _FakeVoice(chunks_per_call, speaker_id_map, num_speakers)
     engine._model_path = "unused"
     engine._config_path = None
     engine._voice = voice
     engine._sample_rate = voice.config.sample_rate
     engine._speaking = False
     engine._stopped = False
+    speaker_id = engine._resolve_speaker(speaker)
     engine._syn_config = None
-    if rate != 1.0 or volume != 1.0:
+    if rate != 1.0 or volume != 1.0 or speaker_id is not None:
         from piper.config import SynthesisConfig
 
         engine._syn_config = SynthesisConfig(
-            length_scale=None if rate == 1.0 else 1.0 / rate, volume=volume
+            length_scale=None if rate == 1.0 else 1.0 / rate,
+            volume=volume,
+            speaker_id=speaker_id,
         )
     return engine, voice
+
+
+# --- __init__/_load_voice: every other test in this file bypasses the real
+# constructor (PiperTTSEngine.__new__ + manual attribute assignment, via
+# _make_engine above) specifically to avoid needing a real downloaded voice
+# file -- which meant the actual construction path (loading the voice,
+# computing sample_rate, deciding whether to build a SynthesisConfig) had
+# ZERO test coverage. Mocking piper.PiperVoice.load (not skipping when a
+# real .onnx file is absent, the way test_aec.py's optional-dependency skip
+# works) means these run in CI every time, not just on a machine that
+# happens to have voices downloaded (.models/ is gitignored, so CI never
+# does). ---
+
+from unittest.mock import patch  # noqa: E402
+
+
+def test_init_loads_the_voice_and_computes_sample_rate() -> None:
+    fake_voice = _FakeVoice([])
+    with patch("piper.PiperVoice.load", return_value=fake_voice) as mock_load:
+        engine = PiperTTSEngine("model.onnx", config_path="model.onnx.json")
+
+    mock_load.assert_called_once_with("model.onnx", config_path="model.onnx.json")
+    assert engine.sample_rate == 22050
+    assert engine.is_speaking() is False
+    # Default rate/volume -- no SynthesisConfig needed, keeps synthesis
+    # output byte-identical to before rate/volume/speaker existed at all.
+    assert engine._syn_config is None
+
+
+def test_init_builds_a_syn_config_when_rate_or_volume_is_non_default() -> None:
+    from piper.config import SynthesisConfig
+
+    fake_voice = _FakeVoice([])
+    with patch("piper.PiperVoice.load", return_value=fake_voice):
+        engine = PiperTTSEngine("model.onnx", rate=1.5, volume=0.8)
+
+    assert isinstance(engine._syn_config, SynthesisConfig)
+    assert engine._syn_config.length_scale == pytest.approx(1.0 / 1.5)
+    assert engine._syn_config.volume == pytest.approx(0.8)
 
 
 def test_sanitize_text_strips_control_chars_and_caps_length() -> None:
@@ -155,6 +212,79 @@ async def test_custom_rate_and_volume_build_a_syn_config() -> None:
     assert isinstance(syn_config, SynthesisConfig)
     assert syn_config.length_scale == pytest.approx(0.5)  # rate 2.0 -> half the duration
     assert syn_config.volume == pytest.approx(0.5)
+
+
+# --- speaker resolution: several already-downloaded Piper voices in this
+# repo (en_GB-semaine-medium, en_GB-aru-medium, en_GB-vctk-medium,
+# en_US-libritts-high) are genuinely multi-speaker, confirmed by loading
+# them directly and reading voice.config.speaker_id_map/num_speakers, not
+# guessed -- this had no way to select anything but the implicit default. ---
+
+
+def test_resolve_speaker_none_is_a_noop() -> None:
+    engine, _ = _make_engine([[np.array([1], dtype=np.int16)]])
+    assert engine._resolve_speaker(None) is None
+
+
+def test_resolve_speaker_by_name() -> None:
+    engine = PiperTTSEngine.__new__(PiperTTSEngine)
+    engine._voice = _FakeVoice(
+        [], speaker_id_map={"prudence": 0, "spike": 1, "obadiah": 2, "poppy": 3}, num_speakers=4
+    )
+    assert engine._resolve_speaker("spike") == 1
+
+
+def test_resolve_speaker_by_raw_index() -> None:
+    engine = PiperTTSEngine.__new__(PiperTTSEngine)
+    engine._voice = _FakeVoice([], speaker_id_map={"p225": 0, "p226": 1}, num_speakers=109)
+    assert engine._resolve_speaker("42") == 42
+
+
+def test_resolve_speaker_unknown_name_raises_with_available_names_listed() -> None:
+    engine = PiperTTSEngine.__new__(PiperTTSEngine)
+    engine._voice = _FakeVoice(
+        [], speaker_id_map={"prudence": 0, "spike": 1, "obadiah": 2, "poppy": 3}, num_speakers=4
+    )
+    with pytest.raises(ValueError, match="'obadiah'") as exc_info:
+        engine._resolve_speaker("nobody")
+    assert "'poppy'" in str(exc_info.value)
+    assert "'prudence'" in str(exc_info.value)
+
+
+def test_resolve_speaker_out_of_range_index_raises() -> None:
+    engine = PiperTTSEngine.__new__(PiperTTSEngine)
+    engine._voice = _FakeVoice([], speaker_id_map={}, num_speakers=4)
+    with pytest.raises(ValueError, match="num_speakers=4"):
+        engine._resolve_speaker("99")
+
+
+def test_resolve_speaker_on_single_speaker_voice_raises() -> None:
+    # Empty speaker_id_map (the real shape for single-speaker voices,
+    # confirmed against en_GB-alba-medium.onnx.json) -- any speaker
+    # request has nothing to match, correctly falls through to the
+    # "not found" error rather than silently no-op'ing.
+    engine = PiperTTSEngine.__new__(PiperTTSEngine)
+    engine._voice = _FakeVoice([], speaker_id_map={}, num_speakers=1)
+    with pytest.raises(ValueError, match="single-speaker voice"):
+        engine._resolve_speaker("anyone")
+
+
+@pytest.mark.asyncio
+async def test_configured_speaker_reaches_the_syn_config() -> None:
+    from piper.config import SynthesisConfig
+
+    engine, voice = _make_engine(
+        [[np.array([1], dtype=np.int16)]],
+        speaker="spike",
+        speaker_id_map={"prudence": 0, "spike": 1, "obadiah": 2, "poppy": 3},
+        num_speakers=4,
+    )
+
+    await engine.synthesize("hi")
+
+    syn_config = voice.syn_configs[0]
+    assert isinstance(syn_config, SynthesisConfig)
+    assert syn_config.speaker_id == 1
 
 
 @pytest.mark.asyncio

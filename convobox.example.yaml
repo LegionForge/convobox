@@ -15,6 +15,15 @@ backend:
   # -- opencode: an HTTP+SSE server. Start it with `opencode serve` and
   #    point url at it.
   url: http://localhost:4096
+  # -- opencode only: pin which model a new session uses,
+  #    "provider/model-id" (matches `opencode models`' own output
+  #    format). Leave unset to use opencode's own default -- which may be
+  #    a hosted free-tier model, not necessarily your own configured
+  #    provider (found live, 2026-07-14: opencode silently used
+  #    OpenCode Zen's hy3-free with no error either way). NOT a CLI flag
+  #    -- `opencode serve` has no -m/--model option at all; this is sent
+  #    via the session-creation API instead. See OPENCODE_API_NOTES.md.
+  # model: openai/gpt-5.6-sol
   # -- claude-code / codex: spawned as a subprocess. `command` is the base
   #    command to launch (ConvoBox appends the flags it needs). Examples:
   # command: ["claude"]
@@ -35,6 +44,13 @@ tts:
                           # hear anything. Browse/download/audition with:
                           #   python scripts/voice_picker_tui.py
                           # (it can write your choice back here for you).
+  # Some Piper voices are genuinely multi-speaker (e.g. en_GB-semaine-medium:
+  # 4 named speakers, en_GB-aru-medium: 12, en_GB-vctk-medium: 109,
+  # en_US-libritts-high: 904) -- pick one by name from that voice's own
+  # speaker_id_map, or a raw numeric index. Leave unset for single-speaker
+  # voices or the voice's own default. An unknown name raises a clear error
+  # at startup listing the real available names for that voice.
+  # speaker: prudence
   rate: 1.0               # speech speed (1.0 normal, 1.2 faster, 0.8 slower)
   volume: 1.0             # loudness (1.0 normal, 0.5 half)
 
@@ -72,9 +88,15 @@ audio:
                           # Requires the optional extra:  pip install -e ".[aec]"
                           # Strongly recommended for same-room speakers+mic;
                           # unnecessary with headphones.
-  aec_delay_ms: 100       # render->capture delay hint. Auto-estimated from
-                          # the real stream latencies when you DON'T set this,
-                          # which is usually best -- leave it out to auto-tune.
+  # aec_delay_ms: 222     # render->capture delay hint. Left OUT (the
+                          # default) so it auto-estimates from the real
+                          # stream latencies on every startup -- usually
+                          # best. Set a fixed number ONLY if you've
+                          # measured a specific value for this exact
+                          # hardware: a wrong fixed value is the #1 cause
+                          # of weak echo suppression (confirmed live,
+                          # 2026-07-15 -- a stale 100ms hint kept AEC3
+                          # from converging against a real ~222ms delay).
 
 # ---------------------------------------------------------------------------
 # interaction -- barge-in (talking over a response).

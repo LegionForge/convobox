@@ -11,7 +11,8 @@ Each entry: the **finding**, then **Adopt →** what it means for ConvoBox.
 > Provenance: the modern / less-canonical entries (Skantze 2021, VAP 2022,
 > dGSLM 2023, Moshi 2024, Stivers 2009, Ward & Tsukahara 2000, Pipecat,
 > LiveKit Agents, Deepgram Flux, Vocode, ElevenLabs Conversational AI,
-> Hume AI EVI, Google Conversation Design) were web-verified July 2026 by
+> Hume AI EVI, Google Conversation Design, Wyoming protocol, Kyutai
+> Unmute) were web-verified July 2026 by
 > reading real primary-source pages/code, not secondhand summaries. The
 > foundational conversation-analysis and pragmatics classics are cited
 > from the standard literature; confirm against the primary source before any
@@ -545,6 +546,76 @@ one finding is concrete and directly actionable:
   CLIs it fronts). `proactive_audio`'s specific shape (agent-initiated
   silence based on relevance) is closest to ElevenLabs' already-covered
   "skip turn" tool, not a new pattern.
+
+**Wyoming protocol (github.com/rhasspy/wyoming, verified 2026-07-15 by
+reading the real GitHub README, not a secondhand summary).** Home
+Assistant's official local voice-assistant protocol -- a genuinely
+different comparison class from §5's full-duplex models or the cloud
+APIs above: a modular, network-transparent pipeline of swappable
+wake-word/STT/TTS *services* over JSONL + raw PCM, using the exact same
+open-source stack ConvoBox does (Whisper for STT, Piper for TTS). The
+closest architectural relative surveyed this session -- worth checking
+for what a comparable, widely-deployed, backend-agnostic pipeline
+considers must-have. Real message types confirmed in the spec:
+`voice-started`/`voice-stopped` (VAD boundary events), `audio-start`/
+`audio-chunk`/`audio-stop` (streaming), `transcript`, `synthesize`,
+`detection`/`not-detected`/`not-recognized`/`not-handled`.
+
+- **This is a validation-by-omission, not a borrow-this finding.** The
+  protocol documents no barge-in/interruption mechanism at all --
+  TTS playback is unidirectional (`synthesize` in, `audio-chunk`s out,
+  nothing documented to halt it mid-stream) -- and no application-level
+  error or timeout signaling; recovery is left entirely to raw TCP
+  disconnection. **Adopt →** nothing to change in ConvoBox; the opposite
+  conclusion. The two axes this session has spent the most effort
+  hardening -- barge-in (`interrupt_presets.py`, `BargeInMonitor`,
+  PR #71's orphaned-speak-task fix, PR #87's event-loop wiring coverage)
+  and failure recovery (the STT allocator crash-recovery in PR #65/#77,
+  the heartbeat in PR #18/#83) -- are problems the most comparable
+  widely-deployed open, swappable-backend voice protocol doesn't attempt
+  to solve at the protocol level at all. Real corroboration that this
+  wasn't wasted effort on an already-solved problem.
+- **`voice-started`/`voice-stopped` corroborates, doesn't add.** Same
+  concept as `UtteranceSegmenter.in_speech`'s existing boundary state,
+  independently named the same way by a comparable system -- not a new
+  primitive to adopt, just another data point that the boundary concept
+  itself is the right one.
+
+**Kyutai Unmute (kyutai-labs-unmute.mintlify.app, github.com/kyutai-labs/unmute,
+kyutai.org/stt -- verified 2026-07-15 by reading the real primary docs,
+not a secondhand summary).** An even closer architectural relative than
+Wyoming: unlike Kyutai's own Moshi (§5, a monolithic end-to-end model,
+already cited), Unmute is explicitly a *modular* STT → LLM → TTS
+pipeline that "works with any OpenAI-compatible LLM server" -- the same
+backend-agnostic design principle ConvoBox is built around, not a
+protocol for smart-home services (Wyoming) or a single fused model
+(Moshi). Confirmed against Unmute's own docs, not assumed.
+
+- **Semantic VAD names a real, known limitation in ConvoBox's own
+  turn-taking, but doesn't transplant directly.** Kyutai STT's own docs
+  (kyutai.org/stt, primary-source-quoted): conventional VAD "determines
+  whether the user is speaking or not, and wait[s] a fixed amount of
+  time after the user is done talking" -- naive because "people often
+  make long pauses during their sentences, which lead to false
+  positives." Their fix: the STT model "predicts not only the text but
+  also the probability that the user is done talking," using both
+  content and intonation, jointly with transcription. This is exactly
+  `UtteranceSegmenter`'s own tradeoff today -- a fixed `min_silence_ms`
+  (500ms default) that must either risk cutting off a mid-thought pause
+  or add latency to every genuine end-of-turn. **Adopt →** not
+  buildable as a bolt-on: it requires an STT model that predicts
+  end-of-turn probability jointly with transcription (Kyutai's own docs
+  note even their semantic VAD "is available in the Rust server but not
+  yet in the other implementations" -- a real architectural commitment,
+  not a small feature flag). faster-whisper (ConvoBox's STT) has no
+  equivalent. Recorded honestly as a frontier/known-limitation citation,
+  same treatment as §5's full-duplex models -- not a v1 target, but the
+  clearest primary-source articulation yet of exactly what
+  `min_silence_ms`'s fixed-timer approach trades away.
+- **The backend-agnostic design itself is validated, independently,
+  by a second real product** (the first being Wyoming) built around
+  the identical principle ConvoBox already committed to -- corroborates
+  the architecture choice, doesn't suggest a change.
 
 ---
 

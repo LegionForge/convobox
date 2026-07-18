@@ -103,6 +103,45 @@ def _elapsed_label(state: ConversationTuiState, now: float) -> str:
     return f"{elapsed // 60:02d}:{elapsed % 60:02d}"
 
 
+def _heartbeat_color(elapsed_s: float) -> str:
+    """Mirrors scripts/run_convobox.py's _heartbeat_color thresholds
+    (<10s green, 10-60s yellow, >60s red) -- duplicated rather than
+    imported so this package's layering stays clean (src/convobox must
+    not depend on scripts/, which imports FROM src/convobox, not the
+    other way around). Keep both in sync if the thresholds ever change."""
+    if elapsed_s < 10.0:
+        return _GREEN
+    if elapsed_s < 60.0:
+        return _YELLOW
+    return _RED
+
+
+def _aec_tag(verdict: str) -> str:
+    """Compact tag from interpret_aec_stats()'s full bracketed line
+    (scripts/run_convobox.py) -- "  [FLOOR-LIMITED: echo cancelled...]"
+    becomes "FLOOR-LIMITED". Never raises: an unrecognized/empty format
+    just yields "" (the diagnostics line omits the tag, not crashes)."""
+    stripped = verdict.strip().lstrip("[")
+    if not stripped:
+        return ""
+    return stripped.split(":")[0].split("]")[0].strip()
+
+
+def _diagnostics_line(state: ConversationTuiState, width: int) -> str:
+    parts = [f"backend: {state.backend_name or '?'}"]
+    if state.aec_enabled:
+        tag = _aec_tag(state.aec_verdict)
+        parts.append(f"AEC: on{' ' + tag if tag else ''}")
+    else:
+        parts.append("AEC: off")
+    if state.mic_level_db is not None:
+        parts.append(f"mic: {state.mic_level_db:.0f}dBFS")
+    if state.heartbeat_elapsed_s is not None:
+        color = _heartbeat_color(state.heartbeat_elapsed_s)
+        parts.append(f"{color}still working: {state.heartbeat_elapsed_s:.0f}s{_RESET}")
+    return _fit(f"{_DIM}" + "  |  ".join(parts) + f"{_RESET}", width)
+
+
 def render_conversation_frame(
     state: ConversationTuiState, width: int, height: int, now: float
 ) -> list[str]:
@@ -127,6 +166,7 @@ def render_conversation_frame(
     right = f"elapsed {elapsed}"
     pad = max(1, width - _visible_len(header) - len(right))
     lines: list[str] = [_clip_visible(header + " " * pad + right, width)]
+    lines.append(_diagnostics_line(state, width))
     lines.append("-" * width)
 
     # Warning banner (phase 3) only takes space when actually set -- costs

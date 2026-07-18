@@ -222,6 +222,66 @@ async def test_hard_stop_interrupts_and_thread_stays_usable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hard_stop_survives_the_appserver_dying_mid_interrupt() -> None:
+    # turn/interrupt's own request can fail (here: the app-server exits
+    # before responding) -- send_hard_stop must not raise. The read loop's
+    # death fails every PENDING future (including this one) with
+    # ConnectionError, which send_hard_stop's except clause must catch.
+    # Untested before this: the existing "process dies" test (die now)
+    # dies AFTER its one in-flight request already resolved, so no
+    # future was ever pending at the moment of death.
+    adapter = _adapter()
+    try:
+        await adapter.send_text("hang and vanish on interrupt")
+        assert adapter.is_busy() is True
+        # Let the reader task process the turn/started notification so
+        # _active_turn_id is set -- otherwise send_hard_stop takes its
+        # "nothing in flight" early-return path instead of actually
+        # issuing (and failing on) a turn/interrupt request.
+        await asyncio.sleep(0.2)
+
+        await adapter.send_hard_stop()  # must not raise
+        assert adapter.is_busy() is False
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_malformed_stdout_line_is_skipped_not_crashed() -> None:
+    # A genuinely malformed (non-JSON) line on the app-server's stdout
+    # must not crash the read loop or drop the real messages around it.
+    # Untested before this: every existing test's fake-server output is
+    # always valid JSON-RPC.
+    adapter = _adapter()
+    try:
+        await adapter.send_text("emit garbage first")
+        events = await _collect(adapter, 1)
+        assert events[0].type == BackendEventType.TEXT
+        assert events[0].content == "echo: emit garbage first"
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_thread_start_with_no_id_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # thread/start responding with no usable thread id is a protocol-level
+    # failure this adapter can't recover from -- must raise RuntimeError
+    # rather than silently proceeding with self._thread_id = None (which
+    # every later request would then send as a literal null threadId).
+    # Untested before this: nothing in the existing fixture can produce
+    # this response, since it happens before any turn text exists to
+    # script the fake server by -- FAKE_CODEX_NO_THREAD_ID exists for
+    # exactly this test.
+    monkeypatch.setenv("FAKE_CODEX_NO_THREAD_ID", "1")
+    adapter = _adapter()
+    try:
+        with pytest.raises(RuntimeError, match="no thread id"):
+            await adapter.send_text("hi")
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_hard_stop_before_any_send_is_a_noop() -> None:
     adapter = _adapter()
     await adapter.send_hard_stop()
@@ -396,3 +456,42 @@ def test_codex_adapter_resolves_windows_cmd_shim(monkeypatch: pytest.MonkeyPatch
 
     adapter = CodexAdapter(["codex"])
     assert adapter._command == ["C:/bin/codex.cmd"]
+
+
+def test_resolve_command_never_consults_which_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PATHEXT/.cmd-shim resolution is a Windows-only concern; on other
+    # platforms `codex` on PATH is directly executable, no guessing
+    # needed. Asserts which() is never even CALLED, not just that the
+    # final result happens to be unchanged -- a stronger check than
+    # comparing output alone would give.
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(mod.os, "name", "posix", raising=False)
+
+    def _unexpected_which(name: str) -> str | None:
+        raise AssertionError(f"shutil.which({name!r}) should not be called on non-Windows")
+
+    monkeypatch.setattr(mod.shutil, "which", _unexpected_which)
+
+    adapter = CodexAdapter(["codex"])
+    assert adapter._command == ["codex"]
+
+
+def test_resolve_command_falls_back_to_bare_name_when_nothing_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # codex isn't found anywhere on PATH under any of the tried names --
+    # passes the original command through unchanged (including any extra
+    # args) rather than raising here; the real FileNotFoundError surfaces
+    # naturally when asyncio.create_subprocess_exec actually tries to
+    # spawn it, matching how a missing claude-code/opencode command is
+    # already handled elsewhere (Settings TUI's own shutil.which warning).
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    adapter = CodexAdapter(["codex", "--flag"])
+    assert adapter._command == ["codex", "--flag"]
