@@ -257,7 +257,23 @@ models for API sessions. With `"model": "openai/gpt-5.4-mini"` (and even
 still answer with the built-in Zen default (`hy3-free`). CLI and server
 resolve the default differently.
 
+**The dedicated model-switch endpoint is broken the same way (found in
+the same investigation).** The server exposes `POST
+/api/session/{sessionID}/model` (body `{"model": ModelRef}` per its own
+spec) -- the endpoint opencode's internal model chooser uses. It returns
+204, the session object then genuinely shows the new model, a
+`model-switched` marker lands in the message list -- and a subsequent
+prompt still never generates. Worse: after prompting a switched session,
+`GET .../message` for it stops responding entirely and the server needs
+a restart (wedged twice, reproducibly). So all three routes to a
+non-default model -- pin at creation, switch endpoint, config default --
+are dead in 1.18.3's server, while `opencode run -m` works fine.
+
 **Workaround for now:** leave `backend.model` unset (voice sessions run
 on the server's own default) and treat model choice as pending an
 upstream fix. Re-verify with the curl matrix above after any opencode
-upgrade before re-adding a pin.
+upgrade before re-adding a pin. A ConvoBox-side model chooser (Settings
+TUI field fed from `GET /api/model`, the same source the internal
+chooser reads) is the right shape once upstream generation works --
+deliberately not built while every choosable value produces a dead
+session.
