@@ -1,0 +1,6 @@
+# Every change requires JP's review -- the mechanical enforcement of
+# "agents propose, JP approves" (AGENTS.md rule 10 era). GitHub
+# auto-requests review from owners on every PR touching matched paths.
+* @jp-cruz
+# Workflow changes doubly so: they run with repo permissions.
+.github/workflows/ @jp-cruz

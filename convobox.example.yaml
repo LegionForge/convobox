@@ -67,6 +67,11 @@ stt:
                           # confidence is below this (0.0 = keep all). ~0.4
                           # filters garbled far-field hallucinations; only
                           # meaningful when language is auto-detected.
+  # corrections:              # Optional, exact fixes for recurring STT errors.
+  #   "the green": "I agree" # Observed transcription mismatch; this is
+                              # applied before ordinary command routing only.
+                              # Hard stops, pause/wake words, and approvals
+                              # always use the raw transcript.
 
 # ---------------------------------------------------------------------------
 # audio -- devices and acoustic echo cancellation.

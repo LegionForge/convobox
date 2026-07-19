@@ -56,6 +56,19 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # PRs is the concrete argument for building it.
 DEFAULT_WAKE_WORD = "Athena"
 
+# Words that FAILED the real Piper -> faster-whisper round-trip test above
+# (normalized form). Not a construction-time rejection -- the safety-tier
+# note above still holds, and a user's own STT stack may differ -- but
+# anything offering wake-word configuration (Settings TUI) should warn
+# when one of these is chosen, because on the shipped pipeline they were
+# confidently mis-transcribed every time and the wake word never matched.
+ROUNDTRIP_REJECTED_WAKE_WORDS = frozenset({
+    "convobox",  # -> "Control Box" (0.93)
+    "copilot",  # -> "co-pilot"
+    "co pilot",
+    "voicebox",  # -> "Boyspicks"
+})
+
 
 def _normalize(text: str) -> str:
     lowered = text.lower()
@@ -89,6 +102,12 @@ class WakewordDetector:
     def wake_word(self) -> str:
         """The original (un-normalized) wake word/phrase this detector matches."""
         return self._original
+
+    @property
+    def normalized_wake_word(self) -> str:
+        """The normalized form actually matched -- the form
+        ``ROUNDTRIP_REJECTED_WAKE_WORDS`` entries are keyed by."""
+        return self._normalized
 
     def check(self, transcript: str) -> bool:
         """True when the wake word appears in ``transcript``.

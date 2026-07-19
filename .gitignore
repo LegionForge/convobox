@@ -11,6 +11,7 @@ build/
 .env
 *.wav
 *.log
+uat-acoustic-calibration/
 .DS_Store
 
 # Per-machine local config and its variants (copy convobox.example.yaml to

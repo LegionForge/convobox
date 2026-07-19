@@ -1,0 +1,14 @@
+# AI-assisted commit template
+#
+# Use this template for commits that include AI-assisted work.
+# Keep the attribution block intact and replace the placeholders.
+
+Summary:
+
+Attribution: <product>
+Provider: <provider>
+Model: <model>
+Scope: <files, feature, or commit>
+Date: <YYYY-MM-DD>
+
+AI-Attribution: <product>; provider=<provider>; model=<model>; scope=<files, feature, or commit>

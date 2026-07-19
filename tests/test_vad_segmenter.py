@@ -128,6 +128,16 @@ def test_flush_with_no_speech_returns_none(
     assert seg.flush() is None
 
 
+def test_last_probability_exposes_most_recent_model_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seg, _ = _make_segmenter(monkeypatch, [0.73])
+
+    assert seg.last_probability is None
+    seg.feed(_windows(1))
+    assert seg.last_probability == pytest.approx(0.73)
+
+
 def test_unaligned_chunks_process_on_window_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

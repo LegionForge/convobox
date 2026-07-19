@@ -93,6 +93,10 @@ class UtteranceSegmenter:
         self._speech_windows = 0
         self._trailing_silence_windows = 0
         self._last_forced = False
+        # Read-only diagnostic observability.  The acoustic calibration
+        # harness records the exact probability that drove each production
+        # VAD decision; normal segmentation behavior does not depend on it.
+        self._last_probability: float | None = None
         # Rolling window of pre-trigger audio, oldest evicted automatically.
         # A maxlen of 0 makes every append/extend/clear below a correct
         # no-op, so _PREFIX_PADDING_WINDOWS = 0 disables this cleanly with
@@ -127,6 +131,11 @@ class UtteranceSegmenter:
         empty or length one" as the common case, not a guarantee.
         """
         return self._last_forced
+
+    @property
+    def last_probability(self) -> float | None:
+        """Silero probability for the most recently processed 512-sample window."""
+        return self._last_probability
 
     def feed(self, chunk: np.ndarray) -> list[np.ndarray]:
         """Push one capture chunk; return any utterances it completes.
@@ -169,6 +178,7 @@ class UtteranceSegmenter:
 
     def _process_window(self, window: np.ndarray) -> np.ndarray | None:
         prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
+        self._last_probability = prob
         is_speech = prob >= self._threshold
         is_silence = prob < self._threshold - _EXIT_HYSTERESIS
 

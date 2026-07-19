@@ -407,3 +407,26 @@ on macOS, which has no mic on the dev machine).
   reachable in this environment (its npm postinstall failed here) to
   test against.
 - Everything on Linux.
+
+## Release gate: what CI cannot test
+
+CI green is NOT release-ready. ConvoBox's highest-value verification is
+live-mic UAT on real hardware, which no runner can perform. Before
+tagging any release, a human completes one live session confirming, at
+minimum:
+
+1. **Safeword**: "stop stop stop" mid-playback is transcribed, tagged
+   `[HARD STOP]`, and followed by `hard stop matched safeword` in the log
+   (both lines -- the second proves dispatch, not just detection).
+2. **Pause/resume**: "stop listening" pauses; the wake word resumes.
+3. **Barge-in**: a deliberate interruption stops audio and forwards the
+   words (`[BARGE-IN]` tag or busy-steer POST).
+4. **AEC sanity on the release hardware**: per-response verdicts read
+   `FLOOR-LIMITED`/`NO ECHO DETECTED` -- a run dominated by
+   `UNDER-CANCELLING` means the delay hint is wrong for this rig
+   (see docs/KNOWN-ISSUES.md); fix before shipping.
+5. **Interactive prompts**: a backend question is announced out loud, not
+   silently deadlocked (docs/DESIGN-backend-questions.md, [L9]).
+
+Record the pass as a dated line in the release PR/notes. If any item
+regresses, the release waits -- no exceptions for "CI was green."

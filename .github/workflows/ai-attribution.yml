@@ -1,0 +1,64 @@
+name: AI Attribution Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Require attribution when AI-assisted
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR attribution
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pull = context.payload.pull_request;
+            const body = pull.body || "";
+
+            const commits = await github.paginate(
+              github.rest.pulls.listCommits,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pull.number,
+                per_page: 100,
+              },
+            );
+
+            const commitMessages = commits.map((commit) => commit.commit.message).join("\n\n");
+            const aiAssistedMarked = /-\s*\[[xX]\]\s*AI-assisted change/.test(body);
+            const bodyHasAttribution =
+              /Attribution:\s*/i.test(body) &&
+              /Provider:\s*/i.test(body) &&
+              /Model:\s*/i.test(body) &&
+              /Scope:\s*/i.test(body) &&
+              /Date:\s*/i.test(body);
+            const commitsHaveAttribution = /AI-Attribution:/i.test(commitMessages);
+
+            if (!aiAssistedMarked) {
+              core.info("PR is not marked as AI-assisted; skipping attribution enforcement.");
+              return;
+            }
+
+            if (bodyHasAttribution || commitsHaveAttribution) {
+              core.info("AI attribution is present.");
+              return;
+            }
+
+            core.setFailed(
+              [
+                "This PR is marked AI-assisted but is missing the required attribution.",
+                "",
+                "Add either:",
+                "- the standard attribution block to the PR body, or",
+                "- an `AI-Attribution:` commit trailer on one or more commits.",
+                "",
+                "Required fields for the PR body block:",
+                "Attribution, Provider, Model, Scope, Date.",
+              ].join("\n"),
+            );
