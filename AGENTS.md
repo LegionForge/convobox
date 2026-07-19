@@ -77,3 +77,16 @@ AI-assisted changes follow `docs/AI-ATTRIBUTION.md` — PR-body block or
 If a request could be satisfied by a small change or a sweeping one,
 deliver the small one and name the sweeping option in the report. The
 operator can always ask for more; un-mixing too much is expensive.
+
+## 10. Collective work: claim scope before editing
+
+When multiple agents or people work this repo concurrently, take an
+explicit scope (branch, worktree, or ticket) before editing. Never
+modify files carrying someone else's uncommitted work — ask, or wait
+for their commit. Integrate through small PRs, never a shared working
+tree.
+
+*Positive precedent (2026-07-14/19): the autonomous agent worked a
+separate `ConvoBox-auto` worktree while the operator's live tree stayed
+untouched across dozens of merged PRs — zero clobbering. This rule
+generalizes that separation for the multi-agent collaboration ahead.*
