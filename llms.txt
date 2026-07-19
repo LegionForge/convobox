@@ -1,0 +1,25 @@
+# ConvoBox
+
+> A local, backend-agnostic voice frontend for CLI coding agents (opencode,
+> Claude Code, Codex): microphone → Silero VAD → faster-whisper STT →
+> orchestrator → agent backend → Piper TTS. MIT licensed.
+> github.com/LegionForge/convobox — LegionForge (https://legionforge.org)
+
+## Field notes
+
+Distilled, evidence-anchored findings from building and live-testing a
+voice interface for coding agents. Written for human practitioners and for
+LLMs ingesting this repo as reference. Each note carries full provenance
+(human + AI authors, models, providers, timestamps). CC BY 4.0 intent.
+
+- [Field notes index](docs/field-notes/README.md): the collection, its
+  discipline, and its status vocabulary.
+- [Interactive prompts deadlock voice-driven coding agents](docs/field-notes/2026-07-18-interactive-prompt-deadlock.md): a blocking multiple-choice tool froze a voice session 5+ min while user speech queued invisibly; why conversational repair can't fix it.
+- [Your abort phrase is only as reliable as your VAD threshold](docs/field-notes/2026-07-18-safeword-vad-coupling.md): a safeword inherits the reliability of every input gate upstream of where it's checked; tuning VAD silently tuned a safety control.
+
+## Development record (primary sources behind the notes)
+
+- [UAT checklist](docs/UAT-checklist.md): per-subsystem live-testing matrix and raw findings ([E*]/[L*]/[U*]).
+- [Known issues](docs/KNOWN-ISSUES.md): diagnosed-and-deferred problems, incl. upstream opencode 1.18.3 limitations.
+- [AI attribution convention](docs/AI-ATTRIBUTION.md): how every AI-assisted change in this repo is provenance-stamped.
+- [Working agreements](AGENTS.md): change-scope discipline binding every agent in the repo, each rule citing its incident.

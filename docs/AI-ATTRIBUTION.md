@@ -19,7 +19,8 @@ when it adds real value and does not create needless noise.
 
 ## Standard attribution block
 
-Use this shape for Codex, Claude, opencode, or any other coding agent:
+Use this shape for Codex, Claude, opencode, Kilo, Cline, or any other
+coding agent / work surface:
 
 ```text
 Attribution: <product>
@@ -28,6 +29,36 @@ Model: <model>
 Scope: <files, feature, or PR>
 Date: <YYYY-MM-DD>
 ```
+
+## Published-artifact provenance (docs, field notes, anything we may share)
+
+For material intended for eventual publication — field notes, design
+writeups, research — attribution is a first-class provenance stamp, not a
+courtesy line. It carries who and what produced the work so a future reader
+(human or model) can weigh each claim. Required fields:
+
+```text
+authors:
+  - JP Cruz <jp@legionforge.org> (role)
+  - <Tool / work surface> (<provider> <model-id>) — <role: investigation | implementation | writing | review>
+org: https://legionforge.org
+created: <YYYY-MM-DDTHH:MM:SS±HH:MM>   # date AND time with timezone offset
+revised: <same format; update on every substantive edit>
+```
+
+Rules:
+- **Name every AI tool that contributed**, with its provider and specific
+  model id — Claude Code (Anthropic), Codex (OpenAI), opencode (whichever
+  provider/model it actually ran), Kilo, Cline, etc. If two models
+  contributed (e.g. one investigated, one implemented), list both with
+  their roles.
+- **The human author is always named** with `jp@legionforge.org` and the
+  org URL `https://legionforge.org`.
+- **Timestamps are date + time + timezone offset**, not just a date —
+  provenance benefits from ordering, and these sessions cross midnight.
+- This applies to **all projects, private and public.** We keep the
+  provenance stamp regardless of whether we ever publish; publishing is a
+  later choice, but the record must already exist.
 
 Examples:
 
