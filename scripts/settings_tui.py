@@ -50,6 +50,7 @@ from convobox.config import (
 )
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
+from convobox.listening_pause import PauseListeningDetector
 from convobox.wakeword import ROUNDTRIP_REJECTED_WAKE_WORDS, WakewordDetector
 
 _RESET = "\x1b[0m"
@@ -201,7 +202,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("interaction", "interrupt_preset", "Interrupt preset", "choice", _CHOICE_INTERRUPT_PRESETS, help_text="do-not-disturb (default, safe without headphones/AEC): finish, drop overlap. conversational: mute+steer now. patient: finish, then deliver. halt: abort, drop. take-over: abort, steer now."),
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
-            FieldSpec("interaction", "wake_word", "Wake word", "str", help_text="Resumes listening after 'stop listening' (and is the push-word barge-in trigger). Must survive real speech-to-text: the old default 'ConvoBox' was confidently mis-heard as 'Control Box' every time, so it never matched. 'Athena' is the round-trip-verified default. Verify any custom word with scripts/roundtrip_smoketest.py before relying on it."),
+            FieldSpec("interaction", "wake_word", "Wake word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
+            FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the wake word resumes. Same picking rule as the wake word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
         ),
     ),
     SectionSpec(
@@ -615,6 +617,20 @@ def validate_config(config: AppConfig) -> ValidationReport:
                 "leaving 'stop listening' with no voice resume. 'Athena' is the "
                 "verified default; test alternatives with scripts/roundtrip_smoketest.py."
             )
+    # Empty pause phrases would leave no way to pause a live session; a
+    # phrase normalizing to nothing could never match. Same
+    # construct-the-real-detector rationale as the wake word above:
+    # PauseListeningDetector is what run_convobox.py builds at startup.
+    if not config.interaction.pause_listening_phrases:
+        report.warnings.append(
+            "interaction.pause_listening_phrases is empty -- there will be no "
+            "way to pause a live listening session by voice."
+        )
+    else:
+        try:
+            PauseListeningDetector(config.interaction.pause_listening_phrases)
+        except ValueError as exc:
+            report.errors.append(f"interaction.pause_listening_phrases: {exc}")
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
     if config.audio.aec_delay_ms is not None and config.audio.aec_delay_ms < 0:
