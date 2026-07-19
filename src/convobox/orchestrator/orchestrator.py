@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -48,6 +49,67 @@ def strip_code_for_speech(text: str) -> str:
     text = _MD_UNDERSCORE_RE.sub("", text)
     text = _COLLAPSE_SPACE_RE.sub(" ", text)
     return _COLLAPSE_BLANK_RE.sub("\n\n", text).strip()
+
+
+# opencode's interactive question tool (multiple-choice prompts back to the
+# user). Live UAT finding [L9]: when the backend calls it, the whole voice
+# session deadlocks unless the question is surfaced -- the tool blocks the
+# turn, steered speech queues invisibly behind it, and nothing tells the
+# user an answer is expected. Slice 1 of docs/DESIGN-backend-questions.md:
+# announce it; answering by voice is a later slice.
+_QUESTION_TOOL = "question"
+
+
+def render_question_for_speech(tool_input: str | None) -> str | None:
+    """Spoken announcement for a backend's interactive `question` tool call.
+
+    ``tool_input`` is the adapter's JSON-encoded tool input. The real shape
+    (read live off a blocked session during [L9]):
+    ``{"questions": [{"question": ..., "options": [{"label": ...,
+    "description": ...}, ...], ...}, ...]}``. Option descriptions are
+    deliberately NOT spoken -- labels keep the announcement short enough to
+    answer; the ladder's later tiers are where "more detail" belongs.
+    Returns None when nothing speakable can be extracted (malformed input
+    must never crash event consumption).
+    """
+    if not tool_input:
+        return None
+    try:
+        parsed = json.loads(tool_input)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    questions = parsed.get("questions")
+    if not isinstance(questions, list):
+        return None
+    parts: list[str] = []
+    for entry in questions:
+        if not isinstance(entry, dict):
+            continue
+        question = entry.get("question")
+        if not isinstance(question, str) or not question.strip():
+            continue
+        piece = question.strip()
+        options = entry.get("options")
+        if isinstance(options, list):
+            labels: list[str] = []
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                label = option.get("label")
+                if isinstance(label, str) and label.strip():
+                    labels.append(label.strip())
+            if labels:
+                numbered = ". ".join(
+                    f"Option {index}: {label}"
+                    for index, label in enumerate(labels, start=1)
+                )
+                piece = f"{piece} {numbered}."
+        parts.append(piece)
+    if not parts:
+        return None
+    return "The agent is asking: " + " ".join(parts)
 
 
 class Orchestrator:
@@ -215,6 +277,21 @@ class Orchestrator:
                 # TUI updates) over a bug in an OBSERVER, not the core
                 # routing/speech responsibility this class exists for.
                 logger.warning("on_event observer raised; ignoring", exc_info=True)
+        if event.type == BackendEventType.TOOL_CALL and event.tool == _QUESTION_TOOL:
+            # [L9]: this tool BLOCKS the backend's turn until answered, and
+            # an unheard question deadlocks the whole voice session. Always
+            # log it (the honest status the heartbeat couldn't give), and
+            # speak it when a voice path exists. Deliberately not tiered:
+            # a question must be delivered whole or it can't be answered.
+            announcement = render_question_for_speech(event.tool_input)
+            if announcement is not None:
+                logger.info(
+                    "backend is waiting for YOUR answer -- %s", announcement
+                )
+                if self._tts is not None and self._player is not None:
+                    self._cancel_speak_task()
+                    self._speak_task = asyncio.create_task(self._speak(announcement))
+            return
         if event.type != BackendEventType.TEXT or not event.content:
             return
         if self._tts is None or self._player is None:
