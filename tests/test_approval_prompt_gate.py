@@ -3,7 +3,7 @@ from __future__ import annotations
 from convobox.approval import ApprovalDetector
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.tui import ConversationTuiState
-from scripts.run_convobox import ApprovalPromptGate, _on_backend_event
+from scripts.run_convobox import ApprovalPromptGate, LastSpokenResponse, _on_backend_event
 
 
 def _gate(timeout_s: float = 2.5) -> ApprovalPromptGate:
@@ -105,6 +105,7 @@ def test_codex_approval_event_starts_gate_and_sets_tui_warning() -> None:
     state = ConversationTuiState()
     _on_backend_event(
         state,
+        LastSpokenResponse(),
         BackendEvent(
             BackendEventType.APPROVAL_REQUEST,
             content="APPROVAL REQUIRED — COMMAND EXECUTION\n\nRequested command:\necho harmless",

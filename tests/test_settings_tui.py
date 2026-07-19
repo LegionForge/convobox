@@ -620,3 +620,32 @@ def test_validate_config_accepts_verified_default_wake_word() -> None:
     report = validate_config(_make_config(**{"interaction.wake_word": "Athena"}))
     assert not any("wake_word" in error for error in report.errors)
     assert not any("wake_word" in warning for warning in report.warnings)
+
+
+# --- pause phrases: TUI-editable, validated like the wake word ---
+
+
+def test_interaction_section_exposes_pause_phrases_field() -> None:
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    spec = next((f for f in interaction.fields if f.key == "pause_listening_phrases"), None)
+    assert spec is not None
+    assert spec.kind == "list_str"
+
+
+def test_validate_config_warns_when_pause_phrases_empty() -> None:
+    config = _make_config(**{"interaction.pause_listening_phrases": []})
+    report = validate_config(config)
+    assert any("pause_listening_phrases" in w for w in report.warnings)
+    assert not any("pause_listening_phrases" in e for e in report.errors)
+
+
+def test_validate_config_rejects_pause_phrase_that_normalizes_to_nothing() -> None:
+    config = _make_config(**{"interaction.pause_listening_phrases": ["!!!"]})
+    report = validate_config(config)
+    assert any("pause_listening_phrases" in e for e in report.errors)
+
+
+def test_validate_config_accepts_default_pause_phrases() -> None:
+    report = validate_config(_make_config())
+    assert not any("pause_listening_phrases" in e for e in report.errors)
+    assert not any("pause_listening_phrases" in w for w in report.warnings)

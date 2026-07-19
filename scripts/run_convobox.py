@@ -52,6 +52,7 @@ import sys
 import time
 from collections import deque
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -128,6 +129,29 @@ _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 def _norm_tokens(text: str) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
+
+
+def token_overlap_ratio(transcript: str, response: str) -> float:
+    """Share of transcript tokens that occur in the response text."""
+    transcript_tokens = _norm_tokens(transcript)
+    response_tokens = _norm_tokens(response)
+    if not transcript_tokens or not response_tokens:
+        return 0.0
+    return len(transcript_tokens & response_tokens) / len(transcript_tokens)
+
+
+def _echo_match_suffix(transcript: str, last_response: str) -> str:
+    overlap = token_overlap_ratio(transcript, last_response)
+    if overlap == 0.0:
+        return "[echo-match: 0.00 -- does NOT match what was playing; possible real speech]"
+    return f"[echo-match: {overlap:.2f} of tokens in last response]"
+
+
+@dataclass
+class LastSpokenResponse:
+    """Shared observer state; the mic loop must only inspect the latest response."""
+
+    text: str = ""
 
 
 # Backchannels/continuers -- "mm-hmm", "yeah", "right" -- signal "I'm
@@ -1029,7 +1053,9 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
 
 
 def _on_backend_event(
-    tui_state: ConversationTuiState | None, event: BackendEvent,
+    tui_state: ConversationTuiState | None,
+    last_spoken_response: LastSpokenResponse,
+    event: BackendEvent,
     approval_phrase: str | None = None,
     approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
@@ -1075,6 +1101,7 @@ def _on_backend_event(
         return
     log.info("response: %s", event.content)
     spoken = strip_code_for_speech(event.content)
+    last_spoken_response.text = spoken
     if spoken and spoken != event.content:
         log.info("response(spoken): %s", spoken)
     if tui_state is not None:
@@ -1121,6 +1148,7 @@ async def run(args: argparse.Namespace) -> None:
     # replies straight to TTS and captured them nowhere, leaving the most
     # useful lines of an audio UAT invisible in the log.
     tui_state = ConversationTuiState() if (args.tui and args.text is None) else None
+    last_spoken_response = LastSpokenResponse()
     if tui_state is not None:
         tui_state.backend_name = config.backend.name
         tui_state.aec_enabled = config.audio.echo_cancellation
@@ -1130,7 +1158,8 @@ async def run(args: argparse.Namespace) -> None:
         tts=tts,
         player=player,
         on_event=lambda e: _on_backend_event(
-            tui_state, e, config.interaction.approval_phrase, approval_gate
+            tui_state, last_spoken_response, e,
+            config.interaction.approval_phrase, approval_gate,
         ),
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
@@ -1559,16 +1588,25 @@ async def run(args: argparse.Namespace) -> None:
                         # AEC was actually in the path when an echo leaked.
                         aec_state = "echo-cancellation active" if canceller is not None else "no echo cancellation"
                         log.info(
-                            "dropped (overlap gate, %s): %r", aec_state, text
+                            "dropped (overlap gate, %s): %r %s",
+                            aec_state,
+                            text,
+                            _echo_match_suffix(text, last_spoken_response.text),
                         )
                         continue
                     if echo_filter.is_echo(text):
                         if barged_in:
                             log.warning(
-                                "dropped (spoken-echo filter, barge-in was our own echo): %r", text
+                                "dropped (spoken-echo filter, barge-in was our own echo): %r %s",
+                                text,
+                                _echo_match_suffix(text, last_spoken_response.text),
                             )
                         else:
-                            log.info("dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r", text)
+                            log.info(
+                                "dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r %s",
+                                text,
+                                _echo_match_suffix(text, last_spoken_response.text),
+                            )
                         continue
                     if barged_in and is_backchannel(text):
                         # Playback already stopped (BargeInMonitor decided
