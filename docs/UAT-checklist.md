@@ -158,6 +158,28 @@ Additions from the 2026-07-11 live log:
   require token overlap with the *currently* playing segment, not any recent
   response), so a re-spoken assistant phrase can't be suppressed. Severity:
   low (no user input lost). Not blocking.
+- **[L9] Backend interactive `question` tool deadlocks a voice session
+  (session #5, 2026-07-18, `uat-echo.log`).** Asked "can you help me test?",
+  the opencode build agent called its interactive `question` tool
+  (multiple-choice, "What kind of testing do you want to run...") at
+  18:53:32 and blocked in `status: running` for 5+ minutes waiting for an
+  answer that has no voice path. Compounding chain, each verified live:
+  (1) the user's barge-in at 18:53:40 muted playback mid-announcement, so
+  the question was never heard; (2) all ~15 subsequent utterances were
+  steered (`on_new_words=now`), got HTTP 200 "admitted", and queued
+  invisibly behind the blocked tool -- none materialized into the session's
+  message list, so "can you repeat the question?" can NEVER work as an LLM
+  prompt in this state; (3) the heartbeat said "thinking or running a
+  tool" for 126s when the truth was "waiting for YOUR answer" -- an honest
+  status was available the whole time (`GET /api/session/{id}/question`
+  returns the full pending question + options). The server exposes a
+  complete reply API (`POST .../question/{requestID}/reply` / `/reject`),
+  so a voice answer loop is buildable -- design: docs/DESIGN-backend-questions.md.
+  Safeword remains the only working exit today. Positive observations from
+  the same session: barge-in captured + `[BARGE-IN]`-tagged cleanly again,
+  AEC delay auto-estimate stable at 222ms, and the RecognitionErrorLadder's
+  FIRST live firing (`'Hallo?' lang=de 0.32 < 0.40 -> [ERROR-LADDER: tier 1]`,
+  working as built).
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
