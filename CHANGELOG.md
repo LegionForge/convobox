@@ -15,6 +15,26 @@ minor versions carry feature and behavior changes.
 > **[L2]**.
 
 ### Added
+- **Backend questions are announced out loud** (`src/convobox/orchestrator/`):
+  when the backend calls opencode's blocking interactive `question` tool,
+  ConvoBox speaks the question with numbered option labels and logs
+  "backend is waiting for YOUR answer" -- previously the session silently
+  deadlocked (UAT finding [L9]; slice 1 of
+  `docs/DESIGN-backend-questions.md`). `Attribution: Claude Code;
+  Provider: Anthropic; Model: claude-fable-5; Scope: this entry.`
+- **Wake word is configurable from the Settings TUI**, validated by the
+  real `WakewordDetector` at save time, with a warning for words the real
+  TTS->STT round-trip has proven unreliable (`ROUNDTRIP_REJECTED_WAKE_WORDS`
+  -- 'ConvoBox' itself mis-heard as 'Control Box' every time).
+  `Attribution: Claude Code; Provider: Anthropic; Model: claude-fable-5;
+  Scope: this entry.`
+- **Operator-maintained STT corrections glossary** (`stt.corrections`,
+  `src/convobox/stt/corrections.py`): deterministic word-boundary fixes
+  for recurring mishears ('bargain' -> 'barge-in'), applied only after
+  every safety-critical raw-transcript check -- a correction can never
+  manufacture a hard stop, wake/pause action, or approval decision.
+  `Attribution: OpenAI Codex; Provider: OpenAI; Model: gpt-5.6-terra;
+  Scope: this entry.`
 - **Conversation TUI now shows backend name, AEC status, and a
   color-coded working heartbeat** (`src/convobox/tui/state.py`,
   `src/convobox/tui/render.py`, `scripts/run_convobox.py`). `Attribution:
