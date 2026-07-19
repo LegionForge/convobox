@@ -587,14 +587,15 @@ def run(args: argparse.Namespace) -> Path:
     try:
         audio, audio_rate = asyncio.run(_synthesize(config, args.response_repeats))
         _write_wav(output_dir / "assistant-reference.wav", audio, audio_rate)
-        mic = MicrophoneStream(
+        # MicrophoneStream.__enter__ starts the stream itself -- no explicit
+        # start() here (CodeQL's literal "with mic: mic.start()" suggestion
+        # on PR #96 would have double-started it).
+        with MicrophoneStream(
             sample_rate=config.audio.sample_rate,
             blocksize=512,
             device=config.audio.input_device,
             channels=1,
-        )
-        mic.start()
-        try:
+        ) as mic:
             print(
                 f"input={config.audio.input_device!r} output={config.audio.output_device!r} "
                 f"voice={config.tts.voice!r}"
@@ -667,9 +668,10 @@ def run(args: argparse.Namespace) -> Path:
                         "no measurable speaker echo reached the mic; "
                         "skipping meaningless delay sweep"
                     )
-        finally:
-            mic.close()
     finally:
+        # Free the single-instance port (47613, shared with run_convobox.py)
+        # even on a crash -- otherwise no voice session can start until the
+        # OS reaps this process.
         lock.close()
 
     aggregates = _aggregate_trials(trials)
