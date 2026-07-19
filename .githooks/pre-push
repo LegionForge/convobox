@@ -16,7 +16,9 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   [ -z "$range" ] && continue
   # uv.lock excluded: package version strings match the IP regex
   # (nvidia_curand 10.4.0.35 -- verified false positive 2026-07-19).
-  hits=$(git grep -l -E "$PATTERN" $range -- ':!uv.lock' 2>/dev/null)
+  # This hook excludes itself: it necessarily contains the patterns it
+  # scans for (it blocked its own first push -- working as designed).
+  hits=$(git grep -l -E "$PATTERN" $range -- ':!uv.lock' ':!.githooks/pre-push' 2>/dev/null)
   if [ -n "$hits" ]; then
     echo "pre-push BLOCKED: possible private data in outgoing commits:" >&2
     echo "$hits" >&2
