@@ -277,3 +277,24 @@ TUI field fed from `GET /api/model`, the same source the internal
 chooser reads) is the right shape once upstream generation works --
 deliberately not built while every choosable value produces a dead
 session.
+
+**CORRECTION (2026-07-18 late, deeper investigation):** the pin mechanism
+itself WORKS -- a session pinned to a model the server has actually
+loaded (verified live: `opencode/grok-code`) generates normally. The real
+bugs are narrower and nastier: (1) the server's API path never loads the
+OAuth-credentialed `openai` provider -- `GET /api/model` lists only
+api-key/config providers (Zen, inception, ollama-remote) even with
+`"openai": {}` forced into config's provider block and a valid,
+unexpired OAuth token; (2) pinning any model absent from that loaded
+catalog (all `openai/*`, and Zen models the server build doesn't carry
+like `opencode/gpt-5.4-mini`) hangs the session silently instead of
+erroring -- that's what every earlier "pin is broken" observation
+actually was; (3) the `opencode run`/TUI request path DOES load and use
+the OAuth provider (verified: `opencode run -m openai/gpt-5.6-terra`
+created its session on this same server and answered), but that lazy
+load never becomes visible to API-created sessions -- retested
+immediately after, still dead. Net: an API client (ConvoBox) cannot
+reach ChatGPT-Plus-OAuth models in 1.18.3 at all; it CAN pin any model
+in `GET /api/model` (the Zen catalog: grok-code, kimi-k2.5-free,
+minimax-m3-free, qwen3.6-plus-free, ...). Config default `"model"` is
+also ignored for API sessions (always Zen `hy3-free`).
