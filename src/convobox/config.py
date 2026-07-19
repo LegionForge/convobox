@@ -65,6 +65,23 @@ class STTConfig(BaseModel):
     # safeword on the raw transcript BEFORE applying this gate: a confidence
     # filter must never be able to swallow a hard stop.
     min_language_probability: float = 0.0
+    # Exact, operator-maintained fixes for recurring STT mistakes.  Applied
+    # only to ordinary command routing after raw safeword/pause/approval
+    # checks; see convobox.stt.corrections.TranscriptCorrector.  Keeping the
+    # glossary in config makes every rewrite inspectable and portable, rather
+    # than silently training on a user's voice data.
+    corrections: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("corrections")
+    @classmethod
+    def _validate_corrections(cls, v: dict[str, str]) -> dict[str, str]:
+        # Constructing the corrector performs normalization-aware validation
+        # (empty sources/targets and duplicate normalized sources).  Import
+        # lazily to keep config's existing import surface lightweight.
+        from convobox.stt.corrections import TranscriptCorrector
+
+        TranscriptCorrector(v)
+        return v
 
 
 class TTSConfig(BaseModel):

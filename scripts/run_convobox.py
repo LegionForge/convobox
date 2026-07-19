@@ -75,6 +75,7 @@ from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.response_tiering import ContinueDetector
 from convobox.safeword.detector import SafewordDetector
+from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, render_conversation_frame
@@ -961,6 +962,7 @@ async def run(args: argparse.Namespace) -> None:
         device=config.audio.output_device
     )
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
+    transcript_corrector = TranscriptCorrector(config.stt.corrections)
     # --tui only applies to the live mic loop, not --text mode (which
     # returns before the mic loop even exists, below) -- constructed here
     # regardless so it's in scope for the Orchestrator on_event wiring,
@@ -996,7 +998,10 @@ async def run(args: argparse.Namespace) -> None:
     if args.text is not None:
         # Scriptable single-shot validation: the full Orchestrator/backend/
         # TTS path with the mic taken out of the equation.
-        await orchestrator.handle_transcript(args.text)
+        text = transcript_corrector.correct(args.text)
+        if text != args.text:
+            log.info("corrected transcript before command routing: %r -> %r", args.text, text)
+        await orchestrator.handle_transcript(text)
         await _drain_until_idle(adapter, timeout_s=args.timeout)
         player.wait()
         await orchestrator.stop_event_loop()
@@ -1273,6 +1278,19 @@ async def run(args: argparse.Namespace) -> None:
                             text, config.interaction.wake_word,
                         )
                         continue
+                    # The glossary is intentionally downstream of every
+                    # safety-critical raw-transcript check above.  A configured
+                    # correction can improve an ordinary command such as a
+                    # project name, but it can never manufacture a hard stop,
+                    # wake/pause action, or approval decision.
+                    corrected_text = transcript_corrector.correct(text)
+                    if corrected_text != text:
+                        log.info(
+                            "corrected transcript before command routing: %r -> %r",
+                            text,
+                            corrected_text,
+                        )
+                        text = corrected_text
                     # Response-tiering continue-prompt (docs/DESIGN-0.3.0-
                     # interaction-and-safety.md, Phase 2). Checked here, same
                     # reasoning as barge-in below: an utterance answering the
