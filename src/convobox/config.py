@@ -10,6 +10,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from convobox.interrupt_presets import resolve_preset
+from convobox.approval import ApprovalDetector
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
 from convobox.wakeword import DEFAULT_WAKE_WORD
 
@@ -155,6 +156,22 @@ class InteractionConfig(BaseModel):
     # not yet live-UAT-tuned against a real "did that feel laggy or
     # naggy" pass.
     continue_timeout_s: float = 2.5
+    # Opt-in only: no approval phrase means ConvoBox preserves its original
+    # fail-closed behavior and declines Codex approval requests immediately.
+    # When set, the exact phrase (never a casual "yes") is required before a
+    # pending command/file approval is released to Codex.
+    approval_phrase: str | None = None
+    # Silence is an explicit denial, never consent.  Long enough to read the
+    # warning and ask a question, but bounded so a forgotten request does not
+    # leave an agent turn hanging indefinitely.
+    approval_timeout_s: float = 30.0
+
+    @field_validator("approval_phrase")
+    @classmethod
+    def _validate_approval_phrase(cls, v: str | None) -> str | None:
+        if v is not None:
+            ApprovalDetector(v)
+        return v
 
 
 class SafewordConfig(BaseModel):

@@ -280,6 +280,107 @@ class BargeInMonitor:
         return False
 
 
+class EchoTailGuard:
+    """Keeps listening suppressed for the reverb/echo tail AFTER a response ends.
+
+    Failure mode B of self-voice barge-in (docs/DESIGN-echo-and-barge-in.md):
+    with a mic+speakers setup, the assistant's own speech reverberates for
+    tens-to-hundreds of ms after playback stops. The fixed ``ECHO_GRACE_S``
+    can't cover this robustly -- too short and the tail slips a false
+    barge-in through right after the response; too long and it eats genuine
+    quick replies ("yes", "go on").
+
+    The AEC telemetry already answers the one question that matters here,
+    per response: was echo actually reaching the mic, and did AEC remove
+    it? We drive the tail from that:
+
+    - No measurable echo at the mic (headset, silent endpoint) -> ``NO
+      ECHO DETECTED`` -> NO extra tail. The baseline ``ECHO_GRACE_S`` in
+      ``utterance_overlapped_playback`` still applies, but we don't
+      over-suppress real replies.
+    - Echo reached the mic but AEC cancelled it to the floor (``FLOOR-
+      LIMITED``) -> residual ~0 -> again NO extra tail: there's nothing
+      leaking to guard against.
+    - Echo reached the mic AND AEC under-cancelled (residual remains) ->
+      open a bounded tail, scaled to the measured render->capture delay
+      (longer acoustic paths need longer tails), capped so a stuck tail
+      can't permanently mute the mic.
+
+    This is stage-2 of echo handling -- signal-level knowledge (we know
+    what we said AND how well AEC removed it) fed into the listening gate
+    -- complementing the text-level ``SpokenEchoFilter`` (stage 1).
+
+    During playback itself the guard stays open (``is_closed()`` is False):
+    the overlap gate's ``player.is_playing()`` check already drops
+    in-flight speech, so the tail guard only governs the window AFTER
+    playback ends. Pure state machine, same family as BargeInMonitor/
+    ListeningGate, so the window logic is unit-testable without a real mic
+    loop or audio device.
+    """
+
+    # Residual (ceiling - attenuation) above this many dB means AEC left
+    # real echo behind -> a tail is warranted. At or below it, the echo
+    # was cancelled to the room floor and the tail is unnecessary.
+    UNDER_CANCEL_MARGIN_DB = 2.0
+    # Tail length = max(baseline, delay_s * this factor), capped at _CAP_S.
+    DELAY_FACTOR = 2.0
+    CAP_S = 1.5
+
+    def __init__(self, baseline_grace_s: float = ECHO_GRACE_S) -> None:
+        self._baseline = baseline_grace_s
+        self._tail_len = 0.0
+        self._tail_ends_at = 0.0  # time.monotonic() scale; 0 = no tail open
+        self._closed = False
+
+    def set_echo_profile(
+        self,
+        attenuation_db: float | None,
+        ceiling_db: float | None,
+        delay_s: float,
+        now: float,
+    ) -> None:
+        """Feed the just-ended response's AEC verdict. Call once per response end.
+
+        Opens a tail (anchored at ``now``) only when echo actually leaked
+        past AEC; otherwise leaves ``_tail_len`` at 0 so the next
+        ``observe`` opens nothing extra.
+        """
+        if (
+            attenuation_db is None
+            or ceiling_db is None
+            or ceiling_db < AEC_MEASURABLE_ECHO_DB
+        ):
+            self._tail_len = 0.0
+            return
+        residual = ceiling_db - attenuation_db
+        if residual <= self.UNDER_CANCEL_MARGIN_DB:
+            self._tail_len = 0.0
+            return
+        self._tail_len = min(self.CAP_S, max(self._baseline, delay_s * self.DELAY_FACTOR))
+        self._tail_ends_at = now + self._tail_len
+
+    def observe(self, playing: bool, now: float) -> bool:
+        """Update and return whether the gate is closed (suppress listening).
+
+        While playing, re-anchor the tail clock to the true playback end
+        (covers streaming stalls where synthesis pauses) and stay open --
+        during-playback suppression is the overlap gate's job. Once audio
+        stops, the gate is closed until the tail window expires, then opens.
+        """
+        if playing:
+            self._tail_ends_at = max(self._tail_ends_at, now + self._tail_len)
+            self._closed = False
+            return False
+        closed = bool(self._tail_ends_at) and now < self._tail_ends_at
+        self._closed = closed
+        if not closed:
+            self._tail_ends_at = 0.0
+        return closed
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+
 class QueuedInterjection:
     """Axis 2's "queue" behavior (docs/DESIGN-barge-in.md's two-axis grid,
     the ``patient`` preset: let-finish + queue) -- "it finishes, then does
@@ -800,6 +901,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection,
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
     continue_gate: ContinuePromptGate | None = None,
+    approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
@@ -883,22 +985,53 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                 )
             if continue_gate.observe_timeout(now):
                 log.debug("continue-prompt window expired with no reply -- assuming done")
+        if approval_gate is not None and approval_gate.observe_timeout(time.monotonic()) == "deny":
+            # Approval silence is a real, explicit denial.  Do not leave the
+            # blocked Codex turn hanging, and never reinterpret a timeout as
+            # consent.
+            if await adapter.resolve_pending_approval(False):
+                log.warning("declined pending Codex approval after %.1fs of silence", approval_gate.timeout_s)
+                if tui_state is not None:
+                    tui_state.warning = None
+            else:
+                log.error("approval timeout fired but no pending backend request could be declined")
         was_playing = playing
         if tui_state is not None:
             if listening_gate is not None and listening_gate.is_paused:
                 tui_state.status = "paused"
+                tui_state.waiting_hint = None
+            elif approval_gate is not None and approval_gate.is_waiting:
+                tui_state.status = "waiting"
+                tui_state.waiting_hint = "approval needed — say your approval phrase or 'no'"
+            elif continue_gate is not None and continue_gate.is_waiting:
+                # A tiered response just finished speaking and we're holding
+                # back more, waiting for the user to say "continue" (or just
+                # carry on). This is NOT the same as idle LISTENING -- the
+                # ball is in the user's court and the session is blocked on
+                # their reply. Surface it as a distinct WAITING state so the
+                # user can tell "are you still thinking?" from "are you
+                # waiting on me?" (UAT finding during the AEC/barge-in test:
+                # the old code fell through to LISTENING here).
+                tui_state.status = "waiting"
+                tui_state.waiting_hint = "say 'continue' for more"
             elif playing:
                 tui_state.status = "speaking"
+                tui_state.waiting_hint = None
             elif busy:
                 tui_state.status = "working"
+                tui_state.waiting_hint = None
             elif segmenter is not None and segmenter.in_speech:
                 tui_state.status = "capturing"
+                tui_state.waiting_hint = None
             else:
                 tui_state.status = "listening"
+                tui_state.waiting_hint = None
 
 
 def _on_backend_event(
-    tui_state: ConversationTuiState | None, event: BackendEvent
+    tui_state: ConversationTuiState | None, event: BackendEvent,
+    approval_phrase: str | None = None,
+    approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
     """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
     and full-detail panes from the real backend event stream, AND records
@@ -923,6 +1056,21 @@ def _on_backend_event(
     asterisk"). tui_state may be None (non-TUI UAT mode), in which case we
     only log.
     """
+    if event.type == BackendEventType.APPROVAL_REQUEST and event.content:
+        if approval_gate is not None:
+            approval_gate.start_waiting(time.monotonic())
+        instruction = (
+            f"\n\nSay '{approval_phrase}' to approve. Say 'no' to deny. "
+            "Silence denies the request."
+            if approval_phrase
+            else "\n\nNo interactive approval phrase is configured; this request will be denied."
+        )
+        warning = event.content + instruction
+        log.warning("%s", warning)
+        if tui_state is not None:
+            tui_state.warning = warning
+            tui_state.full_detail = event.content
+        return
     if event.type != BackendEventType.TEXT or not event.content:
         return
     log.info("response: %s", event.content)
@@ -981,10 +1129,22 @@ async def run(args: argparse.Namespace) -> None:
         safeword=safeword,
         tts=tts,
         player=player,
-        on_event=lambda e: _on_backend_event(tui_state, e),
+        on_event=lambda e: _on_backend_event(
+            tui_state, e, config.interaction.approval_phrase, approval_gate
+        ),
         tier_responses=config.interaction.tier_responses,
+        approval_phrase=config.interaction.approval_phrase,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
+    approval_gate = (
+        ApprovalPromptGate(
+            ApprovalDetector(config.interaction.approval_phrase),
+            config.interaction.approval_timeout_s,
+        )
+        if config.interaction.approval_phrase is not None
+        else None
+    )
+    adapter.set_interactive_approvals(approval_gate is not None)
     error_ladder = RecognitionErrorLadder()
 
     log.info(
@@ -1120,6 +1280,7 @@ async def run(args: argparse.Namespace) -> None:
     # same function -- see grace_s_for_last_response()'s own docstring.
     # Starts at the base grace: nothing's played yet to have a verdict on.
     next_overlap_grace_s = ECHO_GRACE_S
+    tail_guard = EchoTailGuard() if canceller is not None else None
 
     listening_gate = ListeningGate(
         PauseListeningDetector(config.interaction.pause_listening_phrases),
@@ -1182,6 +1343,19 @@ async def run(args: argparse.Namespace) -> None:
                         next_overlap_grace_s, new_grace,
                     )
                 next_overlap_grace_s = new_grace
+                # Stage-2 echo handling (docs/DESIGN-echo-and-barge-in.md):
+                # tell the tail guard how long the reverb/echo tail is
+                # likely to linger, from THIS response's measured AEC
+                # outcome. Only opens a tail when echo actually leaked
+                # past AEC; a floor-limited (well-cancelled) or silent
+                # response opens nothing extra, so genuine quick replies
+                # aren't swallowed. delay_ms is the render->capture path
+                # length AEC was told to expect -- a proxy for how far the
+                # acoustic tail reaches.
+                if tail_guard is not None:
+                    tail_guard.set_echo_profile(
+                        attenuation, ceiling, canceller.delay_ms / 1000, time.monotonic()
+                    )
                 canceller.reset_stats()
             was_playing = playing
             # in_speech reflects the segmenter's state as of the PREVIOUS
@@ -1208,7 +1382,7 @@ async def run(args: argparse.Namespace) -> None:
     watchdog_task = asyncio.create_task(
         _working_watchdog(
             adapter, player, WorkingIndicator(), orchestrator, interject_queue,
-            segmenter, listening_gate, tui_state, continue_gate,
+            segmenter, listening_gate, tui_state, continue_gate, approval_gate,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
@@ -1242,6 +1416,24 @@ async def run(args: argparse.Namespace) -> None:
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
                 if not is_hard_stop:
+                    # Echo-tail guard (stage-2 echo handling): if this
+                    # utterance's audio landed inside the reverb/echo tail
+                    # AFTER playback ended (and AEC left echo behind, per
+                    # the guard's measured profile), it's our own voice
+                    # bouncing off the walls -- suppress listening for it
+                    # rather than forwarding it as user speech or letting
+                    # it trip a fresh barge-in. The guard opens a tail only
+                    # when echo actually leaked past AEC; a headset or
+                    # well-cancelled response opens nothing extra, so real
+                    # quick replies still get through.
+                    if tail_guard is not None and tail_guard.observe(
+                        player.is_playing(), time.monotonic()
+                    ):
+                        log.info(
+                            "dropped (echo-tail guard, own voice still reverberating): %r",
+                            text,
+                        )
+                        continue
                     # No-input (Google Conversation Design's term, see
                     # RecognitionErrorLadder's docstring): STT heard nothing
                     # recognizable at all. Checked before every other gate --
@@ -1278,6 +1470,39 @@ async def run(args: argparse.Namespace) -> None:
                             text, config.interaction.wake_word,
                         )
                         continue
+                    # High-stakes approval prompt.  This is deliberately
+                    # before response-tiering, overlap, and echo gates: the
+                    # user may answer immediately after the prompt finishes,
+                    # and that answer must not be mistaken for an echo or a
+                    # low-stakes "continue" reply.  Anything non-empty that
+                    # is not approve/deny is "discuss" and stays pending.
+                    if approval_gate is not None and approval_gate.is_waiting:
+                        outcome = approval_gate.observe_transcript(text, time.monotonic())
+                        if outcome == "discuss":
+                            log.info(
+                                "approval remains pending while the operator reviews/discusses: %r",
+                                text,
+                            )
+                            continue
+                        if outcome in ("approve", "deny"):
+                            approved = outcome == "approve"
+                            if await adapter.resolve_pending_approval(approved):
+                                log.warning(
+                                    "%s pending Codex approval: %r",
+                                    "approved" if approved else "declined", text,
+                                )
+                                if tui_state is not None:
+                                    tui_state.warning = None
+                            else:
+                                # Fail closed: the gate has consumed the
+                                # phrase, but the backend did not have the
+                                # expected request any more.  Re-open the
+                                # prompt instead of treating this as approval.
+                                approval_gate.start_waiting(time.monotonic())
+                                log.error(
+                                    "could not deliver approval decision to Codex; request remains blocked"
+                                )
+                            continue
                     # The glossary is intentionally downstream of every
                     # safety-critical raw-transcript check above.  A configured
                     # correction can improve an ordinary command such as a

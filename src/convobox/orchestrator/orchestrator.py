@@ -121,6 +121,7 @@ class Orchestrator:
         player: AudioPlayer | None = None,
         on_event: Callable[[BackendEvent], None] | None = None,
         tier_responses: bool = False,
+        approval_phrase: str | None = None,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
@@ -148,6 +149,7 @@ class Orchestrator:
         # queue/generator: the caller decides how to buffer/render: this
         # is a hook, not a second consumer contending for the same events.
         self._on_event_hook = on_event
+        self._approval_phrase = approval_phrase
         self._events_task: asyncio.Task[None] | None = None
         self._speak_task: asyncio.Task[None] | None = None
 
@@ -291,6 +293,24 @@ class Orchestrator:
                 if self._tts is not None and self._player is not None:
                     self._cancel_speak_task()
                     self._speak_task = asyncio.create_task(self._speak(announcement))
+            return
+        if event.type == BackendEventType.APPROVAL_REQUEST:
+            # Never read an agent-supplied shell command aloud: commands can
+            # be long, misleading out of context, or contain sensitive
+            # values.  The TUI warning shows the exact request; speech only
+            # announces the high-stakes state and the operator-controlled
+            # vocabulary needed to resolve it.
+            if self._approval_phrase is None:
+                logger.warning("backend requested approval but interactive approvals are disabled")
+                return
+            announcement = (
+                "Approval required. Review the warning in ConvoBox. "
+                f"Say {self._approval_phrase} to approve, or say no to deny."
+            )
+            logger.warning("backend is waiting for your approval")
+            if self._tts is not None and self._player is not None:
+                self._cancel_speak_task()
+                self._speak_task = asyncio.create_task(self._speak(announcement))
             return
         if event.type != BackendEventType.TEXT or not event.content:
             return

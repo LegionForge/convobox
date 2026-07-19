@@ -709,6 +709,26 @@ section is the live-mic pass that closes the gap.
   speech/silence, tracks roughly what `audio_devices.py --test-input`
   reports for the same device, and reads AEC-cancelled (much quieter)
   during the assistant's own playback when AEC is on and converged.
+- **[U9] "Who's expected to act?" ambiguity during the dead-time
+  (found live during the AEC/barge-in UAT, 2026-07-18).** During a
+  test the user could not tell whether ConvoBox was still processing on
+  the backend or waiting for the user to say something -- there was no
+  indicator for which party the session was blocked on. Root cause:
+  the watchdog loop in `scripts/run_convobox.py` fell through to
+  `status = "listening"` during the tiered-response continue-window
+  (when `continue_gate.is_waiting`), so the "ball is in your court"
+  wait looked identical to idle LISTENING. Fixed by adding a distinct
+  `waiting` `TuiStatus` -- header now shows bold magenta
+  `WAITING FOR YOU` (distinct from the calm cyan LISTENING), driven
+  from `continue_gate.is_waiting` in the watchdog loop
+  (`src/convobox/tui/state.py`, `src/convobox/tui/render.py`,
+  `scripts/run_convobox.py`). Unit-tested (`tests/test_conversation_tui.py`
+  `test_status_label_reflects_state` now covers `WAITING FOR YOU`).
+  Still TODO for a live confirm: watch the header flip to `WAITING FOR
+  YOU` the instant a tiered response finishes speaking and hold there
+  until "continue"/timeout, and confirm it reads as obviously different
+  from LISTENING. The phase-3 approval gate's wait is a separate
+  candidate to surface the same way once that gate is wired live.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 

@@ -305,6 +305,45 @@ async def test_approval_requests_are_auto_declined() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interactive_command_approval_waits_for_operator_and_can_approve() -> None:
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs approval")
+        event = (await _collect(adapter, 1))[0]
+        assert event.type == BackendEventType.APPROVAL_REQUEST
+        assert event.content is not None
+        assert "COMMAND EXECUTION" in event.content
+        assert "rm -rf /" in event.content
+        # No result was written until the caller explicitly approves.
+        assert adapter.is_busy() is True
+        assert await adapter.resolve_pending_approval(True) is True
+        events = await _collect(adapter, 2)
+        assert events[0].content == "approval decision was: approve"
+        assert events[1].type == BackendEventType.DONE
+        assert await adapter.resolve_pending_approval(False) is False
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_interactive_file_change_approval_can_be_declined() -> None:
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs file edit approval")
+        event = (await _collect(adapter, 1))[0]
+        assert event.type == BackendEventType.APPROVAL_REQUEST
+        assert event.content is not None and "FILE CHANGE" in event.content
+        assert await adapter.resolve_pending_approval(False) is True
+        events = await _collect(adapter, 2)
+        assert events[0].content == "approval decision was: decline"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_filechange_approval_uses_decline() -> None:
     # item/fileChange/requestApproval -- live-confirmed 2026-07-14 against
     # a real codex app-server (see codex.py's module docstring): a file

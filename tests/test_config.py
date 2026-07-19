@@ -6,6 +6,7 @@ import pytest
 
 from convobox.config import (
     AudioConfig,
+    InteractionConfig,
     aec_estimate_path,
     read_aec_estimate,
     resolve_config_path,
@@ -52,6 +53,13 @@ def test_aec_delay_ms_defaults_to_none() -> None:
     # on every Settings TUI save, permanently disabling auto-tuning
     # whether the user meant to touch that field or not.
     assert AudioConfig().aec_delay_ms is None
+
+
+def test_approval_phrase_is_opt_in_and_validated() -> None:
+    assert InteractionConfig().approval_phrase is None
+    assert InteractionConfig(approval_phrase="cobalt night and gale").approval_phrase == "cobalt night and gale"
+    with pytest.raises(ValueError, match="common affirmations"):
+        InteractionConfig(approval_phrase="yes")
 
 
 # --- AEC estimate sidecar: run_convobox.py's diagnostic write, the

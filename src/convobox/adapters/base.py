@@ -11,6 +11,7 @@ class BackendEventType(str, Enum):
     TOOL_RESULT = "tool_result"
     ERROR = "error"
     DONE = "done"
+    APPROVAL_REQUEST = "approval_request"
 
 
 class BackendEvent:
@@ -81,6 +82,24 @@ class BackendAdapter(ABC):
         timeout -- a caller that never consumes events() must not deadlock.
         """
         return None
+
+    def set_interactive_approvals(self, enabled: bool) -> None:
+        """Opt in to holding a backend approval request for the operator.
+
+        Most backends have no answerable approval channel, so the safe
+        default is a no-op.  Adapters that do expose one (currently Codex)
+        override this and emit ``APPROVAL_REQUEST`` events while enabled.
+        """
+        return None
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        """Answer the adapter's current approval request, if it has one.
+
+        ``False`` means there was no request to answer (or this backend has
+        no interactive approval channel).  Callers must fail closed when
+        that happens; they must never treat it as an implicit approval.
+        """
+        return False
 
     @abstractmethod
     def events(self) -> AsyncGenerator[BackendEvent, None]:

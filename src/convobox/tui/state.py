@@ -14,8 +14,18 @@ from typing import Literal
 # pipeline states run_convobox.py's main loop passes through: idle
 # (LISTENING) -> VAD detects speech (CAPTURING) -> STT decodes
 # (TRANSCRIBING) -> backend processes (WORKING) -> TTS plays (SPEAKING) --
-# plus PAUSED for the "pause listening" state (docs/DESIGN-barge-in.md).
-TuiStatus = Literal["listening", "capturing", "transcribing", "working", "speaking", "paused"]
+# plus PAUSED for the "pause listening" state (docs/DESIGN-barge-in.md) and
+# WAITING for the gap after a tiered response finishes speaking and
+# ConvoBox is holding back more, expecting the user to say "continue"
+# (or just carry on). WAITING is deliberately distinct from LISTENING: in
+# LISTENING nothing is pending, but in WAITING the ball is in the USER's
+# court and the session is blocked on their reply -- the UAT finding was
+# that the old code fell through to LISTENING during that window, so the
+# user couldn't tell "are you still thinking?" from "are you waiting on
+# me?".
+TuiStatus = Literal[
+    "listening", "capturing", "transcribing", "working", "speaking", "paused", "waiting"
+]
 
 Speaker = Literal["user", "assistant", "system"]
 
@@ -74,6 +84,11 @@ class ConversationTuiState:
     aec_verdict: str = ""
     heartbeat_elapsed_s: float | None = None
     mic_level_db: float | None = None
+    # Short instruction paired with the WAITING status.  Continue prompts
+    # and high-stakes approval prompts both block on the user, but need
+    # different guidance; keeping it in state avoids making the renderer
+    # infer semantics from a generic status label.
+    waiting_hint: str | None = None
 
     def add_turn(self, speaker: Speaker, text: str, timestamp: str | None = None) -> None:
         self.turns.append(

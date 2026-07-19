@@ -27,6 +27,7 @@ _STATUS_LABEL: dict[TuiStatus, str] = {
     "working": "WORKING",
     "speaking": "SPEAKING",
     "paused": "PAUSED",
+    "waiting": "WAITING FOR YOU",
 }
 
 _STATUS_COLOR: dict[TuiStatus, str] = {
@@ -36,6 +37,10 @@ _STATUS_COLOR: dict[TuiStatus, str] = {
     "working": _YELLOW,
     "speaking": _GREEN,
     "paused": _MAGENTA,
+    # Magenta + bold so WAITING reads as "the ball is in your court" -- a
+    # deliberate visual break from the calm cyan LISTENING, which is what
+    # the UAT finding said was indistinguishable from a real wait.
+    "waiting": _MAGENTA + _BOLD,
 }
 
 _SPEAKER_LABEL: dict[str, str] = {
@@ -100,7 +105,10 @@ def _wrap(text: str, width: int) -> list[str]:
 
 def _elapsed_label(state: ConversationTuiState, now: float) -> str:
     elapsed = max(0, int(now - state.started))
-    return f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+    # Spell out the units rather than using a clock-style ``MM:SS`` label:
+    # during live UAT, ``09:05`` was easy to misread as an incomplete
+    # timestamp instead of the session's actual elapsed minutes and seconds.
+    return f"{elapsed // 60}m {elapsed % 60}s"
 
 
 def _heartbeat_color(elapsed_s: float) -> str:
@@ -139,6 +147,12 @@ def _diagnostics_line(state: ConversationTuiState, width: int) -> str:
     if state.heartbeat_elapsed_s is not None:
         color = _heartbeat_color(state.heartbeat_elapsed_s)
         parts.append(f"{color}still working: {state.heartbeat_elapsed_s:.0f}s{_RESET}")
+    if state.status == "waiting":
+        # The header already says WAITING FOR YOU; this tells the user what
+        # to actually DO about it (the UAT ask: "an indicator of what I
+        # should be doing"). Only shown while blocked on their reply.
+        hint = state.waiting_hint or "say 'continue' for more"
+        parts.append(f"{_MAGENTA}{hint}{_RESET}")
     return _fit(f"{_DIM}" + "  |  ".join(parts) + f"{_RESET}", width)
 
 

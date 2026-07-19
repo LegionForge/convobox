@@ -126,6 +126,11 @@ interaction:
   pause_listening_phrases:      # say one to hard-stop in-flight work and
     - stop listening             # pause: everything else is ignored until
     - pause listening            # you say wake_word again.
+  # approval_phrase: cobalt night and gale
+                          # Opt-in Codex command/file approvals. Use a
+                          # distinctive multi-word phrase: plain "yes" is
+                          # deliberately rejected. Say "no" to deny; silence
+                          # after approval_timeout_s (30s by default) denies.
 
 # ---------------------------------------------------------------------------
 # safeword -- spoken phrases that hard-stop the agent (checked before every
