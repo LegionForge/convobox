@@ -10,6 +10,7 @@ from scripts.run_convobox import (
     ECHO_GRACE_S,
     EchoAwarePlayer,
     MutePlayer,
+    token_overlap_ratio,
     utterance_overlapped_playback,
 )
 
@@ -60,6 +61,21 @@ def test_overlap_false_when_nothing_ever_played() -> None:
         min_silence_ms=500,
         playback_ended_at=0.0,
     )
+
+
+# --- dropped-transcript match observability ---
+
+def test_token_overlap_is_zero_for_empty_text() -> None:
+    assert token_overlap_ratio("", "The response has words") == 0.0
+    assert token_overlap_ratio("A transcript", "") == 0.0
+
+
+def test_token_overlap_ignores_punctuation_and_case() -> None:
+    assert token_overlap_ratio("HELLO, world!", "hello -- WORLD.") == 1.0
+
+
+def test_token_overlap_reports_partial_transcript_match() -> None:
+    assert token_overlap_ratio("the pipeline needs a retry", "The pipeline works") == pytest.approx(0.4)
 
 
 @pytest.fixture()
