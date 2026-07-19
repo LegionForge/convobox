@@ -979,9 +979,59 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
         await asyncio.sleep(0.1)
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _check_backend_working_dir(backend: object) -> None:
+    """Validate backend.working_dir and warn about the dangerous cases.
+
+    A coding-agent backend WRITES files in its working directory, so the
+    default (unset -> the agent inherits ConvoBox's own cwd) can let a voice
+    session silently edit ConvoBox's source. This raises on a nonexistent
+    directory and warns loudly when the working dir is ConvoBox's own repo,
+    is unset for a subprocess backend, or is set for opencode (no effect).
+    See docs/DESIGN-backend-sandboxing.md.
+    """
+    name = getattr(backend, "name", "")
+    working_dir = getattr(backend, "working_dir", None)
+    if name == "opencode":
+        if working_dir:
+            log.warning(
+                "backend.working_dir=%r has NO effect on the opencode backend -- "
+                "opencode's directory is set by wherever `opencode serve` was "
+                "launched. Start the server from your workspace instead.",
+                working_dir,
+            )
+        return
+    if working_dir is None:
+        log.warning(
+            "backend.working_dir is unset: the %s agent will run in ConvoBox's "
+            "own directory and can modify its source. Set backend.working_dir "
+            "(or pass --working-dir) to an isolated workspace. See "
+            "docs/DESIGN-backend-sandboxing.md.",
+            name,
+        )
+        return
+    resolved = Path(working_dir).expanduser().resolve()
+    if not resolved.is_dir():
+        raise SystemExit(
+            f"backend.working_dir {working_dir!r} is not an existing directory"
+        )
+    if resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents:
+        log.warning(
+            "backend.working_dir %r is inside ConvoBox's own source tree -- the "
+            "agent can modify the product's code. Point it at a separate "
+            "workspace.",
+            str(resolved),
+        )
+
+
 async def run(args: argparse.Namespace) -> None:
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
+    if args.working_dir is not None:
+        config.backend.working_dir = args.working_dir
+    _check_backend_working_dir(config.backend)
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
@@ -1517,6 +1567,13 @@ def main() -> None:
     )
     parser.add_argument("--config", default=None, help="path to a convobox.yaml config file")
     parser.add_argument("--device", default=None, help="input device name or index")
+    parser.add_argument(
+        "-d", "--working-dir", default=None,
+        help="directory the spawned coding agent (codex/claude-code) runs and "
+        "edits files in; overrides backend.working_dir. Use an isolated "
+        "workspace so the agent cannot modify ConvoBox's own source. No effect "
+        "on the opencode backend (set by where `opencode serve` was launched).",
+    )
     parser.add_argument(
         "--text", default=None,
         help="send this single utterance instead of listening on the mic",
