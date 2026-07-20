@@ -139,6 +139,36 @@ CI, and live-mic UAT sessions could silently drift apart. Three findings:
    may have executed against the wrong clone's code before this was
    caught).
 
+5. **A local sync helper for the UAT clone exists, but deliberately isn't
+   in this repo.** `sync-from-dev.ps1` lives only in the UAT clone's
+   working directory (excluded via that clone's own `.git/info/exclude`,
+   not the tracked `.gitignore`, so it never reaches this repo or the dev
+   clone) -- it fetches `origin/main`, merges it into whatever branch is
+   checked out, then re-syncs the venv with the `--no-cache` fix from
+   item 4 above. Its one hard requirement: refuse to touch anything if
+   the UAT clone has local changes (uncommitted edits, or a live
+   ConvoBox session's coding-agent backend having written files there
+   during dogfooding -- see `docs/DESIGN-backend-sandboxing.md`) or
+   unpushed local commits, since silently syncing on top of either would
+   risk exactly the kind of clobbering this tool exists to prevent.
+   Building and testing it against a real dirty tree (a disposable test
+   file, not a real one, the second time) surfaced two bugs worth
+   remembering for any similar PowerShell + git tooling:
+   - **Path comparisons need slash normalization.** `git rev-parse
+     --show-toplevel` and Python's `__file__` return forward slashes
+     (`D:/LegionForge/...`) even on Windows; PowerShell/.NET paths use
+     backslashes (`D:\LegionForge\...`). A literal `-like`/`-notlike`
+     check between the two silently fails every time, even when the
+     path is actually correct -- normalize both sides (replace `\` with
+     `/`) before comparing.
+   - **`HEAD@{1}` reflects the last reflog entry, not "what this specific
+     command changed."** Using `git log HEAD@{1}..HEAD` to report "new
+     commits from this merge" prints stale, misleading output whenever
+     the merge itself was a no-op but an earlier, unrelated command in
+     the same session had already moved `HEAD` -- capture `git rev-parse
+     HEAD` immediately before and after the specific operation instead of
+     relying on the reflog.
+
 ## Automated tests (no audio hardware needed)
 
 ```bash
