@@ -166,6 +166,9 @@ def _diagnostics_line(state: ConversationTuiState, width: int) -> str:
     if state.heartbeat_elapsed_s is not None:
         color = _heartbeat_color(state.heartbeat_elapsed_s)
         parts.append(f"{color}still working: {state.heartbeat_elapsed_s:.0f}s{_RESET}")
+    if state.aec_dump_active:
+        # AEC3's native frame is a fixed 10ms -- frames*0.01s is duration.
+        parts.append(f"{_RED}{_BOLD}REC{_RESET} {state.aec_dump_frames * 0.01:.0f}s")
     return _fit(f"{_DIM}" + "  |  ".join(parts) + f"{_RESET}", width)
 
 

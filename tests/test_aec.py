@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import wave
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,7 +12,7 @@ pytest.importorskip(
     reason="AEC extra not installed (Windows-only wheels; install with .[aec])",
 )
 
-from convobox.audio.aec import EchoCanceller, _resample  # noqa: E402
+from convobox.audio.aec import AecDumpWriter, EchoCanceller, _resample  # noqa: E402
 
 _SR = 16000
 
@@ -229,3 +231,70 @@ def test_ambient_survives_reset_stats() -> None:
         canceller.feed_reverse(farend[start : start + 512], _SR)
         canceller.process(farend[start : start + 512])
     assert canceller.measurable_ceiling_db() is not None
+
+
+# --- AecDumpWriter: WAV capture for offline "aecdump"-style replay ---
+
+
+def _read_wav(path: Path) -> tuple[int, int, int, int]:
+    with wave.open(str(path), "rb") as w:
+        return w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+
+
+def test_dump_writer_creates_three_valid_wav_files(tmp_path: Path) -> None:
+    writer = AecDumpWriter(tmp_path / "session")
+    frame = (np.zeros(160, dtype=np.int16)).tobytes()  # one 10ms silent frame
+    for _ in range(5):
+        writer.write_reference(frame)
+        writer.write_capture(frame, frame)
+    writer.close()
+
+    for name in ("reference.wav", "mic-raw.wav", "mic-processed.wav"):
+        channels, width, rate, nframes = _read_wav(tmp_path / "session" / name)
+        assert (channels, width, rate) == (1, 2, 16000)
+        assert nframes == 5 * 160
+
+
+def test_dump_writer_close_returns_after_action_summary(tmp_path: Path) -> None:
+    writer = AecDumpWriter(tmp_path / "session")
+    frame = np.zeros(160, dtype=np.int16).tobytes()
+    for _ in range(3):
+        writer.write_reference(frame)
+    for _ in range(7):
+        writer.write_capture(frame, frame)
+    summary = writer.close()
+    assert summary["reference_frames"] == 3
+    assert summary["capture_frames"] == 7
+    assert summary["reference_s"] == pytest.approx(0.03)
+    assert summary["capture_s"] == pytest.approx(0.07)
+    assert summary["directory"] == str(tmp_path / "session")
+
+
+def test_dump_writer_creates_parent_directories(tmp_path: Path) -> None:
+    nested = tmp_path / "a" / "b" / "c"
+    AecDumpWriter(nested).close()
+    assert nested.is_dir()
+    assert (nested / "reference.wav").exists()
+
+
+def test_echo_canceller_with_dump_records_matching_frame_counts(tmp_path: Path) -> None:
+    writer = AecDumpWriter(tmp_path / "session")
+    canceller = EchoCanceller(delay_ms=50, dump=writer)
+    farend = _farend(1.0)
+    for start in range(0, len(farend) - 512, 512):
+        canceller.feed_reverse(farend[start : start + 512], _SR)
+        canceller.process(farend[start : start + 512])
+    summary = writer.close()
+    assert summary["reference_frames"] == canceller.reverse_frames
+    assert summary["capture_frames"] == canceller.capture_frames
+    assert summary["reference_frames"] > 0
+    assert summary["capture_frames"] > 0
+
+
+def test_echo_canceller_without_dump_has_none_attribute() -> None:
+    # dump=None (the default) must be a true no-op, not just "unset" --
+    # confirms feed_reverse/process never crash when nothing is attached.
+    canceller = EchoCanceller(delay_ms=50)
+    assert canceller.dump is None
+    canceller.feed_reverse(np.zeros(512, dtype=np.float32), _SR)
+    canceller.process(np.zeros(512, dtype=np.float32))

@@ -35,7 +35,9 @@ from __future__ import annotations
 import logging
 import math
 import time
+import wave
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -68,10 +70,74 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
     return np.interp(target_x, source_x, audio).astype(np.float32)
 
 
+class AecDumpWriter:
+    """Records the real reference/capture streams AEC3 processes to WAV,
+    for offline replay -- the same "aecdump" methodology WebRTC's own
+    audioproc_f/unpack_aecdump tooling uses (reverseN.wav/inputN.wav
+    pairs): capture a live incident once, then test as many hypotheses
+    against the SAME real audio as needed, without another live session.
+
+    Three files, all at APM's native format (16kHz mono 16-bit PCM):
+
+    - reference.wav: what was actually played (the far-end/reverse
+      stream), written from feed_reverse -- the PLAYBACK thread.
+    - mic-raw.wav: the raw mic capture BEFORE cancellation -- the input
+      to replay against different settings.
+    - mic-processed.wav: the same capture AFTER cancellation, for a
+      quick human-listenable before/after with no replay step needed.
+
+    Each file is written by exactly one thread for its whole lifetime
+    (reference.wav: playback thread only; the other two: capture-path
+    thread only), so no locking is needed here -- same reasoning as
+    EchoCanceller's existing reverse_frames/capture_frames counters.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        directory.mkdir(parents=True, exist_ok=True)
+        self._reference = self._open(directory / "reference.wav")
+        self._mic_raw = self._open(directory / "mic-raw.wav")
+        self._mic_processed = self._open(directory / "mic-processed.wav")
+        self.reference_frames = 0
+        self.capture_frames = 0
+        self._started = time.monotonic()
+
+    @staticmethod
+    def _open(path: Path) -> wave.Wave_write:
+        w = wave.open(str(path), "wb")
+        w.setnchannels(1)
+        w.setsampwidth(2)  # int16 -- APM's native sample width
+        w.setframerate(_AEC_RATE)
+        return w
+
+    def write_reference(self, frame_int16: bytes) -> None:
+        self._reference.writeframes(frame_int16)
+        self.reference_frames += 1
+
+    def write_capture(self, raw_int16: bytes, processed_int16: bytes) -> None:
+        self._mic_raw.writeframes(raw_int16)
+        self._mic_processed.writeframes(processed_int16)
+        self.capture_frames += 1
+
+    def close(self) -> dict[str, object]:
+        """Finalize the WAV headers and return an after-action summary."""
+        self._reference.close()
+        self._mic_raw.close()
+        self._mic_processed.close()
+        return {
+            "directory": str(self.directory),
+            "reference_frames": self.reference_frames,
+            "capture_frames": self.capture_frames,
+            "reference_s": round(self.reference_frames * (_FRAME / _AEC_RATE), 2),
+            "capture_s": round(self.capture_frames * (_FRAME / _AEC_RATE), 2),
+            "duration_s": round(time.monotonic() - self._started, 2),
+        }
+
+
 class EchoCanceller:
     """Stateful AEC: feed what the speakers play, filter what the mic hears."""
 
-    def __init__(self, delay_ms: int = 100) -> None:
+    def __init__(self, delay_ms: int = 100, dump: AecDumpWriter | None = None) -> None:
         try:
             from aec_audio_processing import AudioProcessor
         except ImportError as exc:  # pragma: no cover - environment-specific
@@ -87,6 +153,7 @@ class EchoCanceller:
         self._apm.set_reverse_stream_format(_AEC_RATE, 1)
         self._apm.set_stream_delay(delay_ms)
         self._delay_ms = delay_ms
+        self.dump = dump
         # Partial-frame carries: chunks arrive in arbitrary sizes; APM
         # only eats exact 10ms frames.
         self._reverse_carry = np.zeros(0, dtype=np.float32)
@@ -170,10 +237,13 @@ class EchoCanceller:
                 self._reverse_carry[:_FRAME],
                 self._reverse_carry[_FRAME:],
             )
-            self._apm.process_reverse_stream(_to_int16_bytes(frame))
+            frame_bytes = _to_int16_bytes(frame)
+            self._apm.process_reverse_stream(frame_bytes)
             # Keep the delay hint fresh: APM consumes it per 10ms frame.
             self._apm.set_stream_delay(self._delay_ms)
             self.reverse_frames += 1
+            if self.dump is not None:
+                self.dump.write_reference(frame_bytes)
         self._reverse_last_fed = time.monotonic()
 
     def process(self, chunk: np.ndarray) -> np.ndarray:
@@ -191,9 +261,13 @@ class EchoCanceller:
                 self._capture_carry[:_FRAME],
                 self._capture_carry[_FRAME:],
             )
-            out_frame = _from_int16_bytes(self._apm.process_stream(_to_int16_bytes(frame)))
+            raw_bytes = _to_int16_bytes(frame)
+            out_bytes = self._apm.process_stream(raw_bytes)
+            out_frame = _from_int16_bytes(out_bytes)
             self._processed_pool = np.concatenate([self._processed_pool, out_frame])
             self.capture_frames += 1
+            if self.dump is not None:
+                self.dump.write_capture(raw_bytes, out_bytes)
             if time.monotonic() - self._reverse_last_fed < _REVERSE_ACTIVE_WINDOW_S:
                 self._rms_in.append(float(np.sqrt(np.mean(frame**2))))
                 self._rms_out.append(float(np.sqrt(np.mean(out_frame**2))))
