@@ -142,7 +142,7 @@ verifying the fix or re-investigating after a future OpenCode API change.
 
 `OpenCodeAdapter` was built by porting the HTTP+SSE API shape documented in
 an *earlier, related* TypeScript project (`voice-opencode`) — see
-`README.md` → "Lessons from an earlier attempt." That project's own
+`docs/LESSONS-FROM-VOICE-OPENCODE.md`. That project's own
 documentation was the only source available at the time; no real OpenCode
 server had been run against it.
 

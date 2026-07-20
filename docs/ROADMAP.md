@@ -125,3 +125,41 @@ template), then set defaults from data.
   docs/DESIGN-echo-and-barge-in.md's competitive notes and the
   2026-07-12 landscape review: existing tools are dictation;
   ConvoBox is conversation).
+
+## Deployment phases (client/server packaging)
+
+Rough phased direction, not commitments — captured to keep design
+decisions from painting the architecture into a corner, not as a
+schedule.
+
+1. **Native desktop client** (macOS, Windows, Linux). Audio capture,
+   listening-state indicators, and TTS playback as a lightweight native
+   process per platform, talking to a local server process over
+   localhost.
+2. **Browser client + networked server.** The server component —
+   VAD/STT/TTS/orchestrator/backend adapters — runs the same regardless
+   of who's talking to it. A browser tab becomes just another thin client
+   (mic in, indicators + audio out) pointed at that server over your own
+   private network (e.g. Tailscale) instead of localhost. Exposing
+   agent-execution access this way needs real auth, not just "reachable
+   on the network" — scoping to a private tailnet, the way other services
+   here already are, is the likely default rather than open LAN access.
+3. **Mobile — deprioritized, not designed away.** Not being built now,
+   but the client/server split above means a native mobile client is
+   "just another client" against the same server API later, not a
+   re-architecture, as long as that protocol stays platform-agnostic.
+   Some phones already do on-device STT/TTS well; the likely mobile shape
+   is a hybrid — local STT/TTS for responsiveness/privacy, still calling
+   the server (over Tailscale, SSH, or similar) for the actual agent
+   execution, since the CLI backends themselves can't run on a phone.
+
+**Cross-platform packaging: Docker for the server, not the client.** The
+server-side component (orchestrator, STT/TTS, backend adapters) is a good
+fit for a single Docker image that runs identically on Mac/Windows/Linux
+hosts — the same container serves the Phase 1 localhost client and the
+Phase 2 browser client. The audio-capture/indicator client can't move
+into the container the same way: microphone and speaker access don't
+pass through Docker cleanly on any of the three platforms (especially
+macOS/Windows, where Docker Desktop runs in a VM with no direct hardware
+audio access), so that piece stays a thin native process per platform
+regardless of how the server is packaged.
