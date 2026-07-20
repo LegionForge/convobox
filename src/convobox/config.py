@@ -201,6 +201,21 @@ class BackendConfig(BaseModel):
     # id}` field -- see OpenCodeAdapter._ensure_session().
     model: str | None = None
 
+    # How much the spawned coding agent is allowed to DO -- the single
+    # source of truth for the backend's write/execute posture, translated
+    # per-backend at spawn (see convobox.adapters). SECURITY-relevant:
+    #   plan       - read-only; the agent investigates but cannot write or
+    #                run commands (the safe default).
+    #   approve    - the agent may act, but every write/command requires
+    #                voice approval (the approval_phrase gate). Codex only:
+    #                Claude Code's headless mode has no per-call approval
+    #                channel, so "approve" degrades to "plan" with a warning.
+    #   permissive - the agent acts without asking. Opt-in, dangerous.
+    # opencode is unaffected (its permissions are fixed by wherever
+    # `opencode serve` was launched) -- a warning is logged if this is set
+    # for opencode. See docs/DESIGN-backend-sandboxing.md.
+    permission_mode: str = "plan"
+
     @field_validator("model")
     @classmethod
     def _validate_model(cls, v: str | None) -> str | None:
@@ -211,6 +226,70 @@ class BackendConfig(BaseModel):
                 f"for the full list"
             )
         return v
+
+    @field_validator("permission_mode")
+    @classmethod
+    def _validate_permission_mode(cls, v: str) -> str:
+        if v not in PERMISSION_MODES:
+            raise ValueError(
+                f"backend.permission_mode {v!r} must be one of "
+                f"{', '.join(PERMISSION_MODES)}"
+            )
+        return v
+
+
+# The valid backend.permission_mode values (see BackendConfig above).
+PERMISSION_MODES = ("plan", "approve", "permissive")
+
+# Permission-POSTURE flags that would fight backend.permission_mode if a
+# user also put them in backend.command. Tool-SCOPING flags
+# (--allowedTools/--disallowedTools) are deliberately excluded: they are
+# orthogonal to the write/execute posture and compose fine with any mode.
+_PERMISSION_CONFLICT_FLAGS: dict[str, tuple[str, ...]] = {
+    "claude-code": ("--permission-mode", "--dangerously-skip-permissions"),
+    "codex": (
+        "--sandbox", "-s", "--ask-for-approval", "-a",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ),
+}
+
+
+def detect_permission_conflict(backend: "BackendConfig") -> str | None:
+    """Return an error message if backend.command carries a permission-posture
+    flag that conflicts with backend.permission_mode, else None.
+
+    permission_mode is the single source of truth for the write/execute
+    posture; letting a user ALSO set the posture via raw command flags means
+    two sources silently disagreeing (e.g. permission_mode=plan while
+    command has --dangerously-skip-permissions). For a safety control that
+    is unacceptable, so this is surfaced as a hard error the user must
+    resolve by removing one.
+    """
+    command = backend.command or []
+    flags = _PERMISSION_CONFLICT_FLAGS.get(backend.name, ())
+    for arg in command:
+        head = arg.split("=", 1)[0]  # tolerate --flag=value form
+        if head in flags:
+            return (
+                f"backend.command contains {head!r}, which sets the same "
+                f"write/execute posture as backend.permission_mode "
+                f"({backend.permission_mode!r}). These conflict -- remove one: "
+                f"use permission_mode for the posture, or clear permission_mode "
+                f"and drive it entirely through command."
+            )
+        # Codex's -c overrides of the posture config keys appear as their own
+        # `key=value` arg (e.g. `-c approval_policy=never` is two tokens);
+        # match the key directly rather than the `-c` token.
+        if backend.name == "codex" and head in _CODEX_POSTURE_KEYS:
+            return (
+                f"backend.command overrides codex's {head!r} via -c, which "
+                f"conflicts with backend.permission_mode "
+                f"({backend.permission_mode!r}) -- remove one."
+            )
+    return None
+
+
+_CODEX_POSTURE_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
 
 
 class BackendProfileConfig(BaseModel):

@@ -70,7 +70,12 @@ from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.approval import ApprovalDetector
 from convobox.audio.playback import AudioPlayer
-from convobox.config import load_config, resolve_config_path, write_aec_estimate
+from convobox.config import (
+    detect_permission_conflict,
+    load_config,
+    resolve_config_path,
+    write_aec_estimate,
+)
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
@@ -1127,9 +1132,32 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
         await asyncio.sleep(0.1)
 
 
+def _check_backend_permission_mode(backend: object) -> None:
+    """Enforce permission_mode as the single source of truth: reject a
+    conflicting command flag, warn where the mode can't be enforced, log
+    the effective posture. SystemExit on conflict (safety control -- fail
+    closed rather than run with an ambiguous posture)."""
+    conflict = detect_permission_conflict(backend)  # type: ignore[arg-type]
+    if conflict is not None:
+        raise SystemExit(conflict)
+    name = getattr(backend, "name", "")
+    mode = getattr(backend, "permission_mode", "plan")
+    if name == "opencode" and mode != "plan":
+        log.warning(
+            "backend.permission_mode=%r has NO effect on opencode -- its "
+            "permissions are set by wherever `opencode serve` was launched; "
+            "configure them there. See docs/DESIGN-backend-sandboxing.md.",
+            mode,
+        )
+    log.info("backend permission_mode: %s (%s)", mode, name)
+
+
 async def run(args: argparse.Namespace) -> None:
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
+    if args.permission_mode is not None:
+        config.backend.permission_mode = args.permission_mode
+    _check_backend_permission_mode(config.backend)
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
@@ -1742,6 +1770,13 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--config", default=None, help="path to a convobox.yaml config file")
+    parser.add_argument(
+        "--permission-mode", default=None,
+        choices=("plan", "approve", "permissive"),
+        help="how much the coding agent may do; overrides backend.permission_mode. "
+        "plan=read-only (safe); approve=writes require voice approval (codex only); "
+        "permissive=writes without asking. See docs/DESIGN-backend-sandboxing.md.",
+    )
     parser.add_argument("--device", default=None, help="input device name or index")
     parser.add_argument(
         "--text", default=None,

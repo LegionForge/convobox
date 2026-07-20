@@ -162,9 +162,40 @@ def _resolve_command(command: Sequence[str] | None) -> list[str]:
     return resolved
 
 
+# backend.permission_mode -> codex config overrides, injected as `-c
+# key=value` at spawn (which take precedence over ~/.codex/config.toml, so
+# the posture is ConvoBox's decision, not the user's codex config).
+# Verified live (2026-07-20): `codex -c approval_policy=X -c sandbox_mode=Y
+# app-server` starts and honors the overrides. sandbox_mode enum:
+# read-only | workspace-write | danger-full-access; approval_policy
+# includes untrusted (escalate writes to approval) and never.
+_PERMISSION_CODEX_OVERRIDES: dict[str, tuple[str, str]] = {
+    # (approval_policy, sandbox_mode)
+    "plan": ("never", "read-only"),          # investigate; cannot write; no prompts
+    "approve": ("untrusted", "workspace-write"),  # writes escalate -> voice gate
+    "permissive": ("never", "workspace-write"),   # writes freely, no prompts
+}
+
+
+def _permission_config_args(permission_mode: str) -> list[str]:
+    override = _PERMISSION_CODEX_OVERRIDES.get(permission_mode)
+    if override is None:
+        return []
+    approval_policy, sandbox_mode = override
+    return [
+        "-c", f"approval_policy={approval_policy}",
+        "-c", f"sandbox_mode={sandbox_mode}",
+    ]
+
+
 class CodexAdapter(BackendAdapter):
-    def __init__(self, command: Sequence[str] | None = None) -> None:
+    def __init__(
+        self, command: Sequence[str] | None = None, permission_mode: str = "plan"
+    ) -> None:
         self._command = _resolve_command(command)
+        # Injected before the `app-server` subcommand at spawn -- see
+        # _permission_config_args and _ensure_thread's create_subprocess_exec.
+        self._permission_args = _permission_config_args(permission_mode)
         self._proc: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()  # guards spawn + handshake (see _ensure_thread)
         self._reader_task: asyncio.Task[None] | None = None
@@ -207,6 +238,9 @@ class CodexAdapter(BackendAdapter):
             if self._proc is None or self._proc.returncode is not None:
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
+                    # `-c` config overrides are global codex options and MUST
+                    # come before the `app-server` subcommand.
+                    *self._permission_args,
                     "app-server",
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,

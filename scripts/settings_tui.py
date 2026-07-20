@@ -61,6 +61,7 @@ _YELLOW = "\x1b[33m"
 _CYAN = "\x1b[36m"
 
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
+_CHOICE_PERMISSION_MODES = ("plan", "approve", "permissive")
 _CHOICE_TTS_ENGINES = ("piper",)
 _CHOICE_STT_ENGINES = ("faster-whisper",)
 # Keep in sync with convobox.interrupt_presets.PRESETS's keys (config.py
@@ -194,6 +195,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
             FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
+            FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default). approve: may act, but every write/command needs voice approval via your approval_phrase (CODEX ONLY -- Claude Code's headless mode has no per-call approval channel, so it falls back to plan). permissive: acts without asking (dangerous). No effect on opencode (set at `opencode serve` launch). Do NOT also set a permission flag in Command -- that's a conflict."),
         ),
     ),
     SectionSpec(

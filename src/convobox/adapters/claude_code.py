@@ -132,23 +132,44 @@ _REQUIRED_FLAGS = [
 # codex.py's runtime decline).
 _DEFAULT_PERMISSION_MODE = "plan"
 
+# backend.permission_mode -> Claude Code's --permission-mode. NOTE the
+# missing "approve": Claude Code's headless mode has NO per-call approval
+# channel (see the module docstring's "Permission gate" -- a gated call
+# just hangs the session), so voice-approval is impossible here. "approve"
+# therefore degrades to "plan" with a warning (safe: nothing executes).
+_PERMISSION_CLAUDE_MODE: dict[str, str] = {
+    "plan": "plan",
+    "permissive": "acceptEdits",
+}
 
-def _resolve_flags(command: Sequence[str]) -> list[str]:
+
+def _resolve_flags(command: Sequence[str], permission_mode: str = "plan") -> list[str]:
     """The flags to append after the caller's own command (pure, tested).
 
-    Skips the default --permission-mode if the caller's own command
-    already sets one -- an explicit user choice always wins over this
-    adapter's safe default, the same "respect an explicit override"
-    principle used for AEC delay and audio device resolution elsewhere.
+    Skips injecting --permission-mode if the caller's own command already
+    sets one (an explicit user choice wins). Otherwise translates
+    permission_mode; "approve" is not expressible headless (no per-call
+    channel) and degrades to plan -- the caller logs the warning.
     """
     if "--permission-mode" in command:
         return list(_REQUIRED_FLAGS)
-    return [*_REQUIRED_FLAGS, "--permission-mode", _DEFAULT_PERMISSION_MODE]
+    mode = _PERMISSION_CLAUDE_MODE.get(permission_mode, _DEFAULT_PERMISSION_MODE)
+    return [*_REQUIRED_FLAGS, "--permission-mode", mode]
 
 
 class ClaudeCodeAdapter(BackendAdapter):
-    def __init__(self, command: Sequence[str] | None = None) -> None:
+    def __init__(
+        self, command: Sequence[str] | None = None, permission_mode: str = "plan"
+    ) -> None:
         self._command = list(command) if command else ["claude"]
+        if permission_mode == "approve":
+            logger.warning(
+                "backend.permission_mode='approve' is not supported by Claude "
+                "Code (headless mode has no per-call approval channel) -- "
+                "falling back to 'plan' (read-only). Use codex for voice-gated "
+                "approvals, or 'permissive' to allow edits without a gate."
+            )
+        self._permission_mode = permission_mode
         self._proc: asyncio.subprocess.Process | None = None
         self._proc_lock = asyncio.Lock()
         self._stderr_task: asyncio.Task[None] | None = None
@@ -171,7 +192,7 @@ class ClaudeCodeAdapter(BackendAdapter):
             if self._proc is None or self._proc.returncode is not None:
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
-                    *_resolve_flags(self._command),
+                    *_resolve_flags(self._command, self._permission_mode),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

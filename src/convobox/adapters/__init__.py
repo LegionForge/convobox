@@ -15,11 +15,14 @@ __all__ = [
 
 def create_backend_adapter(config: BackendConfig) -> BackendAdapter:
     if config.name == "opencode":
+        # permission_mode not passed: opencode's permissions are fixed by
+        # wherever `opencode serve` was launched, not something ConvoBox can
+        # set per-session. run_convobox.py warns if it's non-default here.
         return OpenCodeAdapter(config.url, model=config.model)
     if config.name == "claude-code":
-        return ClaudeCodeAdapter(config.command)
+        return ClaudeCodeAdapter(config.command, permission_mode=config.permission_mode)
     if config.name == "codex":
-        return CodexAdapter(config.command)
+        return CodexAdapter(config.command, permission_mode=config.permission_mode)
     raise ValueError(
         f"unknown backend.name {config.name!r} "
         "(implemented: 'opencode', 'claude-code', 'codex')"
