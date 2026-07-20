@@ -15,6 +15,22 @@ minor versions carry feature and behavior changes.
 > **[L2]**.
 
 ### Added
+- **Conversation TUI panes are now keyboard-scrollable** (`src/convobox/tui/`,
+  `scripts/run_convobox.py`). `Attribution: Claude Code; Provider:
+  Anthropic; Model: claude-fable-5; Scope: this entry.` Reported as
+  "PgUp/PgDn and other shortcut keys aren't in the TUI" — traced first
+  (per this repo's "verify before fixing" rule) and confirmed there was
+  never any keyboard input handling in `_tui_render_loop` at all: both
+  panes always rendered just their tail, a missing feature rather than a
+  regression. `Tab` now switches focus between the Transcript and Full
+  response panes; `Up`/`Down`/`PgUp`/`PgDn`/`Home`/`End` scroll whichever
+  pane has focus, clamped fresh every frame so a stale offset (terminal
+  resize, shorter content) can never blank a pane. Windows (`msvcrt`) and
+  POSIX (raw/cbreak `termios` mode for the session, CSI-sequence
+  decoding for PgUp/PgDn) are both implemented; see
+  `docs/UAT-checklist.md` **[U9]** for what's unit-tested versus still
+  needing a live-terminal pass, and `docs/ROADMAP.md` for why mouse-wheel
+  support was scoped out of this pass rather than bundled in.
 - **Backend questions are announced out loud** (`src/convobox/orchestrator/`):
   when the backend calls opencode's blocking interactive `question` tool,
   ConvoBox speaks the question with numbered option labels and logs

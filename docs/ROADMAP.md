@@ -56,6 +56,25 @@ Phase 1 adds -- this one edits `convobox.yaml` before/between sessions; the
 0.3.0 one runs *alongside* `run_convobox.py` showing the live transcript,
 full-detail response pane, and barge-in/approval status while talking.
 
+### Conversation TUI mouse-wheel scrolling (deferred, scoped)
+Keyboard scrolling (Tab/Up/Down/PgUp/PgDn/Home/End) shipped 2026-07-20
+(`docs/UAT-checklist.md`'s **[U9]**). Mouse wheel support was
+deliberately left out of that pass: it needs two unrelated mechanisms,
+not one small addition --
+- POSIX: enable SGR mouse-tracking mode (`ESC[?1000h` + `ESC[?1006h`)
+  and parse `ESC[<64;COL;ROWM`/`ESC[<65;COL;ROWM`  wheel-up/down events.
+- Windows: msvcrt's `getwch()` (what the conversation TUI already reads
+  keys through) cannot see mouse events at all -- would need the Win32
+  Console API directly (`ReadConsoleInput` + `ENABLE_MOUSE_INPUT`/
+  `ENABLE_EXTENDED_FLAGS` via ctypes), a different code path from
+  everything else the TUI does today.
+
+Windows is also the only tested platform (README support matrix), so
+this is real, non-trivial work for the one platform where it's hardest
+to get right, with no CI/automated way to exercise real mouse events
+either way. Worth doing once the keyboard controls have had a live UAT
+pass and mouse support is still wanted -- not blocking today's fix.
+
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response
   routing: VERBALIZE vs DISPLAY (spoken summary + full text on screen).
