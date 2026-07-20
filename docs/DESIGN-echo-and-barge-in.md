@@ -72,6 +72,67 @@ cancellation, not on orchestration changes.**
 - Honest cost: room-specific tuning UAT (delay hint, adaptation
   convergence, mic placement changes), not code volume.
 
+### Research: what Zoom/Webex/WebRTC do beyond basic linear AEC (2026-07-20)
+
+Prompted by self-barge-in "still needs a bit of tweaking" once AEC lands.
+Researched what commercial VoIP/conferencing products do beyond a plain
+adaptive linear filter, since that's the gap between "AEC exists" and
+"AEC works well enough on cheap speakers in a real room with no
+headphones." Two claims below are cited against a fetched source each;
+where a claim is general/uncited engineering knowledge rather than
+something verified from a specific published source, it's labeled as
+such rather than presented as a confirmed fact.
+
+**The techniques that matter most for ConvoBox's specific problem
+(open mic, no headphones):**
+
+- **Nonlinear residual echo suppression**, a frequency-dependent
+  post-filter that cleans up what the linear adaptive filter can't model
+  by design -- echo from speaker distortion, amp non-linearity, and ADC
+  clipping. Matters here specifically because cheap speakers at real-room
+  volume are exactly the non-linear-distortion case this stage targets.
+- **Double-talk detection**: monitors coherence between the far-end
+  reference (what was played) and the mic signal to distinguish "user
+  talking over playback" from "just echo," and throttles filter
+  adaptation during genuine double-talk so real speech doesn't get
+  mislearned as echo. This is the mechanism that keeps a real barge-in
+  from being silently swallowed by an over-eager canceller -- directly
+  relevant to `BargeInMonitor`.
+- **Continuous delay estimation**, cross-correlating the reference and
+  capture signals on an ongoing basis rather than once at startup, since
+  render→capture delay drifts across devices/host-APIs. This is exactly
+  the class of problem behind this project's own `aec_delay_ms` auto-tune
+  incident (a stale baked-in value silently disabling auto-tuning) --
+  cited [source](https://switchboard.audio/hub/how-webrtc-aec3-works/)
+  describes AEC3 doing this continuously, not as a one-shot calibration.
+
+**Does `aec-audio-processing` (WebRTC AEC3) already include these?**
+Yes -- per the same source, all three are native AEC3 stages, not
+something ConvoBox would need to layer on top. That reframes the open
+"self-barge-in still needs tweaking" problem: it's more likely a
+**wiring/tuning problem** (is the far-end reference correctly tee'd and
+time-aligned before `process_stream`; is delay estimation actually
+converging on this project's specific device paths) than "AEC3 lacks a
+needed algorithm." Worth checking against real UAT numbers before
+reaching for anything beyond AEC3.
+
+**What Zoom/Webex publish about their own approach:** not much at the
+algorithmic level. [Webex's own audio-quality blog](https://blog.webex.com/collaboration/video-conferencing/audio-quality/)
+confirms AEC has to work for full-duplex to function at all, but
+publishes no lower-level detail (proprietary). [Zoom's blog on its
+"High-Fidelity Music Mode"](https://www.zoom.com/en/blog/high-fidelity-music-mode-professional-audio-on-zoom/)
+confirms Zoom offers an echo-cancellation-mode choice ("Echo
+cancellation" vs. "Aggressive") but likewise discloses no internals.
+Both are general/uncited on internals beyond what's quoted here -- their
+value is confirming *that* full-duplex AEC is table-stakes industry
+practice, not revealing *how* they implement it.
+
+If AEC3's built-in stages prove insufficient after real tuning, the
+next-step academic reference is [double-talk-detection-aided residual
+echo suppression via spectrogram masking](https://www.mdpi.com/2624-599X/4/3/39) --
+state-of-the-art beyond AEC3, not needed unless AEC3-plus-tuning is
+verified insufficient first.
+
 Once AEC is in, the target barge-in design is a config mode
 (`interrupt_mode: none | stop_audio | abort_turn`) — adopted from the
 UAT suggestion notes — where `stop_audio` cuts TTS but lets the backend
