@@ -17,7 +17,7 @@
       "file": "src/convobox/audio/capture.py",
       "line": 21,
       "pattern": "class MicrophoneStream:",
-      "description": "**Stage 1: audio capture.** `MicrophoneStream` wraps a single `sounddevice.InputStream` — continuous streaming, not record-then-stop, because segmentation into utterances is VAD's job downstream, not a fixed capture window.\n\nDeliberately **not** shelling out to platform tools (sox/arecord/powershell) — see README's \"Lessons from an earlier attempt\" for why that was a real command-injection bug in an earlier related project."
+      "description": "**Stage 1: audio capture.** `MicrophoneStream` wraps a single `sounddevice.InputStream` — continuous streaming, not record-then-stop, because segmentation into utterances is VAD's job downstream, not a fixed capture window.\n\nDeliberately **not** shelling out to platform tools (sox/arecord/powershell) — see docs/LESSONS-FROM-VOICE-OPENCODE.md for why that was a real command-injection bug in an earlier related project."
     },
     {
       "file": "src/convobox/audio/capture.py",
@@ -101,7 +101,7 @@
       "file": "src/convobox/tts/base.py",
       "line": 14,
       "pattern": "def sanitize_text\\(text: str\\)",
-      "description": "**The security boundary before any synthesis happens.** `sanitize_text` strips control characters and caps length on text that originates from **untrusted LLM output**. Every concrete `TTSEngine` must call this before synthesizing — this exists directly because of a real command-injection bug in an earlier related project (`voice-opencode`), where response text was interpolated straight into a shell command. See README → \"Lessons from an earlier attempt.\""
+      "description": "**The security boundary before any synthesis happens.** `sanitize_text` strips control characters and caps length on text that originates from **untrusted LLM output**. Every concrete `TTSEngine` must call this before synthesizing — this exists directly because of a real command-injection bug in an earlier related project (`voice-opencode`), where response text was interpolated straight into a shell command. See docs/LESSONS-FROM-VOICE-OPENCODE.md."
     },
     {
       "file": "src/convobox/tts/base.py",

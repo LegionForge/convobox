@@ -63,6 +63,52 @@ README's existing "Open questions" -> Licensing model note, which is
 about ConvoBox's own license choice; this is the sharper, more concrete
 version of that same open question.
 
+## Keeping local, CI, and UAT environments in sync
+
+Investigated 2026-07-20 after a direct question about whether local dev,
+CI, and live-mic UAT sessions could silently drift apart. Three findings:
+
+1. **Local UAT and local dev are already the same environment, by
+   construction.** Live-mic UAT sessions run from the exact same `.venv`
+   `uv sync --extra dev` creates -- there's no separate UAT-specific
+   config or interpreter. Nothing to fix here; noted so it's not assumed
+   to be a hidden risk later.
+2. **The claimed Python floor didn't match what's actually verified
+   anywhere.** `pyproject.toml`'s `requires-python`, the README, and
+   `docs/QUICKSTART.md` all said "3.11+", but `ci.yml` pins every job to
+   `python-version: "3.12"` and this machine's own `.venv` is 3.12 --
+   Python 3.11 was never exercised by CI or (as far as anyone can tell)
+   locally. Fixed by raising the floor to match reality
+   (`requires-python = ">=3.12"`, `uv.lock` regenerated, README/
+   QUICKSTART updated) rather than adding untested 3.11 CI coverage for a
+   version nobody has actually run this against.
+3. **Two gaps found but deliberately NOT changed here, since fixing them
+   means changing behavior this project doesn't own or hasn't scoped:**
+   - `ruff`/`bandit`/`mypy` in CI run against whatever `pip install -e
+     ".[dev]"` resolves at CI time (confirmed by reading
+     `LegionForge/dev-rig`'s actual `lint.yml`); locally, `uv sync
+     --extra dev` resolves the same version *constraints* through `uv`
+     instead. Same `pyproject.toml` constraints, but no shared lockfile
+     between the two installers and no upper version bounds on
+     ruff/mypy/bandit -- so "green locally" and "green in CI" can drift
+     apart over time as new tool versions release, with no code change
+     on either side. Living with this for now; a real fix would mean
+     either pinning exact tool versions in `pyproject.toml` or getting
+     `LegionForge/dev-rig`'s reusable workflow to consume `uv.lock`
+     directly, both bigger changes than "sync the environments" implied.
+   - CI's lint job only ever checks `source-dirs: "src/convobox"` --
+     `scripts/*.py` (the actual entrypoints: `run_convobox.py`,
+     `settings_tui.py`, `voice_picker.py`, etc.) get **no** ruff/mypy/
+     bandit coverage in CI, matching what this doc tells you to run
+     locally (same scope, so at least the two agree with each other).
+     Confirmed this gap firsthand while adding the conversation TUI's
+     scroll feature: `mypy scripts/run_convobox.py` gave two false
+     `termios`-attribute errors when run locally with mypy's default
+     Windows target, but came back clean with `--platform linux` -- the
+     same target CI's `ubuntu-latest` runner actually uses. A real fix
+     (adding `scripts` to `source-dirs`) would need vetting every file
+     under `scripts/` for new findings first, out of scope for this pass.
+
 ## Automated tests (no audio hardware needed)
 
 ```bash
