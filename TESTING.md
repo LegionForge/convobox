@@ -109,6 +109,66 @@ CI, and live-mic UAT sessions could silently drift apart. Three findings:
      (adding `scripts` to `source-dirs`) would need vetting every file
      under `scripts/` for new findings first, out of scope for this pass.
 
+4. **New finding (2026-07-20), confirmed by direct reproduction: `uv`'s
+   local build cache can cross-contaminate editable installs between two
+   clones of the same-named, same-version package on one machine.**
+   Two local checkouts of this repo exist on this machine (the dev
+   clone and a separate UAT clone, both named `convobox`, version
+   `0.2.0`, and -- after being kept in sync -- byte-identical
+   `pyproject.toml`/`uv.lock`). Running `uv sync` in the SECOND clone
+   silently overwrote the FIRST clone's editable-install pointer
+   (`.venv/Lib/site-packages/_editable_impl_convobox.pth`) to point at
+   the second clone's `src/`, even though `uv sync` was never re-run in
+   the first clone -- confirmed by inspecting the `.pth` file's content
+   and modification timestamp directly, and by `import convobox;
+   convobox.__file__` resolving to the WRONG clone's directory. `uv
+   sync --reinstall-package convobox` alone did not fix it durably (it
+   re-linked the same poisoned cached build); `uv cache clean convobox`
+   followed by `uv sync --reinstall-package convobox --no-cache` was
+   required to force a genuinely fresh build reflecting the correct
+   source path. **Practical rule: if you maintain more than one local
+   clone of this repo (or any same-named/same-version local package),
+   re-run `uv sync --reinstall-package convobox --no-cache` in whichever
+   clone you're about to test in if you've run `uv sync` in the OTHER
+   clone more recently -- don't assume the venv still points at itself.**
+   Verify with `python -c "import convobox; print(convobox.__file__)"`
+   before trusting a test run's result, especially after debugging
+   something as significant as an AEC delay setting (see
+   `docs/DESIGN-echo-and-barge-in.md`'s 2026-07-20 correction, which
+   this exact bug complicated: some of that session's diagnostic runs
+   may have executed against the wrong clone's code before this was
+   caught).
+
+5. **A local sync helper for the UAT clone exists, but deliberately isn't
+   in this repo.** `sync-from-dev.ps1` lives only in the UAT clone's
+   working directory (excluded via that clone's own `.git/info/exclude`,
+   not the tracked `.gitignore`, so it never reaches this repo or the dev
+   clone) -- it fetches `origin/main`, merges it into whatever branch is
+   checked out, then re-syncs the venv with the `--no-cache` fix from
+   item 4 above. Its one hard requirement: refuse to touch anything if
+   the UAT clone has local changes (uncommitted edits, or a live
+   ConvoBox session's coding-agent backend having written files there
+   during dogfooding -- see `docs/DESIGN-backend-sandboxing.md`) or
+   unpushed local commits, since silently syncing on top of either would
+   risk exactly the kind of clobbering this tool exists to prevent.
+   Building and testing it against a real dirty tree (a disposable test
+   file, not a real one, the second time) surfaced two bugs worth
+   remembering for any similar PowerShell + git tooling:
+   - **Path comparisons need slash normalization.** `git rev-parse
+     --show-toplevel` and Python's `__file__` return forward slashes
+     (`D:/LegionForge/...`) even on Windows; PowerShell/.NET paths use
+     backslashes (`D:\LegionForge\...`). A literal `-like`/`-notlike`
+     check between the two silently fails every time, even when the
+     path is actually correct -- normalize both sides (replace `\` with
+     `/`) before comparing.
+   - **`HEAD@{1}` reflects the last reflog entry, not "what this specific
+     command changed."** Using `git log HEAD@{1}..HEAD` to report "new
+     commits from this merge" prints stale, misleading output whenever
+     the merge itself was a no-op but an earlier, unrelated command in
+     the same session had already moved `HEAD` -- capture `git rev-parse
+     HEAD` immediately before and after the specific operation instead of
+     relying on the reflog.
+
 ## Automated tests (no audio hardware needed)
 
 ```bash

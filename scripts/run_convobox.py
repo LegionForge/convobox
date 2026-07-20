@@ -1159,6 +1159,7 @@ async def run(args: argparse.Namespace) -> None:
     if tui_state is not None:
         tui_state.backend_name = config.backend.name
         tui_state.aec_enabled = config.audio.echo_cancellation
+        tui_state.aec_dump_active = args.aec_dump is not None and config.audio.echo_cancellation
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
@@ -1219,9 +1220,26 @@ async def run(args: argparse.Namespace) -> None:
     device = _resolve_device(args.device, config.audio.input_device)
 
     canceller = None
+    aec_dump = None
     mic_holder: dict[str, object] = {}
+    if args.aec_dump is not None and not config.audio.echo_cancellation:
+        log.warning(
+            "--aec-dump has no effect: audio.echo_cancellation is off, "
+            "so there is no reference/capture stream to record"
+        )
     if config.audio.echo_cancellation:
-        from convobox.audio.aec import EchoCanceller
+        from convobox.audio.aec import AecDumpWriter, EchoCanceller
+
+        if args.aec_dump is not None:
+            dump_root = Path(args.aec_dump) if args.aec_dump else Path(".aec-dumps")
+            dump_dir = dump_root / time.strftime("%Y%m%d-%H%M%S")
+            aec_dump = AecDumpWriter(dump_dir)
+            log.info(
+                "AEC dump ON -- recording reference.wav / mic-raw.wav / "
+                "mic-processed.wav to %s (replay offline against any "
+                "hypothesis -- no live session needed to test one)",
+                dump_dir,
+            )
 
         # aec_delay_ms=None (the default) means auto-tune -- confirmed
         # live (2026-07-15) that a stale/wrong FIXED hint (measured
@@ -1231,10 +1249,19 @@ async def run(args: argparse.Namespace) -> None:
         # starting guess fed to APM before the real estimate lands on
         # first playback -- set_delay() below replaces it immediately in
         # the auto-tune case, same as before this was a sentinel.
+        #
+        # CORRECTION 2026-07-20: an explicit aec_delay_ms is NOT
+        # necessarily stale/wrong -- uat-acoustic-calibration/'s real
+        # on-hardware delay sweeps found 247-309ms clearly outperforming
+        # the ~222ms auto-estimate on this device pair (see
+        # docs/DESIGN-echo-and-barge-in.md). Re-run
+        # scripts/acoustic_calibration.py before assuming either value is
+        # right; don't silently override a configured value here.
         _INITIAL_AEC_DELAY_MS = 100
         delay_explicit = config.audio.aec_delay_ms is not None
         canceller = EchoCanceller(
-            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS
+            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
+            dump=aec_dump,
         )
         delay_estimated = False
 
@@ -1357,6 +1384,22 @@ async def run(args: argparse.Namespace) -> None:
                 )
                 if tui_state is not None:
                     tui_state.aec_verdict = verdict
+                if canceller.dump is not None:
+                    # AEC3's native frame size is a fixed 10ms (see
+                    # convobox.audio.aec's module docstring) -- frame
+                    # count * 0.01s is duration, no need to import the
+                    # internal _FRAME/_AEC_RATE constants for this.
+                    log.info(
+                        "AEC dump progress: reference=%d frames (%.1fs)  "
+                        "capture=%d frames (%.1fs)  dir=%s",
+                        canceller.dump.reference_frames,
+                        canceller.dump.reference_frames * 0.01,
+                        canceller.dump.capture_frames,
+                        canceller.dump.capture_frames * 0.01,
+                        canceller.dump.directory,
+                    )
+                    if tui_state is not None:
+                        tui_state.aec_dump_frames = canceller.dump.capture_frames
                 new_grace = grace_s_for_last_response(attenuation, ceiling)
                 if new_grace != next_overlap_grace_s:
                     log.info(
@@ -1663,6 +1706,20 @@ async def run(args: argparse.Namespace) -> None:
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tui_old_tty_settings)
             sys.stdout.write("\x1b[?25h\x1b[?1049l")  # restore cursor + main screen
             sys.stdout.flush()
+        # AEC dump: finalize the WAV headers and log an after-action
+        # summary. Runs even on a mid-session exception/Ctrl+C -- an
+        # unclosed wave.Wave_write leaves the RIFF header's size fields
+        # wrong, making the file unplayable, so this must not be skipped.
+        if canceller is not None and canceller.dump is not None:
+            summary = canceller.dump.close()
+            log.info(
+                "AEC dump closed -- %s: reference %.1fs (%d frames), "
+                "capture %.1fs (%d frames), session %.1fs. Replay these "
+                "offline against any hypothesis -- see "
+                "docs/DESIGN-echo-and-barge-in.md.",
+                summary["directory"], summary["reference_s"], summary["reference_frames"],
+                summary["capture_s"], summary["capture_frames"], summary["duration_s"],
+            )
         # Close the backend transport (subprocess pipes / HTTP client)
         # while the loop is still alive, so shutdown is quiet instead of
         # spraying 'Event loop is closed' tracebacks. Runs on Ctrl+C too
@@ -1720,6 +1777,16 @@ def main() -> None:
             "Only affects the mic loop, not --text mode. Log output moves to "
             f"{_TUI_LOG_FILE} -- interleaving ordinary log lines with the "
             "alt-screen redraw would garble the display."
+        ),
+    )
+    parser.add_argument(
+        "--aec-dump", nargs="?", const="", default=None, metavar="DIR",
+        help=(
+            "record the real AEC reference/mic streams to WAV for offline "
+            "replay (reference.wav, mic-raw.wav, mic-processed.wav under a "
+            "timestamped subdirectory of DIR, default .aec-dumps/). Requires "
+            "audio.echo_cancellation on. See docs/DESIGN-echo-and-barge-in.md "
+            "-> 'Capturing a live incident for offline analysis'."
         ),
     )
     parser.add_argument("-v", "--verbose", action="store_true")
