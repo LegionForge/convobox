@@ -5,6 +5,14 @@ between you and whichever coding agent CLI you're driving — Claude Code,
 Codex, OpenCode, and eventually others — and lets you work by voice
 instead of (or alongside) the keyboard.
 
+> **Headphones strongly recommended for now.** Acoustic echo cancellation
+> (open mic + speakers, no headphones) is still being dialed in — see
+> [docs/DESIGN-echo-and-barge-in.md](docs/DESIGN-echo-and-barge-in.md)
+> for the live tuning notes. Headphones sidestep the whole problem: the
+> assistant's own voice never reaches the mic, so self-barge-in can't
+> happen regardless of room acoustics. Open-speaker use works today but
+> is the rougher edge of the experience.
+
 AI-assisted change attribution is documented in
 [docs/AI-ATTRIBUTION.md](docs/AI-ATTRIBUTION.md).
 The repo also includes a commit template at [`.gitmessage.txt`](.gitmessage.txt)

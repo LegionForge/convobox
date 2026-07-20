@@ -228,6 +228,18 @@ def test_diagnostics_line_shows_mic_level() -> None:
     assert "mic: -42dBFS" in lines[1]
 
 
+def test_diagnostics_line_omits_rec_tag_by_default() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "REC" not in lines[1]
+
+
+def test_diagnostics_line_shows_rec_tag_with_elapsed_seconds_when_dumping() -> None:
+    state = ConversationTuiState(started=0.0, aec_dump_active=True, aec_dump_frames=300)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "REC 3s" in lines[1]  # 300 frames * 10ms/frame = 3.0s
+
+
 def test_heartbeat_color_thresholds_match_run_convobox_pys_own() -> None:
     # Mirrors scripts/run_convobox.py's _heartbeat_color boundary tests
     # (test_barge_in.py) -- must stay in sync with that copy.

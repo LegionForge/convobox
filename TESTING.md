@@ -109,6 +109,36 @@ CI, and live-mic UAT sessions could silently drift apart. Three findings:
      (adding `scripts` to `source-dirs`) would need vetting every file
      under `scripts/` for new findings first, out of scope for this pass.
 
+4. **New finding (2026-07-20), confirmed by direct reproduction: `uv`'s
+   local build cache can cross-contaminate editable installs between two
+   clones of the same-named, same-version package on one machine.**
+   Two local checkouts of this repo exist on this machine (the dev
+   clone and a separate UAT clone, both named `convobox`, version
+   `0.2.0`, and -- after being kept in sync -- byte-identical
+   `pyproject.toml`/`uv.lock`). Running `uv sync` in the SECOND clone
+   silently overwrote the FIRST clone's editable-install pointer
+   (`.venv/Lib/site-packages/_editable_impl_convobox.pth`) to point at
+   the second clone's `src/`, even though `uv sync` was never re-run in
+   the first clone -- confirmed by inspecting the `.pth` file's content
+   and modification timestamp directly, and by `import convobox;
+   convobox.__file__` resolving to the WRONG clone's directory. `uv
+   sync --reinstall-package convobox` alone did not fix it durably (it
+   re-linked the same poisoned cached build); `uv cache clean convobox`
+   followed by `uv sync --reinstall-package convobox --no-cache` was
+   required to force a genuinely fresh build reflecting the correct
+   source path. **Practical rule: if you maintain more than one local
+   clone of this repo (or any same-named/same-version local package),
+   re-run `uv sync --reinstall-package convobox --no-cache` in whichever
+   clone you're about to test in if you've run `uv sync` in the OTHER
+   clone more recently -- don't assume the venv still points at itself.**
+   Verify with `python -c "import convobox; print(convobox.__file__)"`
+   before trusting a test run's result, especially after debugging
+   something as significant as an AEC delay setting (see
+   `docs/DESIGN-echo-and-barge-in.md`'s 2026-07-20 correction, which
+   this exact bug complicated: some of that session's diagnostic runs
+   may have executed against the wrong clone's code before this was
+   caught).
+
 ## Automated tests (no audio hardware needed)
 
 ```bash

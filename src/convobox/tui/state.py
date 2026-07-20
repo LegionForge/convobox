@@ -80,6 +80,11 @@ class ConversationTuiState:
     - focus_pane: which pane keyboard scroll commands apply to. Defaults
       to "detail" (the full-response pane) since that's the one operators
       actually need to scroll back through; Tab switches it.
+    - aec_dump_active/aec_dump_frames: set once at startup from --aec-dump
+      (static, like backend_name/aec_enabled); aec_dump_frames updates
+      once per finished response (run_convobox.py's existing per-response
+      AEC-stats block) with the real capture-frame count so far, not
+      per-chunk -- this is a debug/AAR indicator, not a live meter.
     """
 
     turns: list[TranscriptTurn] = field(default_factory=list)
@@ -101,6 +106,8 @@ class ConversationTuiState:
     transcript_scroll: int = 0
     detail_scroll: int = 0
     focus_pane: Literal["transcript", "detail"] = "detail"
+    aec_dump_active: bool = False
+    aec_dump_frames: int = 0
 
     def add_turn(self, speaker: Speaker, text: str, timestamp: str | None = None) -> None:
         self.turns.append(
