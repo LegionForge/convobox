@@ -1,6 +1,6 @@
 # ConvoBox quickstart
 
-From zero to talking to a coding agent. Assumes Python 3.11+ and a backend
+From zero to talking to a coding agent. Assumes Python 3.12+ and a backend
 you can reach (the examples use [OpenCode](https://github.com/anthropics/…),
 which runs a local server; `claude-code` and `codex` work too and are spawned
 as subprocesses).

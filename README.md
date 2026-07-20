@@ -38,7 +38,7 @@ how to interrupt/abort by voice and what each listening state looks like.
 
 ## Installation
 
-**Prerequisites:** Python 3.11+, [git](https://git-scm.com/), and a
+**Prerequisites:** Python 3.12+, [git](https://git-scm.com/), and a
 coding-agent CLI you can already reach on its own — OpenCode (runs a
 local server), Claude Code, or Codex (both spawned as subprocesses).
 

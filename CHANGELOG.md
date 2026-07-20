@@ -14,6 +14,20 @@ minor versions carry feature and behavior changes.
 > from the live backend's session records, not assumed. See `docs/UAT-checklist.md`
 > **[L2]**.
 
+### Fixed
+- **Python version floor didn't match what CI or local dev actually run**
+  (`pyproject.toml`, `uv.lock`, `README.md`, `docs/QUICKSTART.md`).
+  `Attribution: Claude Code; Provider: Anthropic; Model: claude-fable-5;
+  Scope: this entry.` `requires-python` and the docs claimed "3.11+", but
+  `ci.yml` pins every job to `python-version: "3.12"` and this machine's
+  own dev `.venv` is 3.12 -- 3.11 was never actually exercised anywhere.
+  Raised the floor to `>=3.12` to match reality instead of adding
+  untested 3.11 CI coverage. Two related environment-drift risks (pip
+  vs. uv tool-version resolution having no shared lockfile; `scripts/*.py`
+  having zero CI lint/type-check coverage) were investigated and
+  documented as accepted, named gaps rather than silently fixed --
+  see `TESTING.md` → "Keeping local, CI, and UAT environments in sync".
+
 ### Added
 - **Conversation TUI panes are now keyboard-scrollable** (`src/convobox/tui/`,
   `scripts/run_convobox.py`). `Attribution: Claude Code; Provider:
