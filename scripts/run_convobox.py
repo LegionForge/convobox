@@ -54,7 +54,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
@@ -1126,8 +1126,113 @@ def _draw_conversation_tui(tui_state: ConversationTuiState) -> None:
     sys.stdout.flush()
 
 
+_TUI_SCROLL_PAGE = 10  # lines per PgUp/PgDn -- roughly one screenful at typical sizes
+
+
+def _handle_tui_key(tui_state: ConversationTuiState, key: str) -> None:
+    """Apply one decoded key to the conversation TUI's scroll state.
+
+    Pure state mutation (no I/O), same split as everything else in
+    convobox.tui -- render.py clamps whatever offset lands here against
+    the CURRENT frame's line count, so this function never needs to know
+    pane heights or how much history exists; it just nudges a counter.
+    """
+    if key == "TAB":
+        tui_state.focus_pane = "transcript" if tui_state.focus_pane == "detail" else "detail"
+        return
+    attr = "transcript_scroll" if tui_state.focus_pane == "transcript" else "detail_scroll"
+    if key == "HOME":
+        setattr(tui_state, attr, 1_000_000)  # clamped to the real max at render time
+    elif key == "END":
+        setattr(tui_state, attr, 0)
+    else:
+        delta = {"UP": 1, "DOWN": -1, "PGUP": _TUI_SCROLL_PAGE, "PGDN": -_TUI_SCROLL_PAGE}.get(key)
+        if delta is not None:
+            setattr(tui_state, attr, max(0, getattr(tui_state, attr) + delta))
+
+
+# Windows scan codes for the "\x00"/"\xe0"-prefixed extended keys msvcrt.getwch()
+# returns (conio.h getch() table): Home=71 'G', Up=72 'H', PgUp=73 'I',
+# Left=75 'K', Right=77 'M', End=79 'O', Down=80 'P', PgDn=81 'Q'. Only the
+# ones the conversation TUI actually binds are mapped -- Left/Right are
+# reserved (unused today) rather than silently mapped to something odd.
+_WIN_EXTENDED_KEYS = {"H": "UP", "P": "DOWN", "I": "PGUP", "Q": "PGDN", "G": "HOME", "O": "END"}
+
+# POSIX CSI final-byte / tilde-code mappings for the same key set. Arrow
+# keys are a single final byte after "ESC ["; PgUp/PgDn/Home/End on most
+# real terminals (xterm, gnome-terminal, iTerm2, Windows Terminal's own
+# POSIX-style reporting under WSL) are "ESC [ <digits> ~" instead --
+# confirmed against the VT/xterm control-sequence conventions, not
+# assumed, since this is exactly the class of "looks obviously right"
+# escape-sequence claim that has burned this project before (see
+# docs/DESIGN-echo-and-barge-in.md's PortAudio constraint-name mistake).
+_POSIX_CSI_FINAL = {"A": "UP", "B": "DOWN", "H": "HOME", "F": "END"}
+_POSIX_CSI_TILDE = {"5": "PGUP", "6": "PGDN"}
+
+
+def _read_pending_key() -> str | None:
+    """Non-blocking single-keypress read for the conversation TUI's scroll
+    controls. Returns None immediately when no key is waiting -- safe to
+    poll once per frame from _tui_render_loop without ever blocking the
+    event loop (unlike scripts/settings_tui.py's read_key(), a BLOCKING
+    read used by that script's synchronous, non-asyncio main loop; kept
+    as a separate function rather than shared, since the two have
+    incompatible blocking contracts).
+
+    Assumes the terminal is already in raw/cbreak mode on POSIX for the
+    whole --tui session (set once in main(), restored in its finally
+    block) -- this function only polls and reads, it never changes
+    terminal modes itself, so it can be called every 0.1s cheaply.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        if not msvcrt.kbhit():
+            return None
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            code = msvcrt.getwch()
+            return _WIN_EXTENDED_KEYS.get(code)
+        return "TAB" if ch == "\t" else None
+
+    import select
+
+    fd = sys.stdin.fileno()
+    if not select.select([fd], [], [], 0)[0]:
+        return None
+    ch = sys.stdin.read(1)
+    if ch == "\t":
+        return "TAB"
+    if ch != "\x1b":
+        return None
+    # Drain the rest of the escape sequence. A bare ESC keypress (no
+    # follow-up bytes) times out the first select() below and is dropped
+    # silently -- the conversation TUI has no ESC-bound action today.
+    if not select.select([fd], [], [], 0.05)[0]:
+        return None
+    if sys.stdin.read(1) != "[":
+        return None
+    if not select.select([fd], [], [], 0.05)[0]:
+        return None
+    code = sys.stdin.read(1)
+    if code in _POSIX_CSI_FINAL:
+        return _POSIX_CSI_FINAL[code]
+    if not code.isdigit():
+        return None
+    digits = code
+    while select.select([fd], [], [], 0.05)[0]:
+        nxt = sys.stdin.read(1)
+        if nxt == "~":
+            break
+        digits += nxt
+    return _POSIX_CSI_TILDE.get(digits)
+
+
 async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
     while True:
+        key = _read_pending_key()
+        if key is not None:
+            _handle_tui_key(tui_state, key)
         _draw_conversation_tui(tui_state)
         await asyncio.sleep(0.1)
 
@@ -1152,12 +1257,62 @@ def _check_backend_permission_mode(backend: object) -> None:
     log.info("backend permission_mode: %s (%s)", mode, name)
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _check_backend_working_dir(backend: object) -> None:
+    """Validate backend.working_dir and warn about the dangerous cases.
+
+    A coding-agent backend WRITES files in its working directory, so the
+    default (unset -> the agent inherits ConvoBox's own cwd) can let a voice
+    session silently edit ConvoBox's source. This raises on a nonexistent
+    directory and warns loudly when the working dir is ConvoBox's own repo,
+    is unset for a subprocess backend, or is set for opencode (no effect).
+    See docs/DESIGN-backend-sandboxing.md.
+    """
+    name = getattr(backend, "name", "")
+    working_dir = getattr(backend, "working_dir", None)
+    if name == "opencode":
+        if working_dir:
+            log.warning(
+                "backend.working_dir=%r has NO effect on the opencode backend -- "
+                "opencode's directory is set by wherever `opencode serve` was "
+                "launched. Start the server from your workspace instead.",
+                working_dir,
+            )
+        return
+    if working_dir is None:
+        log.warning(
+            "backend.working_dir is unset: the %s agent will run in ConvoBox's "
+            "own directory and can modify its source. Set backend.working_dir "
+            "(or pass --working-dir) to an isolated workspace. See "
+            "docs/DESIGN-backend-sandboxing.md.",
+            name,
+        )
+        return
+    resolved = Path(working_dir).expanduser().resolve()
+    if not resolved.is_dir():
+        raise SystemExit(
+            f"backend.working_dir {working_dir!r} is not an existing directory"
+        )
+    if resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents:
+        log.warning(
+            "backend.working_dir %r is inside ConvoBox's own source tree -- the "
+            "agent can modify the product's code. Point it at a separate "
+            "workspace.",
+            str(resolved),
+        )
+
+
 async def run(args: argparse.Namespace) -> None:
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
     if args.permission_mode is not None:
         config.backend.permission_mode = args.permission_mode
     _check_backend_permission_mode(config.backend)
+    if args.working_dir is not None:
+        config.backend.working_dir = args.working_dir
+    _check_backend_working_dir(config.backend)
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
@@ -1443,6 +1598,11 @@ async def run(args: argparse.Namespace) -> None:
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
+    # termios' own attribute-list type is platform-stub-conditional (POSIX
+    # only) and this variable is only ever populated on POSIX -- Any
+    # sidesteps fighting typeshed's win32/posix stub split rather than
+    # asserting a precise type mypy can't agree on across platforms.
+    tui_old_tty_settings: Any = None
     if tui_state is not None:
         # Same VT-mode-enable idiom as voice_tui.py/settings_tui.py --
         # os.system("") with a hardcoded empty-string literal has the
@@ -1450,6 +1610,18 @@ async def run(args: argparse.Namespace) -> None:
         # Windows console hosts; it never executes a program.
         os.system("")  # nosec B605 B607
         sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
+        if sys.platform != "win32":
+            # msvcrt.getwch() (used by _read_pending_key on Windows) already
+            # bypasses the console's line-buffering/echo, so only POSIX
+            # needs an explicit mode change -- without this, a scroll
+            # keypress would sit unread until Enter, and would echo into
+            # the alt-screen TUI instead of being consumed silently.
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            tui_old_tty_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
         tui_render_task = asyncio.create_task(_tui_render_loop(tui_state))
 
     try:
@@ -1739,6 +1911,10 @@ async def run(args: argparse.Namespace) -> None:
             tui_render_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await tui_render_task
+            if tui_old_tty_settings is not None:
+                import termios
+
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tui_old_tty_settings)
             sys.stdout.write("\x1b[?25h\x1b[?1049l")  # restore cursor + main screen
             sys.stdout.flush()
         # Close the backend transport (subprocess pipes / HTTP client)
@@ -1778,6 +1954,13 @@ def main() -> None:
         "permissive=writes without asking. See docs/DESIGN-backend-sandboxing.md.",
     )
     parser.add_argument("--device", default=None, help="input device name or index")
+    parser.add_argument(
+        "-d", "--working-dir", default=None,
+        help="directory the spawned coding agent (codex/claude-code) runs and "
+        "edits files in; overrides backend.working_dir. Use an isolated "
+        "workspace so the agent cannot modify ConvoBox's own source. No effect "
+        "on the opencode backend (set by where `opencode serve` was launched).",
+    )
     parser.add_argument(
         "--text", default=None,
         help="send this single utterance instead of listening on the mic",

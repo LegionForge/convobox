@@ -159,7 +159,10 @@ def _resolve_flags(command: Sequence[str], permission_mode: str = "plan") -> lis
 
 class ClaudeCodeAdapter(BackendAdapter):
     def __init__(
-        self, command: Sequence[str] | None = None, permission_mode: str = "plan"
+        self,
+        command: Sequence[str] | None = None,
+        permission_mode: str = "plan",
+        working_dir: str | None = None,
     ) -> None:
         self._command = list(command) if command else ["claude"]
         if permission_mode == "approve":
@@ -170,6 +173,9 @@ class ClaudeCodeAdapter(BackendAdapter):
                 "approvals, or 'permissive' to allow edits without a gate."
             )
         self._permission_mode = permission_mode
+        # Where the spawned agent reads/writes files. None -> inherit
+        # ConvoBox's cwd; an explicit path isolates edits. See BackendConfig.
+        self._working_dir = working_dir
         self._proc: asyncio.subprocess.Process | None = None
         self._proc_lock = asyncio.Lock()
         self._stderr_task: asyncio.Task[None] | None = None
@@ -197,6 +203,7 @@ class ClaudeCodeAdapter(BackendAdapter):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=_STREAM_LIMIT,
+                    cwd=self._working_dir,
                 )
                 # stderr must be drained somewhere or a chatty CLI can fill
                 # the pipe and deadlock; drained to debug logs rather than

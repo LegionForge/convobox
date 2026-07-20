@@ -145,7 +145,7 @@ def test_backend_section_hides_irrelevant_field_per_backend() -> None:
     assert [field.key for field in state.current_fields()] == ["name", "url", "model"]
 
     settings_tui._switch_backend(state.working, "codex")
-    assert [field.key for field in state.current_fields()] == ["name", "command"]
+    assert [field.key for field in state.current_fields()] == ["name", "command", "working_dir"]
 
 
 def test_backend_help_mentions_per_backend_memory() -> None:
@@ -649,3 +649,28 @@ def test_validate_config_accepts_default_pause_phrases() -> None:
     report = validate_config(_make_config())
     assert not any("pause_listening_phrases" in e for e in report.errors)
     assert not any("pause_listening_phrases" in w for w in report.warnings)
+
+
+# --- backend working dir: TUI-editable for subprocess backends, warned ---
+
+
+def test_working_dir_field_visible_for_codex_not_opencode() -> None:
+    backend = next(s for s in settings_tui.SECTION_SPECS if s.key == "backend")
+    codex_fields = {
+        f.key for f in settings_tui._visible_fields_for_section(
+            _make_config(**{"backend.name": "codex", "backend.command": ["codex"]}), backend
+        )
+    }
+    assert "working_dir" in codex_fields
+    opencode_fields = {
+        f.key for f in settings_tui._visible_fields_for_section(
+            _make_config(**{"backend.name": "opencode"}), backend
+        )
+    }
+    assert "working_dir" not in opencode_fields
+
+
+def test_validate_warns_when_codex_working_dir_unset() -> None:
+    config = _make_config(**{"backend.name": "codex", "backend.command": ["codex"]})
+    report = validate_config(config)
+    assert any("working_dir is unset" in w for w in report.warnings)

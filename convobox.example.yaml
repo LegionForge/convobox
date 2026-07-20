@@ -34,6 +34,13 @@ backend:
   #    no-writes stance), pass --disallowedTools yourself -- ConvoBox
   #    doesn't reject or reinterpret anything already in `command`:
   # command: ["claude", "--disallowedTools", "Bash", "Write", "Edit"]
+  # -- codex / claude-code: the directory the agent runs and EDITS files in.
+  #    SECURITY: unset (the default) means the agent inherits ConvoBox's own
+  #    directory -- a voice session could then modify ConvoBox's source.
+  #    Point it at an isolated workspace so the agent's edits land there, not
+  #    on any repo you care about. Override per-run with --working-dir PATH.
+  #    No effect on opencode (its dir = where `opencode serve` was launched).
+  # working_dir: "C:/work/convobox-uat"
 
 # ---------------------------------------------------------------------------
 # tts -- how ConvoBox speaks (text-to-speech).

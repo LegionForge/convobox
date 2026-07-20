@@ -200,6 +200,19 @@ class BackendConfig(BaseModel):
     # (`GET /doc`), is `POST /api/session`'s optional `model: {providerID,
     # id}` field -- see OpenCodeAdapter._ensure_session().
     model: str | None = None
+    # The directory the spawned coding agent (codex, claude-code) runs in --
+    # i.e. where it reads and WRITES files. SECURITY-RELEVANT: a coding
+    # agent edits its working directory, so pointing it at ConvoBox's own
+    # source (the default when unset -- the subprocess inherits ConvoBox's
+    # cwd) lets a voice conversation silently modify the product's own code
+    # mid-session. Set this to an isolated workspace (e.g. a scratch/UAT
+    # directory separate from any repo you care about) so the agent's edits
+    # land there, not on your source. Overridable per-run with
+    # `run_convobox.py --working-dir PATH`. Does NOT apply to the opencode
+    # backend, whose directory is fixed by wherever `opencode serve` was
+    # launched (not a subprocess ConvoBox spawns) -- see
+    # docs/DESIGN-backend-sandboxing.md.
+    working_dir: str | None = None
 
     # How much the spawned coding agent is allowed to DO -- the single
     # source of truth for the backend's write/execute posture, translated

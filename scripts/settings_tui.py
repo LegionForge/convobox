@@ -196,6 +196,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
             FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default). approve: may act, but every write/command needs voice approval via your approval_phrase (CODEX ONLY -- Claude Code's headless mode has no per-call approval channel, so it falls back to plan). permissive: acts without asking (dangerous). No effect on opencode (set at `opencode serve` launch). Do NOT also set a permission flag in Command -- that's a conflict."),
+            FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched). Override per-run with run_convobox.py --working-dir."),
         ),
     ),
     SectionSpec(
@@ -233,7 +234,10 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
     if backend_name == "opencode":
         return tuple(field for field in section.fields if field.key in {"name", "url", "model"})
     if backend_name in {"claude-code", "codex"}:
-        return tuple(field for field in section.fields if field.key in {"name", "command"})
+        return tuple(
+            field for field in section.fields
+            if field.key in {"name", "command", "working_dir"}
+        )
     return section.fields
 
 
@@ -586,6 +590,19 @@ def validate_config(config: AppConfig) -> ValidationReport:
         report.warnings.append(
             "backend.url does not start with http:// or https://; the connection may fail"
         )
+    if config.backend.name in {"claude-code", "codex"}:
+        working_dir = config.backend.working_dir
+        if not working_dir:
+            report.warnings.append(
+                f"backend.working_dir is unset -- the {config.backend.name} agent "
+                "will run in ConvoBox's own directory and can modify its source. "
+                "Point it at an isolated workspace."
+            )
+        elif not Path(working_dir).expanduser().is_dir():
+            report.warnings.append(
+                f"backend.working_dir {working_dir!r} is not an existing directory "
+                "(it will fail at startup until created)"
+            )
     if (
         config.backend.name == "opencode"
         and config.backend.model is not None

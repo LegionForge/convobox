@@ -124,6 +124,33 @@ def _heartbeat_color(elapsed_s: float) -> str:
     return _RED
 
 
+def _windowed(rendered: list[str], pane_height: int, offset: int) -> tuple[list[str], int]:
+    """Slice already-wrapped `rendered` lines to `pane_height` rows, `offset`
+    rows up from the bottom (0 = live -- always show the latest content,
+    matching a chat app's default "stick to bottom"). Clamped fresh
+    against `rendered`'s current length on every call, so a scroll offset
+    left over from a wider/narrower frame (terminal resize) or a pane that
+    had more history before never produces a blank window or an out-of-
+    range slice -- it just reads as "as far back as there is," same as
+    scrolling past the top of any real scrollback. Returns the clamped
+    offset alongside the window so the header can show an accurate
+    "scrolled" indicator.
+    """
+    if not rendered:
+        return [], 0
+    max_offset = max(0, len(rendered) - pane_height)
+    offset = max(0, min(offset, max_offset))
+    end = len(rendered) - offset
+    start = max(0, end - pane_height)
+    return rendered[start:end], offset
+
+
+def _pane_label(label: str, focused: bool, offset: int) -> str:
+    marker = f"{_CYAN}{_BOLD}▸ {_RESET}" if focused else "  "
+    hint = f"  {_DIM}(scrolled -- End for latest){_RESET}" if offset else ""
+    return f"{marker}{_BOLD}{label}{_RESET}{hint}"
+
+
 def _aec_tag(verdict: str) -> str:
     """Compact tag from interpret_aec_stats()'s full bracketed line
     (scripts/run_convobox.py) -- "  [FLOOR-LIMITED: echo cancelled...]"
@@ -196,7 +223,10 @@ def render_conversation_frame(
             )
         warning_lines.append(f"{_RED}{_BOLD}{'!' * width}{_RESET}")
 
-    footer = f"{_DIM}Ctrl+C to exit{_RESET}"
+    footer = _fit(
+        f"{_DIM}Tab pane  Up/Down scroll  PgUp/PgDn page  Home/End  Ctrl+C exit{_RESET}",
+        width,
+    )
     fixed_lines = len(lines) + len(warning_lines) + 1  # +1 footer
     body_height = max(4, height - fixed_lines)
     # Transcript gets the larger share (it's the primary "what's
@@ -204,18 +234,19 @@ def render_conversation_frame(
     transcript_height = max(2, round(body_height * 0.6)) - 1  # -1 for its own header
     detail_height = max(2, body_height - transcript_height - 1) - 1  # -1 for its own header
 
-    lines.append(f"{_BOLD}Transcript{_RESET}")
-    transcript_lines = _render_transcript(state, width, transcript_height)
+    transcript_lines, transcript_offset = _render_transcript(state, width, transcript_height)
+    lines.append(_pane_label("Transcript", state.focus_pane == "transcript", transcript_offset))
     lines.extend(transcript_lines)
     lines.append("-" * width)
 
-    lines.append(f"{_BOLD}Full response{_RESET}")
     detail_lines = _wrap(state.full_detail, width) if state.full_detail else []
     if not detail_lines:
-        detail_lines = [f"{_DIM}(nothing yet){_RESET}"]
-    detail_lines = detail_lines[-detail_height:] if len(detail_lines) > detail_height else detail_lines
-    detail_lines += [""] * max(0, detail_height - len(detail_lines))
-    lines.extend(_fit(line, width) for line in detail_lines[:detail_height])
+        windowed_detail, detail_offset = [f"{_DIM}(nothing yet){_RESET}"], 0
+    else:
+        windowed_detail, detail_offset = _windowed(detail_lines, detail_height, state.detail_scroll)
+    lines.append(_pane_label("Full response", state.focus_pane == "detail", detail_offset))
+    windowed_detail = windowed_detail + [""] * max(0, detail_height - len(windowed_detail))
+    lines.extend(_fit(line, width) for line in windowed_detail[:detail_height])
 
     lines.extend(warning_lines)
     lines.append(footer)
@@ -227,9 +258,12 @@ def render_conversation_frame(
     return lines[:height]
 
 
-def _render_transcript(state: ConversationTuiState, width: int, pane_height: int) -> list[str]:
+def _render_transcript(
+    state: ConversationTuiState, width: int, pane_height: int
+) -> tuple[list[str], int]:
     if not state.turns:
-        return [f"{_DIM}(nothing heard yet){_RESET}"] + [""] * max(0, pane_height - 1)
+        lines = [f"{_DIM}(nothing heard yet){_RESET}"] + [""] * max(0, pane_height - 1)
+        return lines[:pane_height], 0
 
     rendered: list[str] = []
     for turn in state.turns:
@@ -241,9 +275,9 @@ def _render_transcript(state: ConversationTuiState, width: int, pane_height: int
             rendered.append(_fit(prefix + wrapped, width))
             prefix = " " * prefix_len  # continuation lines: indent, no repeated label
 
-    tail = rendered[-pane_height:] if len(rendered) > pane_height else rendered
-    tail += [""] * max(0, pane_height - len(tail))
-    return tail[:pane_height]
+    window, offset = _windowed(rendered, pane_height, state.transcript_scroll)
+    window = window + [""] * max(0, pane_height - len(window))
+    return window[:pane_height], offset
 
 
 def _visible_len(text: str) -> int:

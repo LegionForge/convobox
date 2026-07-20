@@ -509,7 +509,7 @@ did).
 5. Edge VAD: V1-V4.
 6. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
    priority-ordering bug -- do not skip it).
-7. Conversation TUI (`--tui`): U1-U6.
+7. Conversation TUI (`--tui`): U1-U10.
 8. Response tiering (`interaction.tier_responses: true`): R1-R7.
 9. STT native-allocator recovery (long session, 20+ min): ST1-ST3.
 10. Scriptable/cleanup: M1-M3, X1-X2.
@@ -729,6 +729,38 @@ section is the live-mic pass that closes the gap.
   until "continue"/timeout, and confirm it reads as obviously different
   from LISTENING. The phase-3 approval gate's wait is a separate
   candidate to surface the same way once that gate is wired live.
+- **[U10] Scrollable panes, added 2026-07-20.** Reported broken (no PgUp/
+  PgDn/other shortcuts worked at all) -- traced end-to-end before fixing
+  per this repo's "verify a bug before proposing a fix" rule: the
+  transcript and full-response panes always rendered just the tail of
+  their content with zero keyboard input handling anywhere in
+  `_tui_render_loop` -- this was never-implemented, not regressed.
+  `Tab` switches focus between the Transcript and Full response panes
+  (the focused one gets a `▸` marker); `Up`/`Down` scroll the focused
+  pane one line, `PgUp`/`PgDn` one page (10 lines), `Home` jumps to the
+  oldest content, `End` snaps back to live/latest. A scrolled pane's
+  header shows `(scrolled -- End for latest)`. Unit-tested (`_handle_tui_key`
+  in `tests/test_conversation_tui_keys.py`; render-side windowing/
+  clamping in `tests/test_conversation_tui.py`) but never driven by a
+  REAL keypress in a real terminal -- confirm live: PgUp/PgDn/Home/End/
+  Tab/arrows all work as described on both the tested platform (Windows,
+  `msvcrt`) and, if you get to it, a POSIX terminal (the CSI-sequence
+  path -- `ESC [ 5 ~` / `ESC [ 6 ~` for PgUp/PgDn -- is implemented but
+  unvalidated live, matching this project's existing Linux/macOS
+  validation gap); that Ctrl+C still exits cleanly now that POSIX raw
+  mode (`tty.setcbreak`) is active for the whole `--tui` session, not
+  just at the moments a key is read; and that the terminal is left in a
+  normal (echo on, line-buffered) state after exit even if the session
+  ends via an exception, not just Ctrl+C. **Mouse scroll wheel is
+  deliberately NOT implemented this pass** -- it would need real
+  terminal mouse-tracking mode (SGR `ESC[?1000h`/`ESC[?1006h` + parsing
+  `ESC[<64;...M`/`ESC[<65;...M` wheel events) on POSIX, and the Windows
+  Console API's `ReadConsoleInput`/`ENABLE_MOUSE_INPUT` (msvcrt's
+  `getwch()` cannot see mouse events at all) on Windows -- two
+  substantially different, untestable-without-a-real-terminal
+  mechanisms, for a platform (Windows) that's also the only tested one.
+  Keyboard scrolling covers the reported problem; flagged in
+  `docs/ROADMAP.md` as a scoped follow-up rather than bundled in here.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 
