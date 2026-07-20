@@ -20,33 +20,58 @@ jobs:
             const pull = context.payload.pull_request;
             const body = pull.body || "";
 
-            const commits = await github.paginate(
-              github.rest.pulls.listCommits,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pull.number,
-                per_page: 100,
-              },
-            );
-
-            const commitMessages = commits.map((commit) => commit.commit.message).join("\n\n");
             const aiAssistedMarked = /-\s*\[[xX]\]\s*AI-assisted change/.test(body);
+            if (!aiAssistedMarked) {
+              core.info("PR is not marked as AI-assisted; skipping attribution enforcement.");
+              return;
+            }
+
+            // Check the PR body FIRST -- this needs no API call, so a
+            // correctly-attributed PR can never be blocked by a GitHub API
+            // outage (which is exactly what once spuriously failed a
+            // correct PR: the old code called listCommits unconditionally
+            // at the top and threw on a transient 503).
             const bodyHasAttribution =
               /Attribution:\s*/i.test(body) &&
               /Provider:\s*/i.test(body) &&
               /Model:\s*/i.test(body) &&
               /Scope:\s*/i.test(body) &&
               /Date:\s*/i.test(body);
-            const commitsHaveAttribution = /AI-Attribution:/i.test(commitMessages);
-
-            if (!aiAssistedMarked) {
-              core.info("PR is not marked as AI-assisted; skipping attribution enforcement.");
+            if (bodyHasAttribution) {
+              core.info("AI attribution present in PR body.");
               return;
             }
 
-            if (bodyHasAttribution || commitsHaveAttribution) {
-              core.info("AI attribution is present.");
+            // The body lacks the block -> fall back to commit trailers. This
+            // is the ONLY path that needs the API. A transient API error here
+            // must NOT hard-fail the PR on infrastructure grounds: attribution
+            // is a governance requirement, and blocking correct work during a
+            // GitHub outage is worse than the rare case of one un-attributed
+            // PR slipping through while the API is down (easily caught later).
+            let commitMessages = "";
+            try {
+              const commits = await github.paginate(
+                github.rest.pulls.listCommits,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pull.number,
+                  per_page: 100,
+                },
+              );
+              commitMessages = commits.map((commit) => commit.commit.message).join("\n\n");
+            } catch (error) {
+              core.warning(
+                "Could not fetch commits to check for an AI-Attribution trailer (" +
+                  (error && error.message ? error.message : String(error)) +
+                  "). Skipping the commit-trailer check rather than failing the PR on " +
+                  "an infrastructure error -- ensure attribution is present.",
+              );
+              return;
+            }
+
+            if (/AI-Attribution:/i.test(commitMessages)) {
+              core.info("AI attribution present in a commit trailer.");
               return;
             }
 
