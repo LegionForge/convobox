@@ -60,7 +60,7 @@ how `BargeInMonitor` already tracks sustained speech during playback:
 
 **Barge-in** ships per the existing design: the two-axis grid, named
 presets (`conversational` default), the `speech`/`push-word` trigger split,
-`WakewordDetector`, and backchannel filtering. See
+`ResumeWordDetector`, and backchannel filtering. See
 [DESIGN-barge-in.md](DESIGN-barge-in.md) for the full spec — nothing here
 changes it, this phase just implements it on top of `PendingPrompt` instead
 of a bespoke `BargeInMonitor`-only mechanism.
@@ -249,12 +249,12 @@ hardcode with a real `PendingPrompt(approve/deny/discuss)`:
 
 **Classification primitive shipped (2026-07-14), wiring not yet started.**
 `ApprovalDetector` (`src/convobox/approval/detector.py`) is the sixth
-Safeword/Confirmword/Wakeword/PauseListening/ContinueDetector-shaped pure
+Safeword/Confirmword/ResumeWord/PauseListening/ContinueDetector-shaped pure
 classifier: constructed with a required `ConfirmwordDetector`-shaped
 approval phrase (no safe default — the whole point is an operator-chosen
 word) plus a deny-phrase list (defaults to `DEFAULT_DENY_PHRASES`, real
 round-trip-verified — Piper TTS → faster-whisper STT, same methodology as
-`DEFAULT_WAKE_WORD`/the response-tiering vocabulary). `check()` returns
+`DEFAULT_RESUME_WORD`/the response-tiering vocabulary). `check()` returns
 `"approve"` / `"deny"` / `"discuss"` / `None` (empty transcript only) — never
 falls through to normal command routing the way `ContinueDetector`'s
 unmatched-utterance case does, since a pending approval must stay open and
@@ -367,7 +367,7 @@ here needs to be its own pass.
 ## Explicitly out of scope for 0.3.0
 
 - Wake-word *engine* (openWakeWord etc.) for a low-power idle/asleep mode —
-  `WakewordDetector` (transcript-match, phase 1) is in scope; a dedicated
+  `ResumeWordDetector` (transcript-match, phase 1) is in scope; a dedicated
   spotter model is not (per `docs/ROADMAP.md`'s existing post-0.5 deferral).
 - The Claude Code PTY/interactive-mode rework (see phase 3).
 - Voice Activity Projection / semantic endpointing (still the deferred

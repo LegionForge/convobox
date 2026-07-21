@@ -5,7 +5,7 @@ from typing import Literal
 
 from convobox.confirmword.detector import ConfirmwordDetector
 
-# The sixth instance of the Safeword/Confirmword/Wakeword/PauseListening/
+# The sixth instance of the Safeword/Confirmword/ResumeWord/PauseListening/
 # ContinueDetector-shaped pattern: plain normalized-substring match, no ML,
 # no fuzzy matching, no LLM. See docs/DESIGN-0.3.0-interaction-and-safety.md's
 # Phase 3 (approvals) and its shared-primitive framing (PendingPrompt).
@@ -30,7 +30,7 @@ from convobox.confirmword.detector import ConfirmwordDetector
 #   unmatched speech here is a positive branch, not a fall-through.
 #
 # Deny vocabulary round-trip verified (Piper -> faster-whisper, the same
-# methodology established fixing DEFAULT_WAKE_WORD and response tiering's
+# methodology established fixing DEFAULT_RESUME_WORD and response tiering's
 # continue/decline phrases) before being trusted as a default: "no", "deny",
 # "decline", "cancel", "don't", "no don't", "not now", "hold off", "reject"
 # all round-tripped correctly. DEFAULT_DENY_PHRASES below is a subset of

@@ -36,6 +36,14 @@ channel, editor as canvas.
   (built-in voice set, no download-per-voice), so the picker's
   browse/audition/choose/persist flow stays while its
   catalog/download mechanics become engine-specific.
+- **Auto-download-on-first-use, shipped for Piper 2026-07-20** (see
+  `create_tts_engine`/`resolve_voice_paths` in
+  `src/convobox/tts/factory.py`): a voice named in config that isn't
+  cached yet is downloaded automatically instead of raising with a
+  "run voice_picker.py yourself" hint -- mirrors the STT model's
+  existing one-time-download-then-offline pattern
+  (`convobox.stt.transcriber`). Carry the same convention to Kokoro's
+  engine factory once it lands, not just the picker UX noted above.
 
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
@@ -107,7 +115,11 @@ instruction arrived BY VOICE (where mishearing is a real input mode):
 - Optional "listening" states with an activation wake word
   ("Computer!"-class), trained on THE USER'S OWN VOICE like a
   biometric enrollment: multiple passes -- high/low pitch, fast, slow,
-  excited, sleepy -- so other speakers don't trigger it.
+  excited, sleepy -- so other speakers don't trigger it. This is the
+  Alexa/Google-Home-style "wake from idle/asleep" engine (openWakeWord
+  etc.) -- a genuinely different feature from `interaction.resume_word`
+  (which resumes from an already-listening-but-paused state, not from
+  asleep); deliberately kept named "wake word" for that reason.
 - Research pointers when we get there: openWakeWord / microWakeWord
   (local, trainable); speaker-conditioned wake filtering.
 - Explicit deferral (JP, 2026-07-12): open mic WITHOUT speaker

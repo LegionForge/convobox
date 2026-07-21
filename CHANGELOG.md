@@ -96,9 +96,9 @@ minor versions carry feature and behavior changes.
   deadlocked (UAT finding [L9]; slice 1 of
   `docs/DESIGN-backend-questions.md`). `Attribution: Claude Code;
   Provider: Anthropic; Model: claude-fable-5; Scope: this entry.`
-- **Wake word is configurable from the Settings TUI**, validated by the
-  real `WakewordDetector` at save time, with a warning for words the real
-  TTS->STT round-trip has proven unreliable (`ROUNDTRIP_REJECTED_WAKE_WORDS`
+- **Resume word is configurable from the Settings TUI**, validated by the
+  real `ResumeWordDetector` at save time, with a warning for words the real
+  TTS->STT round-trip has proven unreliable (`ROUNDTRIP_REJECTED_RESUME_WORDS`
   -- 'ConvoBox' itself mis-heard as 'Control Box' every time).
   `Attribution: Claude Code; Provider: Anthropic; Model: claude-fable-5;
   Scope: this entry.`

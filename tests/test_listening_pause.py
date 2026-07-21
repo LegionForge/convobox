@@ -65,7 +65,7 @@ def test_default_pause_phrases_constant() -> None:
 
 @pytest.mark.parametrize("casual", ["yes", "okay", "sure", "hi"])
 def test_common_words_are_allowed_as_pause_phrases(casual: str) -> None:
-    # Pausing listening is benign (say the wake word again to resume), not
+    # Pausing listening is benign (say the resume word again to resume), not
     # destructive -- same low safety tier as SafewordDetector, not
     # ConfirmwordDetector's approval-gate tier. See the module docstring.
     detector = PauseListeningDetector(pause_phrases=[casual])

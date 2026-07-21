@@ -24,15 +24,63 @@ def test_resolve_voice_paths_returns_existing_files(tmp_path: Path) -> None:
     assert config == tmp_path / "en_US-lessac-medium.onnx.json"
 
 
-def test_resolve_voice_paths_missing_model_raises_with_download_hint(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match=r"voice_picker\.py --download en_US-lessac-medium"):
-        resolve_voice_paths("en_US-lessac-medium", tmp_path)
+def test_resolve_voice_paths_downloads_a_missing_voice_automatically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, Path]] = []
+
+    def _fake_download_voice(key: str, voices_dir: Path) -> None:
+        calls.append((key, voices_dir))
+        _touch(voices_dir / f"{key}.onnx")
+        _touch(voices_dir / f"{key}.onnx.json")
+
+    monkeypatch.setattr("piper.download_voices.download_voice", _fake_download_voice)
+
+    model, config = resolve_voice_paths("en_US-lessac-medium", tmp_path)
+
+    assert calls == [("en_US-lessac-medium", tmp_path)]
+    assert model == tmp_path / "en_US-lessac-medium.onnx"
+    assert config == tmp_path / "en_US-lessac-medium.onnx.json"
 
 
-def test_resolve_voice_paths_missing_config_raises(tmp_path: Path) -> None:
+def test_resolve_voice_paths_does_not_redownload_an_existing_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _touch(tmp_path / "en_US-lessac-medium.onnx")
-    # config .json intentionally not created
-    with pytest.raises(FileNotFoundError):
+    _touch(tmp_path / "en_US-lessac-medium.onnx.json")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "piper.download_voices.download_voice",
+        lambda key, voices_dir: calls.append(key),
+    )
+
+    resolve_voice_paths("en_US-lessac-medium", tmp_path)
+
+    assert calls == []
+
+
+def test_resolve_voice_paths_download_failure_raises_actionable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail(key: str, voices_dir: Path) -> None:
+        raise RuntimeError("404 not found")
+
+    monkeypatch.setattr("piper.download_voices.download_voice", _fail)
+
+    with pytest.raises(FileNotFoundError, match=r"could not be downloaded automatically"):
+        resolve_voice_paths("nonexistent-voice", tmp_path)
+
+
+def test_resolve_voice_paths_incomplete_download_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # download_voice "succeeds" (no exception) but doesn't actually produce
+    # both expected files -- must not be silently treated as success.
+    monkeypatch.setattr(
+        "piper.download_voices.download_voice", lambda key, voices_dir: None
+    )
+
+    with pytest.raises(FileNotFoundError, match="did not produce the expected files"):
         resolve_voice_paths("en_US-lessac-medium", tmp_path)
 
 

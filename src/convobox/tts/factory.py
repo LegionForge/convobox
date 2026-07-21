@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from convobox.config import TTSConfig
@@ -8,22 +9,45 @@ from convobox.tts.piper import PiperTTSEngine
 
 DEFAULT_VOICES_DIR = Path(".models/piper")
 
+logger = logging.getLogger(__name__)
+
 
 def resolve_voice_paths(voice: str, voices_dir: Path = DEFAULT_VOICES_DIR) -> tuple[Path, Path]:
-    """Map a Piper voice key (e.g. "en_US-lessac-medium") to its local files.
+    """Map a Piper voice key (e.g. "en_US-lessac-medium") to its local files,
+    downloading it first if it isn't cached yet.
 
-    Raises FileNotFoundError with a scripts/voice_picker.py hint rather than
-    letting PiperVoice.load fail deeper in the stack with a less actionable
-    "file not found" -- this is the first thing a misconfigured tts.voice
-    hits, so the error needs to say what to run, not just what's missing.
+    ConvoBox never bundles a voice you didn't ask for, but per the
+    install-at-setup philosophy (docs/ROADMAP.md's "Pluggable STT/TTS
+    engines"), a voice named in config that isn't present yet is fetched
+    automatically here rather than making the operator run
+    scripts/voice_picker.py by hand first -- mirrors
+    convobox.stt.transcriber's existing one-time-download-then-offline
+    pattern for the Whisper model. scripts/voice_picker.py itself remains
+    the way to browse/audition/choose a voice before picking one; this is
+    just the "it's configured, go get it" path.
     """
     model_path = voices_dir / f"{voice}.onnx"
     config_path = voices_dir / f"{voice}.onnx.json"
     if not model_path.exists() or not config_path.exists():
+        logger.info(
+            "TTS voice %r not downloaded yet -- fetching to %s (one-time; "
+            "use scripts/voice_picker.py to browse/audition other voices)",
+            voice, voices_dir,
+        )
+        from piper.download_voices import download_voice
+
+        voices_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            download_voice(voice, voices_dir)
+        except Exception as exc:
+            raise FileNotFoundError(
+                f"voice {voice!r} could not be downloaded automatically ({exc}). "
+                f"Browse available voices with: python scripts/voice_picker.py"
+            ) from exc
+    if not model_path.exists() or not config_path.exists():
         raise FileNotFoundError(
-            f"voice {voice!r} not found in {voices_dir} "
-            f"(expected {model_path.name} + {config_path.name}). "
-            f"Run: python scripts/voice_picker.py --download {voice}"
+            f"voice {voice!r} download did not produce the expected files in "
+            f"{voices_dir} (expected {model_path.name} + {config_path.name})"
         )
     return model_path, config_path
 

@@ -24,7 +24,7 @@ substantially more than that is now on `main`:
   to the pre-migration default — no surprise behavior change for
   existing configs.
 - **"Stop listening" / "pause listening"** puts ConvoBox into a
-  wake-word-only state (default wake word: `Athena` — round-trip
+  resume-word-only state (default resume word: `Athena` — round-trip
   STT-verified, unlike the original `ConvoBox` default, which
   Whisper confidently mis-heard as "Control Box" every time).
 - **Backchannel filtering** ("mm-hmm", "yeah", "right", ...) so a
