@@ -23,6 +23,16 @@ Turn behavior is scripted by the prompt text:
                             line before the normal echo response
   contains "needs approval" -> server->client approval request first (current
                             protocol method); echoes the decision back
+  contains "needs approval with a bad id" -> item/commandExecution/
+                            requestApproval sent with a non-integer id
+                            (checked before "needs approval" -- see codex.py's
+                            "codex approval request had a non-integer id"
+                            defensive branch)
+  contains "needs two approvals" -> two item/commandExecution/requestApproval
+                            requests emitted back-to-back with no response in
+                            between (checked before "needs approval" -- see
+                            codex.py's "second codex approval arrived while
+                            one was pending" defensive branch)
   contains "needs file edit approval" -> item/fileChange/requestApproval
                             (current protocol, live-confirmed 2026-07-14 --
                             see codex.py's module docstring)
@@ -159,6 +169,32 @@ def main() -> None:
                     "id": approval_req_id,
                     "method": "item/permissions/requestApproval",
                     "params": {"threadId": THREAD_ID, "turnId": turn_id},
+                })
+                continue
+            if "needs approval with a bad id" in text:
+                pending_approval_turn = turn_id
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": "not-an-integer",
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id, "command": "rm -rf /"},
+                })
+                continue
+            if "needs two approvals" in text:
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id, "command": "rm -rf /1"},
+                })
+                approval_req_id += 1
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"threadId": THREAD_ID, "turnId": turn_id, "command": "rm -rf /2"},
                 })
                 continue
             if "needs approval" in text:
