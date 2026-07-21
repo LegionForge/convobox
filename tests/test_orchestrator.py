@@ -357,6 +357,44 @@ async def test_tier_state_start_returning_no_tiers_does_not_speak() -> None:
 
 
 @pytest.mark.asyncio
+async def test_announce_after_delay_waits_before_speaking() -> None:
+    # Requested for the approval flow (2026-07-20): a delayed confirmation
+    # so the announcement doesn't land right as a just-approved tool call
+    # starts running.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch.announce_after_delay("Approval confirmed.", 0.05)
+    assert tts.synthesized == []  # not yet -- still within the delay
+
+    assert orch._speak_task is not None
+    await orch._speak_task
+    assert tts.synthesized == ["Approval confirmed."]
+
+
+@pytest.mark.asyncio
+async def test_announce_after_delay_is_a_noop_without_tts() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False, with_tts=False)
+    orch.announce_after_delay("Approval confirmed.", 0.05)
+    assert orch._speak_task is None
+
+
+@pytest.mark.asyncio
+async def test_announce_after_delay_replaces_any_pending_speech() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first response"))
+    orch.announce_after_delay("Approval confirmed.", 0.05)
+    assert orch._speak_task is not None
+    await orch._speak_task
+
+    # The pre-empted first announcement never got to synthesize anything --
+    # replaced before it ran, not spoken then talked over.
+    assert tts.synthesized == ["Approval confirmed."]
+
+
+@pytest.mark.asyncio
 async def test_text_event_synthesizes_and_plays_stripped_speech() -> None:
     orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
     assert tts is not None and player is not None
