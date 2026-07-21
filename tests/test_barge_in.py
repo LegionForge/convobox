@@ -333,3 +333,37 @@ def test_pure_backchannel_utterances_are_detected(text: str) -> None:
 )
 def test_non_backchannel_utterances_are_not_flagged(text: str) -> None:
     assert is_backchannel(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Live-confirmed 2026-07-20 (UAT session, convobox-tui.log): these
+        # exact short acknowledgments were each treated as full barge-ins
+        # because they're one word short of _BACKCHANNEL_TOKENS alone.
+        "Okay, get it.",
+        "Thank you very much.",
+        "thanks",
+        "Got it.",
+        "You're welcome.",
+        "Understood.",
+        "Sounds good.",
+        "No problem.",
+        "OKAY, GOT IT",
+    ],
+)
+def test_short_acknowledgment_phrases_are_backchannel(text: str) -> None:
+    assert is_backchannel(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We're in fact.",  # real content, not a curated acknowledgment phrase
+        "It's me.",  # ambiguous outside this context -- must not be swallowed
+        "got it, but stop the deploy",  # real content beyond the acknowledgment
+        "thank you for nothing",  # extra content past the phrase
+    ],
+)
+def test_phrases_with_extra_content_are_not_backchannel(text: str) -> None:
+    assert is_backchannel(text) is False
