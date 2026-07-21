@@ -224,13 +224,27 @@ class CodexAdapter(BackendAdapter):
         The app-server leaves the originating turn blocked until this JSON-RPC
         response arrives.  There is deliberately no auto-approve fallback:
         an unexpected/missing request is reported as ``False`` to the caller.
+
+        The approve payload is ``{"decision": "accept"}``, NOT ``"approve"``
+        -- bug found live, 2026-07-20 (UAT session: every voice-approved
+        write was still rejected by Codex, e.g. "the temporary write probe
+        was declined before it ran" immediately after ConvoBox logged
+        "approved pending Codex approval"). `codex app-server
+        generate-json-schema` (codex-cli 0.144.6) shows
+        CommandExecutionApprovalDecision/FileChangeApprovalDecision have NO
+        "approve" enum member at all -- only "accept"/"acceptForSession"/
+        "decline"/"cancel" (plus amendment objects) -- so the old value was
+        simply invalid and Codex treated it as a decline. The module
+        docstring's live verification only ever covered the DECLINE path;
+        the approve path was schema-read but never actually tested, which
+        is exactly how this went unnoticed.
         """
         pending = self._pending_approval
         if pending is None:
             return False
         request_id, method = pending
         deny_payload = _APPROVAL_DENY_PAYLOADS[method]
-        payload = {"decision": "approve"} if approved else deny_payload
+        payload = {"decision": "accept"} if approved else deny_payload
         await self._write({"jsonrpc": "2.0", "id": request_id, "result": payload})
         self._pending_approval = None
         return True
