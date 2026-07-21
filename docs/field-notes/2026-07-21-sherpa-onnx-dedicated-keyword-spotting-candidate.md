@@ -10,10 +10,10 @@ provenance:
   authors:
     - JP Cruz <jp@legionforge.org> (operator, posed the question live)
     - Codex CLI (OpenAI, model gpt-5.6-terra) — recommendation, made live in a voice session
-    - Claude Code (Anthropic claude-sonnet-5) — transcription, writing
+    - Claude Code (Anthropic claude-sonnet-5) — transcription, writing, follow-up API research
   org: https://legionforge.org
   created: 2026-07-21T01:15:00-05:00
-  revised: 2026-07-21T01:15:00-05:00
+  revised: 2026-07-21T03:35:00-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -75,8 +75,53 @@ Supporting points made in the same conversation:
   a low-power idle mode) — Sherpa-ONNX could plausibly serve both that
   future feature AND this safety-phrase-reliability problem in one
   implementation, rather than being two separate initiatives.
-- **Status: hypothesis, not evaluated.** No prototype built, no real
-  keyword-spotting model tested against ConvoBox's actual phrases. Next
-  step if pursued: a small standalone spike testing Sherpa-ONNX's Windows
-  CPU wheel against the actual approval phrase / safeword vocabulary,
-  independent of the main pipeline.
+- **Status: hypothesis, API-confirmed, still not integration-tested.**
+
+## Follow-up research (2026-07-21, same session, later cycle)
+
+Installed the real `sherpa-onnx` package (PyPI, latest 1.13.4) into an
+isolated throwaway venv (not this project's own) to check real
+feasibility claims rather than taking the recommendation at face value:
+
+- **Real Windows wheels confirmed**: `sherpa_onnx-1.13.4-cp312-win_amd64.whl`
+  exists on PyPI, matching this project's Python 3.12 — not a
+  Linux/macOS-only claim.
+- **The wheel itself is small (2.1MB)** — supports the "cheaper than a
+  second full transcriber" claim at the library level, but this is
+  bindings only. A real pretrained keyword-spotting model (encoder/
+  decoder/joiner ONNX files, typically tens-to-hundreds of MB, hosted
+  separately on the k2-fsa model releases/Hugging Face) is a SEPARATE
+  download this note's original write-up didn't make explicit — same
+  "downloads on first use, not bundled" pattern as faster-whisper/Piper,
+  but worth stating plainly rather than implying the 2.1MB wheel is the
+  whole cost.
+- **`sherpa_onnx.KeywordSpotter` is real and matches Codex's claim**,
+  confirmed via `inspect.signature`:
+  `KeywordSpotter(tokens, encoder, decoder, joiner, keywords_file, ...,
+  provider='cpu', ...)` — a streaming transducer-based spotter, CPU
+  provider available (no GPU requirement, as claimed).
+- **Initial concern, then resolved**: `keywords_file` looked like it would
+  need the target phrase pre-converted into the specific pretrained
+  model's own token/BPE vocabulary -- a real integration tax if it
+  required hand-building. Checked further: the package ships
+  `sherpa_onnx.text2token()` (confirmed via `inspect.signature` +
+  docstring) plus `SentencePieceTokenizer`, which does exactly this
+  conversion given the model's own `tokens.txt`/BPE model files. Not
+  custom tooling ConvoBox would need to write -- the library already
+  handles it.
+
+**Net assessment**: the recommendation holds up under real API
+inspection, more tractable than the original write-up assumed (the
+keyword-file generation concern is a solved problem in the library, not
+an open one). Still genuinely unevaluated for actual USE: no pretrained
+model has been downloaded or tested against ConvoBox's real phrases
+("stop stop stop", "juliette papa charlie", "Athena") for either
+accuracy or false-positive rate. Deliberately did not download a
+pretrained model this cycle (same reasoning as declining to
+pre-download `large-v3` for Whisper earlier tonight: a genuine,
+possibly-largish unsupervised download isn't a good use of this
+autonomous window). Concrete next step if pursued: pick one of k2-fsa's
+published small English streaming-transducer keyword models, download
+it once (with JP's awareness of the size), and run a real recognition
+test against the three phrases above before writing any integration
+code.
