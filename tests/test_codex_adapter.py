@@ -319,7 +319,12 @@ async def test_interactive_command_approval_waits_for_operator_and_can_approve()
         assert adapter.is_busy() is True
         assert await adapter.resolve_pending_approval(True) is True
         events = await _collect(adapter, 2)
-        assert events[0].content == "approval decision was: approve"
+        # "accept", not "approve" -- confirmed against codex-cli 0.144.6's
+        # own generated schema (CommandExecutionApprovalDecision has no
+        # "approve" enum member at all); a stale "approve" here silently
+        # made every voice-approved write get rejected by Codex anyway
+        # (live-found 2026-07-20 UAT session).
+        assert events[0].content == "approval decision was: accept"
         assert events[1].type == BackendEventType.DONE
         assert await adapter.resolve_pending_approval(False) is False
     finally:

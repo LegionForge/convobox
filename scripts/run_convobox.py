@@ -1792,6 +1792,17 @@ async def run(args: argparse.Namespace) -> None:
                                     "%s pending Codex approval: %r",
                                     "approved" if approved else "declined", text,
                                 )
+                                if approved:
+                                    # Delayed, not immediate: the resumed
+                                    # turn starts running the tool call
+                                    # right away, so speaking straight
+                                    # over that moment risks a self-barge-in
+                                    # on the announcement interrupting the
+                                    # tool call itself, not just the
+                                    # announcement (requested 2026-07-20).
+                                    orchestrator.announce_after_delay(
+                                        "Approval confirmed.", 2.0
+                                    )
                                 if tui_state is not None:
                                     tui_state.warning = None
                             else:

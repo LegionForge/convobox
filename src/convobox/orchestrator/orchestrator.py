@@ -212,6 +212,27 @@ class Orchestrator:
             self._speak_task.cancel()
             self._speak_task = None
 
+    async def _speak_after_delay(self, text: str, delay_s: float) -> None:
+        await asyncio.sleep(delay_s)
+        await self._speak(text)
+
+    def announce_after_delay(self, text: str, delay_s: float) -> None:
+        """Speak `text` after `delay_s`, once, replacing any pending speech.
+
+        Requested for the approval flow specifically (2026-07-20): a Codex
+        turn resumes IMMEDIATELY once an approval is granted, so announcing
+        "approved" with no gap risks the announcement itself landing right
+        as the tool call starts -- a self-barge-in on that overlap could
+        then interrupt the tool call, not just the announcement. A short
+        delay gives the resumed turn a moment to get underway first. Only
+        the requester (run_convobox.py's approval-resolution path) calls
+        this today; no other announcement in this class needs a delay.
+        """
+        if self._tts is None or self._player is None:
+            return
+        self._cancel_speak_task()
+        self._speak_task = asyncio.create_task(self._speak_after_delay(text, delay_s))
+
     async def stop_event_loop(self) -> None:
         self._cancel_speak_task()
         if self._events_task is None:
