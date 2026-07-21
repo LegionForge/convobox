@@ -468,6 +468,43 @@ async def test_permissions_approval_grants_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_integer_approval_id_is_declined_not_operator_facing() -> None:
+    # _answer_server_request's defensive guard: an approval request whose
+    # id isn't an int can't be answered later (resolve_pending_approval
+    # keys off it), so it must be declined immediately rather than surfaced
+    # as an operator-facing prompt nothing could ever resolve.
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs approval with a bad id")
+        events = await _collect(adapter, 2)
+        assert not any(e.type == BackendEventType.APPROVAL_REQUEST for e in events)
+        assert events[0].content == "approval decision was: decline"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_second_pending_approval_is_auto_declined_not_swapped_in() -> None:
+    # _answer_server_request's other defensive guard: if a second approval
+    # request arrives before the first is answered, it must never replace
+    # the decision the operator is currently looking at -- auto-decline the
+    # second, leave the first's prompt (and the operator's chance to answer
+    # it) untouched.
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs two approvals")
+        events = await _collect(adapter, 2)
+        # Exactly one operator-facing prompt -- the second request never
+        # became a second APPROVAL_REQUEST event.
+        assert sum(1 for e in events if e.type == BackendEventType.APPROVAL_REQUEST) == 1
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_failed_turn_yields_error_event() -> None:
     adapter = _adapter()
     try:
