@@ -185,6 +185,37 @@ def test_validate_config_reports_missing_voice(tmp_path: Path, monkeypatch: pyte
     assert any("tts.voice is required" in msg for msg in report.errors)
 
 
+# --- STT device: pick-from-list rather than free text (JP's ask: "we
+# should have a chooser for cpu/gpu"). Only str kind before this. ---
+
+
+def test_stt_section_exposes_device_as_a_choice_field() -> None:
+    stt = next(s for s in settings_tui.SECTION_SPECS if s.key == "stt")
+    spec = next((f for f in stt.fields if f.key == "device"), None)
+    assert spec is not None
+    assert spec.kind == "choice"
+    assert set(spec.choices) == {"auto", "cpu", "cuda"}
+
+
+def test_validate_config_accepts_default_stt_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    (tmp_path / "en_US-lessac-medium.onnx").write_bytes(b"x")
+    (tmp_path / "en_US-lessac-medium.onnx.json").write_text("{}", encoding="utf-8")
+    config = _make_config(**{"tts.voice": "en_US-lessac-medium"})
+    report = validate_config(config)
+    assert not any("stt.device" in w for w in report.warnings)
+
+
+def test_validate_config_warns_on_unrecognized_stt_device() -> None:
+    # A warning, not an error -- stt.device passes straight through to
+    # ctranslate2/faster-whisper, which may accept values beyond the three
+    # the TUI offers (e.g. a specific GPU index); this only flags a
+    # stale/typo'd value from an existing convobox.yaml.
+    config = _make_config(**{"stt.device": "cuda:1"})
+    report = validate_config(config)
+    assert any("stt.device" in w and "cuda:1" in w for w in report.warnings)
+
+
 def test_validate_config_warns_when_backend_command_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exact surprise from UAT: a schema-valid codex config that can't
     # actually launch. The dependency check must flag it at save time.
