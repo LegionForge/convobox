@@ -31,7 +31,33 @@ class _WhisperLikeModel(Protocol):
     def transcribe(self, audio: np.ndarray, language: str | None = None) -> tuple[Any, Any]: ...
 
 
-def _build_whisper_model(config: STTConfig) -> WhisperModel:
+# Substrings from real CUDA/cuBLAS/cuDNN library-loading failures --
+# confirmed live, 2026-07-20: a GPU that ctranslate2 can *detect*
+# (get_cuda_device_count() > 0, since that just queries the NVIDIA
+# driver) is not necessarily one it can actually RUN on -- the real CUDA
+# runtime libraries (cuBLAS specifically) can be missing from the
+# environment, and the resulting RuntimeError only surfaces on the
+# FIRST real inference call (WhisperModel construction itself succeeds),
+# not at construction time. This is a PERMANENT failure, unlike the
+# transient MKL/CPU allocator leak below -- retrying the same device
+# forever just repeats it on every utterance with no user-facing signal
+# ("no responses detected"), so it needs a different response: fall back
+# to cpu, not reload-and-retry-same-device.
+_GPU_UNAVAILABLE_MARKERS = (
+    "is not found or cannot be loaded",  # e.g. "Library cublas64_12.dll is not found..."
+    "cublas",
+    "cudnn",
+    "cuda driver",
+    "cuda_runtime",
+)
+
+
+def _looks_like_gpu_unavailable(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _GPU_UNAVAILABLE_MARKERS)
+
+
+def _build_whisper_model(config: STTConfig, device_override: str | None = None) -> WhisperModel:
     """Construct the real WhisperModel, preferring the local cache.
 
     faster-whisper/huggingface_hub otherwise makes a real network call on
@@ -52,10 +78,15 @@ def _build_whisper_model(config: STTConfig) -> WhisperModel:
     retried with the normal (network-enabled) path, so first-time setup
     (no model downloaded yet) still works exactly as before. Every
     subsequent construction after that first download is fully offline.
+
+    device_override, when set, wins over config.device -- used by
+    LocalTranscriber's permanent cpu fallback once a GPU has been
+    confirmed unusable this session (see _looks_like_gpu_unavailable).
     """
+    device = device_override or config.device
     try:
         return WhisperModel(
-            config.model, device=config.device, compute_type=config.compute_type,
+            config.model, device=device, compute_type=config.compute_type,
             local_files_only=True,
         )
     except LocalEntryNotFoundError:
@@ -65,7 +96,7 @@ def _build_whisper_model(config: STTConfig) -> WhisperModel:
             config.model,
         )
         return WhisperModel(
-            config.model, device=config.device, compute_type=config.compute_type,
+            config.model, device=device, compute_type=config.compute_type,
         )
 
 
@@ -137,8 +168,20 @@ class LocalTranscriber(STTEngine):
         # every real caller passes only `config` and gets the real
         # WhisperModel, unchanged from before this parameter existed.
         self._config = config
-        self._model_factory = model_factory or (lambda: _build_whisper_model(config))
-        self._model: _WhisperLikeModel | None = self._model_factory()
+        self._custom_factory = model_factory
+        # Set once a GPU has been confirmed unusable this session (see
+        # _looks_like_gpu_unavailable) -- from then on every rebuild goes
+        # to cpu, regardless of what config.device says. None of this
+        # applies when a custom model_factory is injected (tests): a
+        # fake model can't raise a real GPU-unavailable error, so the
+        # override is simply never set for that path.
+        self._device_override: str | None = None
+        self._model: _WhisperLikeModel | None = self._build_model()
+
+    def _build_model(self) -> _WhisperLikeModel:
+        if self._custom_factory is not None:
+            return self._custom_factory()
+        return _build_whisper_model(self._config, device_override=self._device_override)
 
     def _empty_result(self, audio: np.ndarray, start: float) -> TranscriptResult:
         latency_ms = (time.perf_counter() - start) * 1000.0
@@ -176,7 +219,7 @@ class LocalTranscriber(STTEngine):
         self._model = None
         gc.collect()
         try:
-            self._model = self._model_factory()
+            self._model = self._build_model()
         except RuntimeError:
             logger.error(
                 "STT model reload ALSO failed -- staying unavailable, will "
@@ -221,7 +264,39 @@ class LocalTranscriber(STTEngine):
             # try (ctranslate2's native encode() failure surfaces during
             # iteration, not the transcribe() call itself) and the timing.
             segment_list = list(segments)
-        except RuntimeError:
+        except RuntimeError as exc:
+            if (
+                self._custom_factory is None
+                and self._device_override is None
+                and self._config.device != "cpu"
+                and _looks_like_gpu_unavailable(exc)
+            ):
+                # A GPU that's DETECTED (ctranslate2 queries the driver,
+                # cheap) is not necessarily one that's USABLE (needs the
+                # real CUDA runtime libraries, e.g. cuBLAS) -- confirmed
+                # live, 2026-07-20: config.device="auto"/"cuda" resolved
+                # to a real NVIDIA GPU, but "Library cublas64_12.dll is
+                # not found or cannot be loaded" crashed EVERY single
+                # transcription, silently, for the rest of the session
+                # (this same broad except block reloaded the same broken
+                # device every time -- correct behavior for the transient
+                # MKL/CPU allocator leak below, but wrong here: this
+                # failure is permanent, not transient, so retrying the
+                # same device just repeats it forever with no user-facing
+                # signal beyond "nothing seems to be heard"). Falling back
+                # to cpu for the rest of the session is the fix -- loud,
+                # once, not a silent per-utterance repeat of the same crash.
+                self._device_override = "cpu"
+                logger.warning(
+                    "STT device %r failed to actually run (GPU detected but "
+                    "not usable -- likely a missing CUDA runtime library, "
+                    "e.g. cuBLAS): %s -- falling back to cpu for the rest of "
+                    "this session. Fix the CUDA install or set stt.device: "
+                    "cpu explicitly to silence this.",
+                    self._config.device, exc,
+                )
+                self._reload_model()
+                return self._empty_result(audio, start)
             # Known, unresolved upstream issue: ctranslate2's native
             # (MKL on Windows) allocator leaks memory across repeated
             # transcribe() calls in a long-lived process, eventually
