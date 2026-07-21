@@ -349,6 +349,62 @@ async def test_interactive_file_change_approval_can_be_declined() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hard_stop_declines_a_pending_approval_first() -> None:
+    # send_hard_stop()'s own comment: "Never leave an operator-held request
+    # dangling when the safeword aborts the turn." Real coverage gap found
+    # 2026-07-21: no existing test exercised this interaction at all --
+    # every hard-stop test used a plain "hang forever" turn with no
+    # approval in flight, and every approval test resolved (or left
+    # untouched) the approval without ever calling send_hard_stop().
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs approval")
+
+        collected: list[BackendEvent] = []
+
+        async def consume() -> None:
+            async for event in adapter.events():
+                collected.append(event)
+
+        consumer = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.2)
+        assert any(e.type == BackendEventType.APPROVAL_REQUEST for e in collected)
+        assert adapter.is_busy() is True  # turn stays blocked on the approval
+
+        await adapter.send_hard_stop()
+        assert adapter.is_busy() is False  # immediately
+
+        await asyncio.sleep(0.3)
+        # The pending approval was declined (not left dangling) as part of
+        # the hard stop -- a second, explicit resolve_pending_approval must
+        # now be a no-op (nothing left pending).
+        assert await adapter.resolve_pending_approval(True) is False
+        assert any(
+            e.type == BackendEventType.TEXT and e.content == "approval decision was: decline"
+            for e in collected
+        )
+        assert any(e.type == BackendEventType.DONE for e in collected)
+
+        # Same thread serves the next turn (matches the plain hard-stop
+        # test's own "thread stays usable" guarantee).
+        await adapter.send_text("still alive?")
+        await asyncio.sleep(0.5)
+        assert any(
+            e.type == BackendEventType.TEXT and e.content == "echo: still alive?"
+            for e in collected
+        )
+
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_filechange_approval_uses_decline() -> None:
     # item/fileChange/requestApproval -- live-confirmed 2026-07-14 against
     # a real codex app-server (see codex.py's module docstring): a file
