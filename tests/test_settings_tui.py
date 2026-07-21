@@ -218,6 +218,41 @@ def test_validate_config_warns_on_unrecognized_stt_device() -> None:
     assert any("stt.device" in w and "cuda:1" in w for w in report.warnings)
 
 
+# --- Whisper model size: pick-from-list rather than free text (JP's ask:
+# "we need a chooser for the whisper model size"). Choices are pulled
+# from the installed faster-whisper's own available_models(), not a
+# hand-maintained duplicate. ---
+
+
+def test_stt_section_exposes_model_as_a_choice_field() -> None:
+    stt = next(s for s in settings_tui.SECTION_SPECS if s.key == "stt")
+    spec = next((f for f in stt.fields if f.key == "model"), None)
+    assert spec is not None
+    assert spec.kind == "choice"
+    # Exact real values from the installed faster-whisper, not a guess.
+    from faster_whisper.utils import available_models
+    assert set(spec.choices) == set(available_models())
+    assert "base" in spec.choices  # the shipped default
+    assert "large-v3" in spec.choices  # JP's specific ask
+
+
+def test_validate_config_accepts_default_stt_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    (tmp_path / "en_US-lessac-medium.onnx").write_bytes(b"x")
+    (tmp_path / "en_US-lessac-medium.onnx.json").write_text("{}", encoding="utf-8")
+    config = _make_config(**{"tts.voice": "en_US-lessac-medium"})
+    report = validate_config(config)
+    assert not any("stt.model" in w for w in report.warnings)
+
+
+def test_validate_config_warns_on_unrecognized_stt_model() -> None:
+    config = _make_config(**{"stt.model": "whisper-nonexistent-variant"})
+    report = validate_config(config)
+    assert any(
+        "stt.model" in w and "whisper-nonexistent-variant" in w for w in report.warnings
+    )
+
+
 def test_validate_config_warns_when_backend_command_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exact surprise from UAT: a schema-valid codex config that can't
     # actually launch. The dependency check must flag it at save time.
