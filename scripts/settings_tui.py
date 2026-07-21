@@ -44,6 +44,7 @@ from convobox.adapters import create_backend_adapter
 from convobox.config import (
     AppConfig,
     BackendProfileConfig,
+    detect_permission_conflict,
     load_config,
     read_aec_estimate,
     resolve_config_path,
@@ -207,6 +208,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
             FieldSpec("interaction", "resume_word", "Resume word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
             FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the resume word resumes. Same picking rule as the resume word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
+            FieldSpec("interaction", "approval_phrase", "Approval phrase", "optional_str", help_text="Opt-in Codex command/file approvals (needs backend.permission_mode: approve above). Leave unset to keep the safe default: every approval request is denied automatically, no prompts. When set, say this exact phrase to approve a pending request; say 'no' to deny; silence for approval_timeout_s denies. Use a distinctive multi-word phrase -- plain 'yes' is deliberately rejected. Same STT-reliability caution as the resume word: pick something clearly Whisper-transcribable. A NATO-alphabet-style phrase (e.g. 'juliette papa charlie') tends to round-trip more reliably than ordinary words -- verify with scripts/roundtrip_smoketest.py before relying on it."),
+            FieldSpec("interaction", "approval_timeout_s", "Approval timeout s", "float", help_text="How long a pending approval waits for a voice decision before silence is treated as an explicit denial (never as consent)."),
         ),
     ),
     SectionSpec(
@@ -236,7 +239,7 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
     if backend_name in {"claude-code", "codex"}:
         return tuple(
             field for field in section.fields
-            if field.key in {"name", "command", "working_dir"}
+            if field.key in {"name", "command", "working_dir", "permission_mode"}
         )
     return section.fields
 
@@ -603,6 +606,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
                 f"backend.working_dir {working_dir!r} is not an existing directory "
                 "(it will fail at startup until created)"
             )
+    conflict = detect_permission_conflict(config.backend)
+    if conflict is not None:
+        report.errors.append(conflict)
+    if config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
+        report.warnings.append(
+            "backend.permission_mode is 'approve' but interaction.approval_phrase is "
+            "unset -- every approval request will be denied automatically with no "
+            "voice prompt (the safe fail-closed default, but likely not what you "
+            "intended when choosing 'approve')"
+        )
     if (
         config.backend.name == "opencode"
         and config.backend.model is not None

@@ -145,7 +145,9 @@ def test_backend_section_hides_irrelevant_field_per_backend() -> None:
     assert [field.key for field in state.current_fields()] == ["name", "url", "model"]
 
     settings_tui._switch_backend(state.working, "codex")
-    assert [field.key for field in state.current_fields()] == ["name", "command", "working_dir"]
+    assert [field.key for field in state.current_fields()] == [
+        "name", "command", "permission_mode", "working_dir",
+    ]
 
 
 def test_backend_help_mentions_per_backend_memory() -> None:
@@ -674,3 +676,98 @@ def test_validate_warns_when_codex_working_dir_unset() -> None:
     config = _make_config(**{"backend.name": "codex", "backend.command": ["codex"]})
     report = validate_config(config)
     assert any("working_dir is unset" in w for w in report.warnings)
+
+
+# --- permission mode + approval phrase: found live, 2026-07-20 -- JP
+# looked for a way to set backend.permission_mode/interaction.
+# approval_phrase in the Settings TUI and couldn't find either. Root
+# cause for permission_mode specifically: the FieldSpec already existed
+# in SECTION_SPECS, but _visible_fields_for_section's claude-code/codex
+# whitelist never included "permission_mode" -- defined in code, invisible
+# in the actual TUI. approval_phrase had no FieldSpec at all. ---
+
+
+def test_permission_mode_field_visible_for_codex_not_opencode() -> None:
+    backend = next(s for s in settings_tui.SECTION_SPECS if s.key == "backend")
+    codex_fields = {
+        f.key for f in settings_tui._visible_fields_for_section(
+            _make_config(**{"backend.name": "codex", "backend.command": ["codex"]}), backend
+        )
+    }
+    assert "permission_mode" in codex_fields
+    opencode_fields = {
+        f.key for f in settings_tui._visible_fields_for_section(
+            _make_config(**{"backend.name": "opencode"}), backend
+        )
+    }
+    assert "permission_mode" not in opencode_fields
+
+
+def test_interaction_section_exposes_approval_phrase_and_timeout_fields() -> None:
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    phrase_spec = next((f for f in interaction.fields if f.key == "approval_phrase"), None)
+    assert phrase_spec is not None
+    assert phrase_spec.kind == "optional_str"
+    timeout_spec = next((f for f in interaction.fields if f.key == "approval_timeout_s"), None)
+    assert timeout_spec is not None
+    assert timeout_spec.kind == "float"
+
+
+def test_validate_config_rejects_approval_phrase_that_is_just_yes() -> None:
+    # The real runtime constructor (ApprovalDetector -> ConfirmwordDetector)
+    # rejects plain affirmations at construction time; re-running
+    # AppConfig.model_validate() at the top of validate_config() already
+    # surfaces this (same mechanism as every other field's save-time check
+    # on this code path) -- no separate ApprovalDetector call needed here.
+    config = _make_config(**{"interaction.approval_phrase": "yes"})
+    report = validate_config(config)
+    assert any("approval_phrase" in error for error in report.errors)
+
+
+def test_validate_config_accepts_a_distinctive_approval_phrase() -> None:
+    report = validate_config(_make_config(**{"interaction.approval_phrase": "juliette papa charlie"}))
+    assert not any("approval_phrase" in e for e in report.errors)
+
+
+def test_validate_warns_when_approve_mode_has_no_approval_phrase() -> None:
+    config = _make_config(
+        **{
+            "backend.name": "codex",
+            "backend.command": ["codex"],
+            "backend.permission_mode": "approve",
+        }
+    )
+    report = validate_config(config)
+    assert any(
+        "permission_mode is 'approve'" in w and "approval_phrase is unset" in w
+        for w in report.warnings
+    )
+
+
+def test_validate_does_not_warn_when_approve_mode_has_an_approval_phrase() -> None:
+    config = _make_config(
+        **{
+            "backend.name": "codex",
+            "backend.command": ["codex"],
+            "backend.permission_mode": "approve",
+            "interaction.approval_phrase": "juliette papa charlie",
+        }
+    )
+    report = validate_config(config)
+    assert not any("approval_phrase is unset" in w for w in report.warnings)
+
+
+def test_validate_rejects_permission_mode_conflicting_with_raw_command_flag() -> None:
+    # detect_permission_conflict (convobox.config) is the single source of
+    # truth for this check; wiring it into validate_config() means a
+    # conflicting raw flag typed into backend.command is caught at TUI
+    # save time too, not just at run_convobox.py startup.
+    config = _make_config(
+        **{
+            "backend.name": "codex",
+            "backend.command": ["codex", "--dangerously-bypass-approvals-and-sandbox"],
+            "backend.permission_mode": "plan",
+        }
+    )
+    report = validate_config(config)
+    assert any("permission_mode" in e for e in report.errors)
