@@ -77,7 +77,7 @@ it.
   mishear, seed the glossary from STT's *weird* outputs ("Barack in"), not
   from the plausible-but-wrong word ("bargain") — even though the plausible
   one feels like the "obvious" entry. (diagnosed)
-- **This same principle governs wake words and pause phrases**, which are
+- **This same principle governs resume words and pause phrases**, which are
   matched the same context-free way: pick something distinct and unlikely in
   normal conversation, so it neither misfires on ordinary speech nor needs a
   glossary exception to be recognized. (validated-live; see the safeword/VAD

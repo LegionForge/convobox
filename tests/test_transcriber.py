@@ -269,3 +269,80 @@ def test_build_whisper_model_used_as_the_default_factory() -> None:
     mock_cls.assert_called_once_with(
         "tiny.en", device="cpu", compute_type="int8", local_files_only=True
     )
+
+
+# --- GPU-detected-but-not-usable fallback (found live, 2026-07-20): a real
+# NVIDIA GPU can be DETECTED (ctranslate2 just queries the driver) without
+# being USABLE (needs the real CUDA runtime, e.g. cuBLAS) -- confirmed live
+# by "Library cublas64_12.dll is not found or cannot be loaded" crashing
+# EVERY transcription in a session with device="auto"/"cuda". ---
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Library cublas64_12.dll is not found or cannot be loaded",
+        "Could not load library cudnn_ops64_9.dll",
+        "CUDA driver version is insufficient for CUDA runtime version",
+    ],
+)
+def test_looks_like_gpu_unavailable_matches_real_error_messages(message: str) -> None:
+    from convobox.stt.transcriber import _looks_like_gpu_unavailable
+
+    assert _looks_like_gpu_unavailable(RuntimeError(message))
+
+
+def test_looks_like_gpu_unavailable_does_not_match_the_cpu_allocator_quirk() -> None:
+    # The pre-existing, unrelated MKL/CPU allocator leak (SYSTRAN/faster-
+    # whisper#660) must keep using the same-device reload path below, not
+    # this one -- these two failure classes need different recoveries.
+    from convobox.stt.transcriber import _looks_like_gpu_unavailable
+
+    assert not _looks_like_gpu_unavailable(RuntimeError("mkl_malloc: failed to allocate memory"))
+    assert not _looks_like_gpu_unavailable(RuntimeError("could not create a memory object"))
+
+
+def test_gpu_unavailable_error_falls_back_to_cpu_permanently() -> None:
+    gpu_model = MagicMock()
+    gpu_model.transcribe.side_effect = RuntimeError(
+        "Library cublas64_12.dll is not found or cannot be loaded"
+    )
+    cpu_model = MagicMock()
+    cpu_model.transcribe.return_value = (
+        [_FakeSegment(text="hello world", avg_logprob=-0.2)],
+        _FakeInfo(language="en", language_probability=0.95),
+    )
+
+    def side_effect(*args, **kwargs):
+        return cpu_model if kwargs.get("device") == "cpu" else gpu_model
+
+    config = STTConfig(model="tiny.en", device="cuda", compute_type="float16")
+    with patch("convobox.stt.transcriber.WhisperModel", side_effect=side_effect) as mock_cls:
+        transcriber = LocalTranscriber(config)
+        # First call hits the broken GPU model and triggers the fallback.
+        result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+        assert result.text == ""  # this utterance is still lost, same as any reload
+        assert transcriber._device_override == "cpu"
+
+        # The reload must have asked for cpu explicitly, not config.device.
+        reload_call = mock_cls.call_args_list[-1]
+        assert reload_call.kwargs["device"] == "cpu"
+
+        # Subsequent calls use the now-working cpu model and stay on cpu --
+        # no repeated fallback churn or reverting to the broken device.
+        result2 = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+        assert result2.text == "hello world"
+        assert transcriber._device_override == "cpu"
+
+
+def test_gpu_unavailable_fallback_does_not_apply_to_injected_test_models() -> None:
+    # A custom model_factory (test injection) bypasses _build_whisper_model
+    # entirely, so it can never receive a device override -- the fallback
+    # logic must not even attempt to set one for this path.
+    failing_model = _FakeModel(fail_times=0)
+    failing_model.transcribe = MagicMock(
+        side_effect=RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+    )
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: failing_model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert transcriber._device_override is None

@@ -85,7 +85,7 @@ from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, render_conversation_frame
-from convobox.wakeword import WakewordDetector
+from convobox.resumeword import ResumeWordDetector
 
 log = logging.getLogger("convobox.run")
 
@@ -502,7 +502,7 @@ class RecognitionErrorLadder:
 
 
 class ListeningGate:
-    """Tracks the paused (wake-word-only) listening state (docs/DESIGN-barge-in.md,
+    """Tracks the paused (resume-word-only) listening state (docs/DESIGN-barge-in.md,
     "Pause/resume listening").
 
     Pure state machine, like BargeInMonitor, so it's unit-testable independent
@@ -513,7 +513,7 @@ class ListeningGate:
     already runs regardless of anything this class does).
     """
 
-    def __init__(self, pause_detector: PauseListeningDetector, wake_detector: WakewordDetector) -> None:
+    def __init__(self, pause_detector: PauseListeningDetector, wake_detector: ResumeWordDetector) -> None:
         self._pause_detector = pause_detector
         self._wake_detector = wake_detector
         self.is_paused = False
@@ -575,7 +575,7 @@ class ContinuePromptGate:
         is_waiting first; calling this while not waiting is a caller bug,
         not handled specially here). ANY utterance ends the wait, matched
         or not -- unlike ListeningGate's paused state, which drops
-        everything until the wake word, a non-continue/decline reply here
+        everything until the resume word, a non-continue/decline reply here
         means the user moved on to a new topic, not that they're still
         mid-answer, so "pass" tells the caller to forward it normally
         rather than dropping it.
@@ -1523,12 +1523,12 @@ async def run(args: argparse.Namespace) -> None:
 
     listening_gate = ListeningGate(
         PauseListeningDetector(config.interaction.pause_listening_phrases),
-        WakewordDetector(config.interaction.wake_word),
+        ResumeWordDetector(config.interaction.resume_word),
     )
     log.info(
         "say %r to pause listening (hard-stops in-flight work); say %r to resume",
         config.interaction.pause_listening_phrases[0],
-        config.interaction.wake_word,
+        config.interaction.resume_word,
     )
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
@@ -1709,7 +1709,7 @@ async def run(args: argparse.Namespace) -> None:
                     # No-input (Google Conversation Design's term, see
                     # RecognitionErrorLadder's docstring): STT heard nothing
                     # recognizable at all. Checked before every other gate --
-                    # empty text can't match a wake word/pause phrase/gate
+                    # empty text can't match a resume word/pause phrase/gate
                     # condition anyway, and previously flowed silently all
                     # the way to Orchestrator.handle_transcript's own empty
                     # guard with no log line at all. Now observable.
@@ -1722,15 +1722,15 @@ async def run(args: argparse.Namespace) -> None:
                         continue
                     # Pause/resume gate runs before every other gate, same
                     # reasoning as the safeword: while paused, NOTHING except
-                    # the wake word should reach the overlap/echo/confidence
+                    # the resume word should reach the overlap/echo/confidence
                     # gates or the backend (docs/DESIGN-barge-in.md,
                     # "Pause/resume listening").
                     gate_action = listening_gate.observe(text)
                     if gate_action == "resume":
-                        log.info("resumed listening (wake word matched): %r", text)
+                        log.info("resumed listening (resume word matched): %r", text)
                         continue
                     if gate_action == "drop":
-                        log.debug("dropped (paused, not the wake word): %r", text)
+                        log.debug("dropped (paused, not the resume word): %r", text)
                         continue
                     if gate_action == "pause":
                         player.stop()
@@ -1739,7 +1739,7 @@ async def run(args: argparse.Namespace) -> None:
                         log.info(
                             "paused listening (matched %r) -- hard-stopped in-flight "
                             "work; say %r to resume",
-                            text, config.interaction.wake_word,
+                            text, config.interaction.resume_word,
                         )
                         continue
                     # High-stakes approval prompt.  This is deliberately

@@ -114,13 +114,13 @@ Alexa-style. Modeled as an explicit state machine rather than ad hoc flags:
 | State | Description | Indicator |
 | --- | --- | --- |
 | Off | Not running | none |
-| Idle (wake-word only) | Passively spotting the wake word; not transcribing general speech | dim visual, no sound |
+| Idle (resume-word only) | Passively spotting the resume word; not transcribing general speech | dim visual, no sound |
 | Active listening | Woken; capturing and transcribing speech | visual change + activation earcon |
 | Command captured | Utterance finalized, STT complete | brief distinct acknowledgment cue |
 | Backend working | Target CLI is executing; visually distinct from "listening" since you can still interject | visual only |
 | Responding (TTS playback) | Speaking a response; interruptible at any point (barge-in returns to Active listening) | visual only |
 | **Hard stop (safeword heard)** | Safeword detected; execution is being halted | **its own unmistakable audio/visual class — never a louder variant of another state** |
-| Stopped / muted | Explicitly told to stop; no wake-word spotting either | fully dim, no sound |
+| Stopped / muted | Explicitly told to stop; no resume-word spotting either | fully dim, no sound |
 
 Inbound/outbound profanity filtering (what you say vs. what TTS speaks
 back) is planned as a configurable option, off by default.

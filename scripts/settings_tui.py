@@ -51,7 +51,7 @@ from convobox.config import (
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
 from convobox.listening_pause import PauseListeningDetector
-from convobox.wakeword import ROUNDTRIP_REJECTED_WAKE_WORDS, WakewordDetector
+from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 
 _RESET = "\x1b[0m"
 _REVERSE = "\x1b[7m"
@@ -161,7 +161,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
             FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
-            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression."),
+            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression. To clear an already-set value back to unset: delete the digits, then type - (a bare minus sign) and press Enter -- an empty field alone is treated as 'no change', not 'clear', so backspacing to blank and pressing Enter leaves the old value in place."),
         ),
     ),
     SectionSpec(
@@ -170,8 +170,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("stt", "engine", "Engine", "choice", _CHOICE_STT_ENGINES, help_text="Speech-to-text backend. Only faster-whisper is implemented right now."),
             FieldSpec("stt", "model", "Model", "str", help_text="Whisper model name, such as base or small."),
-            FieldSpec("stt", "device", "Device", "str", help_text="Inference device. cpu is the safe default; cuda is for supported GPUs."),
-            FieldSpec("stt", "compute_type", "Compute type", "str", help_text="Whisper compute precision, such as int8 on CPU or float16 on GPU."),
+            FieldSpec("stt", "device", "Device", "str", help_text="Inference device. 'auto' (default) autodetects a real GPU (e.g. NVIDIA CUDA) and falls back to cpu if none is visible. Set 'cpu' or 'cuda' explicitly only to override the autodetection."),
+            FieldSpec("stt", "compute_type", "Compute type", "str", help_text="Whisper compute precision. 'default' (recommended) picks the right precision for whichever device was selected above (int8 on cpu, float16 on GPU). Set an explicit value (int8, float16, ...) only to override."),
             FieldSpec("stt", "language", "Language", "optional_str", help_text="Pin a language code like en, or leave unset for auto-detect."),
             FieldSpec("stt", "min_language_probability", "Min language probability", "float", help_text="Drop auto-detected transcripts below this confidence threshold."),
         ),
@@ -205,8 +205,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("interaction", "interrupt_preset", "Interrupt preset", "choice", _CHOICE_INTERRUPT_PRESETS, help_text="do-not-disturb (default, safe without headphones/AEC): finish, drop overlap. conversational: mute+steer now. patient: finish, then deliver. halt: abort, drop. take-over: abort, steer now."),
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
-            FieldSpec("interaction", "wake_word", "Wake word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
-            FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the wake word resumes. Same picking rule as the wake word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
+            FieldSpec("interaction", "resume_word", "Resume word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
+            FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the resume word resumes. Same picking rule as the resume word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
         ),
     ),
     SectionSpec(
@@ -624,21 +624,21 @@ def validate_config(config: AppConfig) -> ValidationReport:
         # builds this exact detector at startup, so a value it rejects
         # (normalizes to nothing) would crash the session before the first
         # utterance. Same save-time-check rationale as backend.model above.
-        detector = WakewordDetector(config.interaction.wake_word)
+        detector = ResumeWordDetector(config.interaction.resume_word)
     except ValueError as exc:
-        report.errors.append(f"interaction.wake_word: {exc}")
+        report.errors.append(f"interaction.resume_word: {exc}")
     else:
-        if detector.normalized_wake_word in ROUNDTRIP_REJECTED_WAKE_WORDS:
+        if detector.normalized_resume_word in ROUNDTRIP_REJECTED_RESUME_WORDS:
             report.warnings.append(
-                f"interaction.wake_word {config.interaction.wake_word!r} is confirmed to "
+                f"interaction.resume_word {config.interaction.resume_word!r} is confirmed to "
                 "mis-transcribe through the real TTS->STT round-trip (see "
-                "convobox.wakeword.detector) -- the wake word will likely never match, "
+                "convobox.resumeword.detector) -- the resume word will likely never match, "
                 "leaving 'stop listening' with no voice resume. 'Athena' is the "
                 "verified default; test alternatives with scripts/roundtrip_smoketest.py."
             )
     # Empty pause phrases would leave no way to pause a live session; a
     # phrase normalizing to nothing could never match. Same
-    # construct-the-real-detector rationale as the wake word above:
+    # construct-the-real-detector rationale as the resume word above:
     # PauseListeningDetector is what run_convobox.py builds at startup.
     if not config.interaction.pause_listening_phrases:
         report.warnings.append(

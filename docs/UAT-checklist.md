@@ -614,9 +614,9 @@ did).
 - **[P3] Ordinary speech is dropped while paused.** While paused, say a
   normal command ("what time is it", "run the tests") -- NOT routed to the
   backend (no new HTTP/subprocess request; `is_busy()` never flips true),
-  logged at debug as "dropped (paused, not the wake word)".
-- **[P4] Wake word resumes.** While paused, say the configured wake word
-  (default "ConvoBox") -- log shows "resumed listening (wake word
+  logged at debug as "dropped (paused, not the resume word)".
+- **[P4] Resume word resumes.** While paused, say the configured resume word
+  (default "ConvoBox") -- log shows "resumed listening (resume word
   matched)"; the NEXT ordinary utterance after that routes normally again.
 - **[P5] Safeword still works while paused, but does NOT resume.** While
   paused, say "stop stop stop" -- the `[HARD STOP]` path still fires
@@ -626,9 +626,9 @@ did).
   the design calls for, not the same thing.
 - **[P6] The pause phrase is inert while already paused.** While paused,
   say "stop listening" (or "pause listening") again -- treated as ordinary
-  ignored speech per P3, not a special case; still requires the wake word
+  ignored speech per P3, not a special case; still requires the resume word
   to exit.
-- **[P7] Custom wake_word / pause_listening_phrases via config.** Set
+- **[P7] Custom resume_word / pause_listening_phrases via config.** Set
   non-default values in convobox.yaml (or the Settings TUI once it exposes
   these fields) and confirm the whole P1-P6 cycle still works end-to-end,
   not just the unit-tested detector classes in isolation.

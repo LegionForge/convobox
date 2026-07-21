@@ -588,41 +588,41 @@ async def test_probe_audio_reports_resolution_errors_without_raising(
     assert "mic: no device found" in result
 
 
-# --- wake word: TUI-configurable, validated by the real detector ---
+# --- resume word: TUI-configurable, validated by the real detector ---
 
 
-def test_interaction_section_exposes_wake_word_field() -> None:
+def test_interaction_section_exposes_resume_word_field() -> None:
     interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
-    spec = next((f for f in interaction.fields if f.key == "wake_word"), None)
+    spec = next((f for f in interaction.fields if f.key == "resume_word"), None)
     assert spec is not None
     assert spec.kind == "str"
 
 
-def test_validate_config_rejects_wake_word_that_normalizes_to_nothing() -> None:
-    # The real runtime constructor (WakewordDetector) is the validator; a
+def test_validate_config_rejects_resume_word_that_normalizes_to_nothing() -> None:
+    # The real runtime constructor (ResumeWordDetector) is the validator; a
     # value it rejects would otherwise crash run_convobox.py at startup.
-    config = _make_config(**{"interaction.wake_word": "!!!"})
+    config = _make_config(**{"interaction.resume_word": "!!!"})
     report = validate_config(config)
-    assert any("wake_word" in error for error in report.errors)
+    assert any("resume_word" in error for error in report.errors)
 
 
-def test_validate_config_warns_on_roundtrip_rejected_wake_word() -> None:
+def test_validate_config_warns_on_roundtrip_rejected_resume_word() -> None:
     # "ConvoBox" is the confirmed-broken original default (mis-transcribed
     # as "Control Box" every time) -- a warning, not an error: a user's own
     # STT stack may differ, and the detector deliberately doesn't hard-ban.
-    config = _make_config(**{"interaction.wake_word": "ConvoBox"})
+    config = _make_config(**{"interaction.resume_word": "ConvoBox"})
     report = validate_config(config)
-    assert not any("wake_word" in error for error in report.errors)
+    assert not any("resume_word" in error for error in report.errors)
     assert any("mis-transcribe" in warning for warning in report.warnings)
 
 
-def test_validate_config_accepts_verified_default_wake_word() -> None:
-    report = validate_config(_make_config(**{"interaction.wake_word": "Athena"}))
-    assert not any("wake_word" in error for error in report.errors)
-    assert not any("wake_word" in warning for warning in report.warnings)
+def test_validate_config_accepts_verified_default_resume_word() -> None:
+    report = validate_config(_make_config(**{"interaction.resume_word": "Athena"}))
+    assert not any("resume_word" in error for error in report.errors)
+    assert not any("resume_word" in warning for warning in report.warnings)
 
 
-# --- pause phrases: TUI-editable, validated like the wake word ---
+# --- pause phrases: TUI-editable, validated like the resume word ---
 
 
 def test_interaction_section_exposes_pause_phrases_field() -> None:

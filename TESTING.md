@@ -524,7 +524,7 @@ minimum:
 1. **Safeword**: "stop stop stop" mid-playback is transcribed, tagged
    `[HARD STOP]`, and followed by `hard stop matched safeword` in the log
    (both lines -- the second proves dispatch, not just detection).
-2. **Pause/resume**: "stop listening" pauses; the wake word resumes.
+2. **Pause/resume**: "stop listening" pauses; the resume word resumes.
 3. **Barge-in**: a deliberate interruption stops audio and forwards the
    words (`[BARGE-IN]` tag or busy-steer POST).
 4. **AEC sanity on the release hardware**: per-response verdicts read
