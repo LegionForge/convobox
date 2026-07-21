@@ -177,6 +177,36 @@ class LocalTranscriber(STTEngine):
         # override is simply never set for that path.
         self._device_override: str | None = None
         self._model: _WhisperLikeModel | None = self._build_model()
+        self._warm_up()
+
+    def _warm_up(self) -> None:
+        """Absorb a GPU-unavailable failure here, not on the user's first
+        real utterance.
+
+        ctranslate2 delay-loads cuBLAS: WhisperModel construction succeeds
+        even when the GPU is detected but unusable (e.g. a missing
+        cublas64_12.dll) -- the failure only surfaces on the first real
+        .transcribe() call (see _looks_like_gpu_unavailable's docstring).
+        Without this, the user's own first utterance was always the one
+        that triggered AND absorbed that failure, silently discarded as
+        "unheard" by the existing recovery below -- live-confirmed
+        2026-07-21 (a fresh session's first utterance was consistently
+        empty-STT-result-discarded, traced to this exact mechanism).
+        Transcribing a short burst of silence here instead means any such
+        failure (and the resulting permanent cpu fallback) happens before
+        the user's real speech ever reaches the pipeline. Also reduces
+        first-utterance latency incidentally: the first inference on any
+        accelerator is typically the slowest (kernel/algorithm selection),
+        not specific to this bug.
+
+        Skipped when a custom model_factory is injected (tests use a fake
+        model with no real GPU path to warm up) or when config.device is
+        explicitly "cpu" (nothing to absorb -- same guard condition as the
+        real fallback check in transcribe()).
+        """
+        if self._custom_factory is not None or self._config.device == "cpu":
+            return
+        self.transcribe(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32))
 
     def _build_model(self) -> _WhisperLikeModel:
         if self._custom_factory is not None:
