@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
-from convobox.wakeword import DEFAULT_WAKE_WORD
+from convobox.resumeword import DEFAULT_RESUME_WORD
 
 
 class AudioConfig(BaseModel):
@@ -54,8 +54,14 @@ class STTConfig(BaseModel):
     # selectable/pluggable symmetrically with tts.engine.
     engine: str = "faster-whisper"
     model: str = "base"
-    device: str = "cpu"
-    compute_type: str = "int8"
+    # "auto"/"default" delegate straight to faster-whisper's own device and
+    # compute-type selection (ctranslate2.get_cuda_device_count() under the
+    # hood) -- confirmed on this machine's real NVIDIA 4060 to pick CUDA
+    # automatically when present, CPU otherwise. Set explicit values
+    # ("cpu"/"int8") only to force a side away from what's auto-detected,
+    # e.g. to keep a GPU free for another process.
+    device: str = "auto"
+    compute_type: str = "default"
     language: str | None = None
     # Drop transcripts whose detected-language probability falls below this
     # (0.0 = disabled). Live testing showed detections under ~0.4 on accented
@@ -134,9 +140,9 @@ class InteractionConfig(BaseModel):
     # Shared by two independent features (docs/DESIGN-barge-in.md, "Pause/
     # resume listening"): the push-word barge-in trigger (future work) and
     # resuming from the paused listening state (below) both use this word.
-    wake_word: str = DEFAULT_WAKE_WORD
+    resume_word: str = DEFAULT_RESUME_WORD
     # Saying one of these hard-stops in-flight backend work (same as the
-    # safeword) and enters a paused state where only wake_word is heard,
+    # safeword) and enters a paused state where only resume_word is heard,
     # until it's said and normal listening resumes.
     pause_listening_phrases: list[str] = Field(
         default_factory=lambda: list(DEFAULT_PAUSE_PHRASES)

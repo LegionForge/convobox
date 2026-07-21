@@ -35,7 +35,7 @@ def test_observe_transcript_decline_ends_the_wait_and_returns_decline() -> None:
 
 def test_observe_transcript_unrelated_speech_ends_the_wait_and_returns_pass() -> None:
     # Unlike ListeningGate's paused state (which drops everything until
-    # the wake word), a non-matching reply here means the user moved on
+    # the resume word), a non-matching reply here means the user moved on
     # to a new topic, not that they're still mid-answer -- "pass" tells
     # the caller to forward it normally, not drop it.
     gate = _gate()

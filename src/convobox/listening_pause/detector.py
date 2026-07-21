@@ -5,11 +5,11 @@ import re
 # Same shape as SafewordDetector (a list of phrases, deterministic
 # normalized-substring match, no ML/fuzzy/LLM) because entering the paused
 # state is itself a hard-stop-class event -- JP's framing: "like interrupt,
-# but interrupt and stop processing all speech, then listen for wake word."
+# but interrupt and stop processing all speech, then listen for resume word."
 # See docs/DESIGN-barge-in.md, "Pause/resume listening".
 #
 # SAME SAFETY TIER AS SAFEWORD, NOT ConfirmwordDetector: accidentally
-# saying "stop listening" is benign -- you just say the wake word again to
+# saying "stop listening" is benign -- you just say the resume word again to
 # resume -- not destructive. So this detector does NOT ban common
 # affirmations the way ConfirmwordDetector does; only "doesn't normalize to
 # nothing" is a construction-time error, same guard as SafewordDetector.
@@ -30,7 +30,7 @@ class PauseListeningDetector:
     """Detects a phrase that should pause listening (docs/DESIGN-barge-in.md).
 
     Constructed with a list of phrases (default ``DEFAULT_PAUSE_PHRASES``);
-    any one matching pauses ConvoBox into a wake-word-only listening state
+    any one matching pauses ConvoBox into a resume-word-only listening state
     (the orchestration for that state lives outside this class -- this is a
     pure detector, same division of labor as SafewordDetector vs. the main
     loop). Fails loudly at construction (``ValueError``) on any phrase that

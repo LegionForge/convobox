@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-# The fifth instance of the Safeword/Confirmword/Wakeword/PauseListening-shaped
+# The fifth instance of the Safeword/Confirmword/ResumeWord/PauseListening-shaped
 # pattern: plain normalized-substring match, no ML, no fuzzy matching, no LLM.
 # See docs/DESIGN-0.3.0-interaction-and-safety.md's Phase 2 (response tiering)
 # and its shared-primitive framing (PendingPrompt): after a tiered/short
@@ -11,7 +11,7 @@ from typing import Literal
 # utterance is interpreted against this small fixed vocabulary instead of
 # routed as a normal command.
 #
-# LOW-STAKES VOCABULARY, same tier as WakewordDetector/PauseListeningDetector,
+# LOW-STAKES VOCABULARY, same tier as ResumeWordDetector/PauseListeningDetector,
 # NOT ConfirmwordDetector's tier: misreading "continue" as a real command (or
 # missing it) just means the user hears more detail than they wanted, or has
 # to ask again -- never a destructive action. So this detector does NOT ban
@@ -21,7 +21,7 @@ from typing import Literal
 # approval-vocabulary detector's strictness leak the other way either.
 #
 # Vocabulary round-trip verified (Piper -> faster-whisper, the same
-# methodology established fixing the DEFAULT_WAKE_WORD bug) before being
+# methodology established fixing the DEFAULT_RESUME_WORD bug) before being
 # trusted as a default -- not guessed. "I'm good" was tested and REJECTED
 # (mis-heard as "am Gut") and is deliberately absent from DEFAULT_DECLINE_PHRASES.
 

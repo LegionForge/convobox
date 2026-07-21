@@ -44,7 +44,7 @@ speak them deterministically: no LLM round-trip, no queue.
    a human expects.
 3. **Local repair phrases.** "repeat the question", "what are you waiting
    for?", "are you okay?" -> handled by the orchestrator directly
-   (deterministic phrase match, same family as safeword/wake word),
+   (deterministic phrase match, same family as safeword/resume word),
    re-speaking the pending question. Never forwarded to the backend while
    a question is pending.
 4. **Voice answer.** Match the user's reply against option labels/numbers

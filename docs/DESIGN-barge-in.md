@@ -67,16 +67,16 @@ Separate from *what* the interrupt does is *what counts as* an interrupt:
   safeword ("stop stop stop") is a guaranteed hard stop, honored
   mid-playback regardless of AEC. This is the non-negotiable safety floor.
 
-## Wake word = the push-word trigger
+## Resume word = the push-word trigger
 
-A wake word *is* the `push-word` trigger, and for ConvoBox it's nearly free:
+A resume word *is* the `push-word` trigger, and for ConvoBox it's nearly free:
 because we already run Whisper on every utterance, detecting a user-chosen
-wake word is just a transcript match — the exact mechanism `SafewordDetector`
+resume word is just a transcript match — the exact mechanism `SafewordDetector`
 already uses. So it's a third instance of one proven pattern:
 
 - `SafewordDetector` — hard-stop (shipped)
 - `ConfirmwordDetector` — approval gate (shipped, 0.2.0)
-- **`WakewordDetector`** — attention / interrupt (new): same normalized
+- **`ResumeWordDetector`** — attention / interrupt (new): same normalized
   transcript match, same construction-time validation of the user's choice.
 
 **User-selectable, validated at setup.** Ship a strong built-in default
@@ -96,9 +96,9 @@ matching covers interrupt-while-active.
 A fourth interaction primitive, related to but distinct from barge-in's
 push-word trigger: a spoken **"stop listening" / "pause listening"** puts
 ConvoBox into a standing paused state — every utterance is ignored except
-the wake word — until the wake word is heard again, which resumes normal
+the resume word — until the resume word is heard again, which resumes normal
 listening. In JP's framing: *"like interrupt, but interrupt and stop
-processing all speech, then listen for wake word."*
+processing all speech, then listen for resume word."*
 
 **Not the deferred wake-word roadmap item.** `docs/ROADMAP.md`'s "Wake word
 (post-0.5)" item is specifically about a **dedicated low-power spotter
@@ -119,7 +119,7 @@ gates):
    no-op if nothing is running, same as today). Does **not** by itself
    change pause state — pause and hard-stop are orthogonal axes.
 2. **If currently paused** (and not a safeword match) — check *only* the
-   wake word:
+   resume word:
    - matched → resume (exit paused state); the utterance is never routed
      to the backend as a command.
    - not matched → drop silently (log at debug, don't reach the
@@ -130,21 +130,21 @@ gates):
      is never routed to the backend as a command.
    - not matched → today's normal flow, unchanged.
 
-**One wake word, two jobs.** The same `WakewordDetector` instance serves
+**One resume word, two jobs.** The same `ResumeWordDetector` instance serves
 both the push-word barge-in trigger *and* resuming from pause — "get
 ConvoBox's attention," just triggered from different starting states
 (mid-response vs. fully paused). Pause/resume does **not** require barge-in's
 `push-word` trigger to be configured; it's independent and on by default
-(using `DEFAULT_WAKE_WORD` if the user never sets one).
+(using `DEFAULT_RESUME_WORD` if the user never sets one).
 
 **New detector: `PauseListeningDetector`.** Same shape as `SafewordDetector`
 (a list of phrases, matched deterministically; only construction guard is
 "doesn't normalize to nothing") — **not** `ConfirmwordDetector`'s stricter
 guard, since accidentally saying "stop listening" is benign (you just say
-the wake word again), not destructive. Default phrases: `["stop listening",
+the resume word again), not destructive. Default phrases: `["stop listening",
 "pause listening"]`.
 
-**Config schema change:** `wake_word` moves out of `interrupt:` (see below)
+**Config schema change:** `resume_word` moves out of `interrupt:` (see below)
 to `interaction:` top-level, since it's now shared by two independent
 features, not owned by barge-in alone.
 
@@ -192,12 +192,12 @@ Human turn-transitions cluster around **~200 ms** (Stivers et al. 2009). So:
 
 ```yaml
 interaction:
-  wake_word: "Athena"            # shared: push-word barge-in trigger AND pause/resume
+  resume_word: "Athena"            # shared: push-word barge-in trigger AND pause/resume
                                   # (default was "ConvoBox" -- confidently
                                   # mis-heard as "Control Box" by Whisper
                                   # every time; verify any custom choice
                                   # round-trips through STT before relying on it)
-  pause_listening_phrases:       # enters the paused (wake-word-only) state; hard-stops in flight
+  pause_listening_phrases:       # enters the paused (resume-word-only) state; hard-stops in flight
     - "stop listening"
     - "pause listening"
   interrupt:
@@ -205,7 +205,7 @@ interaction:
     # advanced — a preset just fills these in; override to sculpt any cell:
     on_current_turn: mute     # let-finish | mute | abort
     on_new_words:    now      # drop | queue | now
-    trigger:         speech   # speech | push-word (uses interaction.wake_word)
+    trigger:         speech   # speech | push-word (uses interaction.resume_word)
     sensitivity_ms:  250      # sustained speech before it counts (backchannels excluded)
     only_when_safe:  true     # auto-fall back to push-word on speakers w/o AEC
   # safeword hard-stop is always on, in every mode, paused or not (see safeword config)
@@ -278,15 +278,15 @@ backend is fully idle) -- see `docs/DESIGN-echo-and-barge-in.md`'s
 ## Phasing
 
 **In 0.3.0:** the two-axis model + presets; the `speech`/`push-word` triggers
-(wake word via transcript match + `WakewordDetector`); pause/resume
-listening (`PauseListeningDetector` + the wake word, shared); backchannel
+(resume word via transcript match + `ResumeWordDetector`); pause/resume
+listening (`PauseListeningDetector` + the resume word, shared); backchannel
 filtering; default-by-safety; interrupt-stop / response-start latency
 instrumentation.
 
 **Deferred (post-0.3.0):** Voice Activity Projection for predictive
 endpointing (beyond silence-timer VAD); a low-power idle wake-word *engine*;
 TRP-aware graceful yielding; speaker verification / voice enrollment (so the
-TV can't trip the wake word); `duck` mode; full-duplex generative direction.
+TV can't trip the resume word); `duck` mode; full-duplex generative direction.
 
 ## Open questions (validate in UAT)
 
@@ -294,7 +294,7 @@ TV can't trip the wake word); `duck` mode; full-duplex generative direction.
   consumer reflex).
 - The backchannel token set — start with English affirmations; per-language
   later.
-- Wake-word validation UX — how many test-transcriptions, what threshold to
+- Resume-word validation UX — how many test-transcriptions, what threshold to
   warn.
 - Per-backend behavior of `BARGE_IN_MARKER` (opencode, then Claude Code /
   Codex) — this is where the barge-in and backend-validation cycles overlap.
