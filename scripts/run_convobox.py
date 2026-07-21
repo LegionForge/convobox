@@ -169,9 +169,36 @@ _BACKCHANNEL_TOKENS: frozenset[str] = frozenset(
     }
 )
 
+# Short acknowledgment PHRASES -- same continuer role as _BACKCHANNEL_TOKENS
+# above, but multi-word, so a single-token subset check can't catch them.
+# Live-confirmed, 2026-07-20 (UAT session .aec-dumps/20260720-205724 +
+# convobox-tui.log): "Okay, get it.", "Thank you very much." and similar
+# short acknowledgments were each missing exactly one word from
+# _BACKCHANNEL_TOKENS ("get"/"it", "thank"/"you"/"very"/"much"), so the
+# whole-utterance subset check failed and interrupt_preset=conversational
+# treated them as full barge-ins -- the user's own live description was
+# "I'm waiting for your playback to finish, but it never does." Matched
+# by EXACT token-set equality (not subset, unlike _BACKCHANNEL_TOKENS)
+# specifically so adding a phrase here can't accidentally swallow real
+# commands that merely happen to contain one of these words (see
+# is_backchannel's docstring for why "yeah, but stop the deploy" must
+# stay a real interrupt). Deliberately small and auditable, same spirit
+# as _BACKCHANNEL_TOKENS -- not exhaustive.
+_BACKCHANNEL_PHRASES: frozenset[frozenset[str]] = frozenset(
+    frozenset(_norm_tokens(phrase))
+    for phrase in (
+        "get it", "got it", "ok get it", "okay get it", "ok got it", "okay got it",
+        "thank you", "thanks", "thank you very much", "thanks a lot", "thanks so much",
+        "no problem", "you're welcome", "sounds good", "got you", "understood",
+        "makes sense", "fair enough", "good point", "noted", "will do", "roger that",
+    )
+)
+
 
 def is_backchannel(text: str) -> bool:
-    """True when `text` is made up ENTIRELY of backchannel/continuer tokens.
+    """True when `text` is made up ENTIRELY of backchannel/continuer tokens,
+    or is an EXACT match (as a whole utterance) for one of the short
+    acknowledgment phrases in _BACKCHANNEL_PHRASES.
 
     Whole-utterance classification, not phrase matching: "yeah, but stop
     the deploy" is NOT a backchannel (real content beyond the continuer),
@@ -182,7 +209,9 @@ def is_backchannel(text: str) -> bool:
     tokens = _norm_tokens(text)
     if not tokens:
         return False
-    return tokens.issubset(_BACKCHANNEL_TOKENS)
+    if tokens.issubset(_BACKCHANNEL_TOKENS):
+        return True
+    return tokens in _BACKCHANNEL_PHRASES
 
 
 # Below this echo-to-ambient headroom there's effectively no echo present
