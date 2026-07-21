@@ -70,6 +70,7 @@ _CHOICE_STT_ENGINES = ("faster-whisper",)
 # real thing rather than guess" preference this codebase already applies
 # elsewhere (e.g. ResumeWordDetector/ApprovalDetector as the validators).
 _CHOICE_STT_MODELS = tuple(available_models())
+_CHOICE_STT_DEVICES = ("auto", "cpu", "cuda")
 # Keep in sync with convobox.interrupt_presets.PRESETS's keys (config.py
 # validates the actual value against that dict at load time; this tuple is
 # just what the TUI offers to pick from).
@@ -176,7 +177,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("stt", "engine", "Engine", "choice", _CHOICE_STT_ENGINES, help_text="Speech-to-text backend. Only faster-whisper is implemented right now."),
             FieldSpec("stt", "model", "Model", "choice", _CHOICE_STT_MODELS, help_text="Whisper model size/variant. base (default) is a good speed/accuracy balance. small/medium/large-v3 trade speed for accuracy (large-v3 is the most accurate, slowest, and biggest download). The distil-* variants are distilled models: noticeably faster than their full-size counterpart at a small accuracy cost -- distil-large-v3 is a common sweet spot if base isn't accurate enough but large-v3 feels too slow. .en variants (tiny.en, base.en, ...) are English-only and slightly more accurate for English than the multilingual equivalent. Downloads automatically on first use (one-time, cached in the Hugging Face cache) -- switching models here doesn't fetch anything until you actually run a session with it."),
-            FieldSpec("stt", "device", "Device", "str", help_text="Inference device. 'auto' (default) autodetects a real GPU (e.g. NVIDIA CUDA) and falls back to cpu if none is visible. Set 'cpu' or 'cuda' explicitly only to override the autodetection."),
+            FieldSpec("stt", "device", "Device", "choice", _CHOICE_STT_DEVICES, help_text="Inference device. auto (default) autodetects a real GPU (e.g. NVIDIA CUDA) and falls back to cpu if none is visible. Pick cpu or cuda explicitly only to override the autodetection -- e.g. to keep a GPU free for another process, or because cuda is detected but not actually usable (missing CUDA runtime libraries like cuBLAS: LocalTranscriber falls back to cpu permanently for the session either way once that happens, but picking cpu here silences the one-time warning)."),
             FieldSpec("stt", "compute_type", "Compute type", "str", help_text="Whisper compute precision. 'default' (recommended) picks the right precision for whichever device was selected above (int8 on cpu, float16 on GPU). Set an explicit value (int8, float16, ...) only to override."),
             FieldSpec("stt", "language", "Language", "optional_str", help_text="Pin a language code like en, or leave unset for auto-detect."),
             FieldSpec("stt", "min_language_probability", "Min language probability", "float", help_text="Drop auto-detected transcripts below this confidence threshold."),
@@ -572,6 +573,20 @@ def validate_config(config: AppConfig) -> ValidationReport:
             f"stt.model {config.stt.model!r} is not one of the models this "
             f"installed faster-whisper version lists "
             f"({', '.join(_CHOICE_STT_MODELS)}) -- double-check it's intentional"
+        )
+    if config.stt.device not in _CHOICE_STT_DEVICES:
+        # A warning, not an error: unlike stt.engine (checked against
+        # convobox's OWN supported-engines list), stt.device is passed
+        # straight through to ctranslate2/faster-whisper, which may accept
+        # values beyond these three (e.g. a specific GPU index) -- this
+        # only exists to nudge a stale/typo'd value from an existing
+        # convobox.yaml, not to hard-block something ctranslate2 itself
+        # might honor.
+        report.warnings.append(
+            f"stt.device {config.stt.device!r} is not one of the values the "
+            f"Settings TUI offers ({', '.join(_CHOICE_STT_DEVICES)}) -- it will "
+            "still be passed through to faster-whisper as-is, but double-check "
+            "it's intentional"
         )
     if config.tts.engine not in _CHOICE_TTS_ENGINES:
         report.errors.append(
