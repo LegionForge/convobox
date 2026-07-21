@@ -1758,6 +1758,22 @@ async def run(args: argparse.Namespace) -> None:
             await watchdog_task
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        # aclose() above already closes stdin/terminates/awaits the
+        # subprocess, but on Windows ProactorEventLoop, closing a pipe
+        # transport schedules the actual OS-handle teardown via
+        # call_soon() rather than doing it inline -- asyncio.run() (our
+        # caller, main()) tears the loop down immediately once this
+        # coroutine returns, before that callback gets a turn to run.
+        # The transport object survives (unclosed) until a later GC
+        # pass finds it, by which point the loop and pipe are both gone
+        # -- "Exception ignored in: ...__del__ ... ValueError: I/O
+        # operation on closed pipe" (live-confirmed, 2026-07-20 UAT
+        # session, codex backend). One more tick of the loop here is
+        # enough for those scheduled callbacks to actually run before
+        # shutdown, same practical mitigation used elsewhere for this
+        # well-known CPython/Windows asyncio subprocess-transport
+        # shutdown-ordering gap.
+        await asyncio.sleep(0.1)
         instance_lock.close()
 
 
