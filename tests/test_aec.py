@@ -9,7 +9,12 @@ import pytest
 
 pytest.importorskip(
     "aec_audio_processing",
-    reason="AEC extra not installed (Windows-only wheels; install with .[aec])",
+    reason=(
+        "AEC extra not installed. PyPI only ships Windows wheels; on "
+        "macOS/Linux install build tools first (e.g. "
+        "brew install meson ninja swig), then "
+        "uv pip install --no-binary aec-audio-processing .[aec]"
+    ),
 )
 
 from convobox.audio.aec import AecDumpWriter, EchoCanceller, _resample  # noqa: E402
