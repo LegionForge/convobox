@@ -77,10 +77,22 @@ _CYAN = "\x1b[36m"
 _KEY_NAME_RE = re.compile(
     r"\b(Esc|Escape|Enter|Space|Tab|Left|Right|Up|Down|Home|End|PgUp|PgDn)\b"
 )
+# Single-letter shortcuts (T/S/R/Q/...), safe to highlight ONLY when
+# bracketed -- that's the existing convention this module's own prose
+# already uses for them ("Press [t] to test.", "press [t] to live-test
+# first") specifically because a bare letter isn't distinguishable from
+# ordinary prose but "[t]" unambiguously is. Live UAT feedback, 2026-07-22:
+# on the screens where the user must actually decide whether to (q)uit,
+# (s)ave, or press (Esc) to back out, the relevant key needs to be called
+# out explicitly, not just present somewhere in a paragraph -- this is
+# the mechanism that makes that possible without also risking a highlight
+# on some unrelated bare "s" or "q" in normal sentence.
+_BRACKET_KEY_RE = re.compile(r"\[([A-Za-z])\]")
 
 
 def _highlight_keys(text: str) -> str:
-    """Bold+color every recognized key name in `text`.
+    """Bold+color every recognized key name -- and every bracketed
+    single-letter shortcut like ``[s]`` -- in `text`.
 
     Must only be called on text that has ALREADY been through `fit()` (or
     is never going through it again) -- inserted ANSI codes are zero-width
@@ -89,7 +101,8 @@ def _highlight_keys(text: str) -> str:
     alignment. Same "style wraps the already-sized string" ordering this
     module already uses for `_REVERSE`-highlighted cells.
     """
-    return _KEY_NAME_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
+    text = _KEY_NAME_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
+    return _BRACKET_KEY_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
 
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
 _CHOICE_PERMISSION_MODES = ("plan", "approve", "permissive")
@@ -964,11 +977,6 @@ def render_modal(
     )
     lines.append(accent + "+" + border * (width - 2) + "+" + _RESET)
     body_height = height - 6
-    box_width = min(width - 4, max(52, len(buffer) + 8))
-    left_pad = max(0, (width - box_width) // 2 - 1)
-    right_pad = max(0, width - left_pad - box_width - 2)
-    box_top = " " * left_pad + border + border * (box_width - 2) + border + " " * right_pad
-    lines.append(box_top[:width])
     content_lines = [f"{tone.strip()} {title}", "", prompt, ""]
     content_lines.extend(detail_lines)
     if choice_options:
@@ -984,6 +992,15 @@ def render_modal(
         else "Esc back out carefully | Enter accept"
     )
     content_lines.append(f"> {buffer}")
+    # Sized off the actual content, not just the input buffer -- a detail
+    # line (e.g. a save/quit hint) longer than the old fixed floor was
+    # silently truncated mid-word since fit() has no wrapping.
+    longest_line = max((len(line) for line in content_lines), default=0)
+    box_width = min(width - 4, max(52, longest_line + 4, len(buffer) + 8))
+    left_pad = max(0, (width - box_width) // 2 - 1)
+    right_pad = max(0, width - left_pad - box_width - 2)
+    box_top = " " * left_pad + border + border * (box_width - 2) + border + " " * right_pad
+    lines.append(box_top[:width])
     inner_width = box_width - 2
     for idx in range(body_height):
         if idx < len(content_lines):
@@ -1148,10 +1165,14 @@ def render(state: TuiState, width: int, height: int) -> list[str]:
     left_width = max(36, min(54, width // 2 + 4))
     right_width = max(24, width - left_width - 3)
     lines: list[str] = []
-    header = (
-        f" ConvoBox Settings TUI | {'dirty' if state.dirty else 'clean'} | {state.path}"
-    )
-    lines.append(fit(header, width))
+    # Explicit and highlighted when dirty (live UAT feedback, 2026-07-22):
+    # a plain "dirty" label is easy to miss entirely; the moment there ARE
+    # unsaved changes is exactly when the save/quit keys matter most, so
+    # name them right here instead of leaving the operator to find them in
+    # the legend bar on their own.
+    dirty_indicator = "dirty -- [S] to save, [Q] to quit and discard" if state.dirty else "clean"
+    header = f" ConvoBox Settings TUI | {dirty_indicator} | {state.path}"
+    lines.append(_highlight_keys(fit(header, width)))
     summary = _section_summary(state.working)
     lines.append(fit(summary[0], width))
     status = f" status: {state.status}"
@@ -1382,7 +1403,11 @@ def _handle_browse(state: TuiState, key: str) -> bool:
         if state.dirty and not _confirm_modal(
             "Confirm Quit",
             "Discard unsaved changes and quit?",
-            ["Unsaved edits will be lost if you confirm."],
+            [
+                "Unsaved edits will be lost if you confirm.",
+                "",
+                "Changed your mind? Press Esc now, then [S] to save first.",
+            ],
             severity="destructive",
         ):
             state.status = "quit cancelled"

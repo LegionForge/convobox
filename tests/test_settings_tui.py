@@ -513,6 +513,87 @@ def test_render_modal_footer_highlights_esc_and_enter() -> None:
     assert "\x1b[1m\x1b[36mEsc\x1b[0m cancel | \x1b[1m\x1b[36mEnter\x1b[0m accept" in joined
 
 
+# --- contextual save/quit key hints: live UAT feedback that even with the
+# general key-name legend (above), a user staring at a save/quit prompt had
+# to infer which key applied from surrounding prose -- the relevant key
+# should be called out explicitly, in brackets, right in the hint. ---
+
+
+def test_highlight_keys_wraps_bracketed_single_letter_shortcuts() -> None:
+    result = _highlight_keys("[S] to save, [Q] to quit and discard")
+    assert "\x1b[1m\x1b[36m[S]\x1b[0m" in result
+    assert "\x1b[1m\x1b[36m[Q]\x1b[0m" in result
+    assert " to save, " in result
+
+
+def test_highlight_keys_leaves_unbracketed_letters_alone() -> None:
+    # A bare "S" or "Q" is far too common in ordinary prose to highlight --
+    # only the explicit [X] bracket notation should trigger.
+    result = _highlight_keys("S and Q are just letters here")
+    assert "\x1b[" not in result
+
+
+def test_render_header_calls_out_save_and_quit_keys_when_dirty(tmp_path: Path) -> None:
+    config = AppConfig()
+    state = TuiState(path=tmp_path / "convobox.yaml", original=config, working=config.model_copy(deep=True))
+    state.dirty = True
+
+    header = render(state, 120, 30)[0]
+    assert "\x1b[1m\x1b[36m[S]\x1b[0m to save" in header
+    assert "\x1b[1m\x1b[36m[Q]\x1b[0m to quit and discard" in header
+
+
+def test_render_header_omits_save_quit_hint_when_clean(tmp_path: Path) -> None:
+    config = AppConfig()
+    state = TuiState(path=tmp_path / "convobox.yaml", original=config, working=config.model_copy(deep=True))
+    state.dirty = False
+
+    header = render(state, 120, 30)[0]
+    assert "clean" in header
+    assert "[S]" not in header
+    assert "[Q]" not in header
+
+
+def test_render_modal_widens_to_fit_long_detail_lines_without_truncating() -> None:
+    # Regression: box_width used to be sized off the input buffer alone, so
+    # a longer detail line (like the quit-confirmation escape-hatch hint
+    # below) was silently cut off mid-word by fit()'s no-wrap truncation.
+    hint = "Changed your mind? Press Esc now, then [S] to save first."
+    lines = render_modal(
+        "Confirm Quit",
+        "Discard unsaved changes and quit?",
+        ["Unsaved edits will be lost if you confirm.", "", hint],
+        "",
+        100,
+        30,
+        severity="destructive",
+    )
+    joined = "\n".join(lines)
+    assert "save first." in joined
+    assert "\x1b[1m\x1b[36mEsc\x1b[0m now, then \x1b[1m\x1b[36m[S]\x1b[0m to save first." in joined
+
+
+def test_handle_browse_quit_confirmation_shows_save_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = AppConfig()
+    state = TuiState(
+        path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True)
+    )
+    state.dirty = True
+    drawn: list[str] = []
+    monkeypatch.setattr(
+        settings_tui,
+        "_draw_modal",
+        lambda title, prompt, detail_lines, buffer="", severity="normal": drawn.extend(detail_lines),
+    )
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ESC")
+
+    still_running = settings_tui._handle_browse(state, "q")
+
+    assert still_running is True
+    assert state.status == "quit cancelled"
+    assert any("[S] to save first" in line for line in drawn)
+
+
 # --- Audio device picker (JP asked for "same logic as
 # scripts/audio_devices.py --setup" -- these tests exercise that exact
 # reuse: monkeypatch audio_devices' own collect_devices/dedupe_devices/etc.
