@@ -292,9 +292,7 @@ async def test_enumerate_mcp_server_names_returns_empty_on_subprocess_failure(
     async def _raise(*args: object, **kwargs: object) -> None:
         raise OSError("claude not found")
 
-    import convobox.adapters.claude_code as mod
-
-    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", _raise)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _raise)
 
     assert await adapter._enumerate_mcp_server_names() == []
 
@@ -310,9 +308,7 @@ async def test_enumerate_mcp_server_names_parses_real_subprocess_output(
         return_value=(b"obsidian: http://localhost:22360/sse (SSE) - OK Connected\n", b"")
     )
 
-    import convobox.adapters.claude_code as mod
-
-    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", AsyncMock(return_value=fake_proc))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=fake_proc))
 
     assert await adapter._enumerate_mcp_server_names() == ["obsidian"]
 
