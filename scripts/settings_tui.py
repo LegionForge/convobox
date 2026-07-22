@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import contextlib
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -61,6 +62,34 @@ _BOLD = "\x1b[1m"
 _RED = "\x1b[31m"
 _YELLOW = "\x1b[33m"
 _CYAN = "\x1b[36m"
+
+# Keyboard shortcut names worth calling out wherever they appear in prose
+# (the help panel's field-specific text, status/tip lines, modal footers) --
+# live UAT feedback: a long help_text wall of text (e.g. permission_mode's,
+# 400+ characters) buries the actual actionable keys inside it with no
+# visual distinction from the surrounding sentence. Word-boundary matched
+# so e.g. "Upload"/"Downtime" never trip a false highlight. Deliberately
+# excludes single-letter shortcuts (T/S/R/Q) -- those appear as ordinary
+# standalone words in normal English prose ("a value", "I recommend") far
+# too often to highlight safely outside the one place they're unambiguous
+# (the legend bar's own fixed "T test" / "S save" text, built by this
+# module, not free-form prose).
+_KEY_NAME_RE = re.compile(
+    r"\b(Esc|Escape|Enter|Space|Tab|Left|Right|Up|Down|Home|End|PgUp|PgDn)\b"
+)
+
+
+def _highlight_keys(text: str) -> str:
+    """Bold+color every recognized key name in `text`.
+
+    Must only be called on text that has ALREADY been through `fit()` (or
+    is never going through it again) -- inserted ANSI codes are zero-width
+    on a real terminal but not to Python's `len()`, so fitting/padding
+    AFTER highlighting would miscount the visible width and break column
+    alignment. Same "style wraps the already-sized string" ordering this
+    module already uses for `_REVERSE`-highlighted cells.
+    """
+    return _KEY_NAME_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
 
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
 _CHOICE_PERMISSION_MODES = ("plan", "approve", "permissive")
@@ -922,11 +951,16 @@ def render_modal(
     lines: list[str] = []
     lines.append(fit(f" ConvoBox Settings TUI | {title} ", width))
     lines.append(fit(f" status: {prompt}", width))
+    # Reverse-video, same treatment as the main screen's own legend bar --
+    # a modal is exactly where "what do Esc/Enter actually do right now"
+    # needs to be unmissable, not read off as part of the status line.
     lines.append(
-        fit(
+        _REVERSE
+        + fit(
             f" {tone}{'Esc cancel | Enter confirm' if severity == 'normal' else 'Esc back out carefully | Enter confirm'} ",
             width,
         )
+        + _RESET
     )
     lines.append(accent + "+" + border * (width - 2) + "+" + _RESET)
     body_height = height - 6
@@ -953,7 +987,9 @@ def render_modal(
     inner_width = box_width - 2
     for idx in range(body_height):
         if idx < len(content_lines):
-            inner = fit(content_lines[idx], inner_width)
+            # _highlight_keys AFTER fit(), same ordering rule as the main
+            # screen's help panel -- see that function's own docstring.
+            inner = _highlight_keys(fit(content_lines[idx], inner_width))
         else:
             inner = fit("", inner_width)
         lines.append(
@@ -969,7 +1005,7 @@ def render_modal(
         if severity == "normal"
         else " Tip: Escape returns to the editor without changing anything"
     )
-    lines.append(fit(tip, width))
+    lines.append(_highlight_keys(fit(tip, width)))
     return lines[:height]
 
 
@@ -1146,17 +1182,29 @@ def render(state: TuiState, width: int, height: int) -> list[str]:
             left_cell = fit("", left_width)
 
         right_cell = help_lines[row] if row < len(help_lines) else ""
-        lines.append(f"{left_cell} | {fit(right_cell, right_width)}")
+        # _highlight_keys AFTER fit(): its ANSI codes are zero-width on a
+        # real terminal but not to len(), so highlighting first would throw
+        # off fit()'s own padding/truncation math -- see that function's
+        # own docstring.
+        lines.append(f"{left_cell} | {_highlight_keys(fit(right_cell, right_width))}")
 
     lines.append("+" + "-" * (width - 2) + "+")
+    # Reverse-video legend bar, same treatment the selected section tab
+    # already gets -- a dedicated, visually unmissable "what can I press
+    # right now" area, not another line of plain text easy to skim past
+    # while reading a long help panel. Kept on ONE line (not wrapped into a
+    # multi-line legend): the six-shortcut set here never changes across
+    # sections/fields, so a single scannable bar covers it.
     lines.append(
-        fit(
+        _REVERSE
+        + fit(
             " Keys: Left/Right tabs  Up/Down fields  Enter edit  Space toggle/cycle  "
             "T test  S save  R revert  Q quit",
             width,
         )
+        + _RESET
     )
-    lines.append(fit(f" Tip: {state.status}", width))
+    lines.append(_highlight_keys(fit(f" Tip: {state.status}", width)))
     return lines
 
 
