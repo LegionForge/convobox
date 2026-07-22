@@ -206,10 +206,10 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         key="audio",
         label="Audio",
         fields=(
-            FieldSpec("audio", "input_device", "Input device", "device", help_text="Space/Left/Right cycles real discovered microphones (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
+            FieldSpec("audio", "input_device", "Input device", "device", help_text="Space/Left/Right cycles real discovered microphones (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test -- this records ~1s from the mic and plays the recording back through the configured output device, so you can actually hear whether it picked you up."),
             FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
-            FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
+            FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room. Space/Left/Right toggles true/false."),
             FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression. To clear an already-set value back to unset: delete the digits, then type - (a bare minus sign) and press Enter -- an empty field alone is treated as 'no change', not 'clear', so backspacing to blank and pressing Enter leaves the old value in place."),
         ),
     ),
@@ -493,11 +493,16 @@ def _device_choices(kind: Literal["input", "output"]) -> list[str]:
 
 def _choices_for(spec: FieldSpec) -> tuple[str, ...]:
     """The live choice list for a field -- static for `choice` fields,
-    freshly enumerated (real connected devices) for `device` fields.
+    freshly enumerated (real connected devices) for `device` fields, a
+    fixed true/false pair for `bool` fields (live UAT feedback,
+    2026-07-22: a typed bool field let a mistype like "flase" through to
+    a raw ValueError instead of just being unselectable).
     """
     if spec.kind == "device":
         kind: Literal["input", "output"] = "input" if spec.key == "input_device" else "output"
         return tuple(_device_choices(kind))
+    if spec.kind == "bool":
+        return ("false", "true")
     return spec.choices
 
 
@@ -786,12 +791,16 @@ async def probe_backend(config: AppConfig) -> str:
 
 
 async def probe_audio(config: AppConfig) -> str:
-    """Play a short tone on the configured speaker; record + meter a short
-    sample from the configured mic.
+    """Play a short tone on the configured speaker; record the configured
+    mic and play the recording back through the speaker so you can
+    actually hear whether the right mic is picking you up -- a level
+    meter alone (the old behavior here) confirms *something* is being
+    captured but not that it's the mic you think it is, or that it
+    sounds right. Live UAT feedback, 2026-07-22.
 
     Reuses scripts/audio_devices.py's own device-resolution, tone, and
-    level functions directly (collect_devices/resolve_spec/play_test_tone/
-    record_test/level_meter/format_level) -- the same logic
+    record+playback functions directly (collect_devices/resolve_spec/
+    play_test_tone/test_input_device) -- the same logic
     `python scripts/audio_devices.py --setup` uses, not a reimplementation
     -- shortened for a quick in-TUI check and silenced (that script is a
     CLI tool that prints; every other probe here reports through
@@ -824,9 +833,10 @@ async def probe_audio(config: AppConfig) -> str:
         else:
             in_idx, in_err = ad._default_index(sd, "input"), None
         if in_idx is not None:
-            audio = ad.record_test(sd, in_idx, seconds=1.2)
-            rms_db, peak_db = ad.level_meter(audio)
-            results.append(f"mic: {ad.format_level(rms_db, peak_db)}")
+            rms_db, peak_db = ad.test_input_device(
+                sd, in_idx, seconds=1.2, playback_device=out_idx
+            )
+            results.append(f"mic: {ad.format_level(rms_db, peak_db)} (played back)")
         else:
             results.append(f"mic: {in_err or 'no device found'}")
 
@@ -1050,7 +1060,7 @@ def _draw_modal(
 
 
 def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
-    is_pickable = spec.kind in ("choice", "device")
+    is_pickable = spec.kind in ("choice", "device", "bool")
     # Device fields are str | None; _format_value(None) is the display
     # string "(unset)", which isn't in _choices_for's list and would break
     # cycling/index-lookup. Seed the buffer with the picker's own sentinel
@@ -1115,10 +1125,15 @@ def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
                     choice_value=buffer,
                 )
                 continue
-        if key == "BACKSPACE":
-            buffer = buffer[:-1]
-        elif len(key) == 1 and key.isprintable():
-            buffer += key
+        if spec.kind != "bool":
+            # A bool field only ever has two valid values, both reachable
+            # by cycling above -- no typed value can ever be more correct
+            # than that, so typing here can only ever produce a mistype
+            # (see _choices_for's docstring for the incident).
+            if key == "BACKSPACE":
+                buffer = buffer[:-1]
+            elif len(key) == 1 and key.isprintable():
+                buffer += key
         _draw_modal(
             f"Edit {spec.label}",
             prompt,
