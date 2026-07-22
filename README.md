@@ -69,6 +69,8 @@ time you actually use them, not at install time.
 
 **Supported today:**
 
+<img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, new voice-gated approval), Codex (app-server JSON-RPC, tested live, real approval channel not yet voice-wired). Windows 11 tested end-to-end; Linux/macOS implemented, not yet voice-validated.">
+
 | Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
 |-------------|----------------------------------------------------------------------|---------------------------------------|
 | **Platform**| Windows 11                                                            | Linux, macOS                         |
@@ -115,6 +117,11 @@ rather than a feature bolted onto one product. A thin adapter interface
 (`send_text`, `send_interject`, `send_hard_stop`, `is_busy`) is
 implemented per backend, preferring each tool's native structured/headless
 interface over scraping terminal output.
+
+<img src="docs/media/use-cases.svg" alt="What people use ConvoBox for: voice-operated coding, talking to your files (logs, configs, docs), analysis and reasoning out loud, live UAT narration, buddy coding, hands-free workflows, and reviewing a diff out loud.">
+
+Not an exhaustive list — the same adapter and voice loop apply wherever a
+coding-agent CLI already fits into how you work.
 
 ## Direction
 
@@ -165,6 +172,8 @@ document also covers the security + performance audit (7 bugs found and
 fixed) and the full progress history.
 
 ## Architecture
+
+<img src="docs/media/architecture.svg" alt="ConvoBox pipeline: microphone into VAD into STT into a safeword check into the orchestrator, which routes to one of three backend adapters (OpenCode, Claude Code, or Codex), then to TTS and speakers, with the acoustic feedback path back to the mic called out separately.">
 
 Audio capture (continuous mic input, VAD-segmented into utterances) feeds
 local STT, which is checked for a deterministic safeword before anything

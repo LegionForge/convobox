@@ -14,6 +14,12 @@ __all__ = [
 
 
 def create_backend_adapter(config: BackendConfig) -> BackendAdapter:
+    # permission_mode is only honored by claude-code and codex today (see
+    # each adapter's module docstring) -- opencode silently ignores it
+    # rather than erroring, same "not every adapter can do everything"
+    # stance as wait_listening's default no-op. ClaudeCodeAdapter derives
+    # its own hook-wiring decision from permission_mode internally (see
+    # its __init__) -- no separate flag needed here.
     if config.name == "opencode":
         # Neither permission_mode nor working_dir is passed: opencode is a
         # pre-launched HTTP server, not a subprocess ConvoBox spawns, so

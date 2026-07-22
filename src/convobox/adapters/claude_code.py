@@ -44,18 +44,16 @@ instead of after shipping a wrong adapter. Key empirical findings:
   forever with zero signal -- exactly the ~50-90s silent stalls seen in
   live UAT before this was diagnosed.
 
-  Fix: default to ``--permission-mode plan`` unless the caller's own
-  ``command`` already sets ``--permission-mode`` (a user override always
-  wins). Confirmed live: plan mode never hangs -- every turn ends with a
-  real, speakable ``result`` -- and it never executes a write/exec
-  action; a gated request comes back as explanatory text instead ("I
-  can't run that without approval..."). This is the same safety stance
-  Codex's adapter already takes (decline the destructive step, but let
-  the turn finish) -- see codex.py's _APPROVAL_METHODS -- just expressed
-  as a session-level flag because headless mode has no per-call channel
-  to express it any other way. Voice-driven approval (wiring
-  ConfirmwordDetector into an actual accept/decline flow) is future
-  work, same as codex.py's TODO.
+  Fix: default to ``--permission-mode plan`` (backend.permission_mode's
+  own default) unless the caller's own ``command`` already sets
+  ``--permission-mode`` (a user override always wins). Confirmed live:
+  plan mode never hangs -- every turn ends with a real, speakable
+  ``result`` -- and it never executes a write/exec action; a gated
+  request comes back as explanatory text instead ("I can't run that
+  without approval..."). This is the safe universal default;
+  ``backend.permission_mode="approve"`` now has a REAL per-call channel
+  of its own -- see "Voice-gated tool approval" below, which replaces
+  what used to be a documented gap here.
 
 - **`--disallowedTools` (confirmed live, 2026-07-14): removes tools
   entirely, doesn't reproduce the hang above.** A real spawned
@@ -88,6 +86,63 @@ instead of after shipping a wrong adapter. Key empirical findings:
   workflow-specific, which is exactly what ``command:`` is already for.
   See ``docs/DESIGN-0.3.0-interaction-and-safety.md``'s phase 3 for the
   full reasoning.
+
+- **Voice-gated tool approval (``permission_mode="approve"``), live-built
+  and live-verified 2026-07-2x.** ``--permission-mode plan`` above solves
+  the hang, but at the cost of never executing anything -- there was no
+  real per-call channel to answer, the way codex.py's app-server has.
+  This adapter now builds one, using Claude Code's PreToolUse hook
+  mechanism, confirmed live over several probes:
+
+  1. **A PreToolUse hook genuinely blocks the tool call on the hook
+     subprocess's own wall-clock duration** (confirmed at 3s and 8s
+     delays, exact timestamps matched). ``deny`` cleanly ends the turn
+     with an explanatory assistant message and ``stop_reason: end_turn``
+     (no hang, no crash); ``allow`` lets the tool actually execute.
+  2. **``--permission-mode plan`` suppresses tool ATTEMPTS entirely**
+     (confirmed live: under ``plan``, Claude drafted a plan and tried
+     ``ExitPlanMode`` -- disabled headless -- and never attempted the
+     real tool call, so the hook never fired at all). This rules out
+     "keep plan as a safety net, hook gates on top of it" -- the hook can
+     only gate a call Claude actually attempts, so interactive approval
+     pairs with ``acceptEdits`` instead (the hook itself becomes the sole
+     gate, not a second layer on plan mode).
+  3. **``--settings <path>`` accepts an arbitrary external JSON file**,
+     not just a project's own ``.claude/settings.json`` (confirmed live)
+     -- so this adapter's hook config never touches the user's own
+     working directory or its real settings file.
+  4. **Omitting "matcher" in the hook config gates ALL tools**, not a
+     named subset (confirmed live) -- the deliberate MVP scope per
+     product decision: block/approve every tool call, selective
+     per-tool-type gating is future work.
+
+  Mechanism: before spawning, this adapter starts a loopback-only
+  (127.0.0.1) asyncio TCP server and writes a temp ``--settings`` file
+  wiring Claude Code's PreToolUse hook to
+  ``convobox.approval.hook_script`` (stdlib-only, spawned via
+  ``-m`` so it works regardless of install layout -- see that module's
+  own docstring). The spawned ``claude`` process gets the server's
+  host/port and a random per-session auth token via environment
+  variables (inherited by the hook script, since Claude Code spawns it as
+  a child) -- the token stops another local process from spoofing an
+  approval decision over the same loopback port. When the hook connects,
+  this adapter emits ``BackendEventType.APPROVAL_REQUEST`` (the same
+  event queue TEXT/TOOL_CALL/DONE already flow through -- see the queue
+  refactor below) and holds the connection open until
+  ``resolve_pending_approval()`` answers it. Only one approval is ever
+  pending at a time by construction (this adapter's one-subprocess-at-a-
+  time turn model), unlike codex.py's per-request-id JSON-RPC answering --
+  a second concurrent hook connection while one is pending is refused
+  with an immediate deny rather than queued.
+
+  Refactored ``events()`` from "read stdout directly" to "drain an
+  internal queue fed by a background reader task" (matching codex.py's
+  existing shape) -- required because there are now TWO independent
+  async event sources (the subprocess's stdout AND the approval TCP
+  server), and a single ``await proc.stdout.readline()`` can't also learn
+  about a hook connection arriving while the subprocess is silently
+  blocked inside that very hook (which is exactly what a gated tool call
+  looks like: stdout goes quiet, that's the point).
 """
 
 from __future__ import annotations
@@ -96,7 +151,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import secrets
+import sys
+import tempfile
 from collections.abc import AsyncGenerator, Sequence
+from pathlib import Path
 from typing import Any
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
@@ -107,6 +167,23 @@ logger = logging.getLogger(__name__)
 # real CLI (it inventories every tool and MCP server); tool results can
 # be bigger still.
 _STREAM_LIMIT = 10 * 1024 * 1024
+
+_EOF = object()
+
+# 127.0.0.1 only -- this channel answers "should a tool call run", so it
+# must never be reachable from anything but this adapter's own machine.
+_APPROVAL_HOST = "127.0.0.1"
+# A gated tool call is a real decision, not a quick reflex reply -- long
+# enough that a genuinely slow voice decision doesn't trip it, short
+# enough that a ConvoBox crash mid-approval doesn't wedge Claude Code
+# forever. ApprovalPromptGate's own (shorter, config-driven) timeout is
+# what normally resolves first; this is the hook script's own last-resort
+# fail-closed backstop if ConvoBox itself goes silent.
+_APPROVAL_DECISION_TIMEOUT_S = 120.0
+# The permission mode interactive approval pairs with -- NOT plan (see
+# module docstring, finding 2: plan suppresses tool attempts, so the hook
+# never fires). The hook itself is the real gate here, not this flag.
+_INTERACTIVE_APPROVAL_PERMISSION_MODE = "acceptEdits"
 
 # Flags this adapter's protocol handling depends on; appended to whatever
 # base command the config supplies, so a user command like
@@ -132,13 +209,22 @@ _REQUIRED_FLAGS = [
 # codex.py's runtime decline).
 _DEFAULT_PERMISSION_MODE = "plan"
 
-# backend.permission_mode -> Claude Code's --permission-mode. NOTE the
-# missing "approve": Claude Code's headless mode has NO per-call approval
-# channel (see the module docstring's "Permission gate" -- a gated call
-# just hangs the session), so voice-approval is impossible here. "approve"
-# therefore degrades to "plan" with a warning (safe: nothing executes).
+# backend.permission_mode -> Claude Code's --permission-mode. "approve"
+# and "permissive" both resolve to the SAME underlying CLI flag
+# (acceptEdits -- the only thing that flag controls is whether Claude
+# ATTEMPTS tool calls at all; "plan" suppresses attempts entirely, see
+# finding 2 below). What actually differs between "approve" and
+# "permissive" is whether the PreToolUse hook gets wired up alongside it
+# (see ClaudeCodeAdapter.__init__'s interactive_approval derivation) --
+# "approve" gates every attempted call on a voice decision, "permissive"
+# lets them all through ungated. Not independently live-verified that
+# "permissive" (unwired, no hook) behaves identically to "approve" with
+# every request answered "allow" -- both SHOULD, since the hook is the
+# only thing that differs, but only "approve" has been driven through a
+# real spawned process end-to-end tonight (see the mechanism section).
 _PERMISSION_CLAUDE_MODE: dict[str, str] = {
     "plan": "plan",
+    "approve": "acceptEdits",
     "permissive": "acceptEdits",
 }
 
@@ -147,9 +233,13 @@ def _resolve_flags(command: Sequence[str], permission_mode: str = "plan") -> lis
     """The flags to append after the caller's own command (pure, tested).
 
     Skips injecting --permission-mode if the caller's own command already
-    sets one (an explicit user choice wins). Otherwise translates
-    permission_mode; "approve" is not expressible headless (no per-call
-    channel) and degrades to plan -- the caller logs the warning.
+    sets one (an explicit user choice always wins over this adapter's
+    default, the same "respect an explicit override" principle used for
+    AEC delay and audio device resolution elsewhere). Otherwise translates
+    permission_mode via _PERMISSION_CLAUDE_MODE; an unrecognized value
+    falls back to the safe "plan" default rather than raising --
+    BackendConfig's own field validator is the actual gate against typos,
+    this is just defense in depth.
     """
     if "--permission-mode" in command:
         return list(_REQUIRED_FLAGS)
@@ -165,13 +255,6 @@ class ClaudeCodeAdapter(BackendAdapter):
         working_dir: str | None = None,
     ) -> None:
         self._command = list(command) if command else ["claude"]
-        if permission_mode == "approve":
-            logger.warning(
-                "backend.permission_mode='approve' is not supported by Claude "
-                "Code (headless mode has no per-call approval channel) -- "
-                "falling back to 'plan' (read-only). Use codex for voice-gated "
-                "approvals, or 'permissive' to allow edits without a gate."
-            )
         self._permission_mode = permission_mode
         # Where the spawned agent reads/writes files. None -> inherit
         # ConvoBox's cwd; an explicit path isolates edits. See BackendConfig.
@@ -179,11 +262,33 @@ class ClaudeCodeAdapter(BackendAdapter):
         self._proc: asyncio.subprocess.Process | None = None
         self._proc_lock = asyncio.Lock()
         self._stderr_task: asyncio.Task[None] | None = None
+        self._reader_task: asyncio.Task[None] | None = None
         # A counter, not a bool: user messages queue (see module
         # docstring), so N sends produce N result messages and busy must
         # hold until the last one lands.
         self._pending = 0
         self._request_seq = 0
+        # BackendEvent queue fed by _read_loop (stdout) AND
+        # _handle_approval_connection (the hook TCP server) -- see module
+        # docstring's "Refactored events()" paragraph for why one source
+        # (stdout) can't cover both.
+        self._events: asyncio.Queue[BackendEvent | object] = asyncio.Queue()
+
+        # Voice-gated tool approval (see module docstring). Derived from
+        # permission_mode, not a separate constructor argument -- "approve"
+        # is the only mode that wires the hook/TCP server; "plan" and
+        # "permissive" both leave this off (see _PERMISSION_CLAUDE_MODE's
+        # own comment for why "permissive" doesn't need it: nothing gates
+        # those attempts either way, so there's no approval to hold).
+        self._interactive_approval = permission_mode == "approve"
+        self._approval_token = secrets.token_hex(16)
+        self._approval_server: asyncio.Server | None = None
+        self._approval_port: int | None = None
+        self._settings_path: Path | None = None
+        # The hook connection currently awaiting a decision -- at most one
+        # at a time (see module docstring, point 4 of the mechanism
+        # paragraph).
+        self._pending_approval_writer: asyncio.StreamWriter | None = None
 
     async def _ensure_proc(self) -> asyncio.subprocess.Process:
         # Locked for the same reason OpenCodeAdapter._ensure_session is:
@@ -196,21 +301,141 @@ class ClaudeCodeAdapter(BackendAdapter):
         # interleaves them.
         async with self._proc_lock:
             if self._proc is None or self._proc.returncode is not None:
+                env = None
+                extra_flags: list[str] = []
+                if self._interactive_approval:
+                    port = await self._ensure_approval_server()
+                    settings_path = self._ensure_settings_file()
+                    env = dict(os.environ)
+                    env["CONVOBOX_APPROVAL_HOST"] = _APPROVAL_HOST
+                    env["CONVOBOX_APPROVAL_PORT"] = str(port)
+                    env["CONVOBOX_APPROVAL_TOKEN"] = self._approval_token
+                    env["CONVOBOX_APPROVAL_TIMEOUT_S"] = str(_APPROVAL_DECISION_TIMEOUT_S)
+                    extra_flags = ["--settings", str(settings_path)]
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
                     *_resolve_flags(self._command, self._permission_mode),
+                    *extra_flags,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=_STREAM_LIMIT,
                     cwd=self._working_dir,
+                    env=env,
                 )
                 # stderr must be drained somewhere or a chatty CLI can fill
                 # the pipe and deadlock; drained to debug logs rather than
                 # DEVNULL so real failures stay diagnosable.
                 self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))
+                self._reader_task = asyncio.create_task(self._read_loop(self._proc))
                 self._pending = 0
             return self._proc
+
+    async def _ensure_approval_server(self) -> int:
+        """Start the loopback TCP server the hook script connects to, once
+        per adapter lifetime (a respawned subprocess reuses the same
+        server/token -- only the claude process itself dies and restarts,
+        not ConvoBox's own approval channel)."""
+        if self._approval_server is None:
+            self._approval_server = await asyncio.start_server(
+                self._handle_approval_connection, host=_APPROVAL_HOST, port=0
+            )
+            self._approval_port = self._approval_server.sockets[0].getsockname()[1]
+        assert self._approval_port is not None  # nosec B101 -- set immediately above
+        return self._approval_port
+
+    def _ensure_settings_file(self) -> Path:
+        """Write (once) the --settings JSON wiring Claude Code's
+        PreToolUse hook to convobox.approval.hook_script, gating every
+        tool (no "matcher" -- confirmed live this gates ALL tools, the
+        deliberate MVP scope). A temp file, not the working directory's
+        own .claude/settings.json -- confirmed live that --settings
+        accepts an arbitrary external path, so this never touches or
+        risks clobbering the user's real project settings."""
+        if self._settings_path is None:
+            fd, path = tempfile.mkstemp(
+                prefix="convobox-claude-settings-", suffix=".json"
+            )
+            settings = {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": f'"{sys.executable}" -m convobox.approval.hook_script',
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+            with os.fdopen(fd, "w") as f:
+                json.dump(settings, f)
+            self._settings_path = Path(path)
+        return self._settings_path
+
+    async def _handle_approval_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            with contextlib.suppress(OSError):
+                writer.close()
+            return
+        request = _safe_json_loads(line.decode(errors="replace"))
+        if request is None or request.get("token") != self._approval_token:
+            # Wrong/missing token: not a legitimate hook connection (either
+            # a bug or another local process probing the port). Deny and
+            # drop rather than trust it.
+            await self._reject_connection(writer, "unauthorized")
+            return
+        if self._pending_approval_writer is not None:
+            # This adapter's turn model only ever has one tool call in
+            # flight at a time, so this should not happen -- answered
+            # defensively rather than silently dropped or queued.
+            await self._reject_connection(writer, "another approval already pending")
+            return
+        self._pending_approval_writer = writer
+        tool_name = request.get("tool_name")
+        tool_input = request.get("tool_input")
+        self._events.put_nowait(
+            BackendEvent(
+                type=BackendEventType.APPROVAL_REQUEST,
+                tool=tool_name if isinstance(tool_name, str) else None,
+                tool_input=json.dumps(tool_input) if tool_input is not None else None,
+            )
+        )
+
+    async def _reject_connection(self, writer: asyncio.StreamWriter, reason: str) -> None:
+        with contextlib.suppress(OSError):
+            writer.write(json.dumps({"decision": "deny", "reason": reason}).encode() + b"\n")
+            await writer.drain()
+        with contextlib.suppress(OSError):
+            writer.close()
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        writer = self._pending_approval_writer
+        if writer is None:
+            return False
+        self._pending_approval_writer = None
+        # No "reason" on deny: the hook script's own fallback ("denied by
+        # voice") already covers it -- a reason here would just double up
+        # as "denied by voice: denied by voice" (found live).
+        payload = {"decision": "allow"} if approved else {"decision": "deny"}
+        try:
+            writer.write(json.dumps(payload).encode() + b"\n")
+            await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            logger.warning(
+                "failed to deliver the voice approval decision to the pending hook",
+                exc_info=True,
+            )
+        finally:
+            with contextlib.suppress(OSError):
+                writer.close()
+        return True
 
     # SECURITY EXCEPTION: B101 (assert stripped under python -O), all four
     # asserts below -- type-narrowing assertions on pipes, not security
@@ -301,11 +526,28 @@ class ClaudeCodeAdapter(BackendAdapter):
         # closes and Windows asyncio prints "Event loop is closed" /
         # "unclosed transport" tracebacks on every exit. Idempotent.
         proc, self._proc = self._proc, None
-        task, self._stderr_task = self._stderr_task, None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        stderr_task, self._stderr_task = self._stderr_task, None
+        reader_task, self._reader_task = self._reader_task, None
+        for task in (stderr_task, reader_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        # A pending approval must never be left hanging on a torn-down
+        # adapter -- the hook script would otherwise block until its own
+        # fail-closed timeout. Deny it now; a real answer just isn't
+        # coming.
+        if self._pending_approval_writer is not None:
+            await self.resolve_pending_approval(False)
+        server, self._approval_server = self._approval_server, None
+        if server is not None:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+        settings_path, self._settings_path = self._settings_path, None
+        if settings_path is not None:
+            with contextlib.suppress(OSError):
+                settings_path.unlink()
         if proc is None or proc.returncode is not None:
             return
         with contextlib.suppress(ProcessLookupError, OSError):
@@ -320,21 +562,35 @@ class ClaudeCodeAdapter(BackendAdapter):
             with contextlib.suppress(Exception):
                 await proc.wait()
 
-    async def events(self) -> AsyncGenerator[BackendEvent, None]:
-        proc = await self._ensure_proc()
+    async def _read_loop(self, proc: asyncio.subprocess.Process) -> None:
+        """Feeds self._events from the subprocess's stdout -- the other
+        source is _handle_approval_connection (the hook TCP server). See
+        module docstring's "Refactored events()" paragraph for why this
+        can't just be events()'s own loop anymore."""
         assert proc.stdout is not None  # nosec B101 -- spawned with stdout=PIPE
         try:
             while True:
                 line = await proc.stdout.readline()
                 if not line:
-                    # Process exited (or closed stdout): terminal for this
-                    # generator. _ensure_proc will respawn on next send.
                     return
                 outer = _safe_json_loads(line.decode(errors="replace"))
                 if outer is None:
                     continue
                 for event in self._to_backend_events(outer):
-                    yield event
+                    self._events.put_nowait(event)
+        finally:
+            self._events.put_nowait(_EOF)
+
+    async def events(self) -> AsyncGenerator[BackendEvent, None]:
+        await self._ensure_proc()
+        try:
+            while True:
+                item = await self._events.get()
+                if item is _EOF:
+                    # Process exited (or closed stdout): terminal for this
+                    # generator. _ensure_proc will respawn on next send.
+                    return
+                yield item  # type: ignore[misc]
         finally:
             # Same last-resort safety net as OpenCodeAdapter: if this
             # generator ends for any reason (process died, consumer

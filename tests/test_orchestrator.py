@@ -10,6 +10,7 @@ from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventTyp
 from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import (
     Orchestrator,
+    render_approval_request_for_speech,
     render_question_for_speech,
     strip_code_for_speech,
 )
@@ -37,6 +38,8 @@ class FakeBackendAdapter(BackendAdapter):
         # every existing test's behavior exactly.
         self.fail_events_calls = 0
         self.events_call_count = 0
+        self.resolved_approvals: list[bool] = []
+        self.resolve_pending_approval_returns = True
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -49,6 +52,10 @@ class FakeBackendAdapter(BackendAdapter):
 
     def is_busy(self) -> bool:
         return self._busy
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        self.resolved_approvals.append(approved)
+        return self.resolve_pending_approval_returns
 
     async def events(self) -> AsyncGenerator[BackendEvent, None]:
         self.events_call_count += 1
@@ -123,12 +130,16 @@ def make_orchestrator(
     with_tts: bool = False,
     on_event: Callable[[BackendEvent], None] | None = None,
     tier_responses: bool = False,
+    approval_phrase: str | None = None,
 ) -> tuple[Orchestrator, FakeBackendAdapter, FakeTTSEngine | None, FakePlayer | None]:
     adapter = FakeBackendAdapter(busy=busy)
     safeword = SafewordDetector(["stop stop stop"])
     if not with_tts:
         return (
-            Orchestrator(adapter, safeword, on_event=on_event, tier_responses=tier_responses),
+            Orchestrator(
+                adapter, safeword, on_event=on_event, tier_responses=tier_responses,
+                approval_phrase=approval_phrase,
+            ),
             adapter,
             None,
             None,
@@ -138,7 +149,7 @@ def make_orchestrator(
     return (
         Orchestrator(
             adapter, safeword, tts=tts, player=player, on_event=on_event,
-            tier_responses=tier_responses,
+            tier_responses=tier_responses, approval_phrase=approval_phrase,
         ),
         adapter,
         tts,
@@ -847,6 +858,78 @@ def test_render_question_handles_malformed_input() -> None:
     assert render_question_for_speech("not json") is None
     assert render_question_for_speech('{"questions": "nope"}') is None
     assert render_question_for_speech('{"questions": [{"options": []}]}') is None
+
+
+# --- voice-gated tool approval (Phase 3,
+# docs/DESIGN-0.3.0-interaction-and-safety.md; mechanism in
+# claude_code.py) ---
+
+
+def test_render_approval_request_speaks_tool_and_phrase() -> None:
+    # Deliberately does NOT read tool_input/command content aloud (an
+    # earlier version did) -- commands can be long, misleading out of
+    # context, or contain sensitive values. The TUI/log warning carries
+    # the actual detail; speech only announces the high-stakes state.
+    spoken = render_approval_request_for_speech("Bash", "alpha bravo delta")
+    assert spoken == "Approval needed to run Bash. Say alpha bravo delta to approve, or say no to deny."
+
+
+def test_render_approval_request_without_a_tool_name_says_a_tool() -> None:
+    spoken = render_approval_request_for_speech(None, "alpha bravo delta")
+    assert spoken.startswith("Approval needed to run a tool.")
+
+
+def test_render_approval_request_without_a_phrase_uses_a_generic_fallback() -> None:
+    # Shouldn't normally happen (ApprovalDetector requires a phrase to
+    # construct) but must still produce a sensible sentence, not crash.
+    spoken = render_approval_request_for_speech("Bash", None)
+    assert spoken == "Approval needed to run Bash. Say your approval phrase to approve, or say no to deny."
+
+
+@pytest.mark.asyncio
+async def test_approval_request_event_is_announced_via_tts() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, approval_phrase="alpha bravo delta")
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(
+            type=BackendEventType.APPROVAL_REQUEST,
+            tool="Bash",
+            tool_input='{"command": "rm -rf build"}',
+        )
+    )
+    assert orch._speak_task is not None
+    await orch._speak_task
+
+    assert len(tts.synthesized) == 1
+    assert tts.synthesized[0] == (
+        "Approval needed to run Bash. Say alpha bravo delta to approve, or say no to deny."
+    )
+    # The command itself is never read aloud -- see the function's own docstring.
+    assert "rm -rf" not in tts.synthesized[0]
+    assert len(player.played) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_request_event_without_tts_does_not_crash() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False)  # no tts/player
+
+    orch._on_event(BackendEvent(type=BackendEventType.APPROVAL_REQUEST, tool="Bash"))
+    await asyncio.sleep(0)
+
+    assert orch._speak_task is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_approval_delegates_to_the_adapter() -> None:
+    orch, adapter, _, _ = make_orchestrator(busy=False)
+
+    assert await orch.resolve_pending_approval(True) is True
+    assert adapter.resolved_approvals == [True]
+
+    adapter.resolve_pending_approval_returns = False
+    assert await orch.resolve_pending_approval(False) is False
+    assert adapter.resolved_approvals == [True, False]
 
 
 @pytest.mark.asyncio

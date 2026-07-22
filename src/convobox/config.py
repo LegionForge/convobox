@@ -162,20 +162,38 @@ class InteractionConfig(BaseModel):
     # not yet live-UAT-tuned against a real "did that feel laggy or
     # naggy" pass.
     continue_timeout_s: float = 2.5
-    # Opt-in only: no approval phrase means ConvoBox preserves its original
-    # fail-closed behavior and declines Codex approval requests immediately.
-    # When set, the exact phrase (never a casual "yes") is required before a
-    # pending command/file approval is released to Codex.
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): the voice
+    # phrase that gates a pending destructive-action tool call/command.
+    # None (default) leaves voice approval OFF -- existing sessions behave
+    # exactly as before (backend.permission_mode's own default, "plan",
+    # already keeps every backend read-only regardless of this field).
+    # There is no safe default phrase, same reasoning as
+    # ConfirmwordDetector's own construction-time guard: this must be a
+    # phrase the operator chose deliberately, not one this project picked
+    # for them. Honored by both backends that can answer a real approval
+    # request at runtime -- Codex's app-server (accept/decline) and Claude
+    # Code (a PreToolUse hook, since headless mode has no native per-call
+    # channel -- see claude_code.py's module docstring) -- when
+    # backend.permission_mode is "approve" (see BackendConfig below).
     approval_phrase: str | None = None
-    # Silence is an explicit denial, never consent.  Long enough to read the
-    # warning and ask a question, but bounded so a forgotten request does not
-    # leave an agent turn hanging indefinitely.
+    # Silence is an explicit denial, never consent -- long enough to read
+    # the pending action and decide, but bounded so a forgotten request
+    # doesn't leave an agent turn hanging indefinitely
+    # (ApprovalPromptGate.observe_timeout). Longer than continue_timeout_s
+    # on purpose: deciding whether to approve a real destructive action
+    # deserves more time than a quick "continue/stop" reflex.
     approval_timeout_s: float = 30.0
 
     @field_validator("approval_phrase")
     @classmethod
     def _validate_approval_phrase(cls, v: str | None) -> str | None:
         if v is not None:
+            # Raises ValueError (with the real reason) if the phrase is
+            # empty, made up entirely of common affirmations/fillers, or
+            # collides with a deny phrase -- fail fast at config load, not
+            # at the first live approval prompt. ApprovalDetector (which
+            # wraps ConfirmwordDetector) is the authority on this; not
+            # duplicated here.
             ApprovalDetector(v)
         return v
 
@@ -226,9 +244,13 @@ class BackendConfig(BaseModel):
     #   plan       - read-only; the agent investigates but cannot write or
     #                run commands (the safe default).
     #   approve    - the agent may act, but every write/command requires
-    #                voice approval (the approval_phrase gate). Codex only:
-    #                Claude Code's headless mode has no per-call approval
-    #                channel, so "approve" degrades to "plan" with a warning.
+    #                voice approval (the approval_phrase gate). Real on both
+    #                Codex (its app-server has a native per-call approval
+    #                channel this adapter answers directly) and Claude Code
+    #                (headless mode has no NATIVE per-call channel, so this
+    #                adapter builds one: a PreToolUse hook + a local IPC
+    #                channel -- see claude_code.py's module docstring for
+    #                the mechanism and its live verification).
     #   permissive - the agent acts without asking. Opt-in, dangerous.
     # opencode is unaffected (its permissions are fixed by wherever
     # `opencode serve` was launched) -- a warning is logged if this is set

@@ -11,6 +11,12 @@ class BackendEventType(str, Enum):
     TOOL_RESULT = "tool_result"
     ERROR = "error"
     DONE = "done"
+    # A tool call is blocked awaiting a voice approve/deny decision (Phase 3,
+    # docs/DESIGN-0.3.0-interaction-and-safety.md). Only adapters with a
+    # runtime-answerable approval channel emit this -- see
+    # BackendAdapter.resolve_pending_approval's docstring for why most
+    # adapters never do. `tool`/`tool_input` carry what's pending, the same
+    # fields TOOL_CALL uses.
     APPROVAL_REQUEST = "approval_request"
 
 
@@ -87,17 +93,33 @@ class BackendAdapter(ABC):
         """Opt in to holding a backend approval request for the operator.
 
         Most backends have no answerable approval channel, so the safe
-        default is a no-op.  Adapters that do expose one (currently Codex)
-        override this and emit ``APPROVAL_REQUEST`` events while enabled.
+        default is a no-op. Adapters that do expose one and can toggle it
+        at RUNTIME (currently Codex -- see codex.py) override this and emit
+        ``APPROVAL_REQUEST`` events while enabled. ClaudeCodeAdapter is
+        deliberately NOT one of these: its hook-based mechanism is baked
+        into the spawned process's ``--settings``/``--permission-mode`` at
+        CONSTRUCTION time (see its own module docstring), so there is no
+        live process to toggle -- it's controlled via the
+        ``permission_mode`` constructor argument instead (``"approve"``
+        wires the hook; ``"plan"``/``"permissive"`` don't), and this
+        method stays the inherited no-op for it.
         """
         return None
 
     async def resolve_pending_approval(self, approved: bool) -> bool:
-        """Answer the adapter's current approval request, if it has one.
+        """Answer this adapter's currently-pending tool-call approval
+        request, if it has one (see BackendEventType.APPROVAL_REQUEST).
 
-        ``False`` means there was no request to answer (or this backend has
-        no interactive approval channel).  Callers must fail closed when
-        that happens; they must never treat it as an implicit approval.
+        Returns whether there was one to answer. Default (False, no-op):
+        most adapters have no runtime-answerable approval channel at all
+        (opencode has no concept of one) and must not be forced to
+        implement an override just to satisfy this class -- same "default
+        no-op, override where real" shape as wait_listening. A caller
+        answering when nothing is actually pending (a stale gate after a
+        race) also gets False, not an exception -- see ClaudeCodeAdapter's
+        and CodexAdapter's own overrides for the real implementations.
+        False here must always be treated as "nothing to answer / fail
+        closed", never as an implicit approval.
         """
         return False
 

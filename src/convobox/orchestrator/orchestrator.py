@@ -112,6 +112,27 @@ def render_question_for_speech(tool_input: str | None) -> str | None:
     return "The agent is asking: " + " ".join(parts)
 
 
+def render_approval_request_for_speech(tool: str | None, approval_phrase: str | None) -> str:
+    """Spoken announcement for a pending BackendEventType.APPROVAL_REQUEST
+    (Phase 3, docs/DESIGN-0.3.0-interaction-and-safety.md).
+
+    Deliberately does NOT read the command/file path aloud (an earlier
+    version of this function did, via tool_input) -- commands can be
+    long, misleading out of context, or contain sensitive values; the
+    TUI/log warning (see run_convobox.py's _on_backend_event) shows the
+    exact request, speech only announces the high-stakes state, WHICH
+    tool it's for, and the operator-controlled vocabulary needed to
+    resolve it. ``approval_phrase`` is None when interactive approvals
+    are enabled but no phrase is configured (shouldn't normally happen --
+    ApprovalDetector requires one to construct -- but this must still
+    produce a safe, sensible sentence rather than crashing on a caller
+    bug).
+    """
+    name = tool or "a tool"
+    phrase = approval_phrase or "your approval phrase"
+    return f"Approval needed to run {name}. Say {phrase} to approve, or say no to deny."
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -300,6 +321,27 @@ class Orchestrator:
                 # TUI updates) over a bug in an OBSERVER, not the core
                 # routing/speech responsibility this class exists for.
                 logger.warning("on_event observer raised; ignoring", exc_info=True)
+        if event.type == BackendEventType.APPROVAL_REQUEST:
+            # Phase 3: a gated tool call is blocked on a voice decision
+            # (see claude_code.py's module docstring for the mechanism).
+            # Always logged (the honest status a silent hook-blocked
+            # stdout can't give any other way -- same reasoning as the
+            # question-tool announcement below), and spoken when a voice
+            # path exists. Not tiered, same as the question tool: a
+            # pending decision must be delivered whole. Deliberately
+            # doesn't read event.tool_input aloud -- see
+            # render_approval_request_for_speech's own docstring for why
+            # (commands can be long/sensitive/misleading out of context);
+            # the TUI/log warning (run_convobox.py's _on_backend_event)
+            # carries the actual detail.
+            approval_announcement = render_approval_request_for_speech(
+                event.tool, self._approval_phrase
+            )
+            logger.info("%s", approval_announcement)
+            if self._tts is not None and self._player is not None:
+                self._cancel_speak_task()
+                self._speak_task = asyncio.create_task(self._speak(approval_announcement))
+            return
         if event.type == BackendEventType.TOOL_CALL and event.tool == _QUESTION_TOOL:
             # [L9]: this tool BLOCKS the backend's turn until answered, and
             # an unheard question deadlocks the whole voice session. Always
@@ -314,24 +356,6 @@ class Orchestrator:
                 if self._tts is not None and self._player is not None:
                     self._cancel_speak_task()
                     self._speak_task = asyncio.create_task(self._speak(announcement))
-            return
-        if event.type == BackendEventType.APPROVAL_REQUEST:
-            # Never read an agent-supplied shell command aloud: commands can
-            # be long, misleading out of context, or contain sensitive
-            # values.  The TUI warning shows the exact request; speech only
-            # announces the high-stakes state and the operator-controlled
-            # vocabulary needed to resolve it.
-            if self._approval_phrase is None:
-                logger.warning("backend requested approval but interactive approvals are disabled")
-                return
-            announcement = (
-                "Approval required. Review the warning in ConvoBox. "
-                f"Say {self._approval_phrase} to approve, or say no to deny."
-            )
-            logger.warning("backend is waiting for your approval")
-            if self._tts is not None and self._player is not None:
-                self._cancel_speak_task()
-                self._speak_task = asyncio.create_task(self._speak(announcement))
             return
         if event.type != BackendEventType.TEXT or not event.content:
             return
@@ -384,6 +408,13 @@ class Orchestrator:
         # task's own work is just the synthesize() await.
         self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak(spoken))
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        """Passthrough to the adapter's own resolve_pending_approval (see
+        BackendAdapter's docstring) -- kept on Orchestrator so callers
+        (run_convobox.py's main loop) don't reach into ._adapter directly,
+        same encapsulation as has_more_to_reveal/speak_more."""
+        return await self._adapter.resolve_pending_approval(approved)
 
     def has_more_to_reveal(self) -> bool:
         """Whether the current (most recently tiered) response has

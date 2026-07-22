@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import importlib.metadata
 import logging
 import math
 import os
@@ -955,6 +956,34 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
     return device
 
 
+def _resolve_convobox_version() -> str:
+    """Best-effort package version for the startup announcement.
+
+    Falls back to "dev" rather than raising -- a source checkout without
+    installed metadata (e.g. a fresh clone before `uv sync`/`pip install
+    -e .` has registered the package) must never crash startup over a
+    cosmetic version string.
+    """
+    try:
+        return importlib.metadata.version("convobox")
+    except importlib.metadata.PackageNotFoundError:
+        return "dev"
+
+
+def startup_announcement(version: str) -> str:
+    """The spoken "I'm ready" line, once STT/TTS/backend setup is done.
+
+    Exists because the FIRST utterance being silently discarded (root
+    cause: cuBLAS delay-loading on the first real transcribe() call,
+    fixed at its source in LocalTranscriber._warm_up) still left no
+    signal for the user that ConvoBox was actually ready to hear them --
+    "say something and see if it works" isn't a great first experience.
+    A pure function (not inlined at the call site) so the exact wording
+    is unit-testable without a real TTS/audio stack.
+    """
+    return f"LegionForge ConvoBox, version {version}, ready and standing by."
+
+
 async def _working_watchdog(  # type: ignore[no-untyped-def]
     adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection,
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
@@ -1044,15 +1073,23 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
             if continue_gate.observe_timeout(now):
                 log.debug("continue-prompt window expired with no reply -- assuming done")
         if approval_gate is not None and approval_gate.observe_timeout(time.monotonic()) == "deny":
-            # Approval silence is a real, explicit denial.  Do not leave the
-            # blocked Codex turn hanging, and never reinterpret a timeout as
-            # consent.
-            if await adapter.resolve_pending_approval(False):
-                log.warning("declined pending Codex approval after %.1fs of silence", approval_gate.timeout_s)
+            # Silence on a pending approval must never be treated as
+            # consent (ApprovalPromptGate's own central invariant) -- the
+            # timeout itself IS the explicit decline to forward. Routed
+            # through Orchestrator's own passthrough rather than calling
+            # adapter.resolve_pending_approval directly, so the main loop
+            # never needs to reach into the adapter itself.
+            if await orchestrator.resolve_pending_approval(False):
+                log.warning(
+                    "declined pending backend approval after %.1fs of silence",
+                    approval_gate.timeout_s,
+                )
                 if tui_state is not None:
                     tui_state.warning = None
             else:
-                log.error("approval timeout fired but no pending backend request could be declined")
+                log.error(
+                    "approval timeout fired but no pending backend request could be declined"
+                )
         was_playing = playing
         if tui_state is not None:
             if listening_gate is not None and listening_gate.is_paused:
@@ -1115,21 +1152,39 @@ def _on_backend_event(
     (e.g. catch markdown read-out bugs like Piper saying "asterisk
     asterisk"). tui_state may be None (non-TUI UAT mode), in which case we
     only log.
+
+    APPROVAL_REQUEST starts approval_gate's wait right here, the instant
+    the event arrives -- not on some later poll tick the way
+    continue_gate's wait starts (that one is tied to playback finishing,
+    which this isn't). Orchestrator itself does the TTS announcement (see
+    its own _on_event) -- this hook's job is only the gate bookkeeping,
+    same division of labor as everything else it does here (TUI/logging,
+    not speech).
     """
-    if event.type == BackendEventType.APPROVAL_REQUEST and event.content:
+    if event.type == BackendEventType.APPROVAL_REQUEST:
         if approval_gate is not None:
             approval_gate.start_waiting(time.monotonic())
-        instruction = (
-            f"\n\nSay '{approval_phrase}' to approve. Say 'no' to deny. "
-            "Silence denies the request."
-            if approval_phrase
-            else "\n\nNo interactive approval phrase is configured; this request will be denied."
-        )
-        warning = event.content + instruction
-        log.warning("%s", warning)
-        if tui_state is not None:
-            tui_state.warning = warning
-            tui_state.full_detail = event.content
+        # event.content is a verbose, log/TUI-oriented description -- only
+        # Codex's adapter populates it today (_describe_approval_request);
+        # Claude Code's hook-based APPROVAL_REQUEST carries its info in
+        # tool/tool_input instead (see Orchestrator's own spoken
+        # announcement, render_approval_request_for_speech, which handles
+        # that shape). Gated on content being truthy so Claude Code's
+        # events just skip the banner gracefully rather than showing an
+        # empty one -- a real gap (no visual banner for Claude Code yet),
+        # not a crash risk.
+        if event.content:
+            instruction = (
+                f"\n\nSay '{approval_phrase}' to approve. Say 'no' to deny. "
+                "Silence denies the request."
+                if approval_phrase
+                else "\n\nNo interactive approval phrase is configured; this request will be denied."
+            )
+            warning = event.content + instruction
+            log.warning("%s", warning)
+            if tui_state is not None:
+                tui_state.warning = warning
+                tui_state.full_detail = event.content
         return
     if event.type != BackendEventType.TEXT or not event.content:
         return
@@ -1342,6 +1397,25 @@ async def run(args: argparse.Namespace) -> None:
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
+    # tool approval. The GATE (this) is backend-agnostic -- it just needs
+    # a phrase to recognize, and does nothing if the active backend never
+    # emits APPROVAL_REQUEST. Whether a backend actually gates anything is
+    # driven entirely by config.backend.permission_mode == "approve" (see
+    # create_backend_adapter/ClaudeCodeAdapter/CodexAdapter, each derives
+    # its own hook/channel wiring from permission_mode -- no separate flag
+    # passed through here). There is no safe default phrase -- see
+    # InteractionConfig.approval_phrase's own field comment for why.
+    approval_detector = (
+        ApprovalDetector(config.interaction.approval_phrase)
+        if config.interaction.approval_phrase
+        else None
+    )
+    approval_gate = (
+        ApprovalPromptGate(approval_detector, config.interaction.approval_timeout_s)
+        if approval_detector is not None
+        else None
+    )
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
@@ -1567,18 +1641,18 @@ async def run(args: argparse.Namespace) -> None:
             processed = canceller.process(chunk) if canceller is not None else chunk
             if tui_state is not None:
                 # Post-AEC (if on): the signal VAD/STT actually sees, not
-                # the raw pre-cancellation mic. Live per-chunk RMS -- no
-                # smoothing (see docs/UAT-checklist.md [U7]'s note that
-                # this hasn't been watched live; if it reads as too
-                # flickery in practice, that's the first thing to add,
-                # not something to guess at blind here). Speaker-side
-                # level is a deliberately deferred candidate: it would
-                # need a cross-thread write from AudioPlayer.on_block_played
-                # (the playback THREAD, not this async loop), more care
-                # than this same-thread mic update needs.
+                # the raw pre-cancellation mic. Decay-smoothed (see
+                # ConversationTuiState.update_mic_level) per docs/UAT-
+                # checklist.md [U7]'s flagged next step, now built rather
+                # than left as raw per-chunk RMS. Speaker-side level is a
+                # deliberately deferred candidate: it would need a
+                # cross-thread write from AudioPlayer.on_block_played (the
+                # playback THREAD, not this async loop), more care than
+                # this same-thread mic update needs.
                 import audio_devices as ad
 
-                tui_state.mic_level_db, _ = ad.level_meter(processed)
+                raw_db, _ = ad.level_meter(processed)
+                tui_state.update_mic_level(raw_db)
             playing = player.is_playing()
             if canceller is not None and was_playing and not playing:
                 # Response just finished: one stats line per response.
@@ -1656,6 +1730,19 @@ async def run(args: argparse.Namespace) -> None:
                 if tui_state is not None:
                     tui_state.barge_in_active = True
             yield processed
+
+    # Spoken readiness cue: by this point STT has already absorbed any
+    # GPU-fallback cost (LocalTranscriber's own construction-time warm-up)
+    # and the backend/TTS/mic setup above is done, so this really does
+    # mean "say something now, it'll be heard" -- not just "the process
+    # didn't crash yet." Goes through the same tts/player path a normal
+    # response would (echo-filter registration included, via
+    # SpokenTextRecorder), so it can't be mistaken for a live barge-in
+    # trigger and integrates with AEC's reference feed like any other
+    # spoken turn.
+    announcement = startup_announcement(_resolve_convobox_version())
+    log.info("%s", announcement)
+    await player.play_stream(tts.synthesize_stream(announcement), tts.sample_rate)
 
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
              config.safeword.hard_stop_phrases[0])
@@ -1757,6 +1844,14 @@ async def run(args: argparse.Namespace) -> None:
                     gate_action = listening_gate.observe(text)
                     if gate_action == "resume":
                         log.info("resumed listening (resume word matched): %r", text)
+                        if tui_state is not None:
+                            # Resume is otherwise completely silent (docs/
+                            # DESIGN-barge-in.md's open question on this --
+                            # "leaning toward a short acknowledgment"). A
+                            # visual one only: an audio earcon would need to
+                            # go through AudioPlayer/the AEC reference feed,
+                            # which is out of scope here.
+                            tui_state.add_turn("system", "resumed listening")
                         continue
                     if gate_action == "drop":
                         log.debug("dropped (paused, not the resume word): %r", text)
@@ -1770,26 +1865,42 @@ async def run(args: argparse.Namespace) -> None:
                             "work; say %r to resume",
                             text, config.interaction.resume_word,
                         )
+                        if tui_state is not None:
+                            tui_state.add_turn(
+                                "system",
+                                f"paused listening -- say {config.interaction.resume_word!r} to resume",
+                            )
                         continue
-                    # High-stakes approval prompt.  This is deliberately
-                    # before response-tiering, overlap, and echo gates: the
+                    # High-stakes approval prompt. This is deliberately
+                    # before response-tiering, overlap, and echo gates (the
                     # user may answer immediately after the prompt finishes,
                     # and that answer must not be mistaken for an echo or a
-                    # low-stakes "continue" reply.  Anything non-empty that
-                    # is not approve/deny is "discuss" and stays pending.
+                    # low-stakes "continue" reply) AND before the glossary
+                    # correction below, same reasoning as the safeword: a
+                    # configured correction must never be able to manufacture
+                    # or mangle a safety-critical approve/deny decision.
+                    # "discuss" deliberately does NOT forward the utterance
+                    # to the backend: neither adapter has a live channel to
+                    # actually discuss a pending request on (Claude Code's
+                    # own turn is blocked inside the hook for the whole
+                    # wait -- see claude_code.py's module docstring; Codex's
+                    # app-server connection could technically take other
+                    # traffic, but forwarding a "discuss" utterance as a real
+                    # turn is not-yet-built work) -- it just keeps the
+                    # prompt open and stays pending.
                     if approval_gate is not None and approval_gate.is_waiting:
-                        outcome = approval_gate.observe_transcript(text, time.monotonic())
-                        if outcome == "discuss":
+                        approval_outcome = approval_gate.observe_transcript(text, time.monotonic())
+                        if approval_outcome == "discuss":
                             log.info(
                                 "approval remains pending while the operator reviews/discusses: %r",
                                 text,
                             )
                             continue
-                        if outcome in ("approve", "deny"):
-                            approved = outcome == "approve"
-                            if await adapter.resolve_pending_approval(approved):
+                        if approval_outcome in ("approve", "deny"):
+                            approved = approval_outcome == "approve"
+                            if await orchestrator.resolve_pending_approval(approved):
                                 log.warning(
-                                    "%s pending Codex approval: %r",
+                                    "%s pending backend approval: %r",
                                     "approved" if approved else "declined", text,
                                 )
                                 if approved:
@@ -1808,11 +1919,12 @@ async def run(args: argparse.Namespace) -> None:
                             else:
                                 # Fail closed: the gate has consumed the
                                 # phrase, but the backend did not have the
-                                # expected request any more.  Re-open the
+                                # expected request any more. Re-open the
                                 # prompt instead of treating this as approval.
                                 approval_gate.start_waiting(time.monotonic())
                                 log.error(
-                                    "could not deliver approval decision to Codex; request remains blocked"
+                                    "could not deliver approval decision to the backend; "
+                                    "request remains blocked"
                                 )
                             continue
                     # The glossary is intentionally downstream of every
@@ -1935,6 +2047,12 @@ async def run(args: argparse.Namespace) -> None:
                     "  [FORCED: cut at max_utterance_s, still your turn]"
                     if segmenter.was_forced else "",
                 )
+                if segmenter.was_forced and tui_state is not None:
+                    # Otherwise purely a log-line signal (docs/UAT-checklist.md
+                    # [V5]) -- easy to read as ConvoBox just stopped listening
+                    # to you mid-sentence rather than a deliberate, resumable
+                    # cutoff.
+                    tui_state.add_turn("system", "cut off at the time limit -- still your turn")
                 if barged_in and not is_hard_stop:
                     # The backend believes its whole response was delivered; it
                     # wasn't. The marker is our version of realtime APIs'

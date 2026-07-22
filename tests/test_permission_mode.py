@@ -77,10 +77,16 @@ def test_claude_plan_and_permissive_translate() -> None:
     assert "acceptEdits" in _resolve_flags(["claude"], "permissive")
 
 
-def test_claude_approve_degrades_to_plan() -> None:
-    # Headless has no per-call approval channel; approve must fall back to plan.
-    assert "plan" in _resolve_flags(["claude"], "approve")
-    assert "acceptEdits" not in _resolve_flags(["claude"], "approve")
+def test_claude_approve_now_has_a_real_per_call_channel() -> None:
+    # Superseded 2026-07-2x: headless mode has no NATIVE per-call approval
+    # channel, but ClaudeCodeAdapter now builds one (a PreToolUse hook --
+    # see its module docstring), so "approve" no longer degrades to "plan"
+    # -- it resolves to the same CLI flag as "permissive" (acceptEdits,
+    # so Claude actually attempts tool calls), and the hook is what
+    # differs between the two (wired only for "approve"; see
+    # ClaudeCodeAdapter.__init__'s interactive_approval derivation).
+    assert "acceptEdits" in _resolve_flags(["claude"], "approve")
+    assert "plan" not in _resolve_flags(["claude"], "approve")
 
 
 def test_claude_user_permission_flag_wins_over_translation() -> None:

@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 340" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Supported CLI agents at a glance: OpenCode, Claude Code, Codex</title>
+  <style>
+    text { fill: #1f2328; }
+    .caption { fill: #57606a; }
+    .card { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .name { font-size: 18px; font-weight: 700; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .pill { fill: #dcfce7; stroke: #22c55e; stroke-width: 1; }
+    .pill-text { font-size: 12px; font-weight: 600; fill: #166534; }
+    .note { font-size: 12px; fill: #40464e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+      .caption { fill: #9198a1; }
+      .card { fill: #151b23; stroke: #30363d; }
+      .subtitle { fill: #9198a1; }
+      .pill { fill: #0f2a1a; stroke: #4ade80; }
+      .pill-text { fill: #86efac; }
+      .note { fill: #c9d1d9; }
+    }
+  </style>
+
+  <text x="500" y="26" text-anchor="middle" font-size="16" font-weight="700">Supported CLI agents, at a glance</text>
+
+  <!-- OpenCode -->
+  <rect x="30" y="50" width="300" height="220" rx="12" class="card"/>
+  <text x="180" y="80" text-anchor="middle" class="name">OpenCode</text>
+  <text x="180" y="100" text-anchor="middle" class="subtitle">HTTP + SSE, local server</text>
+  <rect x="105" y="112" width="150" height="22" rx="11" class="pill"/>
+  <text x="180" y="127" text-anchor="middle" class="pill-text">✅ Tested live</text>
+  <text x="180" y="156" text-anchor="middle" class="note">No tool-call approval</text>
+  <text x="180" y="172" text-anchor="middle" class="note">concept — the server owns</text>
+  <text x="180" y="188" text-anchor="middle" class="note">execution directly.</text>
+
+  <!-- Claude Code -->
+  <rect x="350" y="50" width="300" height="220" rx="12" class="card"/>
+  <text x="500" y="80" text-anchor="middle" class="name">Claude Code</text>
+  <text x="500" y="100" text-anchor="middle" class="subtitle">stream-json subprocess</text>
+  <rect x="425" y="112" width="150" height="22" rx="11" class="pill"/>
+  <text x="500" y="127" text-anchor="middle" class="pill-text">✅ Tested live</text>
+  <text x="500" y="156" text-anchor="middle" class="note">🔒 Voice-gated approval</text>
+  <text x="500" y="172" text-anchor="middle" class="note">(new): PreToolUse hook, or</text>
+  <text x="500" y="188" text-anchor="middle" class="note">read-only plan mode by default.</text>
+
+  <!-- Codex -->
+  <rect x="670" y="50" width="300" height="220" rx="12" class="card"/>
+  <text x="820" y="80" text-anchor="middle" class="name">Codex</text>
+  <text x="820" y="100" text-anchor="middle" class="subtitle">app-server (JSON-RPC)</text>
+  <rect x="745" y="112" width="150" height="22" rx="11" class="pill"/>
+  <text x="820" y="127" text-anchor="middle" class="pill-text">✅ Tested live</text>
+  <text x="820" y="156" text-anchor="middle" class="note">Real per-call approval</text>
+  <text x="820" y="172" text-anchor="middle" class="note">channel — auto-declined</text>
+  <text x="820" y="188" text-anchor="middle" class="note">today; voice-wiring not yet built.</text>
+
+  <text x="500" y="310" text-anchor="middle" class="caption" font-size="12.5">Platform: Windows 11 tested end-to-end today · Linux and macOS are implemented, not yet voice-validated.</text>
+</svg>
