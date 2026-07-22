@@ -48,6 +48,13 @@ python scripts/audio_devices.py --test 5   # play a tone to device 5
 
 Whichever one you *hear* is the device to pin.
 
+Already picked devices in `convobox.yaml` and just want to confirm they're
+right? The Settings TUI (`python scripts/settings_tui.py`) can test both in
+place: select **Audio → Input device** or **Output device** and press
+`[t]`. Testing the input device records ~1 second from the mic and plays
+the recording straight back through the configured output device — if you
+hear yourself, both ends of the pipeline are correctly wired.
+
 ## 4. Configure
 
 ```bash

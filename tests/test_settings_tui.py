@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from convobox.config import AppConfig
@@ -683,6 +682,41 @@ def test_choices_for_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None
     choice_spec = FieldSpec("interaction", "interrupt_preset", "Preset", "choice", ("a", "b"))
     assert settings_tui._choices_for(choice_spec) == ("a", "b")
 
+    bool_spec = FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool")
+    assert settings_tui._choices_for(bool_spec) == ("false", "true")
+
+
+# --- bool fields are pickable, not typed: live UAT feedback that Enter on
+# a bool field opened a raw text buffer where a mistype (e.g. "flase")
+# produced a bare ValueError instead of just being unselectable, 2026-07-22 ---
+
+
+def test_edit_bool_field_cycles_with_space_like_a_choice_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool")
+    keys = iter([" ", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+
+    accepted, value = settings_tui._edit_value_interactive(spec, False)
+
+    assert accepted is True
+    assert value is True
+
+
+def test_edit_bool_field_ignores_typed_keystrokes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Stray printable keys must never reach the buffer for a bool field --
+    # only LEFT/RIGHT/Space (cycling) and Enter/Esc are meaningful.
+    spec = FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool")
+    keys = iter(["f", "l", "a", "s", "e", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+
+    accepted, value = settings_tui._edit_value_interactive(spec, True)
+
+    assert accepted is True
+    # Untouched by the stray keystrokes -- still the original current value.
+    assert value is True
+
 
 def test_toggle_or_cycle_device_field_from_unset_goes_to_first_device(
     monkeypatch: pytest.MonkeyPatch,
@@ -747,7 +781,7 @@ def test_edit_device_field_enter_immediately_keeps_current_value(
 async def test_probe_audio_reuses_audio_devices_functions_and_reports_both_directions(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, object]] = []
 
     def fake_collect(sd: object, kind: str) -> list[dict[str, object]]:
         return [_fake_device(0, "Speaker A" if kind == "output" else "Mic A")]
@@ -756,30 +790,41 @@ async def test_probe_audio_reuses_audio_devices_functions_and_reports_both_direc
         return 0, None
 
     def fake_play_test_tone(sd: object, index: int, seconds: float = 1.0) -> None:
-        calls.append("play_test_tone")
+        calls.append(("play_test_tone", None))
         print("this must not leak to real stdout")  # noqa: T201 -- probe_audio must suppress it
 
-    def fake_record_test(sd: object, index: int, seconds: float = 3.0, rate: int = 16000) -> object:
-        calls.append("record_test")
+    def fake_test_input_device(
+        sd: object, index: int, seconds: float = 3.0, playback_device: int | None = None
+    ) -> tuple[float, float]:
+        # test_input_device (not the lower-level record_test/level_meter)
+        # is what probe_audio must call now -- it's the one function that
+        # actually plays the recording back, matching what
+        # `audio_devices.py --setup` does (live UAT feedback, 2026-07-22:
+        # the old behavior only metered the mic, never let you hear it).
+        calls.append(("test_input_device", playback_device))
         print("this must not leak either")  # noqa: T201
-        return np.zeros(1600, dtype=np.float32)
+        return -30.0, -12.0
 
     monkeypatch.setattr(audio_devices, "collect_devices", fake_collect)
     monkeypatch.setattr(audio_devices, "resolve_spec", fake_resolve)
     monkeypatch.setattr(audio_devices, "play_test_tone", fake_play_test_tone)
-    monkeypatch.setattr(audio_devices, "record_test", fake_record_test)
-    monkeypatch.setattr(audio_devices, "level_meter", lambda audio: (-30.0, -12.0))
+    monkeypatch.setattr(audio_devices, "test_input_device", fake_test_input_device)
     monkeypatch.setattr(audio_devices, "format_level", lambda rms, peak: f"rms={rms} peak={peak}")
     _install_fake_sounddevice(monkeypatch, query_devices=lambda index: {"name": "Speaker A"})
 
     config = _make_config(**{"audio.output_device": "Speaker A, MME", "audio.input_device": "Mic A, MME"})
     result = await settings_tui.probe_audio(config)
 
-    assert calls == ["play_test_tone", "record_test"]
+    assert [name for name, _ in calls] == ["play_test_tone", "test_input_device"]
+    # The output device actually resolved must be handed to the input
+    # test as its playback target, not left to whatever the system
+    # default happens to be.
+    assert calls[1][1] == 0
     assert "speaker OK" in result
     assert "Speaker A" in result
     assert "mic:" in result
     assert "rms=-30.0 peak=-12.0" in result
+    assert "played back" in result
     # The fakes' print() calls must have been swallowed, not reached the
     # real terminal -- probe_audio redirects stdout specifically so a
     # quick [t] test doesn't flicker raw text across the render loop.
