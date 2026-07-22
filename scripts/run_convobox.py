@@ -853,6 +853,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection,
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
     continue_gate: ContinuePromptGate | None = None,
+    approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
@@ -936,6 +937,14 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                 )
             if continue_gate.observe_timeout(now):
                 log.debug("continue-prompt window expired with no reply -- assuming done")
+        if approval_gate is not None:
+            now = time.monotonic()
+            if approval_gate.observe_timeout(now) == "deny":
+                # Silence on a pending approval must never be treated as
+                # consent (ApprovalPromptGate's own central invariant) --
+                # the timeout itself IS the explicit decline to forward.
+                log.info("approval prompt window expired with no reply -- denying")
+                await orchestrator.resolve_pending_approval(False)
         was_playing = playing
         if tui_state is not None:
             if listening_gate is not None and listening_gate.is_paused:
@@ -954,6 +963,7 @@ def _on_backend_event(
     tui_state: ConversationTuiState | None,
     last_spoken_response: LastSpokenResponse,
     event: BackendEvent,
+    approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
     """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
     and full-detail panes from the real backend event stream, AND records
@@ -977,7 +987,19 @@ def _on_backend_event(
     (e.g. catch markdown read-out bugs like Piper saying "asterisk
     asterisk"). tui_state may be None (non-TUI UAT mode), in which case we
     only log.
+
+    APPROVAL_REQUEST starts approval_gate's wait right here, the instant
+    the event arrives -- not on some later poll tick the way
+    continue_gate's wait starts (that one is tied to playback finishing,
+    which this isn't). Orchestrator itself does the TTS announcement (see
+    its own _on_event) -- this hook's job is only the gate bookkeeping,
+    same division of labor as everything else it does here (TUI/logging,
+    not speech).
     """
+    if event.type == BackendEventType.APPROVAL_REQUEST:
+        if approval_gate is not None:
+            approval_gate.start_waiting(time.monotonic())
+        return
     if event.type != BackendEventType.TEXT or not event.content:
         return
     log.info("response: %s", event.content)
@@ -1166,7 +1188,26 @@ async def run(args: argparse.Namespace) -> None:
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
-    adapter = create_backend_adapter(config.backend)
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
+    # tool approval. Off unless the operator deliberately set a phrase --
+    # see InteractionConfig.approval_phrase's own field comment for why
+    # there is no safe default. Currently only claude-code honors
+    # interactive_approval (see create_backend_adapter); other backends
+    # ignore it, same "not every adapter can do everything" stance as the
+    # rest of this feature.
+    approval_detector = (
+        ApprovalDetector(config.interaction.approval_phrase)
+        if config.interaction.approval_phrase
+        else None
+    )
+    approval_gate = (
+        ApprovalPromptGate(approval_detector, config.interaction.approval_timeout_s)
+        if approval_detector is not None
+        else None
+    )
+    adapter = create_backend_adapter(
+        config.backend, interactive_approval=approval_detector is not None
+    )
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
@@ -1194,7 +1235,7 @@ async def run(args: argparse.Namespace) -> None:
         safeword=safeword,
         tts=tts,
         player=player,
-        on_event=lambda e: _on_backend_event(tui_state, last_spoken_response, e),
+        on_event=lambda e: _on_backend_event(tui_state, last_spoken_response, e, approval_gate),
         tier_responses=config.interaction.tier_responses,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
@@ -1463,7 +1504,7 @@ async def run(args: argparse.Namespace) -> None:
     watchdog_task = asyncio.create_task(
         _working_watchdog(
             adapter, player, WorkingIndicator(), orchestrator, interject_queue,
-            segmenter, listening_gate, tui_state, continue_gate,
+            segmenter, listening_gate, tui_state, continue_gate, approval_gate,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
@@ -1563,6 +1604,34 @@ async def run(args: argparse.Namespace) -> None:
                             corrected_text,
                         )
                         text = corrected_text
+                    # Voice-gated tool approval (Phase 3, docs/DESIGN-0.3.0-
+                    # interaction-and-safety.md), checked BEFORE the
+                    # continue-prompt: the higher-stakes decision wins if
+                    # both were somehow pending at once (they shouldn't be
+                    # in practice -- a tool call blocks the turn, so a
+                    # tiered response can't be mid-reveal at the same
+                    # time). "discuss" deliberately does NOT forward the
+                    # utterance to the backend: Claude Code's own turn is
+                    # blocked inside the hook for the whole approval wait
+                    # (see claude_code.py's module docstring) -- there is
+                    # no live channel to actually discuss it on, unlike
+                    # Codex's app-server. Every other outcome (approve/
+                    # deny/discuss/None) consumes the utterance here; none
+                    # of them fall through to normal command routing.
+                    if approval_gate is not None and approval_gate.is_waiting:
+                        approval_outcome = approval_gate.observe_transcript(text, time.monotonic())
+                        if approval_outcome == "approve":
+                            log.info("voice approval: APPROVED -- %r", text)
+                            await orchestrator.resolve_pending_approval(True)
+                        elif approval_outcome == "deny":
+                            log.info("voice approval: DENIED -- %r", text)
+                            await orchestrator.resolve_pending_approval(False)
+                        elif approval_outcome == "discuss":
+                            log.info(
+                                "voice approval: still waiting (discuss, no live "
+                                "channel to answer on) -- %r", text,
+                            )
+                        continue
                     # Response-tiering continue-prompt (docs/DESIGN-0.3.0-
                     # interaction-and-safety.md, Phase 2). Checked here, same
                     # reasoning as barge-in below: an utterance answering the

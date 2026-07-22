@@ -11,6 +11,13 @@ class BackendEventType(str, Enum):
     TOOL_RESULT = "tool_result"
     ERROR = "error"
     DONE = "done"
+    # A tool call is blocked awaiting a voice approve/deny decision (Phase 3,
+    # docs/DESIGN-0.3.0-interaction-and-safety.md). Only adapters with a
+    # runtime-answerable approval channel emit this -- see
+    # BackendAdapter.resolve_pending_approval's docstring for why most
+    # adapters never do. `tool`/`tool_input` carry what's pending, the same
+    # fields TOOL_CALL uses.
+    APPROVAL_REQUEST = "approval_request"
 
 
 class BackendEvent:
@@ -81,6 +88,22 @@ class BackendAdapter(ABC):
         timeout -- a caller that never consumes events() must not deadlock.
         """
         return None
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        """Answer this adapter's currently-pending tool-call approval
+        request, if it has one (see BackendEventType.APPROVAL_REQUEST).
+
+        Returns whether there was one to answer. Default (False, no-op):
+        most adapters have no runtime-answerable approval channel at all
+        (codex.py auto-declines every request itself; opencode has no
+        concept of one) and must not be forced to implement an override
+        just to satisfy this class -- same "default no-op, override where
+        real" shape as wait_listening. A caller answering when nothing is
+        actually pending (a stale gate after a race) also gets False, not
+        an exception -- see ClaudeCodeAdapter's override for the real
+        implementation.
+        """
+        return False
 
     @abstractmethod
     def events(self) -> AsyncGenerator[BackendEvent, None]:

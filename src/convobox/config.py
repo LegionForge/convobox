@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from convobox.confirmword import ConfirmwordDetector
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
 from convobox.resumeword import DEFAULT_RESUME_WORD
@@ -161,6 +162,38 @@ class InteractionConfig(BaseModel):
     # not yet live-UAT-tuned against a real "did that feel laggy or
     # naggy" pass.
     continue_timeout_s: float = 2.5
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): the voice
+    # phrase that approves a pending destructive-action tool call. None
+    # (default) leaves voice approval OFF -- existing sessions behave
+    # exactly as before (claude-code stays in its safe --permission-mode
+    # plan default; codex keeps auto-declining every request). There is
+    # no safe default phrase, same reasoning as ConfirmwordDetector's own
+    # construction-time guard: this must be a phrase the operator chose
+    # deliberately, not one this project picked for them. Currently only
+    # honored by the claude-code backend (see
+    # create_backend_adapter/ClaudeCodeAdapter's interactive_approval) --
+    # codex's own per-call approval channel is real (see codex.py's
+    # module docstring) but wiring voice decisions into it is separate,
+    # not-yet-built work.
+    approval_phrase: str | None = None
+    # How long ConvoBox waits for a voice decision before treating silence
+    # as deny (ApprovalPromptGate.observe_timeout) -- longer than
+    # continue_timeout_s on purpose: deciding whether to approve a real
+    # destructive action deserves more time than a quick "continue/stop"
+    # reflex, and silence-denies is the safe direction here regardless.
+    approval_timeout_s: float = 30.0
+
+    @field_validator("approval_phrase")
+    @classmethod
+    def _validate_approval_phrase(cls, v: str | None) -> str | None:
+        if v is not None:
+            # Raises ValueError (with the real reason) if the phrase is
+            # empty or made up entirely of common affirmations/fillers --
+            # fail fast at config load, not at the first live approval
+            # prompt. ConfirmwordDetector is the authority on this; not
+            # duplicated here.
+            ConfirmwordDetector(v)
+        return v
 
 
 class SafewordConfig(BaseModel):

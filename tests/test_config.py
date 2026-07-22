@@ -6,6 +6,7 @@ import pytest
 
 from convobox.config import (
     AudioConfig,
+    InteractionConfig,
     aec_estimate_path,
     read_aec_estimate,
     resolve_config_path,
@@ -96,3 +97,27 @@ def test_write_aec_estimate_never_raises_when_the_directory_does_not_exist(
     config_path = tmp_path / "nonexistent-dir" / "convobox.yaml"
     write_aec_estimate(config_path, 222, 180.0, 32.0)  # must not raise
     assert read_aec_estimate(config_path) is None
+
+
+# --- InteractionConfig.approval_phrase: voice-gated tool approval (Phase 3)
+# is OFF by default, and reuses ConfirmwordDetector's own construction-time
+# safety guard -- no dedicated logic duplicated here. ---
+
+
+def test_approval_phrase_defaults_to_none() -> None:
+    assert InteractionConfig().approval_phrase is None
+
+
+def test_approval_phrase_accepts_a_distinctive_phrase() -> None:
+    assert InteractionConfig(approval_phrase="alpha bravo delta").approval_phrase == (
+        "alpha bravo delta"
+    )
+
+
+def test_approval_phrase_rejects_a_common_affirmation_only_phrase() -> None:
+    with pytest.raises(ValueError, match="common affirmations"):
+        InteractionConfig(approval_phrase="yes")
+
+
+def test_approval_timeout_s_has_a_sane_default() -> None:
+    assert InteractionConfig().approval_timeout_s == 30.0
