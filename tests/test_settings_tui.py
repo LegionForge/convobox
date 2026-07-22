@@ -12,6 +12,7 @@ from scripts import settings_tui
 from scripts.settings_tui import (
     FieldSpec,
     TuiState,
+    _highlight_keys,
     backup_config,
     render,
     render_modal,
@@ -438,6 +439,76 @@ def test_render_modal_shows_choice_selector() -> None:
     joined = "\n".join(lines)
     assert "Options:" in joined
     assert "| > conversational" in joined
+
+
+# --- key-name highlighting: live UAT feedback that a long help_text wall
+# of prose (e.g. a 400+ character field help string) buried the actual
+# actionable keys with no visual distinction from the surrounding
+# sentence -- see _highlight_keys's own docstring. ---
+
+
+def test_highlight_keys_wraps_recognized_key_names() -> None:
+    result = _highlight_keys("Press Enter to accept, Esc to cancel")
+    assert "\x1b[1m\x1b[36mEnter\x1b[0m" in result
+    assert "\x1b[1m\x1b[36mEsc\x1b[0m" in result
+    # Plain prose around the keys is untouched.
+    assert "Press " in result
+    assert " to accept, " in result
+
+
+def test_highlight_keys_is_word_boundary_aware() -> None:
+    # "Entered"/"Uploads" must not trip a highlight on the "Enter"/"Up"
+    # substring -- a false positive here would color a random hostname or
+    # everyday word.
+    result = _highlight_keys("The value was Entered and Uploads succeeded")
+    assert "\x1b[" not in result
+
+
+def test_highlight_keys_leaves_plain_text_with_no_keys_unchanged() -> None:
+    assert _highlight_keys("nothing actionable here") == "nothing actionable here"
+
+
+def test_render_legend_bar_is_reverse_video(tmp_path: Path) -> None:
+    # The bottom "Keys: ..." bar must be visually unmissable (live UAT
+    # feedback: a plain-text legend line was too easy to skim past while
+    # reading a long help panel) -- reverse-video, same treatment the
+    # selected section tab already gets.
+    config = AppConfig()
+    state = TuiState(path=tmp_path / "convobox.yaml", original=config, working=config.model_copy(deep=True))
+
+    lines = render(state, 120, 30)
+    legend_lines = [line for line in lines if "Keys:" in line]
+    assert len(legend_lines) == 1
+    assert legend_lines[0].startswith("\x1b[7m")
+    assert legend_lines[0].rstrip().endswith("\x1b[0m")
+
+
+def test_render_help_panel_highlights_key_names_in_field_help_text(tmp_path: Path) -> None:
+    config = AppConfig()
+    state = TuiState(path=tmp_path / "convobox.yaml", original=config, working=config.model_copy(deep=True))
+    state.selected_section = [s.key for s in state.sections].index("audio")
+    fields = state.current_fields()
+    state.selected_field = [f.key for f in fields].index("input_device")
+
+    joined = "\n".join(render(state, 140, 40))
+    # input_device's help_text says "Space/Left/Right cycles..." -- each
+    # of those key names should be individually highlighted.
+    assert "\x1b[1m\x1b[36mSpace\x1b[0m" in joined
+    assert "\x1b[1m\x1b[36mLeft\x1b[0m" in joined
+    assert "\x1b[1m\x1b[36mRight\x1b[0m" in joined
+
+
+def test_render_modal_header_bar_is_reverse_video() -> None:
+    lines = render_modal("Confirm Save", "Save changes?", [], "", 100, 30)
+    header_bar = next(line for line in lines if "Esc cancel | Enter confirm" in line)
+    assert header_bar.startswith("\x1b[7m")
+    assert header_bar.rstrip().endswith("\x1b[0m")
+
+
+def test_render_modal_footer_highlights_esc_and_enter() -> None:
+    lines = render_modal("Confirm Save", "Save changes?", [], "", 100, 30)
+    joined = "\n".join(lines)
+    assert "\x1b[1m\x1b[36mEsc\x1b[0m cancel | \x1b[1m\x1b[36mEnter\x1b[0m accept" in joined
 
 
 # --- Audio device picker (JP asked for "same logic as
