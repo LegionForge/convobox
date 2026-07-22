@@ -112,6 +112,45 @@ def render_question_for_speech(tool_input: str | None) -> str | None:
     return "The agent is asking: " + " ".join(parts)
 
 
+# Common tool-input keys worth reading aloud, tried in this order -- a
+# short, concrete description of WHAT is pending beats reciting raw JSON.
+# Deliberately small and generic (not backend-specific): claude_code.py's
+# TOOL_CALL events already use these same shapes (Bash's "command",
+# Write/Edit's "file_path").
+_APPROVAL_SUMMARY_KEYS = ("command", "file_path", "path")
+_APPROVAL_SUMMARY_MAX_CHARS = 200
+
+
+def render_approval_request_for_speech(tool: str | None, tool_input: str | None) -> str:
+    """Spoken announcement for a pending BackendEventType.APPROVAL_REQUEST
+    (Phase 3, docs/DESIGN-0.3.0-interaction-and-safety.md).
+
+    Deliberately doesn't name the approval phrase itself -- Orchestrator
+    has no config access (same separation as resume_word/pause phrases,
+    which also live outside this class); the caller's own gate/prompt
+    handles phrase-specific instructions. Never raises on malformed
+    ``tool_input`` (same defensive policy as render_question_for_speech) --
+    worst case is a plain "approval needed to run X" with no detail.
+    """
+    name = tool or "a tool"
+    detail = None
+    if tool_input:
+        try:
+            parsed = json.loads(tool_input)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in _APPROVAL_SUMMARY_KEYS:
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    detail = value.strip()
+                    break
+    summary = f"{name}: {detail}" if detail else name
+    if len(summary) > _APPROVAL_SUMMARY_MAX_CHARS:
+        summary = summary[: _APPROVAL_SUMMARY_MAX_CHARS - 1] + "…"
+    return f"Approval needed to run {summary}. Say your approval phrase to allow it, or say no to deny it."
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -277,6 +316,20 @@ class Orchestrator:
                 # TUI updates) over a bug in an OBSERVER, not the core
                 # routing/speech responsibility this class exists for.
                 logger.warning("on_event observer raised; ignoring", exc_info=True)
+        if event.type == BackendEventType.APPROVAL_REQUEST:
+            # Phase 3: a gated tool call is blocked on a voice decision
+            # (see claude_code.py's module docstring for the mechanism).
+            # Always logged (the honest status a silent hook-blocked
+            # stdout can't give any other way -- same reasoning as the
+            # question-tool announcement below), and spoken when a voice
+            # path exists. Not tiered, same as the question tool: a
+            # pending decision must be delivered whole.
+            approval_announcement = render_approval_request_for_speech(event.tool, event.tool_input)
+            logger.info("%s", approval_announcement)
+            if self._tts is not None and self._player is not None:
+                self._cancel_speak_task()
+                self._speak_task = asyncio.create_task(self._speak(approval_announcement))
+            return
         if event.type == BackendEventType.TOOL_CALL and event.tool == _QUESTION_TOOL:
             # [L9]: this tool BLOCKS the backend's turn until answered, and
             # an unheard question deadlocks the whole voice session. Always
@@ -343,6 +396,13 @@ class Orchestrator:
         # task's own work is just the synthesize() await.
         self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak(spoken))
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        """Passthrough to the adapter's own resolve_pending_approval (see
+        BackendAdapter's docstring) -- kept on Orchestrator so callers
+        (run_convobox.py's main loop) don't reach into ._adapter directly,
+        same encapsulation as has_more_to_reveal/speak_more."""
+        return await self._adapter.resolve_pending_approval(approved)
 
     def has_more_to_reveal(self) -> bool:
         """Whether the current (most recently tiered) response has
