@@ -8,7 +8,12 @@ import pytest
 from huggingface_hub.errors import LocalEntryNotFoundError
 
 from convobox.config import STTConfig
-from convobox.stt.transcriber import LocalTranscriber, _memory_diagnostic, _build_whisper_model
+from convobox.stt.transcriber import (
+    LocalTranscriber,
+    _memory_diagnostic,
+    _build_whisper_model,
+    _register_cuda_dll_directories,
+)
 
 
 @dataclass
@@ -391,3 +396,76 @@ def test_gpu_unavailable_fallback_does_not_apply_to_injected_test_models() -> No
     transcriber = LocalTranscriber(_config(), model_factory=lambda: failing_model)
     transcriber.transcribe(np.zeros(16000, dtype=np.float32))
     assert transcriber._device_override is None
+
+
+# --- _register_cuda_dll_directories: fixes the real "Library cublas64_12.dll
+# is not found or cannot be loaded" failure (live-confirmed on an NVIDIA
+# 4060, 2026-07-22). os.add_dll_directory ALONE does not fix this (also
+# live-confirmed) -- prepending the same directories to PATH does; see the
+# function's own docstring for the root-cause reasoning. ---
+
+
+def test_register_cuda_dll_directories_prepends_bin_dirs_to_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    fake_locations = {}
+    for name in ("cublas", "cuda_nvrtc", "cuda_runtime"):
+        pkg_dir = tmp_path / name
+        bin_dir = pkg_dir / "bin"
+        bin_dir.mkdir(parents=True)
+        fake_locations[f"nvidia.{name}"] = pkg_dir
+
+    def fake_find_spec(package: str):
+        location = fake_locations.get(package)
+        if location is None:
+            return None
+        spec = MagicMock()
+        spec.submodule_search_locations = [str(location)]
+        return spec
+
+    monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
+    monkeypatch.setattr("os.add_dll_directory", MagicMock(), raising=False)
+    monkeypatch.setenv("PATH", "C:\\Windows\\System32")
+
+    _register_cuda_dll_directories()
+
+    import os
+
+    path_entries = os.environ["PATH"].split(os.pathsep)
+    for name in ("cublas", "cuda_nvrtc", "cuda_runtime"):
+        assert str(tmp_path / name / "bin") in path_entries
+
+
+def test_register_cuda_dll_directories_is_a_noop_off_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    find_spec = MagicMock()
+    monkeypatch.setattr("importlib.util.find_spec", find_spec)
+
+    _register_cuda_dll_directories()
+
+    find_spec.assert_not_called()
+
+
+def test_register_cuda_dll_directories_is_a_noop_when_the_cuda_extra_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "C:\\Windows\\System32")
+    monkeypatch.setattr("importlib.util.find_spec", lambda package: None)
+    monkeypatch.setattr("os.add_dll_directory", MagicMock(), raising=False)
+
+    _register_cuda_dll_directories()  # must not raise
+
+    import os
+
+    assert os.environ["PATH"] == "C:\\Windows\\System32"
