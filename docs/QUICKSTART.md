@@ -17,6 +17,7 @@ Optional extras, installed only if you want them:
 
 ```bash
 uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wheels)
+uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB, CUDA-only
 uv sync --extra dev        # test/lint tooling
 ```
 
