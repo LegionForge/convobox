@@ -1,5 +1,9 @@
 # LegionForge - ConvoBox
 
+[![CI](https://github.com/LegionForge/convobox/actions/workflows/ci.yml/badge.svg)](https://github.com/LegionForge/convobox/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+
 A local, backend-agnostic voice frontend for CLI coding agents. It sits
 between you and whichever coding agent CLI you're driving — Claude Code,
 Codex, OpenCode, and eventually others — and lets you work by voice
@@ -32,6 +36,17 @@ cp convobox.example.yaml convobox.yaml # edit backend.url / tts.voice as needed
 python scripts/run_convobox.py --text "Reply with one short sentence: it works."
 ```
 
+What that actually looks like (real output, `backend: codex` in this case):
+
+```
+2026-07-22 15:25:53 WARNING backend.working_dir is unset: the codex agent will run in ConvoBox's own directory and can modify its source. Set backend.working_dir (or pass --working-dir) to an isolated workspace. See docs/DESIGN-backend-sandboxing.md.
+2026-07-22 15:25:55 INFO backend=codex  voice=en_GB-alba-medium  safeword='stop stop stop'  pid=35228
+2026-07-22 15:26:10 INFO response: it works.
+```
+
+(That working-dir warning is real and worth heeding — see
+[docs/DESIGN-backend-sandboxing.md](docs/DESIGN-backend-sandboxing.md).)
+
 If you hear a spoken reply, the whole pipeline (backend → TTS → speakers)
 is working. Then go live and talk to it:
 
@@ -60,6 +75,7 @@ Optional extras, installed only if you want them:
 
 ```bash
 uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wheels)
+uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB, CUDA-only
 uv sync --extra dev        # test/lint tooling
 ```
 
@@ -110,6 +126,12 @@ no services, daemons, or registry/system entries. To remove it:
    need it for other Hugging Face–based tools — it isn't ConvoBox-specific.
 
 ## What ConvoBox does
+
+**This is a developer tool, not a general-purpose voice assistant.**
+ConvoBox has nothing to say if you don't already run a coding-agent CLI —
+there's no standalone use case for it today, by design rather than by
+oversight. If that changes, it'll be a deliberate new target added
+alongside this one, not a reframing of what's here.
 
 ConvoBox is not tied to any single backend: the goal is a portable voice
 setup you can point at whatever coding-agent CLI you're using that day,
