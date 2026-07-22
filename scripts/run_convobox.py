@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import importlib.metadata
 import logging
 import math
 import os
@@ -849,6 +850,34 @@ def _resolve_device(cli_device: str | None, config_device: str | None) -> str | 
     return device
 
 
+def _resolve_convobox_version() -> str:
+    """Best-effort package version for the startup announcement.
+
+    Falls back to "dev" rather than raising -- a source checkout without
+    installed metadata (e.g. a fresh clone before `uv sync`/`pip install
+    -e .` has registered the package) must never crash startup over a
+    cosmetic version string.
+    """
+    try:
+        return importlib.metadata.version("convobox")
+    except importlib.metadata.PackageNotFoundError:
+        return "dev"
+
+
+def startup_announcement(version: str) -> str:
+    """The spoken "I'm ready" line, once STT/TTS/backend setup is done.
+
+    Exists because the FIRST utterance being silently discarded (root
+    cause: cuBLAS delay-loading on the first real transcribe() call,
+    fixed at its source in LocalTranscriber._warm_up) still left no
+    signal for the user that ConvoBox was actually ready to hear them --
+    "say something and see if it works" isn't a great first experience.
+    A pure function (not inlined at the call site) so the exact wording
+    is unit-testable without a real TTS/audio stack.
+    """
+    return f"LegionForge ConvoBox, version {version}, ready and standing by."
+
+
 async def _working_watchdog(  # type: ignore[no-untyped-def]
     adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection,
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
@@ -1453,6 +1482,19 @@ async def run(args: argparse.Namespace) -> None:
                 if tui_state is not None:
                     tui_state.barge_in_active = True
             yield processed
+
+    # Spoken readiness cue: by this point STT has already absorbed any
+    # GPU-fallback cost (LocalTranscriber's own construction-time warm-up)
+    # and the backend/TTS/mic setup above is done, so this really does
+    # mean "say something now, it'll be heard" -- not just "the process
+    # didn't crash yet." Goes through the same tts/player path a normal
+    # response would (echo-filter registration included, via
+    # SpokenTextRecorder), so it can't be mistaken for a live barge-in
+    # trigger and integrates with AEC's reference feed like any other
+    # spoken turn.
+    announcement = startup_announcement(_resolve_convobox_version())
+    log.info("%s", announcement)
+    await player.play_stream(tts.synthesize_stream(announcement), tts.sample_rate)
 
     log.info("listening (Ctrl+C to exit; %r hard-stops the agent)",
              config.safeword.hard_stop_phrases[0])
