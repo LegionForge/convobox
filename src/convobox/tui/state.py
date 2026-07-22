@@ -19,6 +19,16 @@ TuiStatus = Literal["listening", "capturing", "transcribing", "working", "speaki
 
 Speaker = Literal["user", "assistant", "system"]
 
+# Fraction of the gap to a QUIETER reading closed per chunk (docs/UAT-
+# checklist.md [U7]: raw per-chunk RMS "reads as too flickery"). Asymmetric
+# on purpose -- a real VU meter's attack/decay behavior: jump immediately to
+# a louder reading (never lag behind actual speech onset) but ease down from
+# a louder one, so a single quiet chunk between words doesn't make the meter
+# visibly stutter. Tuned by feel, not measurement; retune here if a live
+# session still reads as flickery or as too sluggish to reflect real level
+# changes.
+_MIC_LEVEL_DECAY = 0.3
+
 
 @dataclass(frozen=True)
 class TranscriptTurn:
@@ -55,12 +65,13 @@ class ConversationTuiState:
     - heartbeat_elapsed_s: continuous silent-busy seconds from
       WorkingIndicator.silent_busy_s, None when not silently busy (backend
       idle, or audio is already playing its own feedback).
-    - mic_level_db: live mic RMS in dBFS, updated per mic chunk (post-AEC
-      if echo cancellation is on -- the signal VAD/STT actually sees).
-      None until the first chunk arrives. Speaker-side live level is a
-      deliberately deferred candidate (see run_convobox.py's comment at
-      the wiring site) -- it would need a cross-thread write from the
-      playback callback, more care than mic level's same-thread update.
+    - mic_level_db: live mic RMS in dBFS, smoothed (see update_mic_level)
+      from the raw per-chunk reading (post-AEC if echo cancellation is
+      on -- the signal VAD/STT actually sees). None until the first chunk
+      arrives. Speaker-side live level is a deliberately deferred
+      candidate (see run_convobox.py's comment at the wiring site) -- it
+      would need a cross-thread write from the playback callback, more
+      care than mic level's same-thread update.
     - transcript_scroll/detail_scroll: lines scrolled up from the bottom
       for each pane (0 = live -- always show the latest, like a chat
       app's default "stick to bottom"). Nudged by keyboard-driven scroll
@@ -93,6 +104,16 @@ class ConversationTuiState:
     focus_pane: Literal["transcript", "detail"] = "detail"
     aec_dump_active: bool = False
     aec_dump_frames: int = 0
+
+    def update_mic_level(self, raw_db: float) -> None:
+        """Feed one raw per-chunk dBFS reading through the decay smoothing.
+
+        First reading is taken as-is (no prior level to decay from).
+        """
+        if self.mic_level_db is None or raw_db >= self.mic_level_db:
+            self.mic_level_db = raw_db
+        else:
+            self.mic_level_db += (raw_db - self.mic_level_db) * _MIC_LEVEL_DECAY
 
     def add_turn(self, speaker: Speaker, text: str, timestamp: str | None = None) -> None:
         self.turns.append(

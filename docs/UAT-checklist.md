@@ -694,21 +694,26 @@ section is the live-mic pass that closes the gap.
 - **[U8] Live mic level (dBFS), added to the same diagnostics line
   (2026-07-15).** `mic: -XXdBFS`, updated per mic chunk (post-AEC if
   echo cancellation is on -- the same signal VAD/STT sees), reusing
-  `audio_devices.level_meter()`'s existing RMS math. Deliberately NOT
-  smoothed -- unit-tested and a real rendered-frame smoke test confirm
-  the number appears/formats correctly, but the raw per-chunk value has
-  never been watched live. If it reads as too flickery to be useful in
-  practice, that's the first improvement to make (a decay-based VU-meter
-  smoothing, same idea `audio_devices.py --setup`'s own live meter
-  already uses) -- not something to guess at blind here. Speaker-side
-  live level was deliberately NOT built this pass: it would need a
-  cross-thread write from `AudioPlayer.on_block_played` (the playback
-  THREAD, not the async mic loop), more care than this same-thread
-  update needed -- noted as a follow-up candidate, not attempted
-  half-verified. Confirm during a live run: the number moves with real
-  speech/silence, tracks roughly what `audio_devices.py --test-input`
-  reports for the same device, and reads AEC-cancelled (much quieter)
-  during the assistant's own playback when AEC is on and converged.
+  `audio_devices.level_meter()`'s existing RMS math. **Now smoothed
+  (2026-07-16)**, per this entry's own flagged next step:
+  `ConversationTuiState.update_mic_level()` applies asymmetric
+  attack/decay (jumps to a louder reading immediately, eases down 30% of
+  the way per chunk from a quieter one) instead of showing the raw
+  per-chunk RMS. Unit-tested (`tests/test_conversation_tui.py`), but the
+  0.3 decay constant was tuned by feel, not against a live session --
+  confirm during a live run it now reads as a smooth meter rather than
+  flickering, and isn't so heavily damped that real level changes (e.g.
+  moving away from the mic) feel sluggish to show up; retune
+  `_MIC_LEVEL_DECAY` in `src/convobox/tui/state.py` if either direction
+  is off. Speaker-side live level was deliberately NOT built this pass:
+  it would need a cross-thread write from `AudioPlayer.on_block_played`
+  (the playback THREAD, not the async mic loop), more care than this
+  same-thread update needed -- noted as a follow-up candidate, not
+  attempted half-verified. Confirm during a live run: the number moves
+  with real speech/silence, tracks roughly what
+  `audio_devices.py --test-input` reports for the same device, and reads
+  AEC-cancelled (much quieter) during the assistant's own playback when
+  AEC is on and converged.
 - **[U9] Scrollable panes, added 2026-07-20.** Reported broken (no PgUp/
   PgDn/other shortcuts worked at all) -- traced end-to-end before fixing
   per this repo's "verify a bug before proposing a fix" rule: the
@@ -741,6 +746,20 @@ section is the live-mic pass that closes the gap.
   mechanisms, for a platform (Windows) that's also the only tested one.
   Keyboard scrolling covers the reported problem; flagged in
   `docs/ROADMAP.md` as a scoped follow-up rather than bundled in here.
+- **[U10] Silent-transition acknowledgments in the transcript pane, added
+  2026-07-16.** Three previously-silent transitions now add a `system`
+  turn to the TUI transcript (visual only -- no audio earcon, since that
+  would need to go through `AudioPlayer`/the AEC reference feed, out of
+  scope here): pausing listening (`"paused listening -- say '<resume word>'
+  to resume"`), resuming (`"resumed listening"`), and a forced VAD cutoff
+  at `max_utterance_s` (`"cut off at the time limit -- still your
+  turn"`). Addresses `docs/DESIGN-barge-in.md`'s open question about
+  pause/resume feeling "unnervingly silent" and this doc's own **[V5]**
+  note that a forced cutoff was "purely a log-line signal." Not yet
+  watched live: confirm the wording reads as reassuring rather than
+  alarming in the transcript scroll, and that it doesn't fire on the
+  common/expected path (i.e. doesn't show up on ordinary turns with no
+  pause/cutoff involved).
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 

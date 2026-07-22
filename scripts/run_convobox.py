@@ -1418,18 +1418,18 @@ async def run(args: argparse.Namespace) -> None:
             processed = canceller.process(chunk) if canceller is not None else chunk
             if tui_state is not None:
                 # Post-AEC (if on): the signal VAD/STT actually sees, not
-                # the raw pre-cancellation mic. Live per-chunk RMS -- no
-                # smoothing (see docs/UAT-checklist.md [U7]'s note that
-                # this hasn't been watched live; if it reads as too
-                # flickery in practice, that's the first thing to add,
-                # not something to guess at blind here). Speaker-side
-                # level is a deliberately deferred candidate: it would
-                # need a cross-thread write from AudioPlayer.on_block_played
-                # (the playback THREAD, not this async loop), more care
-                # than this same-thread mic update needs.
+                # the raw pre-cancellation mic. Decay-smoothed (see
+                # ConversationTuiState.update_mic_level) per docs/UAT-
+                # checklist.md [U7]'s flagged next step, now built rather
+                # than left as raw per-chunk RMS. Speaker-side level is a
+                # deliberately deferred candidate: it would need a
+                # cross-thread write from AudioPlayer.on_block_played (the
+                # playback THREAD, not this async loop), more care than
+                # this same-thread mic update needs.
                 import audio_devices as ad
 
-                tui_state.mic_level_db, _ = ad.level_meter(processed)
+                raw_db, _ = ad.level_meter(processed)
+                tui_state.update_mic_level(raw_db)
             playing = player.is_playing()
             if canceller is not None and was_playing and not playing:
                 # Response just finished: one stats line per response.
@@ -1577,6 +1577,14 @@ async def run(args: argparse.Namespace) -> None:
                     gate_action = listening_gate.observe(text)
                     if gate_action == "resume":
                         log.info("resumed listening (resume word matched): %r", text)
+                        if tui_state is not None:
+                            # Resume is otherwise completely silent (docs/
+                            # DESIGN-barge-in.md's open question on this --
+                            # "leaning toward a short acknowledgment"). A
+                            # visual one only: an audio earcon would need to
+                            # go through AudioPlayer/the AEC reference feed,
+                            # which is out of scope here.
+                            tui_state.add_turn("system", "resumed listening")
                         continue
                     if gate_action == "drop":
                         log.debug("dropped (paused, not the resume word): %r", text)
@@ -1590,6 +1598,11 @@ async def run(args: argparse.Namespace) -> None:
                             "work; say %r to resume",
                             text, config.interaction.resume_word,
                         )
+                        if tui_state is not None:
+                            tui_state.add_turn(
+                                "system",
+                                f"paused listening -- say {config.interaction.resume_word!r} to resume",
+                            )
                         continue
                     # The glossary is intentionally downstream of every
                     # safety-critical raw-transcript check above.  A configured
@@ -1739,6 +1752,12 @@ async def run(args: argparse.Namespace) -> None:
                     "  [FORCED: cut at max_utterance_s, still your turn]"
                     if segmenter.was_forced else "",
                 )
+                if segmenter.was_forced and tui_state is not None:
+                    # Otherwise purely a log-line signal (docs/UAT-checklist.md
+                    # [V5]) -- easy to read as ConvoBox just stopped listening
+                    # to you mid-sentence rather than a deliberate, resumable
+                    # cutoff.
+                    tui_state.add_turn("system", "cut off at the time limit -- still your turn")
                 if barged_in and not is_hard_stop:
                     # The backend believes its whole response was delivered; it
                     # wasn't. The marker is our version of realtime APIs'
