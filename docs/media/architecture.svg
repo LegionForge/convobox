@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 480" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>ConvoBox architecture: mic to VAD to STT to safeword check to orchestrator to backend adapters to TTS to speakers</title>
+  <style>
+    text { fill: #1f2328; }
+    .caption { fill: #57606a; }
+    .box { stroke-width: 1.5; }
+    .box-capture { fill: #dbeafe; stroke: #3b82f6; }
+    .box-decide  { fill: #ede9fe; stroke: #8b5cf6; }
+    .box-backend { fill: #dcfce7; stroke: #22c55e; }
+    .box-output  { fill: #ffedd5; stroke: #f97316; }
+    .label { font-size: 15px; font-weight: 600; }
+    .sublabel { font-size: 11.5px; }
+    .arrow { stroke: #57606a; stroke-width: 1.75; fill: none; marker-end: url(#arrowhead); }
+    .line  { stroke: #57606a; stroke-width: 1.75; fill: none; }
+    .arrow-dashed { stroke: #9ca3af; stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; marker-end: url(#arrowhead-muted); }
+    .badge-text { font-size: 10.5px; fill: #57606a; }
+    .badge-box { fill: none; stroke: #8b5cf6; stroke-width: 1.25; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+      .caption { fill: #9198a1; }
+      .box-capture { fill: #10233f; stroke: #58a6ff; }
+      .box-decide  { fill: #241a3f; stroke: #a78bfa; }
+      .box-backend { fill: #0f2a1a; stroke: #4ade80; }
+      .box-output  { fill: #3a2410; stroke: #fb923c; }
+      .arrow, .line { stroke: #9198a1; }
+      .arrow-dashed { stroke: #6e7681; }
+      .badge-text { fill: #9198a1; }
+      .badge-box  { stroke: #a78bfa; }
+    }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#57606a" />
+    </marker>
+    <marker id="arrowhead-muted" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#9ca3af" />
+    </marker>
+  </defs>
+
+  <text x="500" y="26" text-anchor="middle" font-size="16" font-weight="700">How ConvoBox turns speech into agent turns and back</text>
+  <text x="555" y="45" text-anchor="middle" class="caption" font-size="11">acoustic path back to the mic — AEC or headphones keep this from becoming self-barge-in</text>
+
+  <!-- Row A: capture + understand -->
+  <g class="box box-capture"><rect x="65" y="64" width="150" height="62" rx="10"/></g>
+  <text x="140" y="90" text-anchor="middle" class="label">Microphone</text>
+  <text x="140" y="108" text-anchor="middle" class="sublabel">continuous capture</text>
+
+  <g class="box box-capture"><rect x="245" y="64" width="150" height="62" rx="10"/></g>
+  <text x="320" y="90" text-anchor="middle" class="label">VAD</text>
+  <text x="320" y="108" text-anchor="middle" class="sublabel">Silero, segments speech</text>
+
+  <g class="box box-capture"><rect x="425" y="64" width="150" height="62" rx="10"/></g>
+  <text x="500" y="90" text-anchor="middle" class="label">STT</text>
+  <text x="500" y="108" text-anchor="middle" class="sublabel">faster-whisper</text>
+
+  <g class="box box-decide"><rect x="605" y="64" width="150" height="62" rx="10"/></g>
+  <text x="680" y="85" text-anchor="middle" class="label">Safeword check</text>
+  <text x="680" y="102" text-anchor="middle" class="sublabel">hard stop, checked</text>
+  <text x="680" y="115" text-anchor="middle" class="sublabel">before anything else</text>
+
+  <g class="box box-decide"><rect x="785" y="64" width="150" height="62" rx="10"/></g>
+  <text x="860" y="85" text-anchor="middle" class="label">Orchestrator</text>
+  <text x="860" y="102" text-anchor="middle" class="sublabel">busy / idle routing:</text>
+  <text x="860" y="115" text-anchor="middle" class="sublabel">command · interject · stop</text>
+
+  <path class="arrow" d="M215,95 L245,95"/>
+  <path class="arrow" d="M395,95 L425,95"/>
+  <path class="arrow" d="M575,95 L605,95"/>
+  <path class="arrow" d="M755,95 L785,95"/>
+
+  <!-- Fan down from Orchestrator to the three backend adapters -->
+  <path class="line" d="M860,126 L860,165"/>
+  <path class="line" d="M130,165 L860,165"/>
+  <path class="arrow" d="M130,165 L130,212"/>
+  <path class="arrow" d="M390,165 L390,212"/>
+  <path class="arrow" d="M650,165 L650,212"/>
+
+  <!-- Row B: three backend adapters -->
+  <g class="box box-backend"><rect x="20" y="212" width="220" height="62" rx="10"/></g>
+  <text x="130" y="238" text-anchor="middle" class="label">OpenCode</text>
+  <text x="130" y="255" text-anchor="middle" class="sublabel">HTTP + SSE, local server</text>
+
+  <g class="box box-backend"><rect x="280" y="212" width="220" height="62" rx="10"/></g>
+  <text x="390" y="238" text-anchor="middle" class="label">Claude Code</text>
+  <text x="390" y="255" text-anchor="middle" class="sublabel">stream-json subprocess</text>
+
+  <g class="box box-backend"><rect x="540" y="212" width="220" height="62" rx="10"/></g>
+  <text x="650" y="238" text-anchor="middle" class="label">Codex</text>
+  <text x="650" y="255" text-anchor="middle" class="sublabel">app-server (JSON-RPC)</text>
+
+  <rect x="305" y="278" width="170" height="20" rx="10" class="badge-box"/>
+  <text x="390" y="292" text-anchor="middle" class="badge-text">🔒 voice-gated approval</text>
+
+  <!-- Converge up-to-down into TTS -->
+  <path class="line" d="M130,274 L130,325"/>
+  <path class="line" d="M650,274 L650,325"/>
+  <path class="line" d="M390,274 L390,325"/>
+  <path class="line" d="M130,325 L650,325"/>
+  <path class="arrow" d="M400,325 L400,352"/>
+
+  <!-- Row C: TTS + speakers -->
+  <g class="box box-output"><rect x="300" y="352" width="200" height="62" rx="10"/></g>
+  <text x="400" y="378" text-anchor="middle" class="label">TTS</text>
+  <text x="400" y="396" text-anchor="middle" class="sublabel">Piper, stripped of code/diffs</text>
+
+  <g class="box box-output"><rect x="540" y="352" width="200" height="62" rx="10"/></g>
+  <text x="640" y="378" text-anchor="middle" class="label">Speakers</text>
+  <text x="640" y="396" text-anchor="middle" class="sublabel">or headphones (recommended)</text>
+
+  <path class="arrow" d="M500,383 L540,383"/>
+
+  <!-- Feedback path: speakers back to mic, routed clear of every box -->
+  <path class="arrow-dashed" d="M740,383 L970,383 L970,50 L140,50 L140,64"/>
+
+  <text x="500" y="452" text-anchor="middle" class="caption" font-size="12">Same adapter interface (send_text · send_interject · send_hard_stop · is_busy) across all three backends — swap the CLI, keep the voice loop.</text>
+</svg>

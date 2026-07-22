@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>ConvoBox use cases</title>
+  <style>
+    text { fill: #1f2328; }
+    .caption { fill: #57606a; }
+    .card { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .cardtitle { font-size: 13.5px; font-weight: 700; }
+    .desc { font-size: 10.8px; fill: #57606a; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+      .caption { fill: #9198a1; }
+      .card { fill: #151b23; stroke: #30363d; }
+      .desc { fill: #9198a1; }
+    }
+  </style>
+
+  <text x="500" y="26" text-anchor="middle" font-size="16" font-weight="700">What people use ConvoBox for</text>
+
+  <!-- Row 1 -->
+  <g>
+    <rect x="30" y="60" width="220" height="150" rx="12" class="card"/>
+    <text x="140" y="100" text-anchor="middle" font-size="30">🎙️</text>
+    <text x="140" y="132" text-anchor="middle" class="cardtitle">Voice-operated coding</text>
+    <text x="140" y="154" text-anchor="middle" class="desc">Drive edits, refactors, and</text>
+    <text x="140" y="170" text-anchor="middle" class="desc">commands hands-free.</text>
+  </g>
+
+  <g>
+    <rect x="270" y="60" width="220" height="150" rx="12" class="card"/>
+    <text x="380" y="100" text-anchor="middle" font-size="30">📄</text>
+    <text x="380" y="132" text-anchor="middle" class="cardtitle">Talk to your files</text>
+    <text x="380" y="154" text-anchor="middle" class="desc">Point it at logs, configs, or</text>
+    <text x="380" y="170" text-anchor="middle" class="desc">docs and ask about them.</text>
+  </g>
+
+  <g>
+    <rect x="510" y="60" width="220" height="150" rx="12" class="card"/>
+    <text x="620" y="100" text-anchor="middle" font-size="30">🧠</text>
+    <text x="620" y="132" text-anchor="middle" class="cardtitle">Analysis &amp; reasoning</text>
+    <text x="620" y="154" text-anchor="middle" class="desc">Think out loud through a</text>
+    <text x="620" y="170" text-anchor="middle" class="desc">design question or a bug.</text>
+  </g>
+
+  <g>
+    <rect x="750" y="60" width="220" height="150" rx="12" class="card"/>
+    <text x="860" y="100" text-anchor="middle" font-size="30">🧪</text>
+    <text x="860" y="132" text-anchor="middle" class="cardtitle">Live UAT narration</text>
+    <text x="860" y="154" text-anchor="middle" class="desc">Narrate a live session while</text>
+    <text x="860" y="170" text-anchor="middle" class="desc">the agent watches and reacts.</text>
+  </g>
+
+  <!-- Row 2 -->
+  <g>
+    <rect x="150" y="230" width="220" height="150" rx="12" class="card"/>
+    <text x="260" y="270" text-anchor="middle" font-size="30">🧑‍🤝‍🧑</text>
+    <text x="260" y="302" text-anchor="middle" class="cardtitle">Buddy coding</text>
+    <text x="260" y="324" text-anchor="middle" class="desc">A pair-programming companion</text>
+    <text x="260" y="340" text-anchor="middle" class="desc">for rubber-duck debugging.</text>
+  </g>
+
+  <g>
+    <rect x="390" y="230" width="220" height="150" rx="12" class="card"/>
+    <text x="500" y="270" text-anchor="middle" font-size="30">♿</text>
+    <text x="500" y="302" text-anchor="middle" class="cardtitle">Hands-free workflows</text>
+    <text x="500" y="324" text-anchor="middle" class="desc">An alternative input path when</text>
+    <text x="500" y="340" text-anchor="middle" class="desc">typing isn't the best option.</text>
+  </g>
+
+  <g>
+    <rect x="630" y="230" width="220" height="150" rx="12" class="card"/>
+    <text x="740" y="270" text-anchor="middle" font-size="30">📋</text>
+    <text x="740" y="302" text-anchor="middle" class="cardtitle">Review out loud</text>
+    <text x="740" y="324" text-anchor="middle" class="desc">Talk through a diff before you</text>
+    <text x="740" y="340" text-anchor="middle" class="desc">approve or merge it.</text>
+  </g>
+
+  <text x="500" y="408" text-anchor="middle" class="caption" font-size="12">Not an exhaustive list — same adapter, same voice loop, wherever a coding-agent CLI already fits.</text>
+</svg>
