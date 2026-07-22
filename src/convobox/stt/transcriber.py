@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import gc
+import importlib.util
 import logging
+import os
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -20,6 +23,67 @@ from convobox.stt.base import SAMPLE_RATE, STTEngine, TranscriptResult
 __all__ = ["SAMPLE_RATE", "LocalTranscriber", "TranscriptResult"]
 
 logger = logging.getLogger(__name__)
+
+
+def _register_cuda_dll_directories() -> None:
+    """Point Windows' DLL loader at the pip-installed CUDA runtime
+    libraries (the `cuda` extra) so ctranslate2 can actually find cuBLAS.
+
+    ctranslate2's Windows wheel bundles cuDNN directly (a .dll sitting
+    right next to ctranslate2.dll) but not cuBLAS -- pip-installed
+    nvidia-*-cu12 packages don't add themselves to Windows' DLL search
+    path the way a system-wide CUDA Toolkit install does, so without
+    this, WhisperModel(device="cuda"/"auto") CONSTRUCTS fine but the
+    first real .transcribe() call fails with "Library cublas64_12.dll is
+    not found or cannot be loaded" (live-confirmed, 2026-07-20 -- silently
+    broke an entire UAT session because an unrelated except RuntimeError
+    block absorbed it as the known transient MKL allocator quirk). cuBLAS
+    is resolved lazily (delay-loaded) by ctranslate2 -- confirmed by the
+    real failure surfacing from inside .transcribe(), not at
+    WhisperModel construction -- so calling this at import time (before
+    any construction) is early enough regardless of import order.
+
+    **`os.add_dll_directory` alone does NOT fix this (live-confirmed,
+    2026-07-22): the failure reproduces byte-for-byte even with the
+    correct `bin/` directories registered via `AddDllDirectory`.**
+    Prepending the same directories to the `PATH` environment variable
+    instead does fix it (also live-confirmed: real `.transcribe()` call
+    succeeds on an NVIDIA 4060 with this and only this change). Root
+    cause, best understanding: `AddDllDirectory`-registered paths are
+    only consulted by loader calls made in "safe search mode"
+    (`LOAD_LIBRARY_SEARCH_*` flags); ctranslate2's own delay-load
+    resolution of its cuBLAS dependency apparently does not opt into
+    that mode, so it falls through to the classic search order, which
+    does include `PATH`. Kept `add_dll_directory` alongside `PATH` (does
+    no harm, and covers whichever other internal loads DO use safe
+    search mode) rather than removing it -- this is a "both, since only
+    one is confirmed necessary" call, not a "one is proven redundant"
+    one.
+
+    No-op on non-Windows or when the `cuda` extra isn't installed --
+    CPU-only machines and CI's Linux runners never exercise this path.
+    """
+    if sys.platform != "win32":
+        return
+    for package in ("nvidia.cublas", "nvidia.cuda_nvrtc", "nvidia.cuda_runtime"):
+        try:
+            spec = importlib.util.find_spec(package)
+        except ImportError:
+            continue
+        if spec is None or not spec.submodule_search_locations:
+            continue
+        for location in spec.submodule_search_locations:
+            bin_dir = Path(location) / "bin"
+            if not bin_dir.is_dir():
+                continue
+            os.add_dll_directory(str(bin_dir))
+            bin_dir_str = str(bin_dir)
+            path_entries = os.environ.get("PATH", "").split(os.pathsep)
+            if bin_dir_str not in path_entries:
+                os.environ["PATH"] = bin_dir_str + os.pathsep + os.environ.get("PATH", "")
+
+
+_register_cuda_dll_directories()
 
 
 class _WhisperLikeModel(Protocol):

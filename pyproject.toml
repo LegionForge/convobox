@@ -42,6 +42,23 @@ dev = [
 aec = [
     "aec-audio-processing>=1.0",
 ]
+# GPU inference for faster-whisper (stt.device: cuda/auto). ctranslate2's
+# Windows wheel bundles cuDNN directly (site-packages/ctranslate2/cudnn64_9.dll)
+# but NOT cuBLAS/nvrtc/the CUDA runtime -- without this extra, `stt.device:
+# cuda` constructs fine (device selection is separate from library loading)
+# but the first real .transcribe() call fails with "Library cublas64_12.dll
+# is not found or cannot be loaded" (live-confirmed, 2026-07-20). Installing
+# this extra alone is NOT sufficient -- convobox.stt.transcriber's own
+# _register_cuda_dll_directories() must also put these packages' bin/
+# directories on PATH at import time (live-confirmed both are needed,
+# 2026-07-22); see that function's docstring. A separate extra, not part
+# of dev/aec: these wheels are large (~1GB) and CUDA-only, no benefit on
+# CPU-only machines or CI's Linux runners.
+cuda = [
+    "nvidia-cublas-cu12>=12.0",
+    "nvidia-cuda-nvrtc-cu12>=12.0",
+    "nvidia-cuda-runtime-cu12>=12.0",
+]
 
 [project.scripts]
 convobox-spike = "scripts.spike:main"
