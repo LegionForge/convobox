@@ -21,8 +21,10 @@ from pathlib import Path
 
 import pytest
 
+from unittest.mock import AsyncMock, MagicMock
+
 from convobox.adapters.base import BackendEventType
-from convobox.adapters.claude_code import ClaudeCodeAdapter, _resolve_flags
+from convobox.adapters.claude_code import ClaudeCodeAdapter, _parse_mcp_list_output, _resolve_flags
 
 _FAKE_CLI = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))]
 
@@ -243,3 +245,107 @@ async def test_aclose_denies_a_pending_approval_rather_than_hanging_it() -> None
 
     reply = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
     assert reply["decision"] == "deny"
+
+
+# --- MCP tool calls hit a SEPARATE permission gate from --permission-mode
+# (live-confirmed 2026-07-22: even acceptEdits still rejects an MCP tool
+# call with "you haven't granted it yet"). permissive mode grants every
+# configured MCP server via --settings permissions.allow instead. ---
+
+
+def test_parse_mcp_list_output_extracts_server_names() -> None:
+    # Modeled on real captured output, 2026-07-22 (one name deliberately
+    # includes periods, hyphens, and spaces -- confirmed splitting on the
+    # FIRST ": " still isolates it correctly; a real connector name from
+    # a live account had exactly this shape).
+    text = (
+        "Checking MCP server health...\n"
+        "\n"
+        "claude.ai Some Connector - Demo - 2026.01.07: "
+        "https://example.com/mcp - ! Needs authentication\n"
+        "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - OK Connected\n"
+        "obsidian: http://localhost:22360/sse (SSE) - OK Connected\n"
+        "browseros: http://127.0.0.1:9000/mcp (HTTP) - FAILED Failed to connect\n"
+    )
+    assert _parse_mcp_list_output(text) == [
+        "claude.ai Some Connector - Demo - 2026.01.07",
+        "claude.ai Gmail",
+        "obsidian",
+        "browseros",
+    ]
+
+
+def test_parse_mcp_list_output_skips_the_header_and_blank_lines() -> None:
+    assert _parse_mcp_list_output("Checking MCP server health...\n\n") == []
+
+
+def test_parse_mcp_list_output_handles_no_servers_configured() -> None:
+    assert _parse_mcp_list_output("") == []
+
+
+@pytest.mark.asyncio
+async def test_enumerate_mcp_server_names_returns_empty_on_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, permission_mode="permissive")
+
+    async def _raise(*args: object, **kwargs: object) -> None:
+        raise OSError("claude not found")
+
+    import convobox.adapters.claude_code as mod
+
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", _raise)
+
+    assert await adapter._enumerate_mcp_server_names() == []
+
+
+@pytest.mark.asyncio
+async def test_enumerate_mcp_server_names_parses_real_subprocess_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, permission_mode="permissive")
+
+    fake_proc = MagicMock()
+    fake_proc.communicate = AsyncMock(
+        return_value=(b"obsidian: http://localhost:22360/sse (SSE) - OK Connected\n", b"")
+    )
+
+    import convobox.adapters.claude_code as mod
+
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", AsyncMock(return_value=fake_proc))
+
+    assert await adapter._enumerate_mcp_server_names() == ["obsidian"]
+
+
+@pytest.mark.asyncio
+async def test_permissive_mode_writes_an_mcp_permissions_settings_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, permission_mode="permissive")
+    monkeypatch.setattr(
+        adapter, "_enumerate_mcp_server_names", AsyncMock(return_value=["obsidian", "browseros"])
+    )
+
+    try:
+        path = await adapter._ensure_mcp_permissions_settings_file()
+        data = json.loads(path.read_text())
+        assert data == {"permissions": {"allow": ["mcp__obsidian", "mcp__browseros"]}}
+    finally:
+        adapter._settings_path = None
+        path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_never_calls_mcp_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    # plan mode (the default) must not pay the ~3s claude-mcp-list cost
+    # for a session that's read-only anyway.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, permission_mode="plan")
+    enumerate_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(adapter, "_enumerate_mcp_server_names", enumerate_mock)
+
+    try:
+        await adapter.send_text("hi")  # triggers _ensure_proc()
+    finally:
+        await adapter.aclose()
+
+    enumerate_mock.assert_not_called()

@@ -247,6 +247,31 @@ def _resolve_flags(command: Sequence[str], permission_mode: str = "plan") -> lis
     return [*_REQUIRED_FLAGS, "--permission-mode", mode]
 
 
+def _parse_mcp_list_output(text: str) -> list[str]:
+    """Extract MCP server names from `claude mcp list`'s human-readable
+    output (pure, tested -- no documented --json/structured mode exists,
+    confirmed live 2026-07-22: `claude mcp list --json` errors as an
+    unknown option).
+
+    Each real server line is ``<name>: <url-or-detail> ...`` -- splitting
+    on the FIRST ": " correctly isolates the name even when the name
+    itself contains periods/hyphens/spaces (confirmed against a real
+    multi-server account whose connector names include exactly that kind
+    of punctuation, e.g. "claude.ai Some Connector - Demo - 2026.01.07").
+    Lines with no ": " (the "Checking MCP server health..." header, blank
+    lines) are skipped rather than erroring -- this must degrade
+    gracefully on any future CLI output-format change, not raise.
+    """
+    names: list[str] = []
+    for line in text.splitlines():
+        if ": " not in line:
+            continue
+        name = line.split(": ", 1)[0].strip()
+        if name:
+            names.append(name)
+    return names
+
+
 class ClaudeCodeAdapter(BackendAdapter):
     def __init__(
         self,
@@ -312,6 +337,15 @@ class ClaudeCodeAdapter(BackendAdapter):
                     env["CONVOBOX_APPROVAL_TOKEN"] = self._approval_token
                     env["CONVOBOX_APPROVAL_TIMEOUT_S"] = str(_APPROVAL_DECISION_TIMEOUT_S)
                     extra_flags = ["--settings", str(settings_path)]
+                elif self._permission_mode == "permissive":
+                    # MCP tool calls hit a SEPARATE permission gate that
+                    # --permission-mode doesn't cover at all (see
+                    # _enumerate_mcp_server_names's docstring) -- without
+                    # this, "permissive" (acts without asking) silently
+                    # doesn't hold for any MCP server the user has
+                    # configured, live-confirmed 2026-07-22.
+                    mcp_settings_path = await self._ensure_mcp_permissions_settings_file()
+                    extra_flags = ["--settings", str(mcp_settings_path)]
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
                     *_resolve_flags(self._command, self._permission_mode),
@@ -369,6 +403,73 @@ class ClaudeCodeAdapter(BackendAdapter):
                         }
                     ]
                 }
+            }
+            with os.fdopen(fd, "w") as f:
+                json.dump(settings, f)
+            self._settings_path = Path(path)
+        return self._settings_path
+
+    async def _enumerate_mcp_server_names(self) -> list[str]:
+        """Every MCP server this machine's Claude Code install knows
+        about, by name -- live-confirmed source of a SEPARATE permission
+        gate from --permission-mode.
+
+        Live-confirmed, 2026-07-22: an MCP tool call fails with "Claude
+        requested permissions to use mcp__<server>__<tool>, but you
+        haven't granted it yet" even under --permission-mode acceptEdits
+        -- NOT a hang (the turn ends cleanly, is_error=False, the model
+        just reports it can't proceed), but permissive mode's whole point
+        ("acts without asking") doesn't hold for MCP tools without an
+        explicit grant. --allowedTools does NOT grant this (tried, still
+        rejected); a bare "mcp__*" wildcard in --settings permissions.allow
+        does NOT work either (tried, still rejected) -- only the exact
+        "mcp__<server-name>" (no tool suffix -- confirmed this grants
+        every tool on that server, not just one) works.
+
+        `claude mcp list` is the only complete enumeration (confirmed live:
+        it includes claude.ai-account-level connectors -- Gmail, Drive,
+        Calendar, an ERP connector -- that live outside any local config
+        file this adapter could read directly, alongside locally-configured
+        servers like a personal Obsidian bridge). OAuth-gated connectors
+        ("Needs authentication" in the listing) can't actually be unblocked
+        by this grant regardless -- their real gate is a one-time OAuth
+        flow this adapter cannot run headless -- but including their names
+        anyway is harmless (a no-op grant for a server that's separately
+        blocked), so every name found is included rather than trying to
+        pre-filter by connection status.
+
+        Best-effort: `claude mcp list` health-checks every server (~3s on
+        a real 7-server account, confirmed live) and returns [] on any
+        failure (missing CLI, timeout, unexpected output) rather than
+        ever blocking startup or crashing over a diagnostic listing.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._command[0] if self._command else "claude",
+                "mcp",
+                "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        except (OSError, TimeoutError, asyncio.TimeoutError):
+            logger.warning("claude mcp list failed; permissive mode will not grant MCP tools", exc_info=True)
+            return []
+        return _parse_mcp_list_output(stdout.decode(errors="replace"))
+
+    async def _ensure_mcp_permissions_settings_file(self) -> Path:
+        """Write (once) the --settings JSON granting every configured MCP
+        server -- the permissive-mode counterpart to
+        _ensure_settings_file's hook wiring. See
+        _enumerate_mcp_server_names's own docstring for why this exists
+        and what it can't fix (OAuth-gated connectors)."""
+        if self._settings_path is None:
+            server_names = await self._enumerate_mcp_server_names()
+            fd, path = tempfile.mkstemp(
+                prefix="convobox-claude-settings-", suffix=".json"
+            )
+            settings = {
+                "permissions": {"allow": [f"mcp__{name}" for name in server_names]}
             }
             with os.fdopen(fd, "w") as f:
                 json.dump(settings, f)
