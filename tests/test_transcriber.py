@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -396,6 +397,65 @@ def test_gpu_unavailable_fallback_does_not_apply_to_injected_test_models() -> No
     transcriber = LocalTranscriber(_config(), model_factory=lambda: failing_model)
     transcriber.transcribe(np.zeros(16000, dtype=np.float32))
     assert transcriber._device_override is None
+
+
+# --- resolved_device: the TUI's GPU/CPU indicator (docs/UAT-checklist.md,
+# live UAT feedback 2026-07-22) reads this, not config.stt.device, because
+# "auto" doesn't say which device it actually resolved to. ---
+
+
+class _FakeModelWithDevice(_FakeModel):
+    """Like _FakeModel, but also exposes `.model.device` -- the real
+    faster_whisper.WhisperModel's own attribute (its `.model` is the
+    underlying ctranslate2 Whisper instance), which is what
+    resolved_device introspects to learn what "auto" actually resolved
+    to."""
+
+    def __init__(self, device: str) -> None:
+        super().__init__()
+        self.model = SimpleNamespace(device=device)
+
+
+def test_resolved_device_reads_the_real_models_own_device() -> None:
+    model = _FakeModelWithDevice("cuda")
+    transcriber = LocalTranscriber(
+        STTConfig(model="tiny.en", device="auto", compute_type="int8"),
+        model_factory=lambda: model,
+    )
+    assert transcriber.resolved_device == "cuda"
+
+
+def test_resolved_device_falls_back_to_config_device_without_a_real_model() -> None:
+    # _FakeModel (used throughout this file) has no `.model` attribute,
+    # same shape as any test's injected fake -- resolved_device must
+    # degrade to the configured value rather than raising.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    assert transcriber.resolved_device == "cpu"  # _config()'s device
+
+
+def test_resolved_device_reflects_a_permanent_cpu_fallback() -> None:
+    gpu_model = MagicMock()
+    gpu_model.transcribe.side_effect = RuntimeError(
+        "Library cublas64_12.dll is not found or cannot be loaded"
+    )
+    cpu_model = MagicMock()
+    cpu_model.transcribe.return_value = (
+        [_FakeSegment(text="hello world", avg_logprob=-0.2)],
+        _FakeInfo(language="en", language_probability=0.95),
+    )
+
+    def side_effect(*args, **kwargs):
+        return cpu_model if kwargs.get("device") == "cpu" else gpu_model
+
+    config = STTConfig(model="tiny.en", device="cuda", compute_type="float16")
+    with patch("convobox.stt.transcriber.WhisperModel", side_effect=side_effect):
+        transcriber = LocalTranscriber(config)
+        # MagicMock's auto-generated .model.device is a Mock, not a str,
+        # so resolved_device falls back to _device_override here -- still
+        # correctly reports "cpu", just via the fallback path rather than
+        # introspecting a real ctranslate2 model.
+        assert transcriber.resolved_device == "cpu"
 
 
 # --- _register_cuda_dll_directories: fixes the real "Library cublas64_12.dll

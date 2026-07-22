@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from convobox.tui.render import (
+    _DIM,
     _GREEN,
     _RED,
+    _RESET,
     _YELLOW,
     _fit,
     _heartbeat_color,
@@ -147,6 +149,44 @@ def test_diagnostics_line_shows_backend_name() -> None:
     state = ConversationTuiState(started=0.0, backend_name="claude-code")
     lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
     assert "backend: claude-code" in lines[1]
+
+
+# --- STT device indicator: live UAT feedback, 2026-07-22 -- with no
+# on-screen signal, a silent cuda->cpu fallback (see
+# LocalTranscriber.resolved_device) was only discoverable in the startup
+# log, not from the running TUI itself. ---
+
+
+def test_diagnostics_line_omits_stt_device_when_unset() -> None:
+    # Empty string is the dataclass default, e.g. --text mode where no
+    # tui_state.stt_device assignment ever runs.
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "stt:" not in lines[1]
+
+
+def test_diagnostics_line_shows_stt_device_cpu() -> None:
+    state = ConversationTuiState(started=0.0, stt_device="cpu")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "stt: cpu" in lines[1]
+
+
+def test_diagnostics_line_shows_stt_device_cuda_in_green() -> None:
+    state = ConversationTuiState(started=0.0, stt_device="cuda")
+    raw_lines = render_conversation_frame(state, width=80, height=24, now=0.0)
+    assert f"{_GREEN}stt: cuda" in raw_lines[1]
+    plain_lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "stt: cuda" in plain_lines[1]
+
+
+def test_diagnostics_line_stt_device_does_not_swallow_dim_styling_for_rest_of_line() -> None:
+    # Regression: the cuda tag embeds its own color+reset mid-line (unlike
+    # the heartbeat/REC tags, which are always last) -- it must restore
+    # _DIM immediately afterward or every part after it loses the ambient
+    # dim style for the rest of the line.
+    state = ConversationTuiState(started=0.0, stt_device="cuda", aec_enabled=True)
+    raw_lines = render_conversation_frame(state, width=80, height=24, now=0.0)
+    assert f"stt: cuda{_RESET}{_DIM}" in raw_lines[1]
 
 
 def test_diagnostics_line_shows_aec_off_by_default() -> None:

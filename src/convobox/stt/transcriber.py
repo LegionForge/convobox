@@ -277,6 +277,26 @@ class LocalTranscriber(STTEngine):
             return self._custom_factory()
         return _build_whisper_model(self._config, device_override=self._device_override)
 
+    @property
+    def resolved_device(self) -> str:
+        """The device this session's model actually runs on.
+
+        config.device can be "auto", which ctranslate2 (not this class)
+        resolves internally -- reading the real WhisperModel's own
+        `.model.device` (the underlying ctranslate2 Whisper instance) is
+        the only way to know whether "auto" landed on cuda or cpu, short
+        of duplicating ctranslate2's own detection logic here. Falls back
+        to `_device_override` (set once a GPU has been confirmed unusable
+        this session -- see _looks_like_gpu_unavailable) or the raw
+        config value when no real model is available to introspect (a
+        test's injected fake model, or mid-reload after a failure).
+        """
+        inner = getattr(self._model, "model", None)
+        device = getattr(inner, "device", None)
+        if isinstance(device, str):
+            return device
+        return self._device_override or self._config.device
+
     def _empty_result(self, audio: np.ndarray, start: float) -> TranscriptResult:
         latency_ms = (time.perf_counter() - start) * 1000.0
         return TranscriptResult(

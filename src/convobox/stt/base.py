@@ -36,3 +36,13 @@ class STTEngine(ABC):
 
     @abstractmethod
     def transcribe(self, audio: np.ndarray) -> TranscriptResult: ...
+
+    @property
+    def resolved_device(self) -> str:
+        """Best-effort compute device this engine actually runs on, e.g.
+        "cuda" or "cpu" -- distinct from config.stt.device, which may be
+        "auto" and not say which one that resolved to. Default "unknown"
+        for engines with no CPU/GPU distinction; LocalTranscriber overrides
+        this with the real device its underlying model resolved to.
+        """
+        return "unknown"
