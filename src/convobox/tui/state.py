@@ -57,9 +57,14 @@ class ConversationTuiState:
     - warning: phase 3's approval banner. None = no active warning; the
       render function reserves no space for it when unset, so it costs
       nothing before approvals ship.
-    - backend_name/aec_enabled: set once at startup (config.backend.name,
-      config.audio.echo_cancellation) -- static for the process lifetime,
-      unlike everything else here.
+    - backend_name/aec_enabled/stt_device: set once at startup
+      (config.backend.name, config.audio.echo_cancellation,
+      STTEngine.resolved_device) -- static for the process lifetime,
+      unlike everything else here. stt_device is the ACTUAL device the
+      model resolved to ("cuda"/"cpu"), not config.stt.device, which may
+      just say "auto" -- live UAT feedback, 2026-07-22: with no on-screen
+      indicator, a GPU that silently fell back to cpu (or vice versa) was
+      only discoverable by reading the startup log.
     - aec_verdict: the last response's interpret_aec_stats() tag
       (run_convobox.py) -- "" until the first response with AEC on.
     - heartbeat_elapsed_s: continuous silent-busy seconds from
@@ -95,6 +100,7 @@ class ConversationTuiState:
     barge_in_active: bool = False
     started: float = field(default_factory=time.monotonic)
     backend_name: str = ""
+    stt_device: str = ""
     aec_enabled: bool = False
     aec_verdict: str = ""
     heartbeat_elapsed_s: float | None = None

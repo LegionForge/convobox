@@ -1315,6 +1315,8 @@ async def run(args: argparse.Namespace) -> None:
     log.info("single-instance lock acquired (pid=%d)", os.getpid())
 
     transcriber = create_stt_engine(config.stt)
+    if tui_state is not None:
+        tui_state.stt_device = transcriber.resolved_device
     segmenter = UtteranceSegmenter(config.vad)
     device = _resolve_device(args.device, config.audio.input_device)
 

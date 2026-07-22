@@ -154,8 +154,29 @@ def _aec_tag(verdict: str) -> str:
     return stripped.split(":")[0].split("]")[0].strip()
 
 
+def _stt_device_tag(device: str) -> str:
+    """Color-code the resolved STT device so GPU vs. CPU is visible at a
+    glance, not just readable -- live UAT feedback, 2026-07-22: with no
+    on-screen signal, a silent cuda->cpu fallback (see
+    LocalTranscriber.resolved_device) was only discoverable in the log.
+
+    Re-applies _DIM after its own _RESET (unlike the heartbeat/REC tags
+    below, which are always last in the line): this tag sits in the
+    MIDDLE of the diagnostics line, so a bare _RESET here would leave
+    every part after it un-dimmed instead of matching the rest of the
+    line's styling.
+    """
+    if device == "cuda":
+        return f"{_GREEN}stt: cuda{_RESET}{_DIM}"
+    if device == "cpu":
+        return "stt: cpu"
+    return f"stt: {device}"
+
+
 def _diagnostics_line(state: ConversationTuiState, width: int) -> str:
     parts = [f"backend: {state.backend_name or '?'}"]
+    if state.stt_device:
+        parts.append(_stt_device_tag(state.stt_device))
     if state.aec_enabled:
         tag = _aec_tag(state.aec_verdict)
         parts.append(f"AEC: on{' ' + tag if tag else ''}")
