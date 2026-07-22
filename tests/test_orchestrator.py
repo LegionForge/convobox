@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator, Callable
 
 import numpy as np
@@ -8,7 +9,12 @@ import pytest
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.audio.playback import AudioPlayer
-from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
+from convobox.orchestrator.orchestrator import (
+    Orchestrator,
+    render_approval_request_for_speech,
+    render_question_for_speech,
+    strip_code_for_speech,
+)
 from convobox.safeword.detector import SafewordDetector
 from convobox.tts.base import TTSEngine
 
@@ -33,6 +39,8 @@ class FakeBackendAdapter(BackendAdapter):
         # every existing test's behavior exactly.
         self.fail_events_calls = 0
         self.events_call_count = 0
+        self.resolved_approvals: list[bool] = []
+        self.resolve_pending_approval_returns = True
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -45,6 +53,10 @@ class FakeBackendAdapter(BackendAdapter):
 
     def is_busy(self) -> bool:
         return self._busy
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        self.resolved_approvals.append(approved)
+        return self.resolve_pending_approval_returns
 
     async def events(self) -> AsyncGenerator[BackendEvent, None]:
         self.events_call_count += 1
@@ -767,3 +779,180 @@ def test_strip_full_markdown_response_sounds_like_prose() -> None:
     assert "never spoken" not in result
     assert "Read the config file" in result
     assert "Done." in result
+
+
+# --- backend interactive questions (docs/DESIGN-backend-questions.md,
+# slice 1: announce; UAT finding [L9]) ---
+
+_QUESTION_INPUT = (
+    '{"questions": [{"question": "What kind of testing do you want?", '
+    '"header": "Test scope", "multiple": false, "options": ['
+    '{"label": "Automated unit tests", "description": "Run pytest."}, '
+    '{"label": "Live hardware UAT", "description": "Real mic and speakers."}]}]}'
+)
+
+
+def test_render_question_speaks_question_and_numbered_labels() -> None:
+    spoken = render_question_for_speech(_QUESTION_INPUT)
+    assert spoken == (
+        "The agent is asking: What kind of testing do you want? "
+        "Option 1: Automated unit tests. Option 2: Live hardware UAT."
+    )
+    # Descriptions deliberately not spoken (kept short enough to answer).
+    assert "pytest" not in spoken
+
+
+def test_render_question_without_options_speaks_question_alone() -> None:
+    spoken = render_question_for_speech(
+        '{"questions": [{"question": "Proceed?", "options": []}]}'
+    )
+    assert spoken == "The agent is asking: Proceed?"
+
+
+def test_render_question_handles_malformed_input() -> None:
+    # Malformed input must never crash event consumption ([L9] happened
+    # mid-session; an exception here would kill the event task).
+    assert render_question_for_speech(None) is None
+    assert render_question_for_speech("") is None
+    assert render_question_for_speech("not json") is None
+    assert render_question_for_speech('{"questions": "nope"}') is None
+    assert render_question_for_speech('{"questions": [{"options": []}]}') is None
+
+
+# --- voice-gated tool approval (Phase 3,
+# docs/DESIGN-0.3.0-interaction-and-safety.md; mechanism in
+# claude_code.py) ---
+
+
+def test_render_approval_request_speaks_tool_and_command() -> None:
+    spoken = render_approval_request_for_speech("Bash", '{"command": "rm -rf build"}')
+    assert spoken == (
+        "Approval needed to run Bash: rm -rf build. "
+        "Say your approval phrase to allow it, or say no to deny it."
+    )
+
+
+def test_render_approval_request_falls_back_to_file_path() -> None:
+    spoken = render_approval_request_for_speech("Write", '{"file_path": "src/app.py"}')
+    assert "Write: src/app.py" in spoken
+
+
+def test_render_approval_request_without_tool_input_names_the_tool_alone() -> None:
+    spoken = render_approval_request_for_speech("Bash", None)
+    assert spoken == (
+        "Approval needed to run Bash. "
+        "Say your approval phrase to allow it, or say no to deny it."
+    )
+
+
+def test_render_approval_request_handles_malformed_tool_input() -> None:
+    # Never raises -- a malformed event must not crash event consumption,
+    # same policy as render_question_for_speech.
+    spoken = render_approval_request_for_speech("Bash", "not json")
+    assert spoken.startswith("Approval needed to run Bash.")
+
+
+def test_render_approval_request_without_a_tool_name_says_a_tool() -> None:
+    spoken = render_approval_request_for_speech(None, None)
+    assert spoken.startswith("Approval needed to run a tool.")
+
+
+def test_render_approval_request_truncates_a_very_long_command() -> None:
+    long_command = "x" * 500
+    spoken = render_approval_request_for_speech("Bash", json.dumps({"command": long_command}))
+    assert len(spoken) < 500 + 100
+    assert spoken.endswith("…. Say your approval phrase to allow it, or say no to deny it.")
+
+
+@pytest.mark.asyncio
+async def test_approval_request_event_is_announced_via_tts() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(
+            type=BackendEventType.APPROVAL_REQUEST,
+            tool="Bash",
+            tool_input='{"command": "rm -rf build"}',
+        )
+    )
+    assert orch._speak_task is not None
+    await orch._speak_task
+
+    assert len(tts.synthesized) == 1
+    assert tts.synthesized[0].startswith("Approval needed to run Bash")
+    assert len(player.played) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_request_event_without_tts_does_not_crash() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False)  # no tts/player
+
+    orch._on_event(BackendEvent(type=BackendEventType.APPROVAL_REQUEST, tool="Bash"))
+    await asyncio.sleep(0)
+
+    assert orch._speak_task is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_approval_delegates_to_the_adapter() -> None:
+    orch, adapter, _, _ = make_orchestrator(busy=False)
+
+    assert await orch.resolve_pending_approval(True) is True
+    assert adapter.resolved_approvals == [True]
+
+    adapter.resolve_pending_approval_returns = False
+    assert await orch.resolve_pending_approval(False) is False
+    assert adapter.resolved_approvals == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_question_tool_call_is_announced_via_tts() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(
+            type=BackendEventType.TOOL_CALL,
+            tool="question",
+            tool_input=_QUESTION_INPUT,
+        )
+    )
+    assert orch._speak_task is not None
+    await orch._speak_task
+
+    assert len(tts.synthesized) == 1
+    assert tts.synthesized[0].startswith("The agent is asking:")
+    assert len(player.played) == 1
+
+
+@pytest.mark.asyncio
+async def test_question_tool_call_without_tts_does_not_crash() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False)  # no tts/player
+
+    orch._on_event(
+        BackendEvent(
+            type=BackendEventType.TOOL_CALL,
+            tool="question",
+            tool_input=_QUESTION_INPUT,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert orch._speak_task is None
+
+
+@pytest.mark.asyncio
+async def test_question_tool_call_with_malformed_input_stays_silent() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(
+        BackendEvent(
+            type=BackendEventType.TOOL_CALL, tool="question", tool_input="not json"
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert orch._speak_task is None
+    assert tts.synthesized == []

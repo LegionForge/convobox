@@ -200,6 +200,18 @@ def test_diagnostics_line_shows_mic_level() -> None:
     assert "mic: -42dBFS" in lines[1]
 
 
+def test_diagnostics_line_omits_rec_tag_by_default() -> None:
+    state = ConversationTuiState(started=0.0)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "REC" not in lines[1]
+
+
+def test_diagnostics_line_shows_rec_tag_with_elapsed_seconds_when_dumping() -> None:
+    state = ConversationTuiState(started=0.0, aec_dump_active=True, aec_dump_frames=300)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "REC 3s" in lines[1]  # 300 frames * 10ms/frame = 3.0s
+
+
 def test_heartbeat_color_thresholds_match_run_convobox_pys_own() -> None:
     # Mirrors scripts/run_convobox.py's _heartbeat_color boundary tests
     # (test_barge_in.py) -- must stay in sync with that copy.
@@ -224,6 +236,62 @@ def test_transcript_scrolls_to_most_recent_when_overflowing() -> None:
     joined = "\n".join(lines)
     assert "message 49" in joined  # most recent must be visible
     assert "message 0 " not in joined  # earliest scrolled off
+
+
+# --- scrollable panes: transcript_scroll / detail_scroll / focus_pane ---
+
+
+def test_transcript_scroll_offset_reveals_older_lines() -> None:
+    state = ConversationTuiState(started=0.0)
+    for i in range(50):
+        state.add_turn("user", f"message {i}", f"12:00:{i:02d}")
+    live = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert not any("message 0 " in line for line in live)
+
+    state.transcript_scroll = 1000  # far more than the real history -- must clamp, not crash
+    scrolled_to_top = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert any("message 0 " in line for line in scrolled_to_top)
+    # Scrolled all the way up -- the very latest message is off the top of the pane.
+    assert not any("message 49" in line for line in scrolled_to_top)
+
+
+def test_detail_scroll_offset_reveals_earlier_paragraphs() -> None:
+    paragraphs = "\n\n".join(f"paragraph {i}" for i in range(30))
+    state = ConversationTuiState(started=0.0, full_detail=paragraphs)
+    live = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert not any("paragraph 0" == line.strip() for line in live)
+
+    state.detail_scroll = 1000
+    scrolled = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert any("paragraph 0" == line.strip() for line in scrolled)
+
+
+def test_scroll_offset_beyond_available_history_clamps_without_blank_window() -> None:
+    # A stale offset (left over from a wider frame, or content that shrank)
+    # must never produce an out-of-range slice or an all-blank pane.
+    state = ConversationTuiState(started=0.0, full_detail="only one short line")
+    state.detail_scroll = 999_999
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert any("only one short line" in line for line in lines)
+
+
+def test_focus_pane_marker_shown_on_focused_pane_only() -> None:
+    transcript_focused = ConversationTuiState(started=0.0, focus_pane="transcript")
+    detail_focused = ConversationTuiState(started=0.0, focus_pane="detail")
+    t_lines = render_conversation_frame(transcript_focused, width=80, height=24, now=0.0)
+    d_lines = render_conversation_frame(detail_focused, width=80, height=24, now=0.0)
+    transcript_header_t = next(line for line in t_lines if "Transcript" in line)
+    transcript_header_d = next(line for line in d_lines if "Transcript" in line)
+    assert "▸" in transcript_header_t
+    assert "▸" not in transcript_header_d
+
+
+def test_scrolled_pane_shows_scrolled_hint() -> None:
+    state = ConversationTuiState(started=0.0, full_detail="\n\n".join(f"p{i}" for i in range(30)))
+    state.detail_scroll = 5
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    detail_header = next(line for line in lines if "Full response" in line)
+    assert "scrolled" in detail_header
 
 
 def test_wrap_preserves_all_words() -> None:

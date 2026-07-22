@@ -63,6 +63,112 @@ README's existing "Open questions" -> Licensing model note, which is
 about ConvoBox's own license choice; this is the sharper, more concrete
 version of that same open question.
 
+## Keeping local, CI, and UAT environments in sync
+
+Investigated 2026-07-20 after a direct question about whether local dev,
+CI, and live-mic UAT sessions could silently drift apart. Three findings:
+
+1. **Local UAT and local dev are already the same environment, by
+   construction.** Live-mic UAT sessions run from the exact same `.venv`
+   `uv sync --extra dev` creates -- there's no separate UAT-specific
+   config or interpreter. Nothing to fix here; noted so it's not assumed
+   to be a hidden risk later.
+2. **The claimed Python floor didn't match what's actually verified
+   anywhere.** `pyproject.toml`'s `requires-python`, the README, and
+   `docs/QUICKSTART.md` all said "3.11+", but `ci.yml` pins every job to
+   `python-version: "3.12"` and this machine's own `.venv` is 3.12 --
+   Python 3.11 was never exercised by CI or (as far as anyone can tell)
+   locally. Fixed by raising the floor to match reality
+   (`requires-python = ">=3.12"`, `uv.lock` regenerated, README/
+   QUICKSTART updated) rather than adding untested 3.11 CI coverage for a
+   version nobody has actually run this against.
+3. **Two gaps found but deliberately NOT changed here, since fixing them
+   means changing behavior this project doesn't own or hasn't scoped:**
+   - `ruff`/`bandit`/`mypy` in CI run against whatever `pip install -e
+     ".[dev]"` resolves at CI time (confirmed by reading
+     `LegionForge/dev-rig`'s actual `lint.yml`); locally, `uv sync
+     --extra dev` resolves the same version *constraints* through `uv`
+     instead. Same `pyproject.toml` constraints, but no shared lockfile
+     between the two installers and no upper version bounds on
+     ruff/mypy/bandit -- so "green locally" and "green in CI" can drift
+     apart over time as new tool versions release, with no code change
+     on either side. Living with this for now; a real fix would mean
+     either pinning exact tool versions in `pyproject.toml` or getting
+     `LegionForge/dev-rig`'s reusable workflow to consume `uv.lock`
+     directly, both bigger changes than "sync the environments" implied.
+   - CI's lint job only ever checks `source-dirs: "src/convobox"` --
+     `scripts/*.py` (the actual entrypoints: `run_convobox.py`,
+     `settings_tui.py`, `voice_picker.py`, etc.) get **no** ruff/mypy/
+     bandit coverage in CI, matching what this doc tells you to run
+     locally (same scope, so at least the two agree with each other).
+     Confirmed this gap firsthand while adding the conversation TUI's
+     scroll feature: `mypy scripts/run_convobox.py` gave two false
+     `termios`-attribute errors when run locally with mypy's default
+     Windows target, but came back clean with `--platform linux` -- the
+     same target CI's `ubuntu-latest` runner actually uses. A real fix
+     (adding `scripts` to `source-dirs`) would need vetting every file
+     under `scripts/` for new findings first, out of scope for this pass.
+
+4. **New finding (2026-07-20), confirmed by direct reproduction: `uv`'s
+   local build cache can cross-contaminate editable installs between two
+   clones of the same-named, same-version package on one machine.**
+   Two local checkouts of this repo exist on this machine (the dev
+   clone and a separate UAT clone, both named `convobox`, version
+   `0.2.0`, and -- after being kept in sync -- byte-identical
+   `pyproject.toml`/`uv.lock`). Running `uv sync` in the SECOND clone
+   silently overwrote the FIRST clone's editable-install pointer
+   (`.venv/Lib/site-packages/_editable_impl_convobox.pth`) to point at
+   the second clone's `src/`, even though `uv sync` was never re-run in
+   the first clone -- confirmed by inspecting the `.pth` file's content
+   and modification timestamp directly, and by `import convobox;
+   convobox.__file__` resolving to the WRONG clone's directory. `uv
+   sync --reinstall-package convobox` alone did not fix it durably (it
+   re-linked the same poisoned cached build); `uv cache clean convobox`
+   followed by `uv sync --reinstall-package convobox --no-cache` was
+   required to force a genuinely fresh build reflecting the correct
+   source path. **Practical rule: if you maintain more than one local
+   clone of this repo (or any same-named/same-version local package),
+   re-run `uv sync --reinstall-package convobox --no-cache` in whichever
+   clone you're about to test in if you've run `uv sync` in the OTHER
+   clone more recently -- don't assume the venv still points at itself.**
+   Verify with `python -c "import convobox; print(convobox.__file__)"`
+   before trusting a test run's result, especially after debugging
+   something as significant as an AEC delay setting (see
+   `docs/DESIGN-echo-and-barge-in.md`'s 2026-07-20 correction, which
+   this exact bug complicated: some of that session's diagnostic runs
+   may have executed against the wrong clone's code before this was
+   caught).
+
+5. **A local sync helper for the UAT clone exists, but deliberately isn't
+   in this repo.** `sync-from-dev.ps1` lives only in the UAT clone's
+   working directory (excluded via that clone's own `.git/info/exclude`,
+   not the tracked `.gitignore`, so it never reaches this repo or the dev
+   clone) -- it fetches `origin/main`, merges it into whatever branch is
+   checked out, then re-syncs the venv with the `--no-cache` fix from
+   item 4 above. Its one hard requirement: refuse to touch anything if
+   the UAT clone has local changes (uncommitted edits, or a live
+   ConvoBox session's coding-agent backend having written files there
+   during dogfooding -- see `docs/DESIGN-backend-sandboxing.md`) or
+   unpushed local commits, since silently syncing on top of either would
+   risk exactly the kind of clobbering this tool exists to prevent.
+   Building and testing it against a real dirty tree (a disposable test
+   file, not a real one, the second time) surfaced two bugs worth
+   remembering for any similar PowerShell + git tooling:
+   - **Path comparisons need slash normalization.** `git rev-parse
+     --show-toplevel` and Python's `__file__` return forward slashes
+     (`D:/LegionForge/...`) even on Windows; PowerShell/.NET paths use
+     backslashes (`D:\LegionForge\...`). A literal `-like`/`-notlike`
+     check between the two silently fails every time, even when the
+     path is actually correct -- normalize both sides (replace `\` with
+     `/`) before comparing.
+   - **`HEAD@{1}` reflects the last reflog entry, not "what this specific
+     command changed."** Using `git log HEAD@{1}..HEAD` to report "new
+     commits from this merge" prints stale, misleading output whenever
+     the merge itself was a no-op but an earlier, unrelated command in
+     the same session had already moved `HEAD` -- capture `git rev-parse
+     HEAD` immediately before and after the specific operation instead of
+     relying on the reflog.
+
 ## Automated tests (no audio hardware needed)
 
 ```bash
@@ -407,3 +513,26 @@ on macOS, which has no mic on the dev machine).
   reachable in this environment (its npm postinstall failed here) to
   test against.
 - Everything on Linux.
+
+## Release gate: what CI cannot test
+
+CI green is NOT release-ready. ConvoBox's highest-value verification is
+live-mic UAT on real hardware, which no runner can perform. Before
+tagging any release, a human completes one live session confirming, at
+minimum:
+
+1. **Safeword**: "stop stop stop" mid-playback is transcribed, tagged
+   `[HARD STOP]`, and followed by `hard stop matched safeword` in the log
+   (both lines -- the second proves dispatch, not just detection).
+2. **Pause/resume**: "stop listening" pauses; the resume word resumes.
+3. **Barge-in**: a deliberate interruption stops audio and forwards the
+   words (`[BARGE-IN]` tag or busy-steer POST).
+4. **AEC sanity on the release hardware**: per-response verdicts read
+   `FLOOR-LIMITED`/`NO ECHO DETECTED` -- a run dominated by
+   `UNDER-CANCELLING` means the delay hint is wrong for this rig
+   (see docs/KNOWN-ISSUES.md); fix before shipping.
+5. **Interactive prompts**: a backend question is announced out loud, not
+   silently deadlocked (docs/DESIGN-backend-questions.md, [L9]).
+
+Record the pass as a dated line in the release PR/notes. If any item
+regresses, the release waits -- no exceptions for "CI was green."

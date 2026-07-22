@@ -1,5 +1,10 @@
 .venv/
 .models/
+# scripts/run_convobox.py --aec-dump output (reference/mic WAV captures
+# for offline AEC analysis) -- real audio, never committed. *.wav below
+# already covers the files; this also catches the directory itself so an
+# empty/future-dated run doesn't show up as an untracked-but-visible dir.
+.aec-dumps/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -11,6 +16,7 @@ build/
 .env
 *.wav
 *.log
+uat-acoustic-calibration/
 .DS_Store
 
 # Per-machine local config and its variants (copy convobox.example.yaml to

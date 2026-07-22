@@ -1,6 +1,6 @@
 # ConvoBox quickstart
 
-From zero to talking to a coding agent. Assumes Python 3.11+ and a backend
+From zero to talking to a coding agent. Assumes Python 3.12+ and a backend
 you can reach (the examples use [OpenCode](https://github.com/anthropics/…),
 which runs a local server; `claude-code` and `codex` work too and are spawned
 as subprocesses).
@@ -104,6 +104,26 @@ Speak a command; it transcribes, sends it to the agent, and speaks the reply.
   `take-over`) trade off differently -- see `docs/DESIGN-barge-in.md`.
 - **Same-room speakers + mic?** Turn on `audio.echo_cancellation: true`
   (needs the `[aec]` extra) so it doesn't transcribe its own speech.
+
+## Listening states & indicators
+
+Hands-free use means there's no screen focus to rely on for feedback, so
+state changes need both a visual and (where noted) an auditory indicator,
+Alexa-style. Modeled as an explicit state machine rather than ad hoc flags:
+
+| State | Description | Indicator |
+| --- | --- | --- |
+| Off | Not running | none |
+| Idle (resume-word only) | Passively spotting the resume word; not transcribing general speech | dim visual, no sound |
+| Active listening | Woken; capturing and transcribing speech | visual change + activation earcon |
+| Command captured | Utterance finalized, STT complete | brief distinct acknowledgment cue |
+| Backend working | Target CLI is executing; visually distinct from "listening" since you can still interject | visual only |
+| Responding (TTS playback) | Speaking a response; interruptible at any point (barge-in returns to Active listening) | visual only |
+| **Hard stop (safeword heard)** | Safeword detected; execution is being halted | **its own unmistakable audio/visual class — never a louder variant of another state** |
+| Stopped / muted | Explicitly told to stop; no resume-word spotting either | fully dim, no sound |
+
+Inbound/outbound profanity filtering (what you say vs. what TTS speaks
+back) is planned as a configurable option, off by default.
 
 ## Troubleshooting
 

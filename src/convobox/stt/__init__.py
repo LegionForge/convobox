@@ -1,4 +1,5 @@
 from convobox.stt.base import STTEngine, TranscriptResult
+from convobox.stt.corrections import TranscriptCorrector
 from convobox.stt.factory import create_stt_engine
 from convobox.stt.language_tracker import LanguageTracker
 from convobox.stt.transcriber import LocalTranscriber
@@ -8,5 +9,6 @@ __all__ = [
     "LocalTranscriber",
     "STTEngine",
     "TranscriptResult",
+    "TranscriptCorrector",
     "create_stt_engine",
 ]

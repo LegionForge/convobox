@@ -72,3 +72,6 @@ assets from them are used.
 Built by JP Cruz (LegionForge). Portions of the implementation, research
 synthesis, and design iteration were developed with AI assistance (Claude);
 see the `Co-Authored-By` trailers in the git history.
+
+For the repo-wide attribution convention used when Codex, Claude Code, or
+opencode edits are committed, see [`docs/AI-ATTRIBUTION.md`](docs/AI-ATTRIBUTION.md).

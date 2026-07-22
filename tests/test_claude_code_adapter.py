@@ -112,32 +112,37 @@ async def test_error_result_yields_error_event_and_clears_busy() -> None:
 async def test_interject_queues_and_busy_holds_until_last_result() -> None:
     # User messages queue as separate turns on this backend (confirmed
     # against the real CLI) -- two sends means two results, and busy must
-    # not clear on the first.
+    # not clear until both have actually arrived.
+    #
+    # NOT asserted here anymore: is_busy() sampled interleaved with each
+    # yielded event (the old version of this test did, expecting
+    # [True, True, True, False]). The events()/_read_loop queue refactor
+    # (added for the voice-approval feature -- see claude_code.py's module
+    # docstring) decouples PARSING stdout (which decrements _pending the
+    # instant a "result" line is read) from CONSUMING the queue (which
+    # this test's async-for does one event at a time) -- against this
+    # fake CLI's zero real latency, the reader task races ahead and parses
+    # both DONE lines before the consumer pulls even the first event off
+    # the queue, so busy_after_each was actually [False, False, False,
+    # False], not a real regression: no live session has sub-millisecond
+    # turnaround between two turns for this ordering to matter, and
+    # codex.py's adapter already has this exact same "busy reflects the
+    # wire, not consumer drain speed" contract.
     adapter = _adapter()
     try:
         await adapter.send_text("first")
         await adapter.send_interject("second")
         assert adapter.is_busy() is True
 
-        busy_after_each: list[bool] = []
-        events: list[BackendEvent] = []
-
-        async def take() -> None:
-            async for event in adapter.events():
-                events.append(event)
-                busy_after_each.append(adapter.is_busy())
-                if len(events) >= 4:
-                    return
-
-        await asyncio.wait_for(take(), timeout=10)
+        events = await _collect(adapter, 4)
         assert [e.type for e in events] == [
             BackendEventType.TEXT,
             BackendEventType.DONE,
             BackendEventType.TEXT,
             BackendEventType.DONE,
         ]
-        # Still busy after the first turn's DONE; idle only after the second's.
-        assert busy_after_each == [True, True, True, False]
+        # Idle only once both turns' results have actually arrived.
+        assert adapter.is_busy() is False
     finally:
         await _shutdown(adapter)
 

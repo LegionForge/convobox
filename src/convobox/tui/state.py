@@ -72,6 +72,20 @@ class ConversationTuiState:
       candidate (see run_convobox.py's comment at the wiring site) -- it
       would need a cross-thread write from the playback callback, more
       care than mic level's same-thread update.
+    - transcript_scroll/detail_scroll: lines scrolled up from the bottom
+      for each pane (0 = live -- always show the latest, like a chat
+      app's default "stick to bottom"). Nudged by keyboard-driven scroll
+      commands (scripts/run_convobox.py's `_handle_tui_key`); render.py
+      clamps freely on every frame, so a stale offset (e.g. after a
+      terminal resize shrinks the pane) never produces a blank window.
+    - focus_pane: which pane keyboard scroll commands apply to. Defaults
+      to "detail" (the full-response pane) since that's the one operators
+      actually need to scroll back through; Tab switches it.
+    - aec_dump_active/aec_dump_frames: set once at startup from --aec-dump
+      (static, like backend_name/aec_enabled); aec_dump_frames updates
+      once per finished response (run_convobox.py's existing per-response
+      AEC-stats block) with the real capture-frame count so far, not
+      per-chunk -- this is a debug/AAR indicator, not a live meter.
     """
 
     turns: list[TranscriptTurn] = field(default_factory=list)
@@ -85,6 +99,11 @@ class ConversationTuiState:
     aec_verdict: str = ""
     heartbeat_elapsed_s: float | None = None
     mic_level_db: float | None = None
+    transcript_scroll: int = 0
+    detail_scroll: int = 0
+    focus_pane: Literal["transcript", "detail"] = "detail"
+    aec_dump_active: bool = False
+    aec_dump_frames: int = 0
 
     def update_mic_level(self, raw_db: float) -> None:
         """Feed one raw per-chunk dBFS reading through the decay smoothing.

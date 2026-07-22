@@ -151,8 +151,14 @@ def _resolve_command(command: Sequence[str] | None) -> list[str]:
 
 
 class CodexAdapter(BackendAdapter):
-    def __init__(self, command: Sequence[str] | None = None) -> None:
+    def __init__(
+        self, command: Sequence[str] | None = None, working_dir: str | None = None
+    ) -> None:
         self._command = _resolve_command(command)
+        # Where the spawned agent reads/writes files. None -> inherit
+        # ConvoBox's cwd (which may be its own source repo); an explicit
+        # path isolates edits to a chosen workspace. See BackendConfig.
+        self._working_dir = working_dir
         self._proc: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()  # guards spawn + handshake (see _ensure_thread)
         self._reader_task: asyncio.Task[None] | None = None
@@ -178,6 +184,7 @@ class CodexAdapter(BackendAdapter):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=_STREAM_LIMIT,
+                    cwd=self._working_dir,
                 )
                 self._thread_id = None
                 self._active_turn_id = None

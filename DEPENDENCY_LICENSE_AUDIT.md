@@ -110,7 +110,7 @@ ends up in use, its specific voice/model files need their own check.
 ## Recommended fix
 
 **Swap the default/primary TTS engine from Piper to Kokoro.** This isn't
-a new decision forced by this finding — `README.md`'s "Component
+a new decision forced by this finding — `docs/ARCHITECTURE.md`'s "Component
 software" section already listed Kokoro as an undecided alternative to
 Piper ("not yet finalized"). This audit resolves that choice in the
 licensing-safe direction: Kokoro-82M is Apache 2.0 for both code and

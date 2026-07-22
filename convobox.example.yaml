@@ -34,6 +34,13 @@ backend:
   #    no-writes stance), pass --disallowedTools yourself -- ConvoBox
   #    doesn't reject or reinterpret anything already in `command`:
   # command: ["claude", "--disallowedTools", "Bash", "Write", "Edit"]
+  # -- codex / claude-code: the directory the agent runs and EDITS files in.
+  #    SECURITY: unset (the default) means the agent inherits ConvoBox's own
+  #    directory -- a voice session could then modify ConvoBox's source.
+  #    Point it at an isolated workspace so the agent's edits land there, not
+  #    on any repo you care about. Override per-run with --working-dir PATH.
+  #    No effect on opencode (its dir = where `opencode serve` was launched).
+  # working_dir: "C:/work/convobox-uat"
 
 # ---------------------------------------------------------------------------
 # tts -- how ConvoBox speaks (text-to-speech).
@@ -59,14 +66,21 @@ tts:
 # ---------------------------------------------------------------------------
 stt:
   model: base             # tiny.en (fastest, English-only) | base | small | ...
-  device: cpu             # "cpu" | "cuda"
-  compute_type: int8      # int8 (cpu) | float16 (gpu) | ...
+  device: auto            # "auto" (recommended -- picks a real GPU if one is
+                          # visible, e.g. NVIDIA CUDA, else cpu) | "cpu" | "cuda"
+  compute_type: default   # "default" (recommended -- matches whatever device
+                          # picked above) | int8 (cpu) | float16 (gpu) | ...
   # language: null        # null = auto-detect (recommended). Pin (e.g. "en")
                           # only to force one language.
   min_language_probability: 0.0   # drop transcripts whose detected-language
                           # confidence is below this (0.0 = keep all). ~0.4
                           # filters garbled far-field hallucinations; only
                           # meaningful when language is auto-detected.
+  # corrections:              # Optional, exact fixes for recurring STT errors.
+  #   "the green": "I agree" # Observed transcription mismatch; this is
+                              # applied before ordinary command routing only.
+                              # Hard stops, pause/resume words, and approvals
+                              # always use the raw transcript.
 
 # ---------------------------------------------------------------------------
 # audio -- devices and acoustic echo cancellation.
@@ -114,13 +128,13 @@ interaction:
                           # assistant interrupts ITSELF. See docs/DESIGN-barge-in.md.
   barge_in_min_speech_ms: 250   # sustained speech required before barge-in
                           # fires, so a cough doesn't kill a response.
-  wake_word: Athena       # say this to resume after "pause listening" below.
+  resume_word: Athena       # say this to resume after "pause listening" below.
                           # pick your own? verify it round-trips through STT
                           # first -- "ConvoBox" itself confidently mis-heard
-                          # as "Control Box" every time (see wakeword/detector.py).
+                          # as "Control Box" every time (see resumeword/detector.py).
   pause_listening_phrases:      # say one to hard-stop in-flight work and
     - stop listening             # pause: everything else is ignored until
-    - pause listening            # you say wake_word again.
+    - pause listening            # you say resume_word again.
 
 # ---------------------------------------------------------------------------
 # safeword -- spoken phrases that hard-stop the agent (checked before every

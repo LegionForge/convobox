@@ -72,6 +72,114 @@ Additions from the 2026-07-11 live log:
   green -> yellow -> red as it ages, in a real unpiped terminal; then
   confirm running under the `2>&1 | Tee-Object` crib pattern produces a
   plain, uncolored log file.
+- **[L6] Headset barge-in test PASSED under AEC-off config (session #81,
+  2026-07-15).** NOTE on provenance: [L3] is **recorded for assessment, not
+  changed in code** (authored by jp-cruz, not applied). The running
+  `convobox.yaml` is **untracked** and sets `echo_cancellation: false` with
+  a comment citing [L3]'s reasoning (54/59 NO ECHO DETECTED) — so it likely
+  reflects the [L3] recommendation, but this is an operator runtime choice,
+  not a committed code change, and causation is inferred not proven.
+  Under that config (`echo_cancellation: false` + headphones +
+  `interrupt_preset: conversational`: `on_current_turn=mute`,
+  `on_new_words=now`, `barge_in_min_speech_ms: 250`), a deliberate barge-in
+  test produced 8 user speech events during interruption windows — every
+  one transcribed AND forwarded to the backend (transcript lines each
+  immediately followed by a `POST …/prompt`). Playback-mute barge-ins
+  (`barge-in: sustained speech during playback -- stopping audio` →
+  replacement utterance) at 01:57:40/43, 01:57:54/55, 01:58:49/51;
+  while-busy (`busy=True`, `on_new_words=now`) barge-ins at 01:57:46,
+  01:57:50, 01:57:53, 01:57:55, 01:58:51. **Zero `NO ECHO DETECTED` lines**
+  in the whole test — the exact condition that armed the [L1] self-echo
+  drop path never occurred, so the [L1] failure mode did NOT recur here.
+  Marginal-confidence speech was still kept and tagged `[BARGE-IN]` ("Don't
+  okay?" at dec=0.48, "just barged in." at dec=0.52) — the 250 ms min-speech
+  threshold is not over-filtering. Scope: this confirms barge-in works under
+  the AEC-off headset config; it is evidence *consistent with* [L3] but is
+  NOT a validation that [L3] is correct (no AEC-on contrast test was run to
+  confirm [L3]'s predicted artifact/drop downside actually recurs). [L1]
+  regression is closed **for this AEC-off path only**. Non-blocking note: a
+  ~54 s backend "still working" stretch (01:58:02→38) overlapped several
+  barge-ins with no stacking problem — latency observation only.
+- **[L7] AEC-on + headset contrast: [L3]'s predicted drop did NOT recur
+  (session #82, 2026-07-15).** This is the "before" half of the [L3]
+  before/after contrast (`docs/UAT-L3-contrast.md`, config
+  `convobox.uat-aec-on.yaml`), finally run. With the headset and
+  `audio.echo_cancellation: true` (forced via `settings_tui.py` into the
+  default `convobox.yaml`, live session pid 27000 → `uat-echo3-aec-on.log`),
+  AEC logged `NO ECHO DETECTED` on essentially every response (the exact
+  [L3] "nothing to cancel" premise held — mic barely hears the speaker).
+  **8/8 genuine *user* barge-ins were preserved and forwarded** (mix of
+  mid-playback `barge-in: sustained speech during playback -- stopping
+  audio`, tagged `[BARGE-IN]`, and while-busy `busy=True` / `on_new_words=now`,
+  not tagged but still forwarded via `POST …/prompt`); lowest-decision-score
+  utterances (dec=0.43, 0.46, 0.44, 0.37) survived — the 250 ms min-speech
+  threshold is not over-filtering. **So [L3]'s specific predicted failure
+  mode — AEC-on + headset dropping *genuine user* barge-ins as self-echo —
+  did NOT occur.** However, the run was NOT drop-free: one real
+  `dropped (` event fired (03:00:43) — `dropped (overlap gate,
+  echo-cancellation active): 'AAC could be left on with a headset. We can
+  try to AAC off as an option, but I think the default should be owned.'`
+  That dropped text is a *mis-transcription of the assistant's own prior
+  spoken response* (not user speech), caught by the overlap/echo gate as if
+  it were echoed playback — i.e. the [L1] self-echo drop path DID re-arm
+  here, but it dropped ConvoBox's own words, not the user's. This is the
+  opposite of [L3]'s concern (which was about dropping the *user*), and is
+  harmless to the conversation (it just suppresses a repeated spoken phrase),
+  but it confirms the [L1] overlap-gate can misfire in the AEC-on/NO-ECHO
+  regime — the exact mechanism [L3] flagged, just pointed at the wrong
+  speaker. **Conclusion:** [L3]'s *user-barge-in* downside is **not
+  reproduced** on this hardware/config, so "AEC OFF is required for headsets"
+  is wrong — AEC (AAC) is a fine default and can stay ON. But [L3]'s root
+  mechanism (NO-ECHO → overlap gate misfires) is alive; it bit the assistant's
+  own speech rather than the user's this time. Resolution: **[L3] is
+  overstated for the user-barge-in case, but its underlying drop mechanism is
+  real and should be tracked** (see [L8]). The open-speaker caveat in [L3]
+  still stands. Caveat: the *subjective* "mic artifacts" half of [L3] is
+  operator-perceived only and was not re-raised during this run; if artifacts
+  recur, reopen. Evidence artifacts: `uat-echo3-aec-on.log` (AEC-on) and
+  `uat-echo2-aec-on.log`/`uat-echo.log` (the AEC-off baseline, session #81)
+  — kept as diffable proof. The still-unexplained operator "artifacting"
+  report from [L3] remains a known unknown (possible external to AEC, e.g.
+  mic/OS processing); flagged for follow-up, not blocking.
+- **[L8] Overlap/echo gate dropped the assistant's OWN speech (AEC-on,
+  NO-ECHO regime), not the user's (found 2026-07-15, session #82,
+  `uat-echo3-aec-on.log`).** During the [L7] AEC-on headset run, one genuine
+  `dropped (` event fired: `dropped (overlap gate, echo-cancellation
+  active): 'AAC could be left on with a headset. We can try to AAC off as an
+  option, but I think the default should be owned.'` (03:00:43). The dropped
+  text is a mis-transcription of ConvoBox's *own prior spoken response*,
+  caught by the overlap gate as if it were echoed playback — the inverse of
+  the [L1] user-barge-in drop failure mode. Harmless to the conversation (it
+  suppresses a repeated spoken phrase, not user input), but it proves the
+  [L1] overlap-gate misfire mechanism [L3] warned about is live in the
+  AEC-on/NO-ECHO condition; it happened to land on ConvoBox's words this
+  time. Follow-up: investigate whether the overlap/`SpokenEchoFilter` should
+  exclude the assistant's own just-spoken text from the drop decision (or
+  require token overlap with the *currently* playing segment, not any recent
+  response), so a re-spoken assistant phrase can't be suppressed. Severity:
+  low (no user input lost). Not blocking.
+- **[L9] Backend interactive `question` tool deadlocks a voice session
+  (session #5, 2026-07-18, `uat-echo.log`).** Asked "can you help me test?",
+  the opencode build agent called its interactive `question` tool
+  (multiple-choice, "What kind of testing do you want to run...") at
+  18:53:32 and blocked in `status: running` for 5+ minutes waiting for an
+  answer that has no voice path. Compounding chain, each verified live:
+  (1) the user's barge-in at 18:53:40 muted playback mid-announcement, so
+  the question was never heard; (2) all ~15 subsequent utterances were
+  steered (`on_new_words=now`), got HTTP 200 "admitted", and queued
+  invisibly behind the blocked tool -- none materialized into the session's
+  message list, so "can you repeat the question?" can NEVER work as an LLM
+  prompt in this state; (3) the heartbeat said "thinking or running a
+  tool" for 126s when the truth was "waiting for YOUR answer" -- an honest
+  status was available the whole time (`GET /api/session/{id}/question`
+  returns the full pending question + options). The server exposes a
+  complete reply API (`POST .../question/{requestID}/reply` / `/reject`),
+  so a voice answer loop is buildable -- design: docs/DESIGN-backend-questions.md.
+  Safeword remains the only working exit today. Positive observations from
+  the same session: barge-in captured + `[BARGE-IN]`-tagged cleanly again,
+  AEC delay auto-estimate stable at 222ms, and the RecognitionErrorLadder's
+  FIRST live firing (`'Hallo?' lang=de 0.32 < 0.40 -> [ERROR-LADDER: tier 1]`,
+  working as built).
 - Echo layers' live scorecard: overlap window caught ~30 echo utterances
   with zero false drops and zero echo reaching the backend; the text
   filter never had to fire (it remains the backstop).
@@ -401,7 +509,7 @@ did).
 5. Edge VAD: V1-V4.
 6. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
    priority-ordering bug -- do not skip it).
-7. Conversation TUI (`--tui`): U1-U6.
+7. Conversation TUI (`--tui`): U1-U9.
 8. Response tiering (`interaction.tier_responses: true`): R1-R7.
 9. STT native-allocator recovery (long session, 20+ min): ST1-ST3.
 10. Scriptable/cleanup: M1-M3, X1-X2.
@@ -506,9 +614,9 @@ did).
 - **[P3] Ordinary speech is dropped while paused.** While paused, say a
   normal command ("what time is it", "run the tests") -- NOT routed to the
   backend (no new HTTP/subprocess request; `is_busy()` never flips true),
-  logged at debug as "dropped (paused, not the wake word)".
-- **[P4] Wake word resumes.** While paused, say the configured wake word
-  (default "ConvoBox") -- log shows "resumed listening (wake word
+  logged at debug as "dropped (paused, not the resume word)".
+- **[P4] Resume word resumes.** While paused, say the configured resume word
+  (default "ConvoBox") -- log shows "resumed listening (resume word
   matched)"; the NEXT ordinary utterance after that routes normally again.
 - **[P5] Safeword still works while paused, but does NOT resume.** While
   paused, say "stop stop stop" -- the `[HARD STOP]` path still fires
@@ -518,9 +626,9 @@ did).
   the design calls for, not the same thing.
 - **[P6] The pause phrase is inert while already paused.** While paused,
   say "stop listening" (or "pause listening") again -- treated as ordinary
-  ignored speech per P3, not a special case; still requires the wake word
+  ignored speech per P3, not a special case; still requires the resume word
   to exit.
-- **[P7] Custom wake_word / pause_listening_phrases via config.** Set
+- **[P7] Custom resume_word / pause_listening_phrases via config.** Set
   non-default values in convobox.yaml (or the Settings TUI once it exposes
   these fields) and confirm the whole P1-P6 cycle still works end-to-end,
   not just the unit-tested detector classes in isolation.
@@ -606,11 +714,43 @@ section is the live-mic pass that closes the gap.
   `audio_devices.py --test-input` reports for the same device, and reads
   AEC-cancelled (much quieter) during the assistant's own playback when
   AEC is on and converged.
-- **[U9] Silent-transition acknowledgments in the transcript pane, added
+- **[U9] Scrollable panes, added 2026-07-20.** Reported broken (no PgUp/
+  PgDn/other shortcuts worked at all) -- traced end-to-end before fixing
+  per this repo's "verify a bug before proposing a fix" rule: the
+  transcript and full-response panes always rendered just the tail of
+  their content with zero keyboard input handling anywhere in
+  `_tui_render_loop` -- this was never-implemented, not regressed.
+  `Tab` switches focus between the Transcript and Full response panes
+  (the focused one gets a `▸` marker); `Up`/`Down` scroll the focused
+  pane one line, `PgUp`/`PgDn` one page (10 lines), `Home` jumps to the
+  oldest content, `End` snaps back to live/latest. A scrolled pane's
+  header shows `(scrolled -- End for latest)`. Unit-tested (`_handle_tui_key`
+  in `tests/test_conversation_tui_keys.py`; render-side windowing/
+  clamping in `tests/test_conversation_tui.py`) but never driven by a
+  REAL keypress in a real terminal -- confirm live: PgUp/PgDn/Home/End/
+  Tab/arrows all work as described on both the tested platform (Windows,
+  `msvcrt`) and, if you get to it, a POSIX terminal (the CSI-sequence
+  path -- `ESC [ 5 ~` / `ESC [ 6 ~` for PgUp/PgDn -- is implemented but
+  unvalidated live, matching this project's existing Linux/macOS
+  validation gap); that Ctrl+C still exits cleanly now that POSIX raw
+  mode (`tty.setcbreak`) is active for the whole `--tui` session, not
+  just at the moments a key is read; and that the terminal is left in a
+  normal (echo on, line-buffered) state after exit even if the session
+  ends via an exception, not just Ctrl+C. **Mouse scroll wheel is
+  deliberately NOT implemented this pass** -- it would need real
+  terminal mouse-tracking mode (SGR `ESC[?1000h`/`ESC[?1006h` + parsing
+  `ESC[<64;...M`/`ESC[<65;...M` wheel events) on POSIX, and the Windows
+  Console API's `ReadConsoleInput`/`ENABLE_MOUSE_INPUT` (msvcrt's
+  `getwch()` cannot see mouse events at all) on Windows -- two
+  substantially different, untestable-without-a-real-terminal
+  mechanisms, for a platform (Windows) that's also the only tested one.
+  Keyboard scrolling covers the reported problem; flagged in
+  `docs/ROADMAP.md` as a scoped follow-up rather than bundled in here.
+- **[U10] Silent-transition acknowledgments in the transcript pane, added
   2026-07-16.** Three previously-silent transitions now add a `system`
   turn to the TUI transcript (visual only -- no audio earcon, since that
   would need to go through `AudioPlayer`/the AEC reference feed, out of
-  scope here): pausing listening (`"paused listening -- say '<wake word>'
+  scope here): pausing listening (`"paused listening -- say '<resume word>'
   to resume"`), resuming (`"resumed listening"`), and a forced VAD cutoff
   at `max_utterance_s` (`"cut off at the time limit -- still your
   turn"`). Addresses `docs/DESIGN-barge-in.md`'s open question about

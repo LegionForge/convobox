@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 import numpy as np
 import yaml
+from faster_whisper.utils import available_models
 from pydantic import ValidationError
 
 # Inserted (not relied on as a package import) so this file works identically
@@ -50,6 +51,8 @@ from convobox.config import (
 )
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
+from convobox.listening_pause import PauseListeningDetector
+from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 
 _RESET = "\x1b[0m"
 _REVERSE = "\x1b[7m"
@@ -61,6 +64,13 @@ _CYAN = "\x1b[36m"
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
 _CHOICE_TTS_ENGINES = ("piper",)
 _CHOICE_STT_ENGINES = ("faster-whisper",)
+# Pulled from the real dependency (faster_whisper.utils.available_models()),
+# not a hand-maintained duplicate -- stays correct automatically as
+# faster-whisper adds/removes models across versions, same "construct the
+# real thing rather than guess" preference this codebase already applies
+# elsewhere (e.g. ResumeWordDetector/ApprovalDetector as the validators).
+_CHOICE_STT_MODELS = tuple(available_models())
+_CHOICE_STT_DEVICES = ("auto", "cpu", "cuda")
 # Keep in sync with convobox.interrupt_presets.PRESETS's keys (config.py
 # validates the actual value against that dict at load time; this tuple is
 # just what the TUI offers to pick from).
@@ -158,7 +168,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
             FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room."),
-            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression."),
+            FieldSpec("audio", "aec_delay_ms", "AEC delay ms", "optional_int", help_text="Render-to-capture delay in milliseconds. Leave unset (recommended) to auto-tune from real stream latencies on every startup -- see 'Last auto-detected' below. Set a fixed number only to override auto-tuning with a value you've specifically measured for this hardware; a wrong fixed value is the #1 cause of weak echo suppression. To clear an already-set value back to unset: delete the digits, then type - (a bare minus sign) and press Enter -- an empty field alone is treated as 'no change', not 'clear', so backspacing to blank and pressing Enter leaves the old value in place."),
         ),
     ),
     SectionSpec(
@@ -166,9 +176,9 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         label="STT",
         fields=(
             FieldSpec("stt", "engine", "Engine", "choice", _CHOICE_STT_ENGINES, help_text="Speech-to-text backend. Only faster-whisper is implemented right now."),
-            FieldSpec("stt", "model", "Model", "str", help_text="Whisper model name, such as base or small."),
-            FieldSpec("stt", "device", "Device", "str", help_text="Inference device. cpu is the safe default; cuda is for supported GPUs."),
-            FieldSpec("stt", "compute_type", "Compute type", "str", help_text="Whisper compute precision, such as int8 on CPU or float16 on GPU."),
+            FieldSpec("stt", "model", "Model", "choice", _CHOICE_STT_MODELS, help_text="Whisper model size/variant. base (default) is a good speed/accuracy balance. small/medium/large-v3 trade speed for accuracy (large-v3 is the most accurate, slowest, and biggest download). The distil-* variants are distilled models: noticeably faster than their full-size counterpart at a small accuracy cost -- distil-large-v3 is a common sweet spot if base isn't accurate enough but large-v3 feels too slow. .en variants (tiny.en, base.en, ...) are English-only and slightly more accurate for English than the multilingual equivalent. Downloads automatically on first use (one-time, cached in the Hugging Face cache) -- switching models here doesn't fetch anything until you actually run a session with it."),
+            FieldSpec("stt", "device", "Device", "choice", _CHOICE_STT_DEVICES, help_text="Inference device. auto (default) autodetects a real GPU (e.g. NVIDIA CUDA) and falls back to cpu if none is visible. Pick cpu or cuda explicitly only to override the autodetection -- e.g. to keep a GPU free for another process, or because cuda is detected but not actually usable (missing CUDA runtime libraries like cuBLAS: LocalTranscriber falls back to cpu permanently for the session either way once that happens, but picking cpu here silences the one-time warning)."),
+            FieldSpec("stt", "compute_type", "Compute type", "str", help_text="Whisper compute precision. 'default' (recommended) picks the right precision for whichever device was selected above (int8 on cpu, float16 on GPU). Set an explicit value (int8, float16, ...) only to override."),
             FieldSpec("stt", "language", "Language", "optional_str", help_text="Pin a language code like en, or leave unset for auto-detect."),
             FieldSpec("stt", "min_language_probability", "Min language probability", "float", help_text="Drop auto-detected transcripts below this confidence threshold."),
         ),
@@ -192,6 +202,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
             FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
+            FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched). Override per-run with run_convobox.py --working-dir."),
         ),
     ),
     SectionSpec(
@@ -200,6 +211,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("interaction", "interrupt_preset", "Interrupt preset", "choice", _CHOICE_INTERRUPT_PRESETS, help_text="do-not-disturb (default, safe without headphones/AEC): finish, drop overlap. conversational: mute+steer now. patient: finish, then deliver. halt: abort, drop. take-over: abort, steer now."),
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
+            FieldSpec("interaction", "resume_word", "Resume word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
+            FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the resume word resumes. Same picking rule as the resume word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
         ),
     ),
     SectionSpec(
@@ -227,7 +240,10 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
     if backend_name == "opencode":
         return tuple(field for field in section.fields if field.key in {"name", "url", "model"})
     if backend_name in {"claude-code", "codex"}:
-        return tuple(field for field in section.fields if field.key in {"name", "command"})
+        return tuple(
+            field for field in section.fields
+            if field.key in {"name", "command", "working_dir"}
+        )
     return section.fields
 
 
@@ -547,6 +563,31 @@ def validate_config(config: AppConfig) -> ValidationReport:
             f"stt.engine {config.stt.engine!r} is not supported here "
             f"(implemented: {', '.join(_CHOICE_STT_ENGINES)})"
         )
+    if config.stt.model not in _CHOICE_STT_MODELS:
+        # A warning, not an error: this list comes from the installed
+        # faster-whisper version's own available_models() -- an older
+        # saved convobox.yaml naming a model that version has since
+        # dropped (or a genuinely custom/local model path) shouldn't be
+        # hard-blocked, just flagged for a second look.
+        report.warnings.append(
+            f"stt.model {config.stt.model!r} is not one of the models this "
+            f"installed faster-whisper version lists "
+            f"({', '.join(_CHOICE_STT_MODELS)}) -- double-check it's intentional"
+        )
+    if config.stt.device not in _CHOICE_STT_DEVICES:
+        # A warning, not an error: unlike stt.engine (checked against
+        # convobox's OWN supported-engines list), stt.device is passed
+        # straight through to ctranslate2/faster-whisper, which may accept
+        # values beyond these three (e.g. a specific GPU index) -- this
+        # only exists to nudge a stale/typo'd value from an existing
+        # convobox.yaml, not to hard-block something ctranslate2 itself
+        # might honor.
+        report.warnings.append(
+            f"stt.device {config.stt.device!r} is not one of the values the "
+            f"Settings TUI offers ({', '.join(_CHOICE_STT_DEVICES)}) -- it will "
+            "still be passed through to faster-whisper as-is, but double-check "
+            "it's intentional"
+        )
     if config.tts.engine not in _CHOICE_TTS_ENGINES:
         report.errors.append(
             f"tts.engine {config.tts.engine!r} is not supported here "
@@ -580,6 +621,19 @@ def validate_config(config: AppConfig) -> ValidationReport:
         report.warnings.append(
             "backend.url does not start with http:// or https://; the connection may fail"
         )
+    if config.backend.name in {"claude-code", "codex"}:
+        working_dir = config.backend.working_dir
+        if not working_dir:
+            report.warnings.append(
+                f"backend.working_dir is unset -- the {config.backend.name} agent "
+                "will run in ConvoBox's own directory and can modify its source. "
+                "Point it at an isolated workspace."
+            )
+        elif not Path(working_dir).expanduser().is_dir():
+            report.warnings.append(
+                f"backend.working_dir {working_dir!r} is not an existing directory "
+                "(it will fail at startup until created)"
+            )
     if (
         config.backend.name == "opencode"
         and config.backend.model is not None
@@ -596,6 +650,37 @@ def validate_config(config: AppConfig) -> ValidationReport:
             f'backend.model {config.backend.model!r} must be "provider/model-id" '
             f'(e.g. "openai/gpt-5.6-sol") -- see `opencode models` for the full list'
         )
+    try:
+        # The real runtime constructor is the validator: run_convobox.py
+        # builds this exact detector at startup, so a value it rejects
+        # (normalizes to nothing) would crash the session before the first
+        # utterance. Same save-time-check rationale as backend.model above.
+        detector = ResumeWordDetector(config.interaction.resume_word)
+    except ValueError as exc:
+        report.errors.append(f"interaction.resume_word: {exc}")
+    else:
+        if detector.normalized_resume_word in ROUNDTRIP_REJECTED_RESUME_WORDS:
+            report.warnings.append(
+                f"interaction.resume_word {config.interaction.resume_word!r} is confirmed to "
+                "mis-transcribe through the real TTS->STT round-trip (see "
+                "convobox.resumeword.detector) -- the resume word will likely never match, "
+                "leaving 'stop listening' with no voice resume. 'Athena' is the "
+                "verified default; test alternatives with scripts/roundtrip_smoketest.py."
+            )
+    # Empty pause phrases would leave no way to pause a live session; a
+    # phrase normalizing to nothing could never match. Same
+    # construct-the-real-detector rationale as the resume word above:
+    # PauseListeningDetector is what run_convobox.py builds at startup.
+    if not config.interaction.pause_listening_phrases:
+        report.warnings.append(
+            "interaction.pause_listening_phrases is empty -- there will be no "
+            "way to pause a live listening session by voice."
+        )
+    else:
+        try:
+            PauseListeningDetector(config.interaction.pause_listening_phrases)
+        except ValueError as exc:
+            report.errors.append(f"interaction.pause_listening_phrases: {exc}")
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
     if config.audio.aec_delay_ms is not None and config.audio.aec_delay_ms < 0:

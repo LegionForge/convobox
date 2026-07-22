@@ -1,17 +1,127 @@
 # LegionForge - ConvoBox
 
-A local, backend-agnostic voice frontend for CLI coding agents.
+A local, backend-agnostic voice frontend for CLI coding agents. It sits
+between you and whichever coding agent CLI you're driving — Claude Code,
+Codex, OpenCode, and eventually others — and lets you work by voice
+instead of (or alongside) the keyboard.
 
-**New here? → [docs/QUICKSTART.md](docs/QUICKSTART.md)** — from install to
-talking to a coding agent in five steps.
+> **Headphones strongly recommended for now.** Acoustic echo cancellation
+> (open mic + speakers, no headphones) is still being dialed in — see
+> [docs/DESIGN-echo-and-barge-in.md](docs/DESIGN-echo-and-barge-in.md)
+> for the live tuning notes. Headphones sidestep the whole problem: the
+> assistant's own voice never reaches the mic, so self-barge-in can't
+> happen regardless of room acoustics. Open-speaker use works today but
+> is the rougher edge of the experience.
 
-## Purpose
+AI-assisted change attribution is documented in
+[docs/AI-ATTRIBUTION.md](docs/AI-ATTRIBUTION.md).
+The repo also includes a commit template at [`.gitmessage.txt`](.gitmessage.txt)
+for local AI-assisted commits.
 
-ConvoBox sits between you and whichever coding agent CLI you're driving —
-Claude Code, Codex, OpenCode, and eventually others — and lets you work by
-voice instead of (or alongside) the keyboard. It is not tied to any single
-backend: the goal is a portable voice setup you can point at whatever tool
-you're using that day, rather than a feature bolted onto one product.
+## Quick Start
+
+The fastest way to hear it work, no microphone required:
+
+```bash
+git clone https://github.com/LegionForge/convobox
+cd convobox
+uv sync                                # or: pip install -e .
+cp convobox.example.yaml convobox.yaml # edit backend.url / tts.voice as needed
+
+# start your backend first, e.g.: opencode serve
+python scripts/run_convobox.py --text "Reply with one short sentence: it works."
+```
+
+If you hear a spoken reply, the whole pipeline (backend → TTS → speakers)
+is working. Then go live and talk to it:
+
+```bash
+python scripts/run_convobox.py
+```
+
+For picking a voice, finding the right audio device, and everything else
+between "installed" and "talking to it comfortably," see the full
+[docs/QUICKSTART.md](docs/QUICKSTART.md) walkthrough — it also covers
+how to interrupt/abort by voice and what each listening state looks like.
+
+## Installation
+
+**Prerequisites:** Python 3.12+, [git](https://git-scm.com/), and a
+coding-agent CLI you can already reach on its own — OpenCode (runs a
+local server), Claude Code, or Codex (both spawned as subprocesses).
+
+```bash
+git clone https://github.com/LegionForge/convobox
+cd convobox
+uv sync                    # or: pip install -e .
+```
+
+Optional extras, installed only if you want them:
+
+```bash
+uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wheels)
+uv sync --extra dev        # test/lint tooling
+```
+
+ConvoBox never bundles a speech engine you didn't ask for — the default
+STT model (faster-whisper) and TTS voices (Piper) download the first
+time you actually use them, not at install time.
+
+**Supported today:**
+
+<img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, new voice-gated approval), Codex (app-server JSON-RPC, tested live, real approval channel not yet voice-wired). Windows 11 tested end-to-end; Linux/macOS implemented, not yet voice-validated.">
+
+| Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
+|-------------|----------------------------------------------------------------------|---------------------------------------|
+| **Platform**| Windows 11                                                            | Linux, macOS                         |
+| **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
+| **STT**     | faster-whisper                                                        | —                                     |
+| **TTS**     | Piper                                                                 | —                                     |
+
+Known problems (and workarounds, like the WASAPI audio-output issue on
+Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
+
+**A safety note before you configure a backend:** by default ConvoBox runs
+Claude Code with `--permission-mode plan` (read/explore/explain only, no
+edits or commands) because headless mode has no way to answer a
+permission prompt at runtime. Setting your own `--permission-mode
+bypassPermissions` (or `--dangerously-skip-permissions`) in
+`backend.command` removes every permission check — only do this in a
+context you'd trust an unsupervised agent with, since voice input can be
+misheard and there's no per-action confirmation yet. Details in
+[docs/STATUS.md](docs/STATUS.md).
+
+## Uninstallation
+
+ConvoBox never installs anything outside the folder you cloned it into —
+no services, daemons, or registry/system entries. To remove it:
+
+1. **Delete the project folder.** This removes the cloned source, the
+   `uv`/`pip` virtual environment, your `convobox.yaml` config, and any
+   downloaded Piper voices (cached at `.models/piper/` inside the
+   project).
+2. **If you installed it into a different environment** with `pip install
+   -e .` instead of `uv sync`, first run `pip uninstall convobox` in that
+   environment.
+3. **Optional — reclaim the STT model cache.** faster-whisper downloads
+   its speech-to-text model into the shared Hugging Face cache
+   (`~/.cache/huggingface` on Linux/macOS, `%USERPROFILE%\.cache\huggingface`
+   on Windows), not into the project folder. Only delete this if you don't
+   need it for other Hugging Face–based tools — it isn't ConvoBox-specific.
+
+## What ConvoBox does
+
+ConvoBox is not tied to any single backend: the goal is a portable voice
+setup you can point at whatever coding-agent CLI you're using that day,
+rather than a feature bolted onto one product. A thin adapter interface
+(`send_text`, `send_interject`, `send_hard_stop`, `is_busy`) is
+implemented per backend, preferring each tool's native structured/headless
+interface over scraping terminal output.
+
+<img src="docs/media/use-cases.svg" alt="What people use ConvoBox for: voice-operated coding, talking to your files (logs, configs, docs), analysis and reasoning out loud, live UAT narration, buddy coding, hands-free workflows, and reviewing a diff out loud.">
+
+Not an exhaustive list — the same adapter and voice loop apply wherever a
+coding-agent CLI already fits into how you work.
 
 ## Direction
 
@@ -30,12 +140,10 @@ you're using that day, rather than a feature bolted onto one product.
   processing can later run on a beefier machine on your own private
   network (e.g. via Tailscale) with a thin client on a laptop or phone,
   without leaving infrastructure you control.
-- **Backend-agnostic by design.** A thin adapter interface
-  (`send_text`, `send_interject`, `send_hard_stop`, `is_busy`) is
-  implemented per backend, preferring each tool's native structured/headless
-  interface (e.g. streamed JSON events, an HTTP+SSE server) over scraping
-  terminal output, with a PTY/keystroke fallback where nothing better
-  exists.
+- **Backend-agnostic by design.** Same adapter interface as above,
+  preferring each tool's native structured/headless interface (e.g.
+  streamed JSON events, an HTTP+SSE server) over scraping terminal
+  output, with a PTY/keystroke fallback where nothing better exists.
 - **Two distinct interrupt semantics.** A *soft interject* ("oh, also—")
   shouldn't derail a long-running task; a *hard stop* (a deliberate,
   deterministic safeword) should abort it immediately. These are modeled
@@ -47,594 +155,58 @@ you're using that day, rather than a feature bolted onto one product.
   hardcoded — the same agency a keyboard session already has should be
   available on the voice side too.
 
-## Status — tested configuration (0.2.0)
+## Status
 
-ConvoBox is backend- and platform-agnostic *by design*, but "designed to
-run anywhere" is not "verified everywhere." This is what has actually been
-driven through the full voice loop (mic → STT → backend → TTS → speakers) on
-real hardware, versus what is implemented but not yet voice-validated:
+All three backend adapters (OpenCode, Claude Code, Codex) have been
+driven through the full live voice loop, including tool use, on Windows
+11. Linux/macOS parity is on the roadmap
+([docs/ROADMAP.md](docs/ROADMAP.md)); the support matrix above shows
+exactly what's tested versus implemented-but-not-yet-validated.
 
-| Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
-|-------------|----------------------------------------------------------------------|---------------------------------------|
-| **Platform**| Windows 11                                                            | Linux, macOS                         |
-| **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
-| **STT**     | faster-whisper                                                        | —                                     |
-| **TTS**     | Piper                                                                 | —                                     |
-
-All three backend adapters have now been driven through the full live voice
-loop, including tool use. Linux/macOS parity is on the roadmap
-(`docs/ROADMAP.md`). Known problems are tracked in
-[`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) — notably WASAPI audio output
-on Windows (use an **MME** output device; see the known-issues doc).
-
-**Since 0.2.0: the interaction/safety bundle (`docs/DESIGN-0.3.0-interaction-and-safety.md`) is landing.**
-Phase 1 (barge-in + a live conversation TUI) and Phase 2 (response
-tiering) are both implemented and merged/merging into `main`; a version
-bump to reflect this as a real release is a separate, deliberate step
-(not yet done — package version tracks releases, not individual PRs),
-so `pyproject.toml` still says `0.2.0` as of this writing even though
-substantially more than that is now on `main`:
-
-- **Barge-in, migrated to a two-axis preset system**
-  (`interaction.interrupt_preset`): `conversational`/`patient`/
-  `do-not-disturb`/`halt`/`take-over`, replacing the old three-value
-  `interrupt_mode`. Default (`do-not-disturb`) is behaviorally identical
-  to the pre-migration default — no surprise behavior change for
-  existing configs.
-- **"Stop listening" / "pause listening"** puts ConvoBox into a
-  wake-word-only state (default wake word: `Athena` — round-trip
-  STT-verified, unlike the original `ConvoBox` default, which
-  Whisper confidently mis-heard as "Control Box" every time).
-- **Backchannel filtering** ("mm-hmm", "yeah", "right", ...) so a
-  listener's continuers never falsely trigger a barge-in.
-- **A live conversation TUI** (`--tui`): transcript pane, full-detail
-  response pane, and a status/barge-in indicator, alongside the
-  already-shipped Settings TUI (`scripts/settings_tui.py`, config
-  editing — a separate tool from the conversation view).
-- **Response tiering** (`interaction.tier_responses`): voice speaks only
-  the first paragraph of a multi-paragraph response by default when
-  enabled; saying "continue"/"go on" within `continue_timeout_s` speaks
-  the rest, already in hand, no backend round-trip. Off by default.
-- **A real safety bug found and fixed in the Codex adapter**: the
-  auto-decline approval path sent a schema-invalid response for 3 of 5
-  approval methods (only 2 were correct) — live-verified against a real
-  `codex app-server` that the auto-decline now actually works for every
-  reachable method, not just the one that happened to be tested first.
-- **A real concurrency bug found and fixed from a live UAT log**: a
-  single backend turn emitting multiple TEXT segments (text interleaved
-  with tool calls, exactly what a coding agent doing real multi-step
-  work looks like) used to leave the previous segment's speak task
-  running uncancelled, corrupting the overlap gate's echo-detection
-  timing for the rest of the session — reported live as "AEC seems to
-  be misfiring," though AEC itself was never the actual cause. Fixed by
-  cancelling any in-flight speak task before starting a new one.
-- **faster-whisper's known, unresolved native-allocator failure**
-  (ctranslate2/MKL leaking memory across repeated calls in a long-lived
-  process — `SYSTRAN/faster-whisper#660`) is now recovered from instead
-  of crashing the session: one lost utterance instead of a dead
-  process, with the model reload preferring the local cache instead of
-  making a network call on every recovery — see `docs/KNOWN-ISSUES.md`
-  for the full writeup.
-- **Settings TUI gained a real audio device picker**
-  (`scripts/settings_tui.py`): cycle through actually-discovered,
-  deduped input/output devices (the same logic `python
-  scripts/audio_devices.py --setup` uses) instead of typing a device
-  name blind, plus an in-TUI test that plays a real tone and reports a
-  real mic level reading.
-- **The onset of an utterance is no longer clipped.** `UtteranceSegmenter`
-  already padded the trailing silence of an utterance to avoid cutting
-  off the last phoneme; it now pads the START the same way, so the
-  first phoneme of a phrase — including the safeword — isn't lost while
-  the VAD is still building confidence to trigger.
-
-Fully wired and config-driven, all with real-pipeline verification where
-a live microphone session was possible; several items (the TUI's full
-utterance-to-response render cycle, response tiering's spoken "continue"
-reply, the `patient` preset's queue-and-deliver behavior) are unit- and
-integration-tested but still need a live-mic UAT pass — see
-`docs/UAT-checklist.md`'s Conversation TUI, Response tiering, and
-Barge-in sections for the specific checklist items (named, not numbered,
-here on purpose -- section numbers have already drifted once this
-session as new sections were added).
-
-**Claude Code permission mode.** Headless (`--print`) mode has no way to
-answer a tool-permission prompt at runtime — a gated tool call would hang
-the session forever with no signal (see `src/convobox/adapters/claude_code.py`'s
-module docstring for the live-probed root cause). ConvoBox therefore
-defaults Claude Code to `--permission-mode plan`: it can read, explore, and
-explain, but never edit files or run commands on its own. For full
-write/execute access, set your own `--permission-mode bypassPermissions`
-(or the equivalent `--dangerously-skip-permissions`) in `backend.command` —
-**this bypasses every permission check**, which is risky on a voice-driven
-channel (misheard words, no per-action confirmation yet); only use it in a
-context you'd trust an unsupervised agent with. An explicit
-`--permission-mode` you set always wins over ConvoBox's default. Per-action
-voice approval is on the roadmap (`docs/ROADMAP.md`'s "Safety tiers for
-destructive actions").
+Since the 0.2.0 release, a substantial interaction/safety bundle
+(barge-in presets, a live conversation TUI, response tiering, a real
+safety bug fixed in the Codex adapter, and more) has landed on `main` —
+see [docs/STATUS.md](docs/STATUS.md) for the full narrative and
+[CHANGELOG.md](CHANGELOG.md) for the formal per-release log. The same
+document also covers the security + performance audit (7 bugs found and
+fixed) and the full progress history.
 
 ## Architecture
 
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'background': '#0d1117', 'mainBkg': '#161b22', 'primaryColor': '#1c2938', 'primaryBorderColor': '#30363d', 'primaryTextColor': '#e6edf3', 'lineColor': '#6e7681', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'edgeLabelBackground': '#161b22', 'titleColor': '#e6edf3'}}}%%
-flowchart TB
-    classDef hw       fill:#0d2137,stroke:#4a90d9,stroke-width:2px,color:#a8d4ff
-    classDef pipeline fill:#0d1f15,stroke:#3fb950,stroke-width:2px,color:#7ee787
-    classDef routing  fill:#0a1e1e,stroke:#39c5cf,stroke-width:2px,color:#79e8ef
-    classDef safety   fill:#1f1808,stroke:#e3b341,stroke-width:2px,color:#f0c842
-    classDef backend  fill:#16112b,stroke:#a371f7,stroke-width:2px,color:#d2a8ff
-    classDef tool     fill:#1f160d,stroke:#f0883e,stroke-width:2px,color:#ffa657
-    classDef future   fill:#0d1117,stroke:#484f58,stroke-width:1px,stroke-dasharray:4 4,color:#6e7681
+<img src="docs/media/architecture.svg" alt="ConvoBox pipeline: microphone into VAD into STT into a safeword check into the orchestrator, which routes to one of three backend adapters (OpenCode, Claude Code, or Codex), then to TTS and speakers, with the acoustic feedback path back to the mic called out separately.">
 
-    subgraph HW["Audio Hardware · native per platform"]
-        direction LR
-        MIC(["Microphone"]):::hw
-        SPK(["Speakers"]):::hw
-    end
+Audio capture (continuous mic input, VAD-segmented into utterances) feeds
+local STT, which is checked for a deterministic safeword before anything
+else touches it. An orchestrator tracks each backend's busy/idle state
+and routes an utterance as a fresh command, a soft interject, or a hard
+stop through one of three backend adapters — OpenCode, Claude Code, or
+Codex — each verified against a live instance. Backend replies stream
+back through local TTS, stripped of code/diffs in favor of spoken prose.
 
-    subgraph LOCAL["Local Pipeline · no audio leaves the machine"]
-        direction TB
-        CAP["MicrophoneStream · sounddevice / PortAudio · continuous float32 @ 16kHz"]:::pipeline
-        VAD["UtteranceSegmenter · Silero VAD · hysteresis band · max_utterance_s cap"]:::pipeline
-        STT["LocalTranscriber · faster-whisper · auto-detect by default · decoder + language confidence"]:::pipeline
-        SW["SafewordDetector · deterministic substring match · no LLM in this path"]:::safety
-        ORCH["Orchestrator · hard-stop precedence · empty-transcript guard · busy/idle routing"]:::routing
-        TTS["PiperTTSEngine · sanitize_text · streaming synthesis"]:::pipeline
-        PLAY["AudioPlayer · barge-in stop()"]:::pipeline
-    end
-
-    subgraph ADAPTERS["Backend Adapters · one per CLI"]
-        OC["OpenCodeAdapter · typed HTTP + SSE client"]:::backend
-        CC["ClaudeCodeAdapter · bidirectional stream-json CLI"]:::backend
-        CX["CodexAdapter · app-server JSON-RPC over stdio"]:::backend
-    end
-
-    subgraph TOOLS["Tools · same pipeline, no backend"]
-        direction LR
-        SPIKE["scripts/spike.py · logged transcripts"]:::tool
-        TUI["scripts/voice_tui.py · live clarity dashboard"]:::tool
-        PICKER["scripts/voice_picker_tui.py · browse/audition/pick a voice"]:::tool
-        AUDIO["scripts/audio_devices.py · find/test your audio device"]:::tool
-        ROUNDTRIP["scripts/roundtrip_smoketest.py · TTS to STT, any voice"]:::tool
-    end
-
-    MIC --> CAP --> VAD -->|"one utterance"| STT --> SW
-    SW -->|"transcript · safeword checked first"| ORCH
-    ORCH -->|"send_text / send_interject / send_hard_stop"| OC
-    OC -->|"SSE events · TEXT / TOOL / DONE / ERROR"| ORCH
-    ORCH -->|"prose only · strip_code_for_speech"| TTS --> PLAY --> SPK
-    SW -.-> SPIKE
-    SW -.-> TUI
-    PICKER -.->|"convobox.yaml snippet"| TTS
-    ROUNDTRIP -.-> TTS
-    ROUNDTRIP -.-> STT
-
-    style HW fill:#0d1525,stroke:#4a90d9,stroke-width:2px,color:#e6edf3
-    style LOCAL fill:#0a130d,stroke:#3fb950,stroke-width:2px,color:#e6edf3
-    style ADAPTERS fill:#150d22,stroke:#a371f7,stroke-width:2px,color:#e6edf3
-    style TOOLS fill:#1a1208,stroke:#f0883e,stroke-width:2px,color:#e6edf3
-```
-
-- **Audio capture** — continuous mic input, segmented into utterances by a
-  neural voice-activity detector (tolerant of pauses/disfluencies).
-- **Local STT** — transcribes each segment on-device.
-- **Safeword detection** — deterministic keyword-spotting over each
-  transcript, intentionally kept out of any LLM's hands so a hard stop
-  can't be second-guessed by a model.
-- **Orchestrator** — tracks each backend's busy/idle state and routes an
-  utterance as a fresh command, a soft interject, or a hard stop.
-- **Backend adapters** — one per target CLI, translating the orchestrator's
-  intent into whatever that tool actually understands, preferring each
-  tool's native structured/headless interface over PTY scraping. Three are
-  implemented: **OpenCode** (typed client over its HTTP+SSE server),
-  **Claude Code** (bidirectional stream-json subprocess), and **Codex**
-  (app-server JSON-RPC over stdio), each verified against a live instance.
-  OpenCode's real API shape (the endpoint paths were wrong in an early
-  assumed version, then corrected against a real `opencode serve`) is
-  documented in [OPENCODE_API_NOTES.md](OPENCODE_API_NOTES.md).
-- **Local TTS** — streams spoken responses back, filtering out raw
-  code/diff output in favor of prose summaries.
-- **Optional local LLM cleanup pass** between STT and the adapter, to fix
-  mangled technical vocabulary — under evaluation, not assumed necessary.
-  See Status.
-
-### One utterance, end to end
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'background': '#0d1117', 'mainBkg': '#161b22', 'primaryColor': '#1c2938', 'primaryBorderColor': '#30363d', 'primaryTextColor': '#e6edf3', 'lineColor': '#6e7681', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'edgeLabelBackground': '#161b22', 'titleColor': '#e6edf3'}}}%%
-flowchart TB
-    classDef step     fill:#0d1f15,stroke:#3fb950,stroke-width:2px,color:#7ee787
-    classDef decision fill:#1f1808,stroke:#e3b341,stroke-width:2px,color:#f0c842
-    classDef stop     fill:#1f160d,stroke:#f0883e,stroke-width:2px,color:#ffa657
-    classDef dropped  fill:#0d0d18,stroke:#484f58,stroke-width:2px,stroke-dasharray:6 4,color:#8b949e
-    classDef backend  fill:#16112b,stroke:#a371f7,stroke-width:2px,color:#d2a8ff
-
-    WIN["mic chunk · consumed in 512-sample / 32ms windows"]:::step
-    ACC["VAD accumulates a speech run · brief dips and ambiguous windows stay inside it"]:::step
-    ENDQ{"silence >= min_silence_ms · or max_utterance_s cap reached?"}:::decision
-    UTT["utterance emitted · trailing silence included so STT does not clip the last phoneme"]:::step
-    STT2["faster-whisper transcribe · language + confidence + latency measured"]:::step
-    SWQ{"safeword match? · deterministic, checked before everything else"}:::decision
-    HALT["hard stop · stop TTS · stop playback · adapter.send_hard_stop()"]:::stop
-    EMPTYQ{"transcript empty?"}:::decision
-    NOISE["dropped · background noise never reaches the backend"]:::dropped
-    BUSYQ{"backend busy?"}:::decision
-    INTJ["send_interject · a soft 'oh, also...' that must not derail the task"]:::backend
-    SEND["send_text · fresh command"]:::backend
-    EVENTS["drain SSE events · TEXT / TOOL_CALL / TOOL_RESULT / ERROR / DONE"]:::backend
-    SPEAKQ{"TEXT event with prose? · strip_code_for_speech removes code and diffs"}:::decision
-    SPEAK["Piper TTS synthesis · fire-and-forget task · AudioPlayer to speakers"]:::step
-    SILENT["nothing spoken · code and diffs stay on screen"]:::dropped
-
-    WIN --> ACC --> ENDQ
-    ENDQ -->|"not yet"| ACC
-    ENDQ -->|"yes"| UTT --> STT2 --> SWQ
-    SWQ -->|"yes"| HALT
-    SWQ -->|"no"| EMPTYQ
-    EMPTYQ -->|"yes"| NOISE
-    EMPTYQ -->|"no"| BUSYQ
-    BUSYQ -->|"yes"| INTJ --> EVENTS
-    BUSYQ -->|"no"| SEND --> EVENTS
-    EVENTS --> SPEAKQ
-    SPEAKQ -->|"prose"| SPEAK
-    SPEAKQ -->|"code only"| SILENT
-```
-
-**Reviewing this codebase?** `.tours/` has three [CodeTour](https://marketplace.visualstudio.com/items?itemName=vsls-contrib.codetour)
-walkthroughs (VS Code will prompt to install the extension via
-`.vscode/extensions.json`): *1. Architecture & Data Flow* follows one
-utterance through every pipeline stage with the data handoff called out at
-each boundary; *2. Review Findings: Security & Performance* visits the
-concrete bugs a review pass found and fixed, in place; *3. Extension
-Points: Modularity & Pluggability* shows collaborators exactly where to
-plug in a new backend adapter or TTS engine, and — just as important —
-which modules are deliberately single-implementation, not extension
-points. Each step is anchored by both a line number and a text pattern so
-the tour stays accurate as the code around it changes — see the comment
-at the top of any `.tour` file if you're adding a new step.
-
-## Prior art
-
-ConvoBox is not the first attempt at voice-driven coding agents. Related
-projects, and where this one differs:
-
-- **[VoiceMode](https://github.com/mbailey/voicemode)** — local-first,
-  open-source, Whisper STT + Kokoro TTS. Runs as an MCP server, so it's
-  scoped to MCP-aware hosts rather than arbitrary CLIs.
-- **[duck_talk](https://github.com/dhuynh95/duck_talk)** — real-time voice
-  interface for Claude Code specifically, built on cloud Gemini Live
-  sessions rather than local STT/TTS.
-- **[RealtimeSTT](https://github.com/KoljaB/RealtimeSTT) /
-  [RealtimeTTS](https://github.com/KoljaB/RealtimeTTS) /
-  [RealtimeVoiceChat](https://github.com/KoljaB/RealtimeVoiceChat)** — not
-  coding-agent tools, but the low-latency local STT/TTS/VAD/barge-in
-  building blocks this project leans on.
-- **Claude Code's native `/voice`** — push-to-talk dictation, one
-  directional (speech in, no speech out), Claude Code only.
-- **Aider's built-in `/voice`** — Whisper-based push-to-talk dictation,
-  aider only.
-
-None of the above are both backend-agnostic *and* local-first *and*
-full-duplex. That combination is the gap ConvoBox is trying to fill.
-
-**[RealtimeVoiceChat](https://github.com/KoljaB/RealtimeVoiceChat)**
-deserves a separate callout: it already implements almost the entire
-Phase 2 pipeline (see [Roadmap](#roadmap)) — a browser client with no
-install, talking over WebSocket to a Dockerized server that runs
-VAD → STT (faster-whisper) → LLM → TTS (Coqui/Kokoro/Orpheus),
-streamed both directions with barge-in support. It's pointed at a chat
-LLM rather than a CLI coding agent, but the audio pipeline and Docker
-packaging are directly reusable — the plan is to evaluate forking it and
-replacing its "send transcript to the LLM" step with ConvoBox's
-orchestrator/backend-adapter layer, rather than rebuilding that pipeline
-from scratch.
-
-Other relevant Docker-native building blocks, if a more piecemeal
-approach ends up being preferable to forking RealtimeVoiceChat:
-
-- **[docker-whisper](https://github.com/hwdsl2/docker-whisper)** —
-  self-hosted, OpenAI-API-compatible Whisper (faster-whisper) server,
-  GPU-accelerated, offline, multi-arch.
-- **[LocalAI](https://localai.io)** — Docker-native, OpenAI-compatible
-  local inference server covering STT, TTS, and an implementation of
-  [OpenAI's Realtime API](https://localai.io/features/openai-realtime/)
-  spec (full-duplex streaming).
-- **[OpenVoiceOS](https://github.com/OpenVoiceOS/ovos-docker-stt)** —
-  plugin-based STT/TTS container images, OCI-compatible (Docker, Podman,
-  Kubernetes).
-
-The Wyoming protocol / Rhasspy satellite ecosystem (Home Assistant's
-local voice stack) is the closest *conceptual* prior art for a
-thin-client/server split with local STT/TTS, but it's no longer
-maintained — superseded by a newer ESPHome-based approach — so it's a
-reference for the pattern, not something to build on directly.
-
-## Lessons from an earlier attempt
-
-An earlier, unreleased project of mine (`voice-opencode`, on hold, TS/Bun,
-scoped to OpenCode only) targeted the same space and is worth mining for
-what to keep and what to avoid:
-
-- **The OpenCode HTTP+SSE client is directly reusable as a template.**
-  `POST /api/sessions` → open a session, `GET
-  /api/sessions/:id/events` (SSE) → stream typed messages (`text |
-  tool_call | tool_result | error | done`), `POST
-  /api/sessions/:id/messages` → send text. That maps cleanly onto
-  ConvoBox's `send_text`/`is_busy` adapter surface for the OpenCode
-  backend specifically, and confirms the "prefer the tool's native
-  structured interface over scraping terminal output" principle above is
-  achievable, not just aspirational.
-- **Never string-interpolate spoken/response text into a shell command.**
-  Its Windows TTS engine built a PowerShell `-Command` string by
-  interpolating the text to speak directly into it — a straightforward
-  command-injection hole, since that text can be arbitrary LLM output. The
-  fix (write text to a temp file via base64 rather than inlining it,
-  sanitize control characters, cap length) is a lesson to design in from
-  the start for ConvoBox's TTS engine, not retrofit later: LLM-response
-  text handed to any subprocess is untrusted input.
-- **Shelling out per-OS for audio capture/playback was fragile and never
-  finished.** Recording was implemented three separate times — a
-  `mciSendString` PowerShell hack on Windows, `sox` on macOS, `arecord` on
-  Linux — each spawning a subprocess and round-tripping through a temp
-  `.wav`/`.mp3` file per utterance. This is exactly why ConvoBox picks
-  [sounddevice](https://github.com/spatialaudio/python-sounddevice) (real
-  PortAudio bindings) instead of shelling out: one cross-platform audio
-  path, no per-OS subprocess maintenance burden, no file-write-then-play
-  latency added to every turn.
-- **"Local-first" was aspirational, not real, and that gap wasn't
-  visible until you looked at what actually ran.** The project was
-  designed with a pluggable local/cloud STT engine factory, but the local
-  Whisper engine was a stub (`throw new Error('Local Whisper not
-  implemented')`) — the only STT that ever worked was the paid OpenAI
-  Whisper API. Pluggability got built before the default path worked
-  offline. Lesson for ConvoBox: get faster-whisper actually transcribing
-  locally first (see [Status](#status)); treat multi-engine abstraction as
-  something to add once there's a working local baseline to abstract
-  from, not a prerequisite for one.
-
-## Listening states & indicators
-
-Hands-free use means there's no screen focus to rely on for feedback, so
-state changes need both a visual and (where noted) an auditory indicator,
-Alexa-style. Modeled as an explicit state machine rather than ad hoc flags:
-
-| State | Description | Indicator |
-| --- | --- | --- |
-| Off | Not running | none |
-| Idle (wake-word only) | Passively spotting the wake word; not transcribing general speech | dim visual, no sound |
-| Active listening | Woken; capturing and transcribing speech | visual change + activation earcon |
-| Command captured | Utterance finalized, STT complete | brief distinct acknowledgment cue |
-| Backend working | Target CLI is executing; visually distinct from "listening" since you can still interject | visual only |
-| Responding (TTS playback) | Speaking a response; interruptible at any point (barge-in returns to Active listening) | visual only |
-| **Hard stop (safeword heard)** | Safeword detected; execution is being halted | **its own unmistakable audio/visual class — never a louder variant of another state** |
-| Stopped / muted | Explicitly told to stop; no wake-word spotting either | fully dim, no sound |
-
-Inbound/outbound profanity filtering (what you say vs. what TTS speaks
-back) is planned as a configurable option, off by default.
-
-## Component software
-
-Current candidate stack for the local pipeline:
-
-- Python, managed with [uv](https://github.com/astral-sh/uv)
-- [sounddevice](https://github.com/spatialaudio/python-sounddevice) — audio
-  capture
-- [Silero VAD](https://github.com/snakers4/silero-vad) — speech
-  segmentation
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — local
-  speech-to-text
-- A local TTS engine (Kokoro or Piper — not yet finalized, though licensing
-  now favors Kokoro: the current `piper-tts` package is GPL-3.0, which
-  would make ConvoBox a GPL-encumbered distribution rather than the clean
-  MIT project it's meant to be — see
-  [DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md)). Whatever the
-  choice, response text must never be interpolated directly into a shell
-  command to invoke it — see
-  [Lessons from an earlier attempt](#lessons-from-an-earlier-attempt).
-- [Ollama](https://ollama.com) — for the optional local LLM cleanup pass,
-  if testing shows it's warranted
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline
+diagrams, the component stack, and pointers into the codebase (including
+three [CodeTour](https://marketplace.visualstudio.com/items?itemName=vsls-contrib.codetour)
+walkthroughs in `.tours/`).
 
 ## Roadmap
 
-Rough phased direction, not commitments — captured to keep design
-decisions from painting the architecture into a corner, not as a
-schedule.
+Rough phased direction, not commitments: a native desktop client first,
+then a browser client talking to a networked server over your own
+private network, with mobile deprioritized but not designed away. Full
+detail, including the near-term feature roadmap (pluggable STT/TTS
+engines, safety tiers for destructive actions, wake word, session
+persistence), is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
-1. **Native desktop client** (macOS, Windows, Linux). Audio capture,
-   listening-state indicators, and TTS playback as a lightweight native
-   process per platform, talking to a local server process over
-   localhost.
-2. **Browser client + networked server.** The server component —
-   VAD/STT/TTS/orchestrator/backend adapters — runs the same regardless
-   of who's talking to it. A browser tab becomes just another thin client
-   (mic in, indicators + audio out) pointed at that server over your own
-   private network (e.g. Tailscale) instead of localhost. Exposing
-   agent-execution access this way needs real auth, not just "reachable
-   on the network" — scoping to a private tailnet, the way other services
-   here already are, is the likely default rather than open LAN access.
-3. **Mobile — deprioritized, not designed away.** Not being built now,
-   but the client/server split above means a native mobile client is
-   "just another client" against the same server API later, not a
-   re-architecture, as long as that protocol stays platform-agnostic.
-   Some phones already do on-device STT/TTS well; the likely mobile shape
-   is a hybrid — local STT/TTS for responsiveness/privacy, still calling
-   the server (over Tailscale, SSH, or similar) for the actual agent
-   execution, since the CLI backends themselves can't run on a phone.
+## Prior art
 
-**Cross-platform packaging: Docker for the server, not the client.** The
-server-side component (orchestrator, STT/TTS, backend adapters) is a good
-fit for a single Docker image that runs identically on Mac/Windows/Linux
-hosts — the same container serves the Phase 1 localhost client and the
-Phase 2 browser client. The audio-capture/indicator client can't move
-into the container the same way: microphone and speaker access don't
-pass through Docker cleanly on any of the three platforms (especially
-macOS/Windows, where Docker Desktop runs in a VM with no direct hardware
-audio access), so that piece stays a thin native process per platform
-regardless of how the server is packaged.
-
-## Status
-
-**As of 2026-07-12, the full voice loop runs end to end**
-(`scripts/run_convobox.py`: mic → VAD → local STT → orchestrator → backend
-adapter → streaming Piper TTS → playback), verified live on Windows across
-many conversation rounds. All three backend adapters are implemented and
-verified against live instances (OpenCode, Claude Code, Codex). Streaming
-TTS (audio starts on the first synthesized sentence), acoustic echo
-cancellation (optional `[aec]` extra, WebRTC AEC3), open barge-in
-(`interaction.interrupt_preset`, defaults to `do-not-disturb` -- off), a
-single-instance mic lock, and a documented, validated `convobox.yaml`
-(see `convobox.example.yaml`
-and [docs/QUICKSTART.md](docs/QUICKSTART.md)) are all in. ~500 automated
-tests, mypy/ruff/bandit clean. A Settings TUI (`scripts/settings_tui.py`,
-config editing) and a live conversation TUI (`--tui`, see the "Since
-0.2.0" note above) are both shipped, not roadmap items anymore. Still
-open: Linux/macOS aren't validated yet, and a second TTS/STT engine
-(Kokoro) is on the roadmap ([docs/ROADMAP.md](docs/ROADMAP.md)).
-
-The rest of this section is the earlier progress log, kept for history.
-
-Scaffolding stage — an initial implementation of every pipeline stage
-exists (`src/convobox/`: audio capture/playback, VAD segmenter, local STT,
-safeword detector, TTS + Piper engine (streaming), an orchestrator, and an
-OpenCode adapter), plus a first real end-to-end validation:
-`scripts/roundtrip_smoketest.py` runs text → Piper TTS → faster-whisper STT
-with no mic involved, and `scripts/spike.py` is the originally-planned
-mic → VAD → local STT → logged-transcript spike. The orchestrator now
-drives TTS itself — a backend TEXT event is stripped of code
-(`strip_code_for_speech`) and spoken via whatever `TTSEngine`/`AudioPlayer`
-it was constructed with (both optional; omitting them keeps the
-routing-only behavior from before), fired as a background task so a slow
-synthesis doesn't stall draining the next backend event, and a hard stop
-now also stops in-progress TTS/playback. 98 automated tests pass
-(`pytest tests/`), mypy is clean across the tree, and `scripts/spike.py`'s
-own async wiring (not just its components) has been run end-to-end with a
-faked mic feed of real synthesized speech. Playback has also now run
-against real speaker hardware, not just a mocked `OutputStream` — including
-barge-in genuinely cutting off in-progress audio (see
-[TESTING.md](TESTING.md) for the measured stop-latency number).
-
-**Windows is now verified end to end** (2026-07-09, Windows 11: full
-suite, mypy, TTS/STT round trip, both smoke tests, real speaker playback
-with 240ms barge-in stop latency), and that run also closed the last
-hardware gap on any platform: **live microphone capture through
-`scripts/spike.py` works**, including a real spoken-safeword exit. The
-same session produced a set of pipeline improvements now in the tree: an
-empty-transcript guard in the orchestrator (background noise can
-VAD-trigger and transcribe to nothing; that must never reach the backend
-as an empty command), a `vad.max_utterance_s` cap (continuous speech
-otherwise buffers unboundedly and yields no transcript until the speaker
-pauses), an `stt.min_language_probability` confidence gate (auto language
-detection hallucinates below ~0.4 on accented or ambiguous audio; the
-safeword is always checked before the gate so a quality filter can never
-swallow a hard stop), and `scripts/voice_tui.py`, a stdlib-only live
-dashboard showing input level, capture state, and a per-utterance clarity
-verdict (see [TESTING.md](TESTING.md) → "Live clarity dashboard").
-`LanguageTracker` followed from further live testing: it flags when an
-utterance's detected language breaks from the session's established one,
-without ever pinning what language STT is asked to assume — auto-detect
-stays real auto-detect always, since pinning was tried and found worse
-(it decodes non-matching speech as confident-sounding nonsense in the
-pinned language rather than surfacing the mismatch).
-
-`TTSConfig.voice`/`rate`/`volume` are wired up now too — every script
-constructed `PiperTTSEngine` by hand with a hardcoded voice before;
-`convobox.tts.create_tts_engine()` is the missing factory, and 98 tests
-pass with it in place. `scripts/voice_picker.py` browses, downloads, and
-auditions any of Piper's 163 voices (44 languages) through real speakers,
-interactively or via flags, and prints the `convobox.yaml` snippet for
-whichever one you land on; `scripts/roundtrip_smoketest.py --voice KEY`
-runs the same TTS→STT intelligibility check as before against any
-installed voice, not just the original hardcoded one. See
-[TESTING.md](TESTING.md) → "Picking a voice". Linux hasn't been attempted
-at all.
-(At that 2026-07-09 point nothing was stable — no Claude Code/Codex
-adapters yet, config not threaded through a CLI, and the orchestrator→TTS
-wiring used `synthesize()` (whole-utterance) rather than streaming. All
-three have since been implemented; see the current-status summary at the
-top of this section.)
-
-A security + performance pass (8 independent finder angles, each claim
-verified against the actual code before acting) found and fixed 7 real
-bugs — worth knowing about even though they're fixed, since a couple were
-subtle:
-
-- **VAD could hang indefinitely.** `UtteranceSegmenter`'s hysteresis band
-  (`[threshold-0.15, threshold)`, ambiguous — neither confidently speech
-  nor silence) was treated as speech, resetting the silence timer on every
-  ambiguous frame. A speaker trailing off gradually, or noise sitting near
-  threshold, could keep an utterance open forever — it would only end via
-  an external `flush()`, never the segmenter's own silence detection.
-- **`OpenCodeAdapter.is_busy()` could latch `True` forever.** It was only
-  ever cleared inside `events()` on an observed DONE/ERROR — a dropped
-  connection, an exception, or the consumer simply not running left every
-  later transcript silently routed to `send_interject` instead of
-  `send_text`, with no error surfaced. Now cleared on any exit from
-  `events()`, and `Orchestrator.handle_transcript` starts the event-drain
-  loop itself instead of relying on a caller to remember a separate wiring
-  step.
-- **A safeword phrase could silently do nothing.** A configured hard-stop
-  phrase that normalizes to an empty string (pure punctuation, etc.) was
-  dropped with no warning — an operator could believe their abort word was
-  active when it wasn't. Now raises at construction instead.
-- **TTS buffered the entire response before returning any audio.**
-  `PiperTTSEngine` collected every chunk into a list before returning —
-  full synthesis time was added to time-to-first-audio. Now streams
-  (`synthesize_stream`, bridging piper's blocking generator through a
-  background thread, same pattern as `MicrophoneStream`); measured ~11x
-  improvement in time-to-first-audio on a 20-sentence passage (143ms vs.
-  1574ms total). `synthesize()` still exists as a concatenating
-  convenience on top of the stream.
-- **A misconfigured backend URL could silently bypass the plaintext-HTTP
-  warning.** A schemeless `"host:port"` URL makes `urlparse` mistake the
-  host for the scheme, so the `scheme == "http"` check never fired —
-  confirmed both that this parse behavior is real and that `httpx` accepts
-  such a URL without complaint. Now warns on any non-http/https scheme too.
-- **`MicrophoneStream.read()` and `.stream()` disagreed on end-of-stream.**
-  After `close()`, `.stream()`'s async generator ended cleanly but `.read()`
-  raised `RuntimeError` — and since it re-enqueues the close-sentinel before
-  raising, every call after `close()` raises again rather than reaching a
-  quiet terminal state. Both now documented/behave consistently (clean
-  return for the async path, an explicit `RuntimeError` for the sync path
-  — a deliberate difference, not an oversight, since a sync consumer can't
-  just "stop iterating" the way an async-for can).
-- Two small cleanups: an unused `MicrophoneStream.chunks()` method and a
-  redundant `OpenCodeAdapter._sse_source` instance field (only ever used
-  immediately after assignment) were removed.
-
-One finding came back **PLAUSIBLE rather than cleanly refuted**, and an
-earlier draft of this section overstated it as refuted — corrected here:
-whether a real audio chunk could land in the queue *after*
-`MicrophoneStream.close()`'s sentinel (because `_callback` has no lock
-against `close()`) rests entirely on `sounddevice`/PortAudio's documented
-guarantee that `stop()` blocks until pending callbacks finish — a
-guarantee this code trusts but does not itself enforce with any lock or
-flag. If that external contract ever doesn't hold, a stray chunk could be
-stranded behind the sentinel (harmless — it's just never read, not a
-correctness hazard beyond that). Not fixed: adding internal synchronization
-to guard against a well-established, actively-relied-upon PortAudio
-guarantee breaking would be defending against a scenario with no evidence
-it occurs, at the cost of real complexity.
-
-**Confirmed but deliberately not fixed, low practical impact:**
-`UtteranceSegmenter` runs Silero inference on every 32ms window regardless
-of triggered state (verified: `_process_window`'s model call happens before
-the triggered check) — but this is inherent to how VAD works, not
-avoidable waste: the model has to run continuously to detect speech onset
-in the first place, and Silero's per-window cost is small enough that it
-hasn't shown up as a bottleneck in any measurement so far. Separately, the
-`np.concatenate` of ~32ms window slices at utterance end happens
-synchronously on the STT hand-off path — real, but the absolute data size
-involved (hundreds of KB for a several-second utterance) makes this a
-sub-millisecond operation, not a meaningful latency contributor next to
-STT's ~150–200ms. Worth revisiting with actual profiling data if latency
-ever becomes a measured problem, not worth speculatively optimizing now.
-
-Known, deliberately deferred (not wrong, just lower-value-per-effort right
-now): `AudioPlayer.play()` opens a fresh `OutputStream` per call instead of
-reusing one — real but modest overhead (tens of ms device-open latency per
-spoken response, not a hot per-window cost), and fixing it would require
-reworking a test suite that deliberately asserts today's open/close-per-call
-contract. Revisit once real latency numbers from the now-wired
-orchestrator→TTS path are available to justify the rework.
+ConvoBox is not the first attempt at voice-driven coding agents —
+[VoiceMode](https://github.com/mbailey/voicemode),
+[duck_talk](https://github.com/dhuynh95/duck_talk), and the built-in
+`/voice` in Claude Code and Aider are the closest relatives, but none
+combine backend-agnostic, local-first, and full-duplex in one project.
+See [docs/PRIOR-ART.md](docs/PRIOR-ART.md) for the full comparison,
+reusable building blocks, and [docs/LESSONS-FROM-VOICE-OPENCODE.md](docs/LESSONS-FROM-VOICE-OPENCODE.md)
+for what an earlier, unreleased attempt at this same problem got wrong.
 
 ## Credits & attributions
 

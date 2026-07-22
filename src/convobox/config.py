@@ -9,9 +9,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from convobox.confirmword import ConfirmwordDetector
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
-from convobox.wakeword import DEFAULT_WAKE_WORD
+from convobox.resumeword import DEFAULT_RESUME_WORD
 
 
 class AudioConfig(BaseModel):
@@ -54,8 +55,14 @@ class STTConfig(BaseModel):
     # selectable/pluggable symmetrically with tts.engine.
     engine: str = "faster-whisper"
     model: str = "base"
-    device: str = "cpu"
-    compute_type: str = "int8"
+    # "auto"/"default" delegate straight to faster-whisper's own device and
+    # compute-type selection (ctranslate2.get_cuda_device_count() under the
+    # hood) -- confirmed on this machine's real NVIDIA 4060 to pick CUDA
+    # automatically when present, CPU otherwise. Set explicit values
+    # ("cpu"/"int8") only to force a side away from what's auto-detected,
+    # e.g. to keep a GPU free for another process.
+    device: str = "auto"
+    compute_type: str = "default"
     language: str | None = None
     # Drop transcripts whose detected-language probability falls below this
     # (0.0 = disabled). Live testing showed detections under ~0.4 on accented
@@ -65,6 +72,23 @@ class STTConfig(BaseModel):
     # safeword on the raw transcript BEFORE applying this gate: a confidence
     # filter must never be able to swallow a hard stop.
     min_language_probability: float = 0.0
+    # Exact, operator-maintained fixes for recurring STT mistakes.  Applied
+    # only to ordinary command routing after raw safeword/pause/approval
+    # checks; see convobox.stt.corrections.TranscriptCorrector.  Keeping the
+    # glossary in config makes every rewrite inspectable and portable, rather
+    # than silently training on a user's voice data.
+    corrections: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("corrections")
+    @classmethod
+    def _validate_corrections(cls, v: dict[str, str]) -> dict[str, str]:
+        # Constructing the corrector performs normalization-aware validation
+        # (empty sources/targets and duplicate normalized sources).  Import
+        # lazily to keep config's existing import surface lightweight.
+        from convobox.stt.corrections import TranscriptCorrector
+
+        TranscriptCorrector(v)
+        return v
 
 
 class TTSConfig(BaseModel):
@@ -117,9 +141,9 @@ class InteractionConfig(BaseModel):
     # Shared by two independent features (docs/DESIGN-barge-in.md, "Pause/
     # resume listening"): the push-word barge-in trigger (future work) and
     # resuming from the paused listening state (below) both use this word.
-    wake_word: str = DEFAULT_WAKE_WORD
+    resume_word: str = DEFAULT_RESUME_WORD
     # Saying one of these hard-stops in-flight backend work (same as the
-    # safeword) and enters a paused state where only wake_word is heard,
+    # safeword) and enters a paused state where only resume_word is heard,
     # until it's said and normal listening resumes.
     pause_listening_phrases: list[str] = Field(
         default_factory=lambda: list(DEFAULT_PAUSE_PHRASES)
@@ -138,6 +162,38 @@ class InteractionConfig(BaseModel):
     # not yet live-UAT-tuned against a real "did that feel laggy or
     # naggy" pass.
     continue_timeout_s: float = 2.5
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): the voice
+    # phrase that approves a pending destructive-action tool call. None
+    # (default) leaves voice approval OFF -- existing sessions behave
+    # exactly as before (claude-code stays in its safe --permission-mode
+    # plan default; codex keeps auto-declining every request). There is
+    # no safe default phrase, same reasoning as ConfirmwordDetector's own
+    # construction-time guard: this must be a phrase the operator chose
+    # deliberately, not one this project picked for them. Currently only
+    # honored by the claude-code backend (see
+    # create_backend_adapter/ClaudeCodeAdapter's interactive_approval) --
+    # codex's own per-call approval channel is real (see codex.py's
+    # module docstring) but wiring voice decisions into it is separate,
+    # not-yet-built work.
+    approval_phrase: str | None = None
+    # How long ConvoBox waits for a voice decision before treating silence
+    # as deny (ApprovalPromptGate.observe_timeout) -- longer than
+    # continue_timeout_s on purpose: deciding whether to approve a real
+    # destructive action deserves more time than a quick "continue/stop"
+    # reflex, and silence-denies is the safe direction here regardless.
+    approval_timeout_s: float = 30.0
+
+    @field_validator("approval_phrase")
+    @classmethod
+    def _validate_approval_phrase(cls, v: str | None) -> str | None:
+        if v is not None:
+            # Raises ValueError (with the real reason) if the phrase is
+            # empty or made up entirely of common affirmations/fillers --
+            # fail fast at config load, not at the first live approval
+            # prompt. ConfirmwordDetector is the authority on this; not
+            # duplicated here.
+            ConfirmwordDetector(v)
+        return v
 
 
 class SafewordConfig(BaseModel):
@@ -166,6 +222,19 @@ class BackendConfig(BaseModel):
     # (`GET /doc`), is `POST /api/session`'s optional `model: {providerID,
     # id}` field -- see OpenCodeAdapter._ensure_session().
     model: str | None = None
+    # The directory the spawned coding agent (codex, claude-code) runs in --
+    # i.e. where it reads and WRITES files. SECURITY-RELEVANT: a coding
+    # agent edits its working directory, so pointing it at ConvoBox's own
+    # source (the default when unset -- the subprocess inherits ConvoBox's
+    # cwd) lets a voice conversation silently modify the product's own code
+    # mid-session. Set this to an isolated workspace (e.g. a scratch/UAT
+    # directory separate from any repo you care about) so the agent's edits
+    # land there, not on your source. Overridable per-run with
+    # `run_convobox.py --working-dir PATH`. Does NOT apply to the opencode
+    # backend, whose directory is fixed by wherever `opencode serve` was
+    # launched (not a subprocess ConvoBox spawns) -- see
+    # docs/DESIGN-backend-sandboxing.md.
+    working_dir: str | None = None
 
     @field_validator("model")
     @classmethod

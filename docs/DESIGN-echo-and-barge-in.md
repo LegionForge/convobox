@@ -72,6 +72,154 @@ cancellation, not on orchestration changes.**
 - Honest cost: room-specific tuning UAT (delay hint, adaptation
   convergence, mic placement changes), not code volume.
 
+### Research: what Zoom/Webex/WebRTC do beyond basic linear AEC (2026-07-20)
+
+Prompted by self-barge-in "still needs a bit of tweaking" once AEC lands.
+Researched what commercial VoIP/conferencing products do beyond a plain
+adaptive linear filter, since that's the gap between "AEC exists" and
+"AEC works well enough on cheap speakers in a real room with no
+headphones." Two claims below are cited against a fetched source each;
+where a claim is general/uncited engineering knowledge rather than
+something verified from a specific published source, it's labeled as
+such rather than presented as a confirmed fact.
+
+**The techniques that matter most for ConvoBox's specific problem
+(open mic, no headphones):**
+
+- **Nonlinear residual echo suppression**, a frequency-dependent
+  post-filter that cleans up what the linear adaptive filter can't model
+  by design -- echo from speaker distortion, amp non-linearity, and ADC
+  clipping. Matters here specifically because cheap speakers at real-room
+  volume are exactly the non-linear-distortion case this stage targets.
+- **Double-talk detection**: monitors coherence between the far-end
+  reference (what was played) and the mic signal to distinguish "user
+  talking over playback" from "just echo," and throttles filter
+  adaptation during genuine double-talk so real speech doesn't get
+  mislearned as echo. This is the mechanism that keeps a real barge-in
+  from being silently swallowed by an over-eager canceller -- directly
+  relevant to `BargeInMonitor`.
+- **Continuous delay estimation**, cross-correlating the reference and
+  capture signals on an ongoing basis rather than once at startup, since
+  render→capture delay drifts across devices/host-APIs. This is exactly
+  the class of problem behind this project's own `aec_delay_ms` auto-tune
+  incident (a stale baked-in value silently disabling auto-tuning) --
+  cited [source](https://switchboard.audio/hub/how-webrtc-aec3-works/)
+  describes AEC3 doing this continuously, not as a one-shot calibration.
+
+**Does `aec-audio-processing` (WebRTC AEC3) already include these?**
+Yes -- per the same source, all three are native AEC3 stages, not
+something ConvoBox would need to layer on top. That reframes the open
+"self-barge-in still needs tweaking" problem: it's more likely a
+**wiring/tuning problem** (is the far-end reference correctly tee'd and
+time-aligned before `process_stream`; is delay estimation actually
+converging on this project's specific device paths) than "AEC3 lacks a
+needed algorithm." Worth checking against real UAT numbers before
+reaching for anything beyond AEC3.
+
+**What Zoom/Webex publish about their own approach:** not much at the
+algorithmic level. [Webex's own audio-quality blog](https://blog.webex.com/collaboration/video-conferencing/audio-quality/)
+confirms AEC has to work for full-duplex to function at all, but
+publishes no lower-level detail (proprietary). [Zoom's blog on its
+"High-Fidelity Music Mode"](https://www.zoom.com/en/blog/high-fidelity-music-mode-professional-audio-on-zoom/)
+confirms Zoom offers an echo-cancellation-mode choice ("Echo
+cancellation" vs. "Aggressive") but likewise discloses no internals.
+Both are general/uncited on internals beyond what's quoted here -- their
+value is confirming *that* full-duplex AEC is table-stakes industry
+practice, not revealing *how* they implement it.
+
+If AEC3's built-in stages prove insufficient after real tuning, the
+next-step academic reference is [double-talk-detection-aided residual
+echo suppression via spectrogram masking](https://www.mdpi.com/2624-599X/4/3/39) --
+state-of-the-art beyond AEC3, not needed unless AEC3-plus-tuning is
+verified insufficient first.
+
+### Correction (2026-07-20, same day): the delay-hint theory was wrong — real calibration data already existed
+
+Earlier the same day, a live UAT log showing 47 `UNDER-CANCELLING` verdicts
+was diagnosed as caused by a stale `aec_delay_ms: 309` fighting the
+~222ms auto-tune estimate, and `convobox.yaml` was changed to remove the
+explicit value. **That diagnosis and that config change were both
+wrong**, and the mistake is worth recording plainly rather than quietly
+fixing:
+
+- `uat-acoustic-calibration/20260716-153747/report.json` (a real,
+  on-hardware delay sweep from `scripts/acoustic_calibration.py`, same
+  device pair: `Microphone (1080P Pro Stream)` / `Headphones (Realtek(R)
+  Audio)`, both MME) ranks **309ms as the best of {285, 297, 309}**: 80%
+  self-barge rejection, 10.6dB mean suppression, and the *lowest*
+  variance across repeats (0.079dB stdev vs. 0.747/1.021 for the
+  others) — explicitly `"best_trial": "309-r1"`,
+  `"recommendation": {"aec_delay_ms": 309}`.
+- A second sweep the same day, `uat-acoustic-calibration/20260716-152911/report.json`,
+  tested {222, 247, 272, 297} and found **222ms — the auto-tune
+  estimate — the *worst* of that set**: only 40% self-barge rejection
+  and a noisy 3.336dB suppression stdev, versus 75-100% rejection for
+  247-297ms.
+- `309ms` was not stale cruft. It was a deliberately, empirically chosen
+  value from real calibration data that already existed in the repo.
+  The convobox.yaml edit was reverted; the explicit value is restored
+  with a comment pointing at these two reports.
+
+This does not fully contradict the delay-hint research above — the
+synthetic sweep and the WebRTC AEC3 source both suggest the hint barely
+affects AEC3's own internal convergence mathematically. What it means is
+that claim, even if true in isolation, does not explain the *actual
+measured outcomes* in this specific room: something in the real
+acoustic/measurement pipeline clearly correlates with this parameter
+(self-barge rejection rate varies from 40% to 100% across delay
+values), and neither the synthetic model nor the WebRTC-source read
+identified what. **Honest status: unresolved.** The mechanism connecting
+delay-hint value to real-world outcome is not understood; only the
+empirical ranking is trusted, because it's real hardware data, not a
+synthetic proxy.
+
+Practical consequence: **the live UAT session's jarring self-barge-in is
+still unexplained.** It happened while running the empirically-best
+known delay value, so "wrong delay" is ruled out as the cause. The room,
+hardware, or backend-conversation conditions during that live session
+may simply differ from the 2026-07-16 calibration run's controlled
+trial (four days is enough time for anything to have shifted — device
+selection, volume, distance, background noise) — re-running
+`scripts/acoustic_calibration.py` is the fastest way to check whether
+309ms is still the right value before looking anywhere else.
+
+### Capturing a live incident for offline analysis (2026-07-20)
+
+`scripts/acoustic_calibration.py` is a **controlled experiment**: known
+text, scripted trials, ambient/delay sweeps, real hardware, but not a
+real conversation with a coding-agent backend. It answers "does AEC work
+here, systematically." It does not capture what happens during an
+actual voice-driven dogfooding session, which is what produced the
+jarring self-barge-in this document is chasing.
+
+`scripts/run_convobox.py --aec-dump [DIR]` is the complementary tool:
+capture the *real* reference (what was actually played) and *real* mic
+signal (before and after cancellation) during an actual live session, to
+WAV, for repeatable offline replay afterward — the same "aecdump"
+methodology WebRTC's own `audioproc_f`/`unpack_aecdump` tooling uses.
+Three files land in a timestamped subdirectory of `.aec-dumps/` (or a
+custom `DIR`): `reference.wav`, `mic-raw.wav`, `mic-processed.wav`.
+Verbose log lines mark the dump's start, per-response progress (frame
+counts, elapsed seconds), and a final after-action summary at shutdown
+— even on Ctrl+C, since the WAV headers must be finalized to be
+playable. The `--tui` conversation view shows a `REC <n>s` tag on the
+diagnostics line whenever a dump is active.
+
+Implementation: `AecDumpWriter` (`src/convobox/audio/aec.py`) is an
+optional observer wired into `EchoCanceller` (`dump=` constructor
+param), writing already-computed int16 frames at zero extra conversion
+cost from both `feed_reverse` (playback thread) and `process` (capture
+thread) — each of the three files is written by exactly one thread for
+its whole lifetime, so no locking was needed, same reasoning as the
+class's existing frame counters.
+
+Once a real incident is captured this way, replay the WAV pair through
+`EchoCanceller` directly (construct with any candidate `delay_ms`, feed
+`reference.wav`'s frames via `feed_reverse`, `mic-raw.wav`'s via
+`process`, compare `attenuation_db()`/`measurable_ceiling_db()`) to test
+hypotheses against the *exact* real audio that misbehaved, repeatably,
+without needing another live session per hypothesis.
+
 Once AEC is in, the target barge-in design is a config mode
 (`interrupt_mode: none | stop_audio | abort_turn`) — adopted from the
 UAT suggestion notes — where `stop_audio` cuts TTS but lets the backend

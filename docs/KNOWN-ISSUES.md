@@ -173,6 +173,59 @@ doing carefully, not rushing mid-UAT.
 
 ---
 
+## AEC builds from source on macOS — PyPI just doesn't ship a wheel for it
+
+**Status:** verified 2026-07-16 on Apple Silicon (M4, macOS 26.5). Not a
+bug — a gap in what was previously assumed. `aec.py`'s docstring and the
+`aec` extra's comment in `pyproject.toml` both said the AEC package's
+"wheels are Windows-only today," which reads like a platform limitation
+of the underlying code. It isn't: `aec-audio-processing`'s sdist
+(`setup.py`) already has full Darwin build support wired in — it builds
+`webrtc-audio-processing` (the same WebRTC APM/AEC3 engine used on
+Windows) via meson into a `.dylib`, with `-DWEBRTC_MAC` and ARM64 NEON
+flags already set, correct macOS rpath handling for the built dylib, the
+works. PyPI just only hosts prebuilt `win_amd64` wheels for it (1.0.0,
+1.0.1); nobody has published a macOS wheel, so a plain `pip install`
+silently falls back to failing rather than to a source build succeeding.
+
+**Verified working, zero code changes to `EchoCanceller`.** Build
+prerequisites (`meson`, `ninja`, `swig` — none installed by uv/pip)
+installed via `brew install meson ninja swig`; Xcode CLT's `clang` was
+already present. Then:
+
+```
+uv pip install --no-binary aec-audio-processing aec-audio-processing
+```
+
+builds cleanly in about 30s and produces a working extension —
+`AudioProcessor(enable_aec=True, ...)` constructs, `process_reverse_stream`/
+`process_stream` run, and all 13 existing `tests/test_aec.py` tests pass
+against the real binding (previously these could only run on Windows).
+
+**What this unblocks.** Signal-level AEC — and therefore live
+mic+speaker attenuation UAT, analogous to JP's 2026-07-15 Windows run
+(see the NS/AGC entry below and `docs/UAT-checklist.md` **[E8]**/**[E9]**)
+— can now actually be exercised on macOS. Before this, macOS testing of
+the barge-in/self-interruption problem was necessarily software-only
+(overlap-gate, text-echo-filter), since `EchoCanceller.__init__` raised
+immediately without the package installed.
+
+**Not yet done.** A live mic+speaker attenuation measurement on macOS
+hardware (the Mac equivalent of JP's Windows UAT run) hasn't been run —
+this entry only confirms the canceller constructs and passes its unit
+tests here, not that it converges well against this machine's actual
+room/speaker/mic acoustics. `docs/KNOWN-ISSUES.md`'s existing note below
+(erratic 0.5-12dB attenuation on Windows) may or may not reproduce
+identically on macOS; that's a separate, still-open question.
+
+**Not done as part of this pass, deliberately:** publishing a macOS wheel
+upstream, or vendoring/prebuilding one for this repo's CI — out of scope
+for a documentation-only note; would need its own decision about where
+built artifacts live and how they're kept in sync with the pinned
+`aec-audio-processing` version.
+
+---
+
 ## WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
 
 **Status:** candidate, not built. Offered to JP directly (2026-07-15
@@ -221,3 +274,80 @@ time). That assessment has since resolved through extensive live UAT
 (`[L4]`-`[L6]`, `[E8]`, `[E9]`) -- the attribution-ambiguity concern
 that justified waiting no longer applies. The live JP go-ahead question
 is the only remaining gate now.
+
+---
+
+## opencode 1.18.3: session-level model pin silently never generates (upstream)
+
+**Status:** diagnosed live 2026-07-18, upstream bug, no fix available
+(1.18.3 is the latest release as of this entry). ConvoBox's
+`backend.model` feature is effectively dead against this server version.
+
+**Symptom.** With `backend.model` set (e.g. `openai/gpt-5.4-mini`), a
+voice session creates its opencode session and POSTs the prompt (both
+200 OK, prompt `admittedSeq` returned) but no assistant message is ever
+created -- ConvoBox waits out its 120s busy window and gives up. No
+error appears in the session's message list, the session object, or the
+server's own console output; the session's `time.updated` never
+advances past creation.
+
+**Isolated with curl against a live 1.18.3 server** (ConvoBox not
+involved), same prompt in all cases:
+
+- unpinned session -> assistant reply in seconds (server default model)
+- session pinned `{"providerID":"openai","id":"gpt-5.4-mini"}` -> never runs
+- pinned to the Zen twin (`opencode/gpt-5.4-mini`) -> never runs
+- pinned with explicit `"variant":"default"` and/or `"agent":"build"` -> never runs
+
+So the pin MECHANISM is broken, not any one provider/credential. The
+shape ConvoBox sends is still exactly what the server's own OpenAPI spec
+(`GET /doc`) declares for `POST /api/session`.
+
+**Also broken in 1.18.3:** the server ignores config-level default
+models for API sessions. With `"model": "openai/gpt-5.4-mini"` (and even
+`agent.build.model`) set in `~/.config/opencode/opencode.json`,
+`opencode run` correctly uses gpt-5.4-mini, but API-created sessions
+still answer with the built-in Zen default (`hy3-free`). CLI and server
+resolve the default differently.
+
+**The dedicated model-switch endpoint is broken the same way (found in
+the same investigation).** The server exposes `POST
+/api/session/{sessionID}/model` (body `{"model": ModelRef}` per its own
+spec) -- the endpoint opencode's internal model chooser uses. It returns
+204, the session object then genuinely shows the new model, a
+`model-switched` marker lands in the message list -- and a subsequent
+prompt still never generates. Worse: after prompting a switched session,
+`GET .../message` for it stops responding entirely and the server needs
+a restart (wedged twice, reproducibly). So all three routes to a
+non-default model -- pin at creation, switch endpoint, config default --
+are dead in 1.18.3's server, while `opencode run -m` works fine.
+
+**Workaround for now:** leave `backend.model` unset (voice sessions run
+on the server's own default) and treat model choice as pending an
+upstream fix. Re-verify with the curl matrix above after any opencode
+upgrade before re-adding a pin. A ConvoBox-side model chooser (Settings
+TUI field fed from `GET /api/model`, the same source the internal
+chooser reads) is the right shape once upstream generation works --
+deliberately not built while every choosable value produces a dead
+session.
+
+**CORRECTION (2026-07-18 late, deeper investigation):** the pin mechanism
+itself WORKS -- a session pinned to a model the server has actually
+loaded (verified live: `opencode/grok-code`) generates normally. The real
+bugs are narrower and nastier: (1) the server's API path never loads the
+OAuth-credentialed `openai` provider -- `GET /api/model` lists only
+api-key/config providers (Zen, inception, ollama-remote) even with
+`"openai": {}` forced into config's provider block and a valid,
+unexpired OAuth token; (2) pinning any model absent from that loaded
+catalog (all `openai/*`, and Zen models the server build doesn't carry
+like `opencode/gpt-5.4-mini`) hangs the session silently instead of
+erroring -- that's what every earlier "pin is broken" observation
+actually was; (3) the `opencode run`/TUI request path DOES load and use
+the OAuth provider (verified: `opencode run -m openai/gpt-5.6-terra`
+created its session on this same server and answered), but that lazy
+load never becomes visible to API-created sessions -- retested
+immediately after, still dead. Net: an API client (ConvoBox) cannot
+reach ChatGPT-Plus-OAuth models in 1.18.3 at all; it CAN pin any model
+in `GET /api/model` (the Zen catalog: grok-code, kimi-k2.5-free,
+minimax-m3-free, qwen3.6-plus-free, ...). Config default `"model"` is
+also ignored for API sessions (always Zen `hy3-free`).

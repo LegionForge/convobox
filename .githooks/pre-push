@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pre-push privacy scrub -- scans every commit about to be uploaded, not
+# just the working tree (a clean tree is not a clean push: git push
+# uploads all ancestor commits). Reference: LegionForge/jeli's hook and
+# the 2026-07-02 stale-branch leak it was written after.
+# Enable once per clone:  git config core.hooksPath .githooks
+PATTERN='192\.168\.|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|ssh[^ ]*@[a-zA-Z0-9]|@[a-zA-Z0-9-]+\.local|id_ed25519|id_rsa|BEGIN [A-Z ]*PRIVATE KEY'
+fail=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    range=$(git rev-list "$local_sha" --not --remotes=origin 2>/dev/null)
+  else
+    range=$(git rev-list "$remote_sha..$local_sha" 2>/dev/null)
+  fi
+  [ -z "$range" ] && continue
+  # uv.lock excluded: package version strings match the IP regex
+  # (nvidia_curand 10.4.0.35 -- verified false positive 2026-07-19).
+  # This hook excludes itself: it necessarily contains the patterns it
+  # scans for (it blocked its own first push -- working as designed).
+  hits=$(git grep -l -E "$PATTERN" $range -- ':!uv.lock' ':!.githooks/pre-push' 2>/dev/null)
+  if [ -n "$hits" ]; then
+    echo "pre-push BLOCKED: possible private data in outgoing commits:" >&2
+    echo "$hits" >&2
+    echo "Inspect with: git grep -n -E '<pattern>' <sha> -- <file>" >&2
+    fail=1
+  fi
+done
+exit $fail

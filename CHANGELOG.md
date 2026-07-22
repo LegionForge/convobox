@@ -14,7 +14,101 @@ minor versions carry feature and behavior changes.
 > from the live backend's session records, not assumed. See `docs/UAT-checklist.md`
 > **[L2]**.
 
+### Fixed
+- **A live-UAT AEC diagnosis was wrong, and the resulting config edit was
+  reverted** (`convobox.yaml` in the UAT working tree; no repo code
+  changed). `Attribution: Claude Code; Provider: Anthropic; Model:
+  claude-fable-5; Scope: this entry.` 47 `UNDER-CANCELLING` verdicts in a
+  live session were diagnosed as caused by a stale `aec_delay_ms: 309`
+  fighting a ~222ms auto-tune estimate, and the explicit value was
+  removed. That was wrong: `uat-acoustic-calibration/`'s real,
+  on-hardware delay-sweep reports (already in the repo from 2026-07-16)
+  rank 309ms the empirical best of the values tested, and 222ms (the
+  auto-estimate) the *worst*. Restored the explicit value with a comment
+  pointing at the evidence. See `docs/DESIGN-echo-and-barge-in.md`'s
+  2026-07-20 correction for the full account, including why this
+  doesn't fully contradict the same-day synthetic/WebRTC-source research
+  into whether AEC3 needs a precise delay hint (it's flagged as an
+  honest, unresolved tension, not papered over).
+- **`uv`'s local build cache can cross-contaminate editable installs
+  between two same-named/same-version local clones of this repo** --
+  confirmed by direct reproduction while investigating the above:
+  running `uv sync` in one clone silently repointed the OTHER clone's
+  `convobox` import at the wrong `src/`, undetected until an import
+  error surfaced it. `Attribution: Claude Code; Provider: Anthropic;
+  Model: claude-fable-5; Scope: this entry.` No code fix applies (this
+  is `uv` cache behavior, not a ConvoBox bug); documented as a
+  practical rule -- re-run `uv sync --reinstall-package convobox
+  --no-cache` and verify `convobox.__file__` before trusting a test run
+  -- in `TESTING.md` → "Keeping local, CI, and UAT environments in
+  sync".
+- **Python version floor didn't match what CI or local dev actually run**
+  (`pyproject.toml`, `uv.lock`, `README.md`, `docs/QUICKSTART.md`).
+  `Attribution: Claude Code; Provider: Anthropic; Model: claude-fable-5;
+  Scope: this entry.` `requires-python` and the docs claimed "3.11+", but
+  `ci.yml` pins every job to `python-version: "3.12"` and this machine's
+  own dev `.venv` is 3.12 -- 3.11 was never actually exercised anywhere.
+  Raised the floor to `>=3.12` to match reality instead of adding
+  untested 3.11 CI coverage. Two related environment-drift risks (pip
+  vs. uv tool-version resolution having no shared lockfile; `scripts/*.py`
+  having zero CI lint/type-check coverage) were investigated and
+  documented as accepted, named gaps rather than silently fixed --
+  see `TESTING.md` → "Keeping local, CI, and UAT environments in sync".
+
 ### Added
+- **`--aec-dump` captures a live incident's real AEC audio for offline
+  replay** (`src/convobox/audio/aec.py`'s new `AecDumpWriter`,
+  `scripts/run_convobox.py`, `src/convobox/tui/`). `Attribution: Claude
+  Code; Provider: Anthropic; Model: claude-fable-5; Scope: this entry.`
+  Complements `scripts/acoustic_calibration.py`'s controlled, scripted
+  calibration sweeps with the ability to capture what actually happens
+  during a REAL conversation with a real coding-agent backend --
+  something the calibration script deliberately doesn't do. Writes
+  `reference.wav`/`mic-raw.wav`/`mic-processed.wav` (WebRTC's own
+  "aecdump" methodology: capture once, replay against any hypothesis
+  offline, no repeat live sessions needed) to a timestamped subdirectory
+  of `.aec-dumps/` (gitignored). The `--tui` conversation view shows a
+  `REC <n>s` tag on the diagnostics line while active; verbose log lines
+  mark start, per-response progress, and a final after-action summary
+  at shutdown (finalized even on Ctrl+C, so the WAV headers stay valid).
+  See `docs/DESIGN-echo-and-barge-in.md` → "Capturing a live incident
+  for offline analysis".
+- **Conversation TUI panes are now keyboard-scrollable** (`src/convobox/tui/`,
+  `scripts/run_convobox.py`). `Attribution: Claude Code; Provider:
+  Anthropic; Model: claude-fable-5; Scope: this entry.` Reported as
+  "PgUp/PgDn and other shortcut keys aren't in the TUI" — traced first
+  (per this repo's "verify before fixing" rule) and confirmed there was
+  never any keyboard input handling in `_tui_render_loop` at all: both
+  panes always rendered just their tail, a missing feature rather than a
+  regression. `Tab` now switches focus between the Transcript and Full
+  response panes; `Up`/`Down`/`PgUp`/`PgDn`/`Home`/`End` scroll whichever
+  pane has focus, clamped fresh every frame so a stale offset (terminal
+  resize, shorter content) can never blank a pane. Windows (`msvcrt`) and
+  POSIX (raw/cbreak `termios` mode for the session, CSI-sequence
+  decoding for PgUp/PgDn) are both implemented; see
+  `docs/UAT-checklist.md` **[U9]** for what's unit-tested versus still
+  needing a live-terminal pass, and `docs/ROADMAP.md` for why mouse-wheel
+  support was scoped out of this pass rather than bundled in.
+- **Backend questions are announced out loud** (`src/convobox/orchestrator/`):
+  when the backend calls opencode's blocking interactive `question` tool,
+  ConvoBox speaks the question with numbered option labels and logs
+  "backend is waiting for YOUR answer" -- previously the session silently
+  deadlocked (UAT finding [L9]; slice 1 of
+  `docs/DESIGN-backend-questions.md`). `Attribution: Claude Code;
+  Provider: Anthropic; Model: claude-fable-5; Scope: this entry.`
+- **Resume word is configurable from the Settings TUI**, validated by the
+  real `ResumeWordDetector` at save time, with a warning for words the real
+  TTS->STT round-trip has proven unreliable (`ROUNDTRIP_REJECTED_RESUME_WORDS`
+  -- 'ConvoBox' itself mis-heard as 'Control Box' every time).
+  `Attribution: Claude Code; Provider: Anthropic; Model: claude-fable-5;
+  Scope: this entry.`
+- **Operator-maintained STT corrections glossary** (`stt.corrections`,
+  `src/convobox/stt/corrections.py`): deterministic word-boundary fixes
+  for recurring mishears ('bargain' -> 'barge-in'), applied only after
+  every safety-critical raw-transcript check -- a correction can never
+  manufacture a hard stop, wake/pause action, or approval decision.
+  `Attribution: OpenAI Codex; Provider: OpenAI; Model: gpt-5.6-terra;
+  Scope: this entry.`
 - **Conversation TUI now shows backend name, AEC status, and a
   color-coded working heartbeat** (`src/convobox/tui/state.py`,
   `src/convobox/tui/render.py`, `scripts/run_convobox.py`). `Attribution:
@@ -61,6 +155,10 @@ minor versions carry feature and behavior changes.
   diagnostic sidecar file `run_convobox.py` writes (`<config>.aec-estimate.json`,
   never `convobox.yaml` itself). See `docs/UAT-checklist.md` **[E8]** and
   `docs/UAT-settings-tui.md`.
+- **Repo-wide AI attribution convention**: `docs/AI-ATTRIBUTION.md` now
+  defines how to record Codex, Claude Code, and opencode edits in PRs,
+  changelog entries, commit trailers, or file-level notes when those notes
+  are genuinely useful.
 - **Agent response logging in the UAT/echo log** (`scripts/run_convobox.py`):
   the orchestrator's `on_event` hook now records every backend reply, not
   just the user's transcript. Each reply is logged as `response: <raw text>`

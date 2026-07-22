@@ -145,7 +145,7 @@ def test_backend_section_hides_irrelevant_field_per_backend() -> None:
     assert [field.key for field in state.current_fields()] == ["name", "url", "model"]
 
     settings_tui._switch_backend(state.working, "codex")
-    assert [field.key for field in state.current_fields()] == ["name", "command"]
+    assert [field.key for field in state.current_fields()] == ["name", "command", "working_dir"]
 
 
 def test_backend_help_mentions_per_backend_memory() -> None:
@@ -183,6 +183,72 @@ def test_validate_config_reports_missing_voice(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
     report = validate_config(AppConfig())
     assert any("tts.voice is required" in msg for msg in report.errors)
+
+
+# --- STT device: pick-from-list rather than free text (JP's ask: "we
+# should have a chooser for cpu/gpu"). Only str kind before this. ---
+
+
+def test_stt_section_exposes_device_as_a_choice_field() -> None:
+    stt = next(s for s in settings_tui.SECTION_SPECS if s.key == "stt")
+    spec = next((f for f in stt.fields if f.key == "device"), None)
+    assert spec is not None
+    assert spec.kind == "choice"
+    assert set(spec.choices) == {"auto", "cpu", "cuda"}
+
+
+def test_validate_config_accepts_default_stt_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    (tmp_path / "en_US-lessac-medium.onnx").write_bytes(b"x")
+    (tmp_path / "en_US-lessac-medium.onnx.json").write_text("{}", encoding="utf-8")
+    config = _make_config(**{"tts.voice": "en_US-lessac-medium"})
+    report = validate_config(config)
+    assert not any("stt.device" in w for w in report.warnings)
+
+
+def test_validate_config_warns_on_unrecognized_stt_device() -> None:
+    # A warning, not an error -- stt.device passes straight through to
+    # ctranslate2/faster-whisper, which may accept values beyond the three
+    # the TUI offers (e.g. a specific GPU index); this only flags a
+    # stale/typo'd value from an existing convobox.yaml.
+    config = _make_config(**{"stt.device": "cuda:1"})
+    report = validate_config(config)
+    assert any("stt.device" in w and "cuda:1" in w for w in report.warnings)
+
+
+# --- Whisper model size: pick-from-list rather than free text (JP's ask:
+# "we need a chooser for the whisper model size"). Choices are pulled
+# from the installed faster-whisper's own available_models(), not a
+# hand-maintained duplicate. ---
+
+
+def test_stt_section_exposes_model_as_a_choice_field() -> None:
+    stt = next(s for s in settings_tui.SECTION_SPECS if s.key == "stt")
+    spec = next((f for f in stt.fields if f.key == "model"), None)
+    assert spec is not None
+    assert spec.kind == "choice"
+    # Exact real values from the installed faster-whisper, not a guess.
+    from faster_whisper.utils import available_models
+    assert set(spec.choices) == set(available_models())
+    assert "base" in spec.choices  # the shipped default
+    assert "large-v3" in spec.choices  # JP's specific ask
+
+
+def test_validate_config_accepts_default_stt_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    (tmp_path / "en_US-lessac-medium.onnx").write_bytes(b"x")
+    (tmp_path / "en_US-lessac-medium.onnx.json").write_text("{}", encoding="utf-8")
+    config = _make_config(**{"tts.voice": "en_US-lessac-medium"})
+    report = validate_config(config)
+    assert not any("stt.model" in w for w in report.warnings)
+
+
+def test_validate_config_warns_on_unrecognized_stt_model() -> None:
+    config = _make_config(**{"stt.model": "whisper-nonexistent-variant"})
+    report = validate_config(config)
+    assert any(
+        "stt.model" in w and "whisper-nonexistent-variant" in w for w in report.warnings
+    )
 
 
 def test_validate_config_warns_when_backend_command_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -586,3 +652,91 @@ async def test_probe_audio_reports_resolution_errors_without_raising(
 
     assert "no device matching" in result
     assert "mic: no device found" in result
+
+
+# --- resume word: TUI-configurable, validated by the real detector ---
+
+
+def test_interaction_section_exposes_resume_word_field() -> None:
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    spec = next((f for f in interaction.fields if f.key == "resume_word"), None)
+    assert spec is not None
+    assert spec.kind == "str"
+
+
+def test_validate_config_rejects_resume_word_that_normalizes_to_nothing() -> None:
+    # The real runtime constructor (ResumeWordDetector) is the validator; a
+    # value it rejects would otherwise crash run_convobox.py at startup.
+    config = _make_config(**{"interaction.resume_word": "!!!"})
+    report = validate_config(config)
+    assert any("resume_word" in error for error in report.errors)
+
+
+def test_validate_config_warns_on_roundtrip_rejected_resume_word() -> None:
+    # "ConvoBox" is the confirmed-broken original default (mis-transcribed
+    # as "Control Box" every time) -- a warning, not an error: a user's own
+    # STT stack may differ, and the detector deliberately doesn't hard-ban.
+    config = _make_config(**{"interaction.resume_word": "ConvoBox"})
+    report = validate_config(config)
+    assert not any("resume_word" in error for error in report.errors)
+    assert any("mis-transcribe" in warning for warning in report.warnings)
+
+
+def test_validate_config_accepts_verified_default_resume_word() -> None:
+    report = validate_config(_make_config(**{"interaction.resume_word": "Athena"}))
+    assert not any("resume_word" in error for error in report.errors)
+    assert not any("resume_word" in warning for warning in report.warnings)
+
+
+# --- pause phrases: TUI-editable, validated like the resume word ---
+
+
+def test_interaction_section_exposes_pause_phrases_field() -> None:
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    spec = next((f for f in interaction.fields if f.key == "pause_listening_phrases"), None)
+    assert spec is not None
+    assert spec.kind == "list_str"
+
+
+def test_validate_config_warns_when_pause_phrases_empty() -> None:
+    config = _make_config(**{"interaction.pause_listening_phrases": []})
+    report = validate_config(config)
+    assert any("pause_listening_phrases" in w for w in report.warnings)
+    assert not any("pause_listening_phrases" in e for e in report.errors)
+
+
+def test_validate_config_rejects_pause_phrase_that_normalizes_to_nothing() -> None:
+    config = _make_config(**{"interaction.pause_listening_phrases": ["!!!"]})
+    report = validate_config(config)
+    assert any("pause_listening_phrases" in e for e in report.errors)
+
+
+def test_validate_config_accepts_default_pause_phrases() -> None:
+    report = validate_config(_make_config())
+    assert not any("pause_listening_phrases" in e for e in report.errors)
+    assert not any("pause_listening_phrases" in w for w in report.warnings)
+
+
+# --- backend working dir: TUI-editable for subprocess backends, warned ---
+
+
+def test_working_dir_field_visible_for_codex_not_opencode() -> None:
+    backend = next(s for s in settings_tui.SECTION_SPECS if s.key == "backend")
+    codex_fields = {
+        f.key for f in settings_tui._visible_fields_for_section(
+            _make_config(**{"backend.name": "codex", "backend.command": ["codex"]}), backend
+        )
+    }
+    assert "working_dir" in codex_fields
+    opencode_fields = {
+        f.key for f in settings_tui._visible_fields_for_section(
+            _make_config(**{"backend.name": "opencode"}), backend
+        )
+    }
+    assert "working_dir" not in opencode_fields
+
+
+def test_validate_warns_when_codex_working_dir_unset() -> None:
+    config = _make_config(**{"backend.name": "codex", "backend.command": ["codex"]})
+    report = validate_config(config)
+    assert any("working_dir is unset" in w for w in report.warnings)

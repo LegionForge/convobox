@@ -79,3 +79,60 @@ def test_distinctive_token_rescues_a_phrase_that_starts_with_yes() -> None:
     # "yes" alone is banned, but "yes nightingale" carries a distinctive token
     detector = ConfirmwordDetector(approval_phrase="yes nightingale")
     assert detector.check("yes nightingale") is True
+
+
+# --- fuzzy match: tolerates STT noise on the SAME phrase, not a different
+# one. Real mishearings observed live, 2026-07-21, UAT session with
+# approval_phrase="juliette papa charlie" -- none of these matched the old
+# exact-only check, even though a human would recognize them instantly. ---
+
+
+@pytest.fixture
+def nato_detector() -> ConfirmwordDetector:
+    return ConfirmwordDetector(approval_phrase="juliette papa charlie")
+
+
+@pytest.mark.parametrize(
+    "mishearing",
+    [
+        "Juliet Papa Charlie",  # missing one letter -- the most common miss
+        "Juliet Papa Charley",
+        "Julianne Papa-Charlie",
+    ],
+)
+def test_fuzzy_match_accepts_real_close_mishearings(
+    nato_detector: ConfirmwordDetector, mishearing: str
+) -> None:
+    assert nato_detector.check(mishearing) is True
+
+
+@pytest.mark.parametrize(
+    "not_close_enough",
+    [
+        "yes",
+        "okay",
+        "sure",
+        "stop",
+        "cancel that",
+        "no",
+        "go ahead and do it",
+        "run the tests",
+        "yeah but stop the deploy",
+        "charlie",  # the one distinctive word alone, still not the phrase
+    ],
+)
+def test_fuzzy_match_rejects_unrelated_speech(
+    nato_detector: ConfirmwordDetector, not_close_enough: str
+) -> None:
+    # These must stay firmly rejected -- fuzzy tolerance is for STT noise on
+    # the SAME phrase, not a license to loosely match anything nearby.
+    assert nato_detector.check(not_close_enough) is False
+
+
+def test_fuzzy_match_embedded_in_a_longer_discuss_style_sentence() -> None:
+    # The real failure mode was a short utterance that's ALMOST just the
+    # phrase (STT mangled a letter or two), not a long unrelated sentence
+    # that happens to contain a fuzzy-close 3-word window -- confirm a
+    # genuinely unrelated longer sentence still doesn't accidentally match.
+    detector = ConfirmwordDetector(approval_phrase="juliette papa charlie")
+    assert detector.check("We really have to put that cherry away now") is False

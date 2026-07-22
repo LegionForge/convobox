@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # The SHA-pinned dev-rig reusables and actions never update themselves
+  # -- that is the trade-off of pinning; this is the standard answer.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly

@@ -52,8 +52,9 @@ import sys
 import time
 from collections import deque
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
@@ -75,10 +76,11 @@ from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.response_tiering import ContinueDetector
 from convobox.safeword.detector import SafewordDetector
+from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, render_conversation_frame
-from convobox.wakeword import WakewordDetector
+from convobox.resumeword import ResumeWordDetector
 
 log = logging.getLogger("convobox.run")
 
@@ -129,6 +131,29 @@ def _norm_tokens(text: str) -> set[str]:
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
 
 
+def token_overlap_ratio(transcript: str, response: str) -> float:
+    """Share of transcript tokens that occur in the response text."""
+    transcript_tokens = _norm_tokens(transcript)
+    response_tokens = _norm_tokens(response)
+    if not transcript_tokens or not response_tokens:
+        return 0.0
+    return len(transcript_tokens & response_tokens) / len(transcript_tokens)
+
+
+def _echo_match_suffix(transcript: str, last_response: str) -> str:
+    overlap = token_overlap_ratio(transcript, last_response)
+    if overlap == 0.0:
+        return "[echo-match: 0.00 -- does NOT match what was playing; possible real speech]"
+    return f"[echo-match: {overlap:.2f} of tokens in last response]"
+
+
+@dataclass
+class LastSpokenResponse:
+    """Shared observer state; the mic loop must only inspect the latest response."""
+
+    text: str = ""
+
+
 # Backchannels/continuers -- "mm-hmm", "yeah", "right" -- signal "I'm
 # listening, keep going," the OPPOSITE of a bid for the floor (Schegloff
 # 1982; Ward & Tsukahara 2000; see docs/CONVERSATION-DESIGN-REFERENCES.md).
@@ -144,9 +169,36 @@ _BACKCHANNEL_TOKENS: frozenset[str] = frozenset(
     }
 )
 
+# Short acknowledgment PHRASES -- same continuer role as _BACKCHANNEL_TOKENS
+# above, but multi-word, so a single-token subset check can't catch them.
+# Live-confirmed, 2026-07-20 (UAT session .aec-dumps/20260720-205724 +
+# convobox-tui.log): "Okay, get it.", "Thank you very much." and similar
+# short acknowledgments were each missing exactly one word from
+# _BACKCHANNEL_TOKENS ("get"/"it", "thank"/"you"/"very"/"much"), so the
+# whole-utterance subset check failed and interrupt_preset=conversational
+# treated them as full barge-ins -- the user's own live description was
+# "I'm waiting for your playback to finish, but it never does." Matched
+# by EXACT token-set equality (not subset, unlike _BACKCHANNEL_TOKENS)
+# specifically so adding a phrase here can't accidentally swallow real
+# commands that merely happen to contain one of these words (see
+# is_backchannel's docstring for why "yeah, but stop the deploy" must
+# stay a real interrupt). Deliberately small and auditable, same spirit
+# as _BACKCHANNEL_TOKENS -- not exhaustive.
+_BACKCHANNEL_PHRASES: frozenset[frozenset[str]] = frozenset(
+    frozenset(_norm_tokens(phrase))
+    for phrase in (
+        "get it", "got it", "ok get it", "okay get it", "ok got it", "okay got it",
+        "thank you", "thanks", "thank you very much", "thanks a lot", "thanks so much",
+        "no problem", "you're welcome", "sounds good", "got you", "understood",
+        "makes sense", "fair enough", "good point", "noted", "will do", "roger that",
+    )
+)
+
 
 def is_backchannel(text: str) -> bool:
-    """True when `text` is made up ENTIRELY of backchannel/continuer tokens.
+    """True when `text` is made up ENTIRELY of backchannel/continuer tokens,
+    or is an EXACT match (as a whole utterance) for one of the short
+    acknowledgment phrases in _BACKCHANNEL_PHRASES.
 
     Whole-utterance classification, not phrase matching: "yeah, but stop
     the deploy" is NOT a backchannel (real content beyond the continuer),
@@ -157,7 +209,9 @@ def is_backchannel(text: str) -> bool:
     tokens = _norm_tokens(text)
     if not tokens:
         return False
-    return tokens.issubset(_BACKCHANNEL_TOKENS)
+    if tokens.issubset(_BACKCHANNEL_TOKENS):
+        return True
+    return tokens in _BACKCHANNEL_PHRASES
 
 
 # Below this echo-to-ambient headroom there's effectively no echo present
@@ -371,7 +425,7 @@ class RecognitionErrorLadder:
 
 
 class ListeningGate:
-    """Tracks the paused (wake-word-only) listening state (docs/DESIGN-barge-in.md,
+    """Tracks the paused (resume-word-only) listening state (docs/DESIGN-barge-in.md,
     "Pause/resume listening").
 
     Pure state machine, like BargeInMonitor, so it's unit-testable independent
@@ -382,7 +436,7 @@ class ListeningGate:
     already runs regardless of anything this class does).
     """
 
-    def __init__(self, pause_detector: PauseListeningDetector, wake_detector: WakewordDetector) -> None:
+    def __init__(self, pause_detector: PauseListeningDetector, wake_detector: ResumeWordDetector) -> None:
         self._pause_detector = pause_detector
         self._wake_detector = wake_detector
         self.is_paused = False
@@ -444,7 +498,7 @@ class ContinuePromptGate:
         is_waiting first; calling this while not waiting is a caller bug,
         not handled specially here). ANY utterance ends the wait, matched
         or not -- unlike ListeningGate's paused state, which drops
-        everything until the wake word, a non-continue/decline reply here
+        everything until the resume word, a non-continue/decline reply here
         means the user moved on to a new topic, not that they're still
         mid-answer, so "pass" tells the caller to forward it normally
         rather than dropping it.
@@ -799,6 +853,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     adapter, player, indicator: WorkingIndicator, orchestrator, interject_queue: QueuedInterjection,
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
     continue_gate: ContinuePromptGate | None = None,
+    approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
@@ -882,6 +937,14 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                 )
             if continue_gate.observe_timeout(now):
                 log.debug("continue-prompt window expired with no reply -- assuming done")
+        if approval_gate is not None:
+            now = time.monotonic()
+            if approval_gate.observe_timeout(now) == "deny":
+                # Silence on a pending approval must never be treated as
+                # consent (ApprovalPromptGate's own central invariant) --
+                # the timeout itself IS the explicit decline to forward.
+                log.info("approval prompt window expired with no reply -- denying")
+                await orchestrator.resolve_pending_approval(False)
         was_playing = playing
         if tui_state is not None:
             if listening_gate is not None and listening_gate.is_paused:
@@ -897,7 +960,10 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
 
 
 def _on_backend_event(
-    tui_state: ConversationTuiState | None, event: BackendEvent
+    tui_state: ConversationTuiState | None,
+    last_spoken_response: LastSpokenResponse,
+    event: BackendEvent,
+    approval_gate: ApprovalPromptGate | None = None,
 ) -> None:
     """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
     and full-detail panes from the real backend event stream, AND records
@@ -921,11 +987,24 @@ def _on_backend_event(
     (e.g. catch markdown read-out bugs like Piper saying "asterisk
     asterisk"). tui_state may be None (non-TUI UAT mode), in which case we
     only log.
+
+    APPROVAL_REQUEST starts approval_gate's wait right here, the instant
+    the event arrives -- not on some later poll tick the way
+    continue_gate's wait starts (that one is tied to playback finishing,
+    which this isn't). Orchestrator itself does the TTS announcement (see
+    its own _on_event) -- this hook's job is only the gate bookkeeping,
+    same division of labor as everything else it does here (TUI/logging,
+    not speech).
     """
+    if event.type == BackendEventType.APPROVAL_REQUEST:
+        if approval_gate is not None:
+            approval_gate.start_waiting(time.monotonic())
+        return
     if event.type != BackendEventType.TEXT or not event.content:
         return
     log.info("response: %s", event.content)
     spoken = strip_code_for_speech(event.content)
+    last_spoken_response.text = spoken
     if spoken and spoken != event.content:
         log.info("response(spoken): %s", spoken)
     if tui_state is not None:
@@ -945,22 +1024,197 @@ def _draw_conversation_tui(tui_state: ConversationTuiState) -> None:
     sys.stdout.flush()
 
 
+_TUI_SCROLL_PAGE = 10  # lines per PgUp/PgDn -- roughly one screenful at typical sizes
+
+
+def _handle_tui_key(tui_state: ConversationTuiState, key: str) -> None:
+    """Apply one decoded key to the conversation TUI's scroll state.
+
+    Pure state mutation (no I/O), same split as everything else in
+    convobox.tui -- render.py clamps whatever offset lands here against
+    the CURRENT frame's line count, so this function never needs to know
+    pane heights or how much history exists; it just nudges a counter.
+    """
+    if key == "TAB":
+        tui_state.focus_pane = "transcript" if tui_state.focus_pane == "detail" else "detail"
+        return
+    attr = "transcript_scroll" if tui_state.focus_pane == "transcript" else "detail_scroll"
+    if key == "HOME":
+        setattr(tui_state, attr, 1_000_000)  # clamped to the real max at render time
+    elif key == "END":
+        setattr(tui_state, attr, 0)
+    else:
+        delta = {"UP": 1, "DOWN": -1, "PGUP": _TUI_SCROLL_PAGE, "PGDN": -_TUI_SCROLL_PAGE}.get(key)
+        if delta is not None:
+            setattr(tui_state, attr, max(0, getattr(tui_state, attr) + delta))
+
+
+# Windows scan codes for the "\x00"/"\xe0"-prefixed extended keys msvcrt.getwch()
+# returns (conio.h getch() table): Home=71 'G', Up=72 'H', PgUp=73 'I',
+# Left=75 'K', Right=77 'M', End=79 'O', Down=80 'P', PgDn=81 'Q'. Only the
+# ones the conversation TUI actually binds are mapped -- Left/Right are
+# reserved (unused today) rather than silently mapped to something odd.
+_WIN_EXTENDED_KEYS = {"H": "UP", "P": "DOWN", "I": "PGUP", "Q": "PGDN", "G": "HOME", "O": "END"}
+
+# POSIX CSI final-byte / tilde-code mappings for the same key set. Arrow
+# keys are a single final byte after "ESC ["; PgUp/PgDn/Home/End on most
+# real terminals (xterm, gnome-terminal, iTerm2, Windows Terminal's own
+# POSIX-style reporting under WSL) are "ESC [ <digits> ~" instead --
+# confirmed against the VT/xterm control-sequence conventions, not
+# assumed, since this is exactly the class of "looks obviously right"
+# escape-sequence claim that has burned this project before (see
+# docs/DESIGN-echo-and-barge-in.md's PortAudio constraint-name mistake).
+_POSIX_CSI_FINAL = {"A": "UP", "B": "DOWN", "H": "HOME", "F": "END"}
+_POSIX_CSI_TILDE = {"5": "PGUP", "6": "PGDN"}
+
+
+def _read_pending_key() -> str | None:
+    """Non-blocking single-keypress read for the conversation TUI's scroll
+    controls. Returns None immediately when no key is waiting -- safe to
+    poll once per frame from _tui_render_loop without ever blocking the
+    event loop (unlike scripts/settings_tui.py's read_key(), a BLOCKING
+    read used by that script's synchronous, non-asyncio main loop; kept
+    as a separate function rather than shared, since the two have
+    incompatible blocking contracts).
+
+    Assumes the terminal is already in raw/cbreak mode on POSIX for the
+    whole --tui session (set once in main(), restored in its finally
+    block) -- this function only polls and reads, it never changes
+    terminal modes itself, so it can be called every 0.1s cheaply.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        if not msvcrt.kbhit():
+            return None
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            code = msvcrt.getwch()
+            return _WIN_EXTENDED_KEYS.get(code)
+        return "TAB" if ch == "\t" else None
+
+    import select
+
+    fd = sys.stdin.fileno()
+    if not select.select([fd], [], [], 0)[0]:
+        return None
+    ch = sys.stdin.read(1)
+    if ch == "\t":
+        return "TAB"
+    if ch != "\x1b":
+        return None
+    # Drain the rest of the escape sequence. A bare ESC keypress (no
+    # follow-up bytes) times out the first select() below and is dropped
+    # silently -- the conversation TUI has no ESC-bound action today.
+    if not select.select([fd], [], [], 0.05)[0]:
+        return None
+    if sys.stdin.read(1) != "[":
+        return None
+    if not select.select([fd], [], [], 0.05)[0]:
+        return None
+    code = sys.stdin.read(1)
+    if code in _POSIX_CSI_FINAL:
+        return _POSIX_CSI_FINAL[code]
+    if not code.isdigit():
+        return None
+    digits = code
+    while select.select([fd], [], [], 0.05)[0]:
+        nxt = sys.stdin.read(1)
+        if nxt == "~":
+            break
+        digits += nxt
+    return _POSIX_CSI_TILDE.get(digits)
+
+
 async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
     while True:
+        key = _read_pending_key()
+        if key is not None:
+            _handle_tui_key(tui_state, key)
         _draw_conversation_tui(tui_state)
         await asyncio.sleep(0.1)
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _check_backend_working_dir(backend: object) -> None:
+    """Validate backend.working_dir and warn about the dangerous cases.
+
+    A coding-agent backend WRITES files in its working directory, so the
+    default (unset -> the agent inherits ConvoBox's own cwd) can let a voice
+    session silently edit ConvoBox's source. This raises on a nonexistent
+    directory and warns loudly when the working dir is ConvoBox's own repo,
+    is unset for a subprocess backend, or is set for opencode (no effect).
+    See docs/DESIGN-backend-sandboxing.md.
+    """
+    name = getattr(backend, "name", "")
+    working_dir = getattr(backend, "working_dir", None)
+    if name == "opencode":
+        if working_dir:
+            log.warning(
+                "backend.working_dir=%r has NO effect on the opencode backend -- "
+                "opencode's directory is set by wherever `opencode serve` was "
+                "launched. Start the server from your workspace instead.",
+                working_dir,
+            )
+        return
+    if working_dir is None:
+        log.warning(
+            "backend.working_dir is unset: the %s agent will run in ConvoBox's "
+            "own directory and can modify its source. Set backend.working_dir "
+            "(or pass --working-dir) to an isolated workspace. See "
+            "docs/DESIGN-backend-sandboxing.md.",
+            name,
+        )
+        return
+    resolved = Path(working_dir).expanduser().resolve()
+    if not resolved.is_dir():
+        raise SystemExit(
+            f"backend.working_dir {working_dir!r} is not an existing directory"
+        )
+    if resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents:
+        log.warning(
+            "backend.working_dir %r is inside ConvoBox's own source tree -- the "
+            "agent can modify the product's code. Point it at a separate "
+            "workspace.",
+            str(resolved),
+        )
 
 
 async def run(args: argparse.Namespace) -> None:
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
-    adapter = create_backend_adapter(config.backend)
+    if args.working_dir is not None:
+        config.backend.working_dir = args.working_dir
+    _check_backend_working_dir(config.backend)
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
+    # tool approval. Off unless the operator deliberately set a phrase --
+    # see InteractionConfig.approval_phrase's own field comment for why
+    # there is no safe default. Currently only claude-code honors
+    # interactive_approval (see create_backend_adapter); other backends
+    # ignore it, same "not every adapter can do everything" stance as the
+    # rest of this feature.
+    approval_detector = (
+        ApprovalDetector(config.interaction.approval_phrase)
+        if config.interaction.approval_phrase
+        else None
+    )
+    approval_gate = (
+        ApprovalPromptGate(approval_detector, config.interaction.approval_timeout_s)
+        if approval_detector is not None
+        else None
+    )
+    adapter = create_backend_adapter(
+        config.backend, interactive_approval=approval_detector is not None
+    )
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
         device=config.audio.output_device
     )
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
+    transcript_corrector = TranscriptCorrector(config.stt.corrections)
     # --tui only applies to the live mic loop, not --text mode (which
     # returns before the mic loop even exists, below) -- constructed here
     # regardless so it's in scope for the Orchestrator on_event wiring,
@@ -971,15 +1225,17 @@ async def run(args: argparse.Namespace) -> None:
     # replies straight to TTS and captured them nowhere, leaving the most
     # useful lines of an audio UAT invisible in the log.
     tui_state = ConversationTuiState() if (args.tui and args.text is None) else None
+    last_spoken_response = LastSpokenResponse()
     if tui_state is not None:
         tui_state.backend_name = config.backend.name
         tui_state.aec_enabled = config.audio.echo_cancellation
+        tui_state.aec_dump_active = args.aec_dump is not None and config.audio.echo_cancellation
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
         tts=tts,
         player=player,
-        on_event=lambda e: _on_backend_event(tui_state, e),
+        on_event=lambda e: _on_backend_event(tui_state, last_spoken_response, e, approval_gate),
         tier_responses=config.interaction.tier_responses,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
@@ -996,7 +1252,10 @@ async def run(args: argparse.Namespace) -> None:
     if args.text is not None:
         # Scriptable single-shot validation: the full Orchestrator/backend/
         # TTS path with the mic taken out of the equation.
-        await orchestrator.handle_transcript(args.text)
+        text = transcript_corrector.correct(args.text)
+        if text != args.text:
+            log.info("corrected transcript before command routing: %r -> %r", args.text, text)
+        await orchestrator.handle_transcript(text)
         await _drain_until_idle(adapter, timeout_s=args.timeout)
         player.wait()
         await orchestrator.stop_event_loop()
@@ -1031,9 +1290,26 @@ async def run(args: argparse.Namespace) -> None:
     device = _resolve_device(args.device, config.audio.input_device)
 
     canceller = None
+    aec_dump = None
     mic_holder: dict[str, object] = {}
+    if args.aec_dump is not None and not config.audio.echo_cancellation:
+        log.warning(
+            "--aec-dump has no effect: audio.echo_cancellation is off, "
+            "so there is no reference/capture stream to record"
+        )
     if config.audio.echo_cancellation:
-        from convobox.audio.aec import EchoCanceller
+        from convobox.audio.aec import AecDumpWriter, EchoCanceller
+
+        if args.aec_dump is not None:
+            dump_root = Path(args.aec_dump) if args.aec_dump else Path(".aec-dumps")
+            dump_dir = dump_root / time.strftime("%Y%m%d-%H%M%S")
+            aec_dump = AecDumpWriter(dump_dir)
+            log.info(
+                "AEC dump ON -- recording reference.wav / mic-raw.wav / "
+                "mic-processed.wav to %s (replay offline against any "
+                "hypothesis -- no live session needed to test one)",
+                dump_dir,
+            )
 
         # aec_delay_ms=None (the default) means auto-tune -- confirmed
         # live (2026-07-15) that a stale/wrong FIXED hint (measured
@@ -1043,10 +1319,19 @@ async def run(args: argparse.Namespace) -> None:
         # starting guess fed to APM before the real estimate lands on
         # first playback -- set_delay() below replaces it immediately in
         # the auto-tune case, same as before this was a sentinel.
+        #
+        # CORRECTION 2026-07-20: an explicit aec_delay_ms is NOT
+        # necessarily stale/wrong -- uat-acoustic-calibration/'s real
+        # on-hardware delay sweeps found 247-309ms clearly outperforming
+        # the ~222ms auto-estimate on this device pair (see
+        # docs/DESIGN-echo-and-barge-in.md). Re-run
+        # scripts/acoustic_calibration.py before assuming either value is
+        # right; don't silently override a configured value here.
         _INITIAL_AEC_DELAY_MS = 100
         delay_explicit = config.audio.aec_delay_ms is not None
         canceller = EchoCanceller(
-            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS
+            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
+            dump=aec_dump,
         )
         delay_estimated = False
 
@@ -1118,12 +1403,12 @@ async def run(args: argparse.Namespace) -> None:
 
     listening_gate = ListeningGate(
         PauseListeningDetector(config.interaction.pause_listening_phrases),
-        WakewordDetector(config.interaction.wake_word),
+        ResumeWordDetector(config.interaction.resume_word),
     )
     log.info(
         "say %r to pause listening (hard-stops in-flight work); say %r to resume",
         config.interaction.pause_listening_phrases[0],
-        config.interaction.wake_word,
+        config.interaction.resume_word,
     )
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
@@ -1169,6 +1454,22 @@ async def run(args: argparse.Namespace) -> None:
                 )
                 if tui_state is not None:
                     tui_state.aec_verdict = verdict
+                if canceller.dump is not None:
+                    # AEC3's native frame size is a fixed 10ms (see
+                    # convobox.audio.aec's module docstring) -- frame
+                    # count * 0.01s is duration, no need to import the
+                    # internal _FRAME/_AEC_RATE constants for this.
+                    log.info(
+                        "AEC dump progress: reference=%d frames (%.1fs)  "
+                        "capture=%d frames (%.1fs)  dir=%s",
+                        canceller.dump.reference_frames,
+                        canceller.dump.reference_frames * 0.01,
+                        canceller.dump.capture_frames,
+                        canceller.dump.capture_frames * 0.01,
+                        canceller.dump.directory,
+                    )
+                    if tui_state is not None:
+                        tui_state.aec_dump_frames = canceller.dump.capture_frames
                 new_grace = grace_s_for_last_response(attenuation, ceiling)
                 if new_grace != next_overlap_grace_s:
                     log.info(
@@ -1203,10 +1504,15 @@ async def run(args: argparse.Namespace) -> None:
     watchdog_task = asyncio.create_task(
         _working_watchdog(
             adapter, player, WorkingIndicator(), orchestrator, interject_queue,
-            segmenter, listening_gate, tui_state, continue_gate,
+            segmenter, listening_gate, tui_state, continue_gate, approval_gate,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
+    # termios' own attribute-list type is platform-stub-conditional (POSIX
+    # only) and this variable is only ever populated on POSIX -- Any
+    # sidesteps fighting typeshed's win32/posix stub split rather than
+    # asserting a precise type mypy can't agree on across platforms.
+    tui_old_tty_settings: Any = None
     if tui_state is not None:
         # Same VT-mode-enable idiom as voice_tui.py/settings_tui.py --
         # os.system("") with a hardcoded empty-string literal has the
@@ -1214,6 +1520,18 @@ async def run(args: argparse.Namespace) -> None:
         # Windows console hosts; it never executes a program.
         os.system("")  # nosec B605 B607
         sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
+        if sys.platform != "win32":
+            # msvcrt.getwch() (used by _read_pending_key on Windows) already
+            # bypasses the console's line-buffering/echo, so only POSIX
+            # needs an explicit mode change -- without this, a scroll
+            # keypress would sit unread until Enter, and would echo into
+            # the alt-screen TUI instead of being consumed silently.
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            tui_old_tty_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
         tui_render_task = asyncio.create_task(_tui_render_loop(tui_state))
 
     try:
@@ -1240,7 +1558,7 @@ async def run(args: argparse.Namespace) -> None:
                     # No-input (Google Conversation Design's term, see
                     # RecognitionErrorLadder's docstring): STT heard nothing
                     # recognizable at all. Checked before every other gate --
-                    # empty text can't match a wake word/pause phrase/gate
+                    # empty text can't match a resume word/pause phrase/gate
                     # condition anyway, and previously flowed silently all
                     # the way to Orchestrator.handle_transcript's own empty
                     # guard with no log line at all. Now observable.
@@ -1253,12 +1571,12 @@ async def run(args: argparse.Namespace) -> None:
                         continue
                     # Pause/resume gate runs before every other gate, same
                     # reasoning as the safeword: while paused, NOTHING except
-                    # the wake word should reach the overlap/echo/confidence
+                    # the resume word should reach the overlap/echo/confidence
                     # gates or the backend (docs/DESIGN-barge-in.md,
                     # "Pause/resume listening").
                     gate_action = listening_gate.observe(text)
                     if gate_action == "resume":
-                        log.info("resumed listening (wake word matched): %r", text)
+                        log.info("resumed listening (resume word matched): %r", text)
                         if tui_state is not None:
                             # Resume is otherwise completely silent (docs/
                             # DESIGN-barge-in.md's open question on this --
@@ -1269,7 +1587,7 @@ async def run(args: argparse.Namespace) -> None:
                             tui_state.add_turn("system", "resumed listening")
                         continue
                     if gate_action == "drop":
-                        log.debug("dropped (paused, not the wake word): %r", text)
+                        log.debug("dropped (paused, not the resume word): %r", text)
                         continue
                     if gate_action == "pause":
                         player.stop()
@@ -1278,12 +1596,53 @@ async def run(args: argparse.Namespace) -> None:
                         log.info(
                             "paused listening (matched %r) -- hard-stopped in-flight "
                             "work; say %r to resume",
-                            text, config.interaction.wake_word,
+                            text, config.interaction.resume_word,
                         )
                         if tui_state is not None:
                             tui_state.add_turn(
                                 "system",
-                                f"paused listening -- say {config.interaction.wake_word!r} to resume",
+                                f"paused listening -- say {config.interaction.resume_word!r} to resume",
+                            )
+                        continue
+                    # The glossary is intentionally downstream of every
+                    # safety-critical raw-transcript check above.  A configured
+                    # correction can improve an ordinary command such as a
+                    # project name, but it can never manufacture a hard stop,
+                    # wake/pause action, or approval decision.
+                    corrected_text = transcript_corrector.correct(text)
+                    if corrected_text != text:
+                        log.info(
+                            "corrected transcript before command routing: %r -> %r",
+                            text,
+                            corrected_text,
+                        )
+                        text = corrected_text
+                    # Voice-gated tool approval (Phase 3, docs/DESIGN-0.3.0-
+                    # interaction-and-safety.md), checked BEFORE the
+                    # continue-prompt: the higher-stakes decision wins if
+                    # both were somehow pending at once (they shouldn't be
+                    # in practice -- a tool call blocks the turn, so a
+                    # tiered response can't be mid-reveal at the same
+                    # time). "discuss" deliberately does NOT forward the
+                    # utterance to the backend: Claude Code's own turn is
+                    # blocked inside the hook for the whole approval wait
+                    # (see claude_code.py's module docstring) -- there is
+                    # no live channel to actually discuss it on, unlike
+                    # Codex's app-server. Every other outcome (approve/
+                    # deny/discuss/None) consumes the utterance here; none
+                    # of them fall through to normal command routing.
+                    if approval_gate is not None and approval_gate.is_waiting:
+                        approval_outcome = approval_gate.observe_transcript(text, time.monotonic())
+                        if approval_outcome == "approve":
+                            log.info("voice approval: APPROVED -- %r", text)
+                            await orchestrator.resolve_pending_approval(True)
+                        elif approval_outcome == "deny":
+                            log.info("voice approval: DENIED -- %r", text)
+                            await orchestrator.resolve_pending_approval(False)
+                        elif approval_outcome == "discuss":
+                            log.info(
+                                "voice approval: still waiting (discuss, no live "
+                                "channel to answer on) -- %r", text,
                             )
                         continue
                     # Response-tiering continue-prompt (docs/DESIGN-0.3.0-
@@ -1329,16 +1688,25 @@ async def run(args: argparse.Namespace) -> None:
                         # AEC was actually in the path when an echo leaked.
                         aec_state = "echo-cancellation active" if canceller is not None else "no echo cancellation"
                         log.info(
-                            "dropped (overlap gate, %s): %r", aec_state, text
+                            "dropped (overlap gate, %s): %r %s",
+                            aec_state,
+                            text,
+                            _echo_match_suffix(text, last_spoken_response.text),
                         )
                         continue
                     if echo_filter.is_echo(text):
                         if barged_in:
                             log.warning(
-                                "dropped (spoken-echo filter, barge-in was our own echo): %r", text
+                                "dropped (spoken-echo filter, barge-in was our own echo): %r %s",
+                                text,
+                                _echo_match_suffix(text, last_spoken_response.text),
                             )
                         else:
-                            log.info("dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r", text)
+                            log.info(
+                                "dropped (spoken-echo filter, matches ConvoBox's own recent speech): %r %s",
+                                text,
+                                _echo_match_suffix(text, last_spoken_response.text),
+                            )
                         continue
                     if barged_in and is_backchannel(text):
                         # Playback already stopped (BargeInMonitor decided
@@ -1449,8 +1817,26 @@ async def run(args: argparse.Namespace) -> None:
             tui_render_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await tui_render_task
+            if tui_old_tty_settings is not None:
+                import termios
+
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tui_old_tty_settings)
             sys.stdout.write("\x1b[?25h\x1b[?1049l")  # restore cursor + main screen
             sys.stdout.flush()
+        # AEC dump: finalize the WAV headers and log an after-action
+        # summary. Runs even on a mid-session exception/Ctrl+C -- an
+        # unclosed wave.Wave_write leaves the RIFF header's size fields
+        # wrong, making the file unplayable, so this must not be skipped.
+        if canceller is not None and canceller.dump is not None:
+            summary = canceller.dump.close()
+            log.info(
+                "AEC dump closed -- %s: reference %.1fs (%d frames), "
+                "capture %.1fs (%d frames), session %.1fs. Replay these "
+                "offline against any hypothesis -- see "
+                "docs/DESIGN-echo-and-barge-in.md.",
+                summary["directory"], summary["reference_s"], summary["reference_frames"],
+                summary["capture_s"], summary["capture_frames"], summary["duration_s"],
+            )
         # Close the backend transport (subprocess pipes / HTTP client)
         # while the loop is still alive, so shutdown is quiet instead of
         # spraying 'Event loop is closed' tracebacks. Runs on Ctrl+C too
@@ -1460,6 +1846,22 @@ async def run(args: argparse.Namespace) -> None:
             await watchdog_task
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        # aclose() above already closes stdin/terminates/awaits the
+        # subprocess, but on Windows ProactorEventLoop, closing a pipe
+        # transport schedules the actual OS-handle teardown via
+        # call_soon() rather than doing it inline -- asyncio.run() (our
+        # caller, main()) tears the loop down immediately once this
+        # coroutine returns, before that callback gets a turn to run.
+        # The transport object survives (unclosed) until a later GC
+        # pass finds it, by which point the loop and pipe are both gone
+        # -- "Exception ignored in: ...__del__ ... ValueError: I/O
+        # operation on closed pipe" (live-confirmed, 2026-07-20 UAT
+        # session, codex backend). One more tick of the loop here is
+        # enough for those scheduled callbacks to actually run before
+        # shutdown, same practical mitigation used elsewhere for this
+        # well-known CPython/Windows asyncio subprocess-transport
+        # shutdown-ordering gap.
+        await asyncio.sleep(0.1)
         instance_lock.close()
 
 
@@ -1482,6 +1884,13 @@ def main() -> None:
     parser.add_argument("--config", default=None, help="path to a convobox.yaml config file")
     parser.add_argument("--device", default=None, help="input device name or index")
     parser.add_argument(
+        "-d", "--working-dir", default=None,
+        help="directory the spawned coding agent (codex/claude-code) runs and "
+        "edits files in; overrides backend.working_dir. Use an isolated "
+        "workspace so the agent cannot modify ConvoBox's own source. No effect "
+        "on the opencode backend (set by where `opencode serve` was launched).",
+    )
+    parser.add_argument(
         "--text", default=None,
         help="send this single utterance instead of listening on the mic",
     )
@@ -1501,6 +1910,16 @@ def main() -> None:
             "Only affects the mic loop, not --text mode. Log output moves to "
             f"{_TUI_LOG_FILE} -- interleaving ordinary log lines with the "
             "alt-screen redraw would garble the display."
+        ),
+    )
+    parser.add_argument(
+        "--aec-dump", nargs="?", const="", default=None, metavar="DIR",
+        help=(
+            "record the real AEC reference/mic streams to WAV for offline "
+            "replay (reference.wav, mic-raw.wav, mic-processed.wav under a "
+            "timestamped subdirectory of DIR, default .aec-dumps/). Requires "
+            "audio.echo_cancellation on. See docs/DESIGN-echo-and-barge-in.md "
+            "-> 'Capturing a live incident for offline analysis'."
         ),
     )
     parser.add_argument("-v", "--verbose", action="store_true")
