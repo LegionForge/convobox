@@ -208,7 +208,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         key="audio",
         label="Audio",
         fields=(
-            FieldSpec("audio", "input_device", "Input device", "device", help_text="Space/Left/Right cycles real discovered microphones (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test -- this records ~1s from the mic and plays the recording back through the configured output device, so you can actually hear whether it picked you up."),
+            FieldSpec("audio", "input_device", "Input device", "device", help_text="Space/Left/Right cycles real discovered microphones (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test -- this records ~3s from the mic (watch the live level bar in the status line while you speak) and plays the recording back through the configured output device, so you can actually hear whether it picked you up."),
             FieldSpec("audio", "output_device", "Output device", "device", help_text="Space/Left/Right cycles real discovered speakers (same list scripts/audio_devices.py --setup offers); leave unset for the system default. Press [t] to test."),
             FieldSpec("audio", "sample_rate", "Sample rate", "int", help_text="Mic capture rate in Hz. 16000 is the default because STT and VAD both expect it."),
             FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool", help_text="Enable acoustic echo cancellation when using open speakers in the same room. Space/Left/Right toggles true/false."),
@@ -900,6 +900,76 @@ async def probe_audio(config: AppConfig, field_key: str | None = None) -> str:
     return " | ".join(results)
 
 
+async def _probe_input_device_live(state: TuiState, seconds: float = 3.0) -> str:
+    """Record ~3s from the configured mic, showing a live level bar in
+    the TUI's own status line WHILE recording (not a raw terminal
+    overlay -- this redraws through the normal `draw()` path so it stays
+    part of the same screen), then play the recording back through the
+    configured speaker.
+
+    Live UAT feedback, 2026-07-23: the plain [t] test (probe_audio, still
+    used for every other audio field) only shows a single level reading
+    after the whole recording finishes. Watching the level move in real
+    time while actually speaking makes gain problems (clipping, too
+    quiet, wrong device picking up something else entirely) far easier to
+    judge than one static number -- this is specifically what `[t]` does
+    now for Input device; every other audio field keeps the quicker,
+    non-live probe_audio() path.
+
+    format_level() already renders a full bar+numbers+verdict string
+    (see audio_devices.py) -- reused as-is for each live tick, not
+    reimplemented here.
+    """
+    import io
+
+    import sounddevice as sd
+
+    import audio_devices as ad
+
+    config = state.working
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_devices = ad.collect_devices(sd, "output")
+        if config.audio.output_device:
+            out_idx, _ = ad.resolve_spec(config.audio.output_device, out_devices)
+        else:
+            out_idx = ad._default_index(sd, "output")
+
+        in_devices = ad.collect_devices(sd, "input")
+        if config.audio.input_device:
+            in_idx, in_err = ad.resolve_spec(config.audio.input_device, in_devices)
+        else:
+            in_idx, in_err = ad._default_index(sd, "input"), None
+    if in_idx is None:
+        return f"mic: {in_err or 'no device found'}"
+
+    chunks: list[np.ndarray] = []
+    latest = {"rms": -120.0, "peak": -120.0}
+
+    def _callback(indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
+        chunks.append(indata[:, 0].copy())
+        latest["rms"], latest["peak"] = ad.level_meter(indata[:, 0])
+
+    rate = ad._CAPTURE_RATE
+    try:
+        stream = sd.InputStream(samplerate=rate, channels=1, device=in_idx, callback=_callback)
+    except Exception:  # noqa: BLE001 -- fall back to the device's own rate
+        rate = int(sd.query_devices(in_idx)["default_samplerate"])
+        stream = sd.InputStream(samplerate=rate, channels=1, device=in_idx, callback=_callback)
+
+    steps = max(1, int(seconds / 0.1))
+    with stream:
+        for _ in range(steps):
+            state.status = f"recording, speak normally -- {ad.format_level(latest['rms'], latest['peak'])}"
+            draw(state)
+            await asyncio.sleep(0.1)
+
+    audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+    rms_db, peak_db = ad.level_meter(audio)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ad._play_recording(sd, audio, rate, out_idx)
+    return f"mic: {ad.format_level(rms_db, peak_db)} (played back)"
+
+
 def _section_summary(config: AppConfig) -> list[str]:
     report = validate_config(config)
     lines = [
@@ -1472,7 +1542,11 @@ async def _test_state(state: TuiState) -> None:
             state.status = await probe_backend(state.working)
         elif section == "audio":
             field = state.current_field()
-            state.status = await probe_audio(state.working, field.key if field else None)
+            field_key = field.key if field else None
+            if field_key == "input_device":
+                state.status = await _probe_input_device_live(state)
+            else:
+                state.status = await probe_audio(state.working, field_key)
         else:
             state.status = f"{section} configuration validated"
     except Exception as exc:  # noqa: BLE001
