@@ -866,6 +866,21 @@ correctly when the real bug recurs.
   quirk, not a real memory shortage"`) reads sane against what Task
   Manager / `Get-CimInstance Win32_OperatingSystem` actually shows at
   the time.
+- **[ST5] The same recovery also fires for a bare numpy MemoryError, not
+  just RuntimeError.** Live-confirmed 2026-07-22: the identical
+  native-allocator pressure can surface as
+  `numpy._core._exceptions._ArrayMemoryError` (raised from `np.fft.rfft`
+  inside faster-whisper's feature extractor, before ctranslate2's own
+  encode step) instead of a `RuntimeError` from ctranslate2 itself --
+  confirmed via `_ArrayMemoryError.__mro__` that it's a `MemoryError`
+  subclass, not caught by the original `except RuntimeError`, and
+  crashed a live session before this fix. Both `transcribe()`'s recovery
+  and `_reload_model()` now catch `(RuntimeError, MemoryError)`. If a
+  long session ever logs this manifestation instead of the
+  `mkl_malloc`/`could not create a memory object` wording, confirm [ST1]
+  through [ST4]'s same behaviors still hold -- the recovery code path is
+  identical once the exception is caught, only the trigger differs. See
+  `docs/field-notes/2026-07-22-native-allocator-leak-also-surfaces-as-numpy-memoryerror.md`.
 
 ## 12. OpenCode model selection (`backend.model`, `src/convobox/adapters/opencode.py`)
 
