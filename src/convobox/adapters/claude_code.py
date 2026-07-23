@@ -44,18 +44,16 @@ instead of after shipping a wrong adapter. Key empirical findings:
   forever with zero signal -- exactly the ~50-90s silent stalls seen in
   live UAT before this was diagnosed.
 
-  Fix: default to ``--permission-mode plan`` unless the caller's own
-  ``command`` already sets ``--permission-mode`` (a user override always
-  wins). Confirmed live: plan mode never hangs -- every turn ends with a
-  real, speakable ``result`` -- and it never executes a write/exec
-  action; a gated request comes back as explanatory text instead ("I
-  can't run that without approval..."). This is the same safety stance
-  Codex's adapter already takes (decline the destructive step, but let
-  the turn finish) -- see codex.py's _APPROVAL_METHODS -- just expressed
-  as a session-level flag because headless mode has no per-call channel
-  to express it any other way. Voice-driven approval (wiring
-  ConfirmwordDetector into an actual accept/decline flow) is future
-  work, same as codex.py's TODO.
+  Fix: default to ``--permission-mode plan`` (backend.permission_mode's
+  own default) unless the caller's own ``command`` already sets
+  ``--permission-mode`` (a user override always wins). Confirmed live:
+  plan mode never hangs -- every turn ends with a real, speakable
+  ``result`` -- and it never executes a write/exec action; a gated
+  request comes back as explanatory text instead ("I can't run that
+  without approval..."). This is the safe universal default;
+  ``backend.permission_mode="approve"`` now has a REAL per-call channel
+  of its own -- see "Voice-gated tool approval" below, which replaces
+  what used to be a documented gap here.
 
 - **`--disallowedTools` (confirmed live, 2026-07-14): removes tools
   entirely, doesn't reproduce the hang above.** A real spawned
@@ -89,7 +87,7 @@ instead of after shipping a wrong adapter. Key empirical findings:
   See ``docs/DESIGN-0.3.0-interaction-and-safety.md``'s phase 3 for the
   full reasoning.
 
-- **Voice-gated tool approval (``interactive_approval=True``), live-built
+- **Voice-gated tool approval (``permission_mode="approve"``), live-built
   and live-verified 2026-07-2x.** ``--permission-mode plan`` above solves
   the hang, but at the cost of never executing anything -- there was no
   real per-call channel to answer, the way codex.py's app-server has.
@@ -211,35 +209,78 @@ _REQUIRED_FLAGS = [
 # codex.py's runtime decline).
 _DEFAULT_PERMISSION_MODE = "plan"
 
+# backend.permission_mode -> Claude Code's --permission-mode. "approve"
+# and "permissive" both resolve to the SAME underlying CLI flag
+# (acceptEdits -- the only thing that flag controls is whether Claude
+# ATTEMPTS tool calls at all; "plan" suppresses attempts entirely, see
+# finding 2 below). What actually differs between "approve" and
+# "permissive" is whether the PreToolUse hook gets wired up alongside it
+# (see ClaudeCodeAdapter.__init__'s interactive_approval derivation) --
+# "approve" gates every attempted call on a voice decision, "permissive"
+# lets them all through ungated. Not independently live-verified that
+# "permissive" (unwired, no hook) behaves identically to "approve" with
+# every request answered "allow" -- both SHOULD, since the hook is the
+# only thing that differs, but only "approve" has been driven through a
+# real spawned process end-to-end tonight (see the mechanism section).
+_PERMISSION_CLAUDE_MODE: dict[str, str] = {
+    "plan": "plan",
+    "approve": "acceptEdits",
+    "permissive": "acceptEdits",
+}
 
-def _resolve_flags(command: Sequence[str], *, interactive_approval: bool = False) -> list[str]:
+
+def _resolve_flags(command: Sequence[str], permission_mode: str = "plan") -> list[str]:
     """The flags to append after the caller's own command (pure, tested).
 
-    Skips the default --permission-mode if the caller's own command
-    already sets one -- an explicit user choice always wins over this
-    adapter's safe default, the same "respect an explicit override"
-    principle used for AEC delay and audio device resolution elsewhere.
-    ``interactive_approval`` only changes WHICH default is appended
-    (acceptEdits instead of plan -- see module docstring, finding 2:
-     plan suppresses tool attempts, so the PreToolUse hook has nothing to
-    gate) -- an explicit user override still wins either way.
+    Skips injecting --permission-mode if the caller's own command already
+    sets one (an explicit user choice always wins over this adapter's
+    default, the same "respect an explicit override" principle used for
+    AEC delay and audio device resolution elsewhere). Otherwise translates
+    permission_mode via _PERMISSION_CLAUDE_MODE; an unrecognized value
+    falls back to the safe "plan" default rather than raising --
+    BackendConfig's own field validator is the actual gate against typos,
+    this is just defense in depth.
     """
     if "--permission-mode" in command:
         return list(_REQUIRED_FLAGS)
-    default_mode = (
-        _INTERACTIVE_APPROVAL_PERMISSION_MODE if interactive_approval else _DEFAULT_PERMISSION_MODE
-    )
-    return [*_REQUIRED_FLAGS, "--permission-mode", default_mode]
+    mode = _PERMISSION_CLAUDE_MODE.get(permission_mode, _DEFAULT_PERMISSION_MODE)
+    return [*_REQUIRED_FLAGS, "--permission-mode", mode]
+
+
+def _parse_mcp_list_output(text: str) -> list[str]:
+    """Extract MCP server names from `claude mcp list`'s human-readable
+    output (pure, tested -- no documented --json/structured mode exists,
+    confirmed live 2026-07-22: `claude mcp list --json` errors as an
+    unknown option).
+
+    Each real server line is ``<name>: <url-or-detail> ...`` -- splitting
+    on the FIRST ": " correctly isolates the name even when the name
+    itself contains periods/hyphens/spaces (confirmed against a real
+    multi-server account whose connector names include exactly that kind
+    of punctuation, e.g. "claude.ai Some Connector - Demo - 2026.01.07").
+    Lines with no ": " (the "Checking MCP server health..." header, blank
+    lines) are skipped rather than erroring -- this must degrade
+    gracefully on any future CLI output-format change, not raise.
+    """
+    names: list[str] = []
+    for line in text.splitlines():
+        if ": " not in line:
+            continue
+        name = line.split(": ", 1)[0].strip()
+        if name:
+            names.append(name)
+    return names
 
 
 class ClaudeCodeAdapter(BackendAdapter):
     def __init__(
         self,
         command: Sequence[str] | None = None,
+        permission_mode: str = "plan",
         working_dir: str | None = None,
-        interactive_approval: bool = False,
     ) -> None:
         self._command = list(command) if command else ["claude"]
+        self._permission_mode = permission_mode
         # Where the spawned agent reads/writes files. None -> inherit
         # ConvoBox's cwd; an explicit path isolates edits. See BackendConfig.
         self._working_dir = working_dir
@@ -258,10 +299,13 @@ class ClaudeCodeAdapter(BackendAdapter):
         # (stdout) can't cover both.
         self._events: asyncio.Queue[BackendEvent | object] = asyncio.Queue()
 
-        # Voice-gated tool approval (see module docstring). Off by default
-        # -- unset, this adapter behaves exactly as before (safe
-        # --permission-mode plan default, no hook, no server).
-        self._interactive_approval = interactive_approval
+        # Voice-gated tool approval (see module docstring). Derived from
+        # permission_mode, not a separate constructor argument -- "approve"
+        # is the only mode that wires the hook/TCP server; "plan" and
+        # "permissive" both leave this off (see _PERMISSION_CLAUDE_MODE's
+        # own comment for why "permissive" doesn't need it: nothing gates
+        # those attempts either way, so there's no approval to hold).
+        self._interactive_approval = permission_mode == "approve"
         self._approval_token = secrets.token_hex(16)
         self._approval_server: asyncio.Server | None = None
         self._approval_port: int | None = None
@@ -293,9 +337,18 @@ class ClaudeCodeAdapter(BackendAdapter):
                     env["CONVOBOX_APPROVAL_TOKEN"] = self._approval_token
                     env["CONVOBOX_APPROVAL_TIMEOUT_S"] = str(_APPROVAL_DECISION_TIMEOUT_S)
                     extra_flags = ["--settings", str(settings_path)]
+                elif self._permission_mode == "permissive":
+                    # MCP tool calls hit a SEPARATE permission gate that
+                    # --permission-mode doesn't cover at all (see
+                    # _enumerate_mcp_server_names's docstring) -- without
+                    # this, "permissive" (acts without asking) silently
+                    # doesn't hold for any MCP server the user has
+                    # configured, live-confirmed 2026-07-22.
+                    mcp_settings_path = await self._ensure_mcp_permissions_settings_file()
+                    extra_flags = ["--settings", str(mcp_settings_path)]
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
-                    *_resolve_flags(self._command, interactive_approval=self._interactive_approval),
+                    *_resolve_flags(self._command, self._permission_mode),
                     *extra_flags,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
@@ -350,6 +403,73 @@ class ClaudeCodeAdapter(BackendAdapter):
                         }
                     ]
                 }
+            }
+            with os.fdopen(fd, "w") as f:
+                json.dump(settings, f)
+            self._settings_path = Path(path)
+        return self._settings_path
+
+    async def _enumerate_mcp_server_names(self) -> list[str]:
+        """Every MCP server this machine's Claude Code install knows
+        about, by name -- live-confirmed source of a SEPARATE permission
+        gate from --permission-mode.
+
+        Live-confirmed, 2026-07-22: an MCP tool call fails with "Claude
+        requested permissions to use mcp__<server>__<tool>, but you
+        haven't granted it yet" even under --permission-mode acceptEdits
+        -- NOT a hang (the turn ends cleanly, is_error=False, the model
+        just reports it can't proceed), but permissive mode's whole point
+        ("acts without asking") doesn't hold for MCP tools without an
+        explicit grant. --allowedTools does NOT grant this (tried, still
+        rejected); a bare "mcp__*" wildcard in --settings permissions.allow
+        does NOT work either (tried, still rejected) -- only the exact
+        "mcp__<server-name>" (no tool suffix -- confirmed this grants
+        every tool on that server, not just one) works.
+
+        `claude mcp list` is the only complete enumeration (confirmed live:
+        it includes claude.ai-account-level connectors -- Gmail, Drive,
+        Calendar, an ERP connector -- that live outside any local config
+        file this adapter could read directly, alongside locally-configured
+        servers like a personal Obsidian bridge). OAuth-gated connectors
+        ("Needs authentication" in the listing) can't actually be unblocked
+        by this grant regardless -- their real gate is a one-time OAuth
+        flow this adapter cannot run headless -- but including their names
+        anyway is harmless (a no-op grant for a server that's separately
+        blocked), so every name found is included rather than trying to
+        pre-filter by connection status.
+
+        Best-effort: `claude mcp list` health-checks every server (~3s on
+        a real 7-server account, confirmed live) and returns [] on any
+        failure (missing CLI, timeout, unexpected output) rather than
+        ever blocking startup or crashing over a diagnostic listing.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._command[0] if self._command else "claude",
+                "mcp",
+                "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        except (OSError, TimeoutError, asyncio.TimeoutError):
+            logger.warning("claude mcp list failed; permissive mode will not grant MCP tools", exc_info=True)
+            return []
+        return _parse_mcp_list_output(stdout.decode(errors="replace"))
+
+    async def _ensure_mcp_permissions_settings_file(self) -> Path:
+        """Write (once) the --settings JSON granting every configured MCP
+        server -- the permissive-mode counterpart to
+        _ensure_settings_file's hook wiring. See
+        _enumerate_mcp_server_names's own docstring for why this exists
+        and what it can't fix (OAuth-gated connectors)."""
+        if self._settings_path is None:
+            server_names = await self._enumerate_mcp_server_names()
+            fd, path = tempfile.mkstemp(
+                prefix="convobox-claude-settings-", suffix=".json"
+            )
+            settings = {
+                "permissions": {"allow": [f"mcp__{name}" for name in server_names]}
             }
             with os.fdopen(fd, "w") as f:
                 json.dump(settings, f)

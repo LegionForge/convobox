@@ -509,7 +509,7 @@ did).
 5. Edge VAD: V1-V4.
 6. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
    priority-ordering bug -- do not skip it).
-7. Conversation TUI (`--tui`): U1-U9.
+7. Conversation TUI (`--tui`): U1-U10.
 8. Response tiering (`interaction.tier_responses: true`): R1-R7.
 9. STT native-allocator recovery (long session, 20+ min): ST1-ST3.
 10. Scriptable/cleanup: M1-M3, X1-X2.
@@ -760,6 +760,28 @@ section is the live-mic pass that closes the gap.
   alarming in the transcript scroll, and that it doesn't fire on the
   common/expected path (i.e. doesn't show up on ordinary turns with no
   pause/cutoff involved).
+- **[U11] "Who's expected to act?" ambiguity during the dead-time
+  (found live during the AEC/barge-in UAT, 2026-07-18).** During a
+  test the user could not tell whether ConvoBox was still processing on
+  the backend or waiting for the user to say something -- there was no
+  indicator for which party the session was blocked on. Root cause:
+  the watchdog loop in `scripts/run_convobox.py` fell through to
+  `status = "listening"` during the tiered-response continue-window
+  (when `continue_gate.is_waiting`), so the "ball is in your court"
+  wait looked identical to idle LISTENING. Fixed by adding a distinct
+  `waiting` `TuiStatus` -- header now shows bold magenta
+  `WAITING FOR YOU` (distinct from the calm cyan LISTENING), driven
+  from `continue_gate.is_waiting` in the watchdog loop
+  (`src/convobox/tui/state.py`, `src/convobox/tui/render.py`,
+  `scripts/run_convobox.py`). Unit-tested (`tests/test_conversation_tui.py`
+  `test_status_label_reflects_state` now covers `WAITING FOR YOU`).
+  Still TODO for a live confirm: watch the header flip to `WAITING FOR
+  YOU` the instant a tiered response finishes speaking and hold there
+  until "continue"/timeout, and confirm it reads as obviously different
+  from LISTENING. The same `waiting`/`waiting_hint` mechanism now also
+  covers the phase-3 approval gate's wait (`approval_gate.is_waiting` --
+  see `_working_watchdog`'s status-derivation block) now that voice
+  approval is wired live.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 

@@ -305,6 +305,106 @@ async def test_approval_requests_are_auto_declined() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interactive_command_approval_waits_for_operator_and_can_approve() -> None:
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs approval")
+        event = (await _collect(adapter, 1))[0]
+        assert event.type == BackendEventType.APPROVAL_REQUEST
+        assert event.content is not None
+        assert "COMMAND EXECUTION" in event.content
+        assert "rm -rf /" in event.content
+        # No result was written until the caller explicitly approves.
+        assert adapter.is_busy() is True
+        assert await adapter.resolve_pending_approval(True) is True
+        events = await _collect(adapter, 2)
+        # "accept", not "approve" -- confirmed against codex-cli 0.144.6's
+        # own generated schema (CommandExecutionApprovalDecision has no
+        # "approve" enum member at all); a stale "approve" here silently
+        # made every voice-approved write get rejected by Codex anyway
+        # (live-found 2026-07-20 UAT session).
+        assert events[0].content == "approval decision was: accept"
+        assert events[1].type == BackendEventType.DONE
+        assert await adapter.resolve_pending_approval(False) is False
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_interactive_file_change_approval_can_be_declined() -> None:
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs file edit approval")
+        event = (await _collect(adapter, 1))[0]
+        assert event.type == BackendEventType.APPROVAL_REQUEST
+        assert event.content is not None and "FILE CHANGE" in event.content
+        assert await adapter.resolve_pending_approval(False) is True
+        events = await _collect(adapter, 2)
+        assert events[0].content == "approval decision was: decline"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_declines_a_pending_approval_first() -> None:
+    # send_hard_stop()'s own comment: "Never leave an operator-held request
+    # dangling when the safeword aborts the turn." Real coverage gap found
+    # 2026-07-21: no existing test exercised this interaction at all --
+    # every hard-stop test used a plain "hang forever" turn with no
+    # approval in flight, and every approval test resolved (or left
+    # untouched) the approval without ever calling send_hard_stop().
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs approval")
+
+        collected: list[BackendEvent] = []
+
+        async def consume() -> None:
+            async for event in adapter.events():
+                collected.append(event)
+
+        consumer = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.2)
+        assert any(e.type == BackendEventType.APPROVAL_REQUEST for e in collected)
+        assert adapter.is_busy() is True  # turn stays blocked on the approval
+
+        await adapter.send_hard_stop()
+        assert adapter.is_busy() is False  # immediately
+
+        await asyncio.sleep(0.3)
+        # The pending approval was declined (not left dangling) as part of
+        # the hard stop -- a second, explicit resolve_pending_approval must
+        # now be a no-op (nothing left pending).
+        assert await adapter.resolve_pending_approval(True) is False
+        assert any(
+            e.type == BackendEventType.TEXT and e.content == "approval decision was: decline"
+            for e in collected
+        )
+        assert any(e.type == BackendEventType.DONE for e in collected)
+
+        # Same thread serves the next turn (matches the plain hard-stop
+        # test's own "thread stays usable" guarantee).
+        await adapter.send_text("still alive?")
+        await asyncio.sleep(0.5)
+        assert any(
+            e.type == BackendEventType.TEXT and e.content == "echo: still alive?"
+            for e in collected
+        )
+
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_filechange_approval_uses_decline() -> None:
     # item/fileChange/requestApproval -- live-confirmed 2026-07-14 against
     # a real codex app-server (see codex.py's module docstring): a file
@@ -363,6 +463,43 @@ async def test_permissions_approval_grants_nothing() -> None:
         assert events[0].type == BackendEventType.TEXT
         assert events[0].content == "approval decision was: {}"
         assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_non_integer_approval_id_is_declined_not_operator_facing() -> None:
+    # _answer_server_request's defensive guard: an approval request whose
+    # id isn't an int can't be answered later (resolve_pending_approval
+    # keys off it), so it must be declined immediately rather than surfaced
+    # as an operator-facing prompt nothing could ever resolve.
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs approval with a bad id")
+        events = await _collect(adapter, 2)
+        assert not any(e.type == BackendEventType.APPROVAL_REQUEST for e in events)
+        assert events[0].content == "approval decision was: decline"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_second_pending_approval_is_auto_declined_not_swapped_in() -> None:
+    # _answer_server_request's other defensive guard: if a second approval
+    # request arrives before the first is answered, it must never replace
+    # the decision the operator is currently looking at -- auto-decline the
+    # second, leave the first's prompt (and the operator's chance to answer
+    # it) untouched.
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs two approvals")
+        events = await _collect(adapter, 2)
+        # Exactly one operator-facing prompt -- the second request never
+        # became a second APPROVAL_REQUEST event.
+        assert sum(1 for e in events if e.type == BackendEventType.APPROVAL_REQUEST) == 1
     finally:
         await _shutdown(adapter)
 

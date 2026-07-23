@@ -9,6 +9,7 @@ import pytest
 from scripts.run_convobox import (
     ECHO_GRACE_S,
     EchoAwarePlayer,
+    EchoTailGuard,
     MutePlayer,
     token_overlap_ratio,
     utterance_overlapped_playback,
@@ -302,3 +303,64 @@ def test_grace_respects_a_custom_base() -> None:
     assert grace_s_for_last_response(None, None, base_grace_s=0.5) == 0.5
     grace = grace_s_for_last_response(attenuation_db=2.0, ceiling_db=15.0, base_grace_s=0.5)
     assert grace == pytest.approx(min(0.5 + 13.0 * 0.05, _MAX_GRACE_S))
+
+
+# --- stage-2 signal-level echo handling: EchoTailGuard ---
+
+
+def test_tail_guard_opens_nothing_for_silent_endpoint() -> None:
+    # Headset / dead output: ceiling below the measurable threshold.
+    g = EchoTailGuard()
+    now = 1000.0
+    g.set_echo_profile(attenuation_db=8.2, ceiling_db=-0.3, delay_s=0.1, now=now)
+    g.observe(playing=False, now=now)
+    assert g.is_closed() is False
+
+
+def test_tail_guard_opens_nothing_when_aec_floor_limited() -> None:
+    # Echo reached the mic but AEC cancelled it to the floor (residual <=
+    # margin) -> nothing leaking, so no extra tail.
+    g = EchoTailGuard()
+    now = 1000.0
+    g.set_echo_profile(attenuation_db=4.6, ceiling_db=4.6, delay_s=0.1, now=now)
+    g.observe(playing=False, now=now)
+    assert g.is_closed() is False
+
+
+def test_tail_guard_opens_tail_when_aec_under_cancels() -> None:
+    # Echo reached the mic AND AEC left real headroom -> open a bounded
+    # tail so the reverb of our own voice is suppressed.
+    g = EchoTailGuard()
+    now = 1000.0
+    g.set_echo_profile(attenuation_db=2.0, ceiling_db=15.0, delay_s=0.22, now=now)
+    assert g.observe(playing=False, now=now) is True
+    assert g.is_closed() is True
+    # Tail length scales with the acoustic path (delay) but is capped.
+    assert 0.3 <= g._tail_len <= EchoTailGuard.CAP_S + 1e-9
+
+
+def test_tail_guard_reopens_while_still_playing() -> None:
+    # During playback the gate stays open and re-anchors the tail clock.
+    g = EchoTailGuard()
+    now = 1000.0
+    g.set_echo_profile(attenuation_db=2.0, ceiling_db=15.0, delay_s=0.22, now=now)
+    assert g.observe(playing=True, now=now) is False
+    assert g.is_closed() is False
+
+
+def test_tail_guard_releases_after_window() -> None:
+    g = EchoTailGuard()
+    now = 1000.0
+    g.set_echo_profile(attenuation_db=2.0, ceiling_db=15.0, delay_s=0.22, now=now)
+    g.observe(playing=False, now=now)  # open the tail
+    # Just past the tail end, the gate reopens.
+    assert g.observe(playing=False, now=now + g._tail_len + 0.01) is False
+    assert g.is_closed() is False
+
+
+def test_tail_guard_tail_is_capped() -> None:
+    # A huge measured delay must not produce an unbounded tail.
+    g = EchoTailGuard()
+    now = 1000.0
+    g.set_echo_profile(attenuation_db=0.0, ceiling_db=30.0, delay_s=10.0, now=now)
+    assert g._tail_len <= EchoTailGuard.CAP_S + 1e-9

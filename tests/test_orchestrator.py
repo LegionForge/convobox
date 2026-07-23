@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncGenerator, Callable
 
 import numpy as np
@@ -131,12 +130,16 @@ def make_orchestrator(
     with_tts: bool = False,
     on_event: Callable[[BackendEvent], None] | None = None,
     tier_responses: bool = False,
+    approval_phrase: str | None = None,
 ) -> tuple[Orchestrator, FakeBackendAdapter, FakeTTSEngine | None, FakePlayer | None]:
     adapter = FakeBackendAdapter(busy=busy)
     safeword = SafewordDetector(["stop stop stop"])
     if not with_tts:
         return (
-            Orchestrator(adapter, safeword, on_event=on_event, tier_responses=tier_responses),
+            Orchestrator(
+                adapter, safeword, on_event=on_event, tier_responses=tier_responses,
+                approval_phrase=approval_phrase,
+            ),
             adapter,
             None,
             None,
@@ -146,7 +149,7 @@ def make_orchestrator(
     return (
         Orchestrator(
             adapter, safeword, tts=tts, player=player, on_event=on_event,
-            tier_responses=tier_responses,
+            tier_responses=tier_responses, approval_phrase=approval_phrase,
         ),
         adapter,
         tts,
@@ -362,6 +365,44 @@ async def test_tier_state_start_returning_no_tiers_does_not_speak() -> None:
     assert orch._speak_task is None
     assert tts.synthesized == []
     assert player.played == []
+
+
+@pytest.mark.asyncio
+async def test_announce_after_delay_waits_before_speaking() -> None:
+    # Requested for the approval flow (2026-07-20): a delayed confirmation
+    # so the announcement doesn't land right as a just-approved tool call
+    # starts running.
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch.announce_after_delay("Approval confirmed.", 0.05)
+    assert tts.synthesized == []  # not yet -- still within the delay
+
+    assert orch._speak_task is not None
+    await orch._speak_task
+    assert tts.synthesized == ["Approval confirmed."]
+
+
+@pytest.mark.asyncio
+async def test_announce_after_delay_is_a_noop_without_tts() -> None:
+    orch, _, _, _ = make_orchestrator(busy=False, with_tts=False)
+    orch.announce_after_delay("Approval confirmed.", 0.05)
+    assert orch._speak_task is None
+
+
+@pytest.mark.asyncio
+async def test_announce_after_delay_replaces_any_pending_speech() -> None:
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    assert tts is not None and player is not None
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first response"))
+    orch.announce_after_delay("Approval confirmed.", 0.05)
+    assert orch._speak_task is not None
+    await orch._speak_task
+
+    # The pre-empted first announcement never got to synthesize anything --
+    # replaced before it ran, not spoken then talked over.
+    assert tts.synthesized == ["Approval confirmed."]
 
 
 @pytest.mark.asyncio
@@ -824,49 +865,30 @@ def test_render_question_handles_malformed_input() -> None:
 # claude_code.py) ---
 
 
-def test_render_approval_request_speaks_tool_and_command() -> None:
-    spoken = render_approval_request_for_speech("Bash", '{"command": "rm -rf build"}')
-    assert spoken == (
-        "Approval needed to run Bash: rm -rf build. "
-        "Say your approval phrase to allow it, or say no to deny it."
-    )
-
-
-def test_render_approval_request_falls_back_to_file_path() -> None:
-    spoken = render_approval_request_for_speech("Write", '{"file_path": "src/app.py"}')
-    assert "Write: src/app.py" in spoken
-
-
-def test_render_approval_request_without_tool_input_names_the_tool_alone() -> None:
-    spoken = render_approval_request_for_speech("Bash", None)
-    assert spoken == (
-        "Approval needed to run Bash. "
-        "Say your approval phrase to allow it, or say no to deny it."
-    )
-
-
-def test_render_approval_request_handles_malformed_tool_input() -> None:
-    # Never raises -- a malformed event must not crash event consumption,
-    # same policy as render_question_for_speech.
-    spoken = render_approval_request_for_speech("Bash", "not json")
-    assert spoken.startswith("Approval needed to run Bash.")
+def test_render_approval_request_speaks_tool_and_phrase() -> None:
+    # Deliberately does NOT read tool_input/command content aloud (an
+    # earlier version did) -- commands can be long, misleading out of
+    # context, or contain sensitive values. The TUI/log warning carries
+    # the actual detail; speech only announces the high-stakes state.
+    spoken = render_approval_request_for_speech("Bash", "alpha bravo delta")
+    assert spoken == "Approval needed to run Bash. Say alpha bravo delta to approve, or say no to deny."
 
 
 def test_render_approval_request_without_a_tool_name_says_a_tool() -> None:
-    spoken = render_approval_request_for_speech(None, None)
+    spoken = render_approval_request_for_speech(None, "alpha bravo delta")
     assert spoken.startswith("Approval needed to run a tool.")
 
 
-def test_render_approval_request_truncates_a_very_long_command() -> None:
-    long_command = "x" * 500
-    spoken = render_approval_request_for_speech("Bash", json.dumps({"command": long_command}))
-    assert len(spoken) < 500 + 100
-    assert spoken.endswith("…. Say your approval phrase to allow it, or say no to deny it.")
+def test_render_approval_request_without_a_phrase_uses_a_generic_fallback() -> None:
+    # Shouldn't normally happen (ApprovalDetector requires a phrase to
+    # construct) but must still produce a sensible sentence, not crash.
+    spoken = render_approval_request_for_speech("Bash", None)
+    assert spoken == "Approval needed to run Bash. Say your approval phrase to approve, or say no to deny."
 
 
 @pytest.mark.asyncio
 async def test_approval_request_event_is_announced_via_tts() -> None:
-    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True)
+    orch, _, tts, player = make_orchestrator(busy=False, with_tts=True, approval_phrase="alpha bravo delta")
     assert tts is not None and player is not None
 
     orch._on_event(
@@ -880,7 +902,11 @@ async def test_approval_request_event_is_announced_via_tts() -> None:
     await orch._speak_task
 
     assert len(tts.synthesized) == 1
-    assert tts.synthesized[0].startswith("Approval needed to run Bash")
+    assert tts.synthesized[0] == (
+        "Approval needed to run Bash. Say alpha bravo delta to approve, or say no to deny."
+    )
+    # The command itself is never read aloud -- see the function's own docstring.
+    assert "rm -rf" not in tts.synthesized[0]
     assert len(player.played) == 1
 
 

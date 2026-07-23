@@ -112,43 +112,25 @@ def render_question_for_speech(tool_input: str | None) -> str | None:
     return "The agent is asking: " + " ".join(parts)
 
 
-# Common tool-input keys worth reading aloud, tried in this order -- a
-# short, concrete description of WHAT is pending beats reciting raw JSON.
-# Deliberately small and generic (not backend-specific): claude_code.py's
-# TOOL_CALL events already use these same shapes (Bash's "command",
-# Write/Edit's "file_path").
-_APPROVAL_SUMMARY_KEYS = ("command", "file_path", "path")
-_APPROVAL_SUMMARY_MAX_CHARS = 200
-
-
-def render_approval_request_for_speech(tool: str | None, tool_input: str | None) -> str:
+def render_approval_request_for_speech(tool: str | None, approval_phrase: str | None) -> str:
     """Spoken announcement for a pending BackendEventType.APPROVAL_REQUEST
     (Phase 3, docs/DESIGN-0.3.0-interaction-and-safety.md).
 
-    Deliberately doesn't name the approval phrase itself -- Orchestrator
-    has no config access (same separation as resume_word/pause phrases,
-    which also live outside this class); the caller's own gate/prompt
-    handles phrase-specific instructions. Never raises on malformed
-    ``tool_input`` (same defensive policy as render_question_for_speech) --
-    worst case is a plain "approval needed to run X" with no detail.
+    Deliberately does NOT read the command/file path aloud (an earlier
+    version of this function did, via tool_input) -- commands can be
+    long, misleading out of context, or contain sensitive values; the
+    TUI/log warning (see run_convobox.py's _on_backend_event) shows the
+    exact request, speech only announces the high-stakes state, WHICH
+    tool it's for, and the operator-controlled vocabulary needed to
+    resolve it. ``approval_phrase`` is None when interactive approvals
+    are enabled but no phrase is configured (shouldn't normally happen --
+    ApprovalDetector requires one to construct -- but this must still
+    produce a safe, sensible sentence rather than crashing on a caller
+    bug).
     """
     name = tool or "a tool"
-    detail = None
-    if tool_input:
-        try:
-            parsed = json.loads(tool_input)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            for key in _APPROVAL_SUMMARY_KEYS:
-                value = parsed.get(key)
-                if isinstance(value, str) and value.strip():
-                    detail = value.strip()
-                    break
-    summary = f"{name}: {detail}" if detail else name
-    if len(summary) > _APPROVAL_SUMMARY_MAX_CHARS:
-        summary = summary[: _APPROVAL_SUMMARY_MAX_CHARS - 1] + "…"
-    return f"Approval needed to run {summary}. Say your approval phrase to allow it, or say no to deny it."
+    phrase = approval_phrase or "your approval phrase"
+    return f"Approval needed to run {name}. Say {phrase} to approve, or say no to deny."
 
 
 class Orchestrator:
@@ -160,6 +142,7 @@ class Orchestrator:
         player: AudioPlayer | None = None,
         on_event: Callable[[BackendEvent], None] | None = None,
         tier_responses: bool = False,
+        approval_phrase: str | None = None,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
@@ -187,6 +170,7 @@ class Orchestrator:
         # queue/generator: the caller decides how to buffer/render: this
         # is a hook, not a second consumer contending for the same events.
         self._on_event_hook = on_event
+        self._approval_phrase = approval_phrase
         self._events_task: asyncio.Task[None] | None = None
         self._speak_task: asyncio.Task[None] | None = None
 
@@ -248,6 +232,27 @@ class Orchestrator:
         if self._speak_task is not None:
             self._speak_task.cancel()
             self._speak_task = None
+
+    async def _speak_after_delay(self, text: str, delay_s: float) -> None:
+        await asyncio.sleep(delay_s)
+        await self._speak(text)
+
+    def announce_after_delay(self, text: str, delay_s: float) -> None:
+        """Speak `text` after `delay_s`, once, replacing any pending speech.
+
+        Requested for the approval flow specifically (2026-07-20): a Codex
+        turn resumes IMMEDIATELY once an approval is granted, so announcing
+        "approved" with no gap risks the announcement itself landing right
+        as the tool call starts -- a self-barge-in on that overlap could
+        then interrupt the tool call, not just the announcement. A short
+        delay gives the resumed turn a moment to get underway first. Only
+        the requester (run_convobox.py's approval-resolution path) calls
+        this today; no other announcement in this class needs a delay.
+        """
+        if self._tts is None or self._player is None:
+            return
+        self._cancel_speak_task()
+        self._speak_task = asyncio.create_task(self._speak_after_delay(text, delay_s))
 
     async def stop_event_loop(self) -> None:
         self._cancel_speak_task()
@@ -323,8 +328,15 @@ class Orchestrator:
             # stdout can't give any other way -- same reasoning as the
             # question-tool announcement below), and spoken when a voice
             # path exists. Not tiered, same as the question tool: a
-            # pending decision must be delivered whole.
-            approval_announcement = render_approval_request_for_speech(event.tool, event.tool_input)
+            # pending decision must be delivered whole. Deliberately
+            # doesn't read event.tool_input aloud -- see
+            # render_approval_request_for_speech's own docstring for why
+            # (commands can be long/sensitive/misleading out of context);
+            # the TUI/log warning (run_convobox.py's _on_backend_event)
+            # carries the actual detail.
+            approval_announcement = render_approval_request_for_speech(
+                event.tool, self._approval_phrase
+            )
             logger.info("%s", approval_announcement)
             if self._tts is not None and self._player is not None:
                 self._cancel_speak_task()

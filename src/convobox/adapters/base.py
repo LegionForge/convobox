@@ -89,19 +89,37 @@ class BackendAdapter(ABC):
         """
         return None
 
+    def set_interactive_approvals(self, enabled: bool) -> None:
+        """Opt in to holding a backend approval request for the operator.
+
+        Most backends have no answerable approval channel, so the safe
+        default is a no-op. Adapters that do expose one and can toggle it
+        at RUNTIME (currently Codex -- see codex.py) override this and emit
+        ``APPROVAL_REQUEST`` events while enabled. ClaudeCodeAdapter is
+        deliberately NOT one of these: its hook-based mechanism is baked
+        into the spawned process's ``--settings``/``--permission-mode`` at
+        CONSTRUCTION time (see its own module docstring), so there is no
+        live process to toggle -- it's controlled via the
+        ``permission_mode`` constructor argument instead (``"approve"``
+        wires the hook; ``"plan"``/``"permissive"`` don't), and this
+        method stays the inherited no-op for it.
+        """
+        return None
+
     async def resolve_pending_approval(self, approved: bool) -> bool:
         """Answer this adapter's currently-pending tool-call approval
         request, if it has one (see BackendEventType.APPROVAL_REQUEST).
 
         Returns whether there was one to answer. Default (False, no-op):
         most adapters have no runtime-answerable approval channel at all
-        (codex.py auto-declines every request itself; opencode has no
-        concept of one) and must not be forced to implement an override
-        just to satisfy this class -- same "default no-op, override where
-        real" shape as wait_listening. A caller answering when nothing is
-        actually pending (a stale gate after a race) also gets False, not
-        an exception -- see ClaudeCodeAdapter's override for the real
-        implementation.
+        (opencode has no concept of one) and must not be forced to
+        implement an override just to satisfy this class -- same "default
+        no-op, override where real" shape as wait_listening. A caller
+        answering when nothing is actually pending (a stale gate after a
+        race) also gets False, not an exception -- see ClaudeCodeAdapter's
+        and CodexAdapter's own overrides for the real implementations.
+        False here must always be treated as "nothing to answer / fail
+        closed", never as an implicit approval.
         """
         return False
 

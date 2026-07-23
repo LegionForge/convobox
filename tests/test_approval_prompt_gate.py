@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from convobox.approval import ApprovalDetector
-from scripts.run_convobox import ApprovalPromptGate
+from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.tui import ConversationTuiState
+from scripts.run_convobox import ApprovalPromptGate, LastSpokenResponse, _on_backend_event
 
 
 def _gate(timeout_s: float = 2.5) -> ApprovalPromptGate:
@@ -96,3 +98,22 @@ def test_start_waiting_again_resets_the_window() -> None:
     gate.start_waiting(now=11.0)
     assert gate.observe_timeout(now=12.5) is None  # only 1.5s since the SECOND start
     assert gate.observe_timeout(now=13.5) == "deny"
+
+
+def test_codex_approval_event_starts_gate_and_sets_tui_warning() -> None:
+    gate = _gate()
+    state = ConversationTuiState()
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(
+            BackendEventType.APPROVAL_REQUEST,
+            content="APPROVAL REQUIRED — COMMAND EXECUTION\n\nRequested command:\necho harmless",
+        ),
+        "cobalt night and gale",
+        gate,
+    )
+    assert gate.is_waiting is True
+    assert state.warning is not None
+    assert "echo harmless" in state.warning
+    assert "cobalt night and gale" in state.warning

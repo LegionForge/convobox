@@ -127,6 +127,7 @@ def test_status_label_reflects_state() -> None:
         ("working", "WORKING"),
         ("speaking", "SPEAKING"),
         ("paused", "PAUSED"),
+        ("waiting", "WAITING FOR YOU"),
     ]:
         state = ConversationTuiState(started=0.0, status=status)  # type: ignore[arg-type]
         lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
@@ -222,6 +223,35 @@ def test_diagnostics_line_omits_heartbeat_when_not_silently_busy() -> None:
     assert "still working" not in lines[1]
 
 
+def test_diagnostics_line_shows_waiting_hint_when_blocked_on_user() -> None:
+    # While the session is blocked on the user's reply (tiered-response
+    # continue-window), the header shows WAITING FOR YOU and the
+    # diagnostics line tells them what to DO about it -- the UAT ask.
+    state = ConversationTuiState(started=0.0, status="waiting")  # type: ignore[arg-type]
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "WAITING FOR YOU" in lines[0]
+    assert "say 'continue' for more" in lines[1]
+
+
+def test_diagnostics_line_uses_approval_specific_waiting_hint() -> None:
+    state = ConversationTuiState(
+        started=0.0,
+        status="waiting",  # type: ignore[arg-type]
+        waiting_hint="approval needed — say your approval phrase or 'no'",
+    )
+    lines = _plain(render_conversation_frame(state, width=100, height=24, now=0.0))
+    assert "approval needed" in lines[1]
+    assert "continue" not in lines[1]
+
+
+def test_diagnostics_line_omits_waiting_hint_when_not_waiting() -> None:
+    # Any other status must NOT show the continue hint.
+    for status in ("listening", "working", "speaking", "capturing", "paused"):
+        state = ConversationTuiState(started=0.0, status=status)  # type: ignore[arg-type]
+        lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+        assert "say 'continue' for more" not in lines[1]
+
+
 def test_diagnostics_line_shows_heartbeat_elapsed_seconds() -> None:
     state = ConversationTuiState(started=0.0, heartbeat_elapsed_s=42.0)
     lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
@@ -262,10 +292,10 @@ def test_heartbeat_color_thresholds_match_run_convobox_pys_own() -> None:
     assert _heartbeat_color(600.0) == _RED
 
 
-def test_elapsed_time_formats_minutes_and_seconds() -> None:
+def test_elapsed_time_labels_minutes_and_seconds_explicitly() -> None:
     state = ConversationTuiState(started=0.0)
     lines = _plain(render_conversation_frame(state, width=80, height=24, now=125.0))
-    assert "elapsed 02:05" in lines[0]
+    assert "elapsed 2m 5s" in lines[0]
 
 
 def test_transcript_scrolls_to_most_recent_when_overflowing() -> None:

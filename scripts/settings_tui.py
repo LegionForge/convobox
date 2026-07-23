@@ -46,6 +46,7 @@ from convobox.adapters import create_backend_adapter
 from convobox.config import (
     AppConfig,
     BackendProfileConfig,
+    detect_permission_conflict,
     load_config,
     read_aec_estimate,
     resolve_config_path,
@@ -104,6 +105,7 @@ def _highlight_keys(text: str) -> str:
     return _BRACKET_KEY_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
 
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
+_CHOICE_PERMISSION_MODES = ("plan", "approve", "permissive")
 _CHOICE_TTS_ENGINES = ("piper",)
 _CHOICE_STT_ENGINES = ("faster-whisper",)
 # Pulled from the real dependency (faster_whisper.utils.available_models()),
@@ -244,6 +246,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
             FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
+            FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default). approve: may act, but every write/command needs voice approval via your approval_phrase -- real on both Codex (native per-call approval channel) and Claude Code (a PreToolUse hook this adapter builds itself, since headless mode has no native one -- see claude_code.py's module docstring). permissive: acts without asking (dangerous). No effect on opencode (set at `opencode serve` launch). Do NOT also set a permission flag in Command -- that's a conflict."),
             FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched). Override per-run with run_convobox.py --working-dir."),
         ),
     ),
@@ -255,6 +258,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
             FieldSpec("interaction", "resume_word", "Resume word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
             FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the resume word resumes. Same picking rule as the resume word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
+            FieldSpec("interaction", "approval_phrase", "Approval phrase", "optional_str", help_text="Opt-in command/file approvals for Codex or Claude Code (needs backend.permission_mode: approve above). Leave unset to keep the safe default: every approval request is denied automatically, no prompts. When set, say this exact phrase to approve a pending request; say 'no' to deny; silence for approval_timeout_s denies. Use a distinctive multi-word phrase -- plain 'yes' is deliberately rejected. Same STT-reliability caution as the resume word: pick something clearly Whisper-transcribable. A NATO-alphabet-style phrase (e.g. 'juliette papa charlie') tends to round-trip more reliably than ordinary words -- verify with scripts/roundtrip_smoketest.py before relying on it."),
+            FieldSpec("interaction", "approval_timeout_s", "Approval timeout s", "float", help_text="How long a pending approval waits for a voice decision before silence is treated as an explicit denial (never as consent)."),
         ),
     ),
     SectionSpec(
@@ -284,7 +289,7 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
     if backend_name in {"claude-code", "codex"}:
         return tuple(
             field for field in section.fields
-            if field.key in {"name", "command", "working_dir"}
+            if field.key in {"name", "command", "working_dir", "permission_mode"}
         )
     return section.fields
 
@@ -681,6 +686,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
                 f"backend.working_dir {working_dir!r} is not an existing directory "
                 "(it will fail at startup until created)"
             )
+    conflict = detect_permission_conflict(config.backend)
+    if conflict is not None:
+        report.errors.append(conflict)
+    if config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
+        report.warnings.append(
+            "backend.permission_mode is 'approve' but interaction.approval_phrase is "
+            "unset -- every approval request will be denied automatically with no "
+            "voice prompt (the safe fail-closed default, but likely not what you "
+            "intended when choosing 'approve')"
+        )
     if (
         config.backend.name == "opencode"
         and config.backend.model is not None

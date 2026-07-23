@@ -9,8 +9,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-from convobox.confirmword import ConfirmwordDetector
 from convobox.interrupt_presets import resolve_preset
+from convobox.approval import ApprovalDetector
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
 from convobox.resumeword import DEFAULT_RESUME_WORD
 
@@ -163,24 +163,25 @@ class InteractionConfig(BaseModel):
     # naggy" pass.
     continue_timeout_s: float = 2.5
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): the voice
-    # phrase that approves a pending destructive-action tool call. None
-    # (default) leaves voice approval OFF -- existing sessions behave
-    # exactly as before (claude-code stays in its safe --permission-mode
-    # plan default; codex keeps auto-declining every request). There is
-    # no safe default phrase, same reasoning as ConfirmwordDetector's own
-    # construction-time guard: this must be a phrase the operator chose
-    # deliberately, not one this project picked for them. Currently only
-    # honored by the claude-code backend (see
-    # create_backend_adapter/ClaudeCodeAdapter's interactive_approval) --
-    # codex's own per-call approval channel is real (see codex.py's
-    # module docstring) but wiring voice decisions into it is separate,
-    # not-yet-built work.
+    # phrase that gates a pending destructive-action tool call/command.
+    # None (default) leaves voice approval OFF -- existing sessions behave
+    # exactly as before (backend.permission_mode's own default, "plan",
+    # already keeps every backend read-only regardless of this field).
+    # There is no safe default phrase, same reasoning as
+    # ConfirmwordDetector's own construction-time guard: this must be a
+    # phrase the operator chose deliberately, not one this project picked
+    # for them. Honored by both backends that can answer a real approval
+    # request at runtime -- Codex's app-server (accept/decline) and Claude
+    # Code (a PreToolUse hook, since headless mode has no native per-call
+    # channel -- see claude_code.py's module docstring) -- when
+    # backend.permission_mode is "approve" (see BackendConfig below).
     approval_phrase: str | None = None
-    # How long ConvoBox waits for a voice decision before treating silence
-    # as deny (ApprovalPromptGate.observe_timeout) -- longer than
-    # continue_timeout_s on purpose: deciding whether to approve a real
-    # destructive action deserves more time than a quick "continue/stop"
-    # reflex, and silence-denies is the safe direction here regardless.
+    # Silence is an explicit denial, never consent -- long enough to read
+    # the pending action and decide, but bounded so a forgotten request
+    # doesn't leave an agent turn hanging indefinitely
+    # (ApprovalPromptGate.observe_timeout). Longer than continue_timeout_s
+    # on purpose: deciding whether to approve a real destructive action
+    # deserves more time than a quick "continue/stop" reflex.
     approval_timeout_s: float = 30.0
 
     @field_validator("approval_phrase")
@@ -188,11 +189,12 @@ class InteractionConfig(BaseModel):
     def _validate_approval_phrase(cls, v: str | None) -> str | None:
         if v is not None:
             # Raises ValueError (with the real reason) if the phrase is
-            # empty or made up entirely of common affirmations/fillers --
-            # fail fast at config load, not at the first live approval
-            # prompt. ConfirmwordDetector is the authority on this; not
+            # empty, made up entirely of common affirmations/fillers, or
+            # collides with a deny phrase -- fail fast at config load, not
+            # at the first live approval prompt. ApprovalDetector (which
+            # wraps ConfirmwordDetector) is the authority on this; not
             # duplicated here.
-            ConfirmwordDetector(v)
+            ApprovalDetector(v)
         return v
 
 
@@ -236,6 +238,25 @@ class BackendConfig(BaseModel):
     # docs/DESIGN-backend-sandboxing.md.
     working_dir: str | None = None
 
+    # How much the spawned coding agent is allowed to DO -- the single
+    # source of truth for the backend's write/execute posture, translated
+    # per-backend at spawn (see convobox.adapters). SECURITY-relevant:
+    #   plan       - read-only; the agent investigates but cannot write or
+    #                run commands (the safe default).
+    #   approve    - the agent may act, but every write/command requires
+    #                voice approval (the approval_phrase gate). Real on both
+    #                Codex (its app-server has a native per-call approval
+    #                channel this adapter answers directly) and Claude Code
+    #                (headless mode has no NATIVE per-call channel, so this
+    #                adapter builds one: a PreToolUse hook + a local IPC
+    #                channel -- see claude_code.py's module docstring for
+    #                the mechanism and its live verification).
+    #   permissive - the agent acts without asking. Opt-in, dangerous.
+    # opencode is unaffected (its permissions are fixed by wherever
+    # `opencode serve` was launched) -- a warning is logged if this is set
+    # for opencode. See docs/DESIGN-backend-sandboxing.md.
+    permission_mode: str = "plan"
+
     @field_validator("model")
     @classmethod
     def _validate_model(cls, v: str | None) -> str | None:
@@ -246,6 +267,70 @@ class BackendConfig(BaseModel):
                 f"for the full list"
             )
         return v
+
+    @field_validator("permission_mode")
+    @classmethod
+    def _validate_permission_mode(cls, v: str) -> str:
+        if v not in PERMISSION_MODES:
+            raise ValueError(
+                f"backend.permission_mode {v!r} must be one of "
+                f"{', '.join(PERMISSION_MODES)}"
+            )
+        return v
+
+
+# The valid backend.permission_mode values (see BackendConfig above).
+PERMISSION_MODES = ("plan", "approve", "permissive")
+
+# Permission-POSTURE flags that would fight backend.permission_mode if a
+# user also put them in backend.command. Tool-SCOPING flags
+# (--allowedTools/--disallowedTools) are deliberately excluded: they are
+# orthogonal to the write/execute posture and compose fine with any mode.
+_PERMISSION_CONFLICT_FLAGS: dict[str, tuple[str, ...]] = {
+    "claude-code": ("--permission-mode", "--dangerously-skip-permissions"),
+    "codex": (
+        "--sandbox", "-s", "--ask-for-approval", "-a",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ),
+}
+
+
+def detect_permission_conflict(backend: "BackendConfig") -> str | None:
+    """Return an error message if backend.command carries a permission-posture
+    flag that conflicts with backend.permission_mode, else None.
+
+    permission_mode is the single source of truth for the write/execute
+    posture; letting a user ALSO set the posture via raw command flags means
+    two sources silently disagreeing (e.g. permission_mode=plan while
+    command has --dangerously-skip-permissions). For a safety control that
+    is unacceptable, so this is surfaced as a hard error the user must
+    resolve by removing one.
+    """
+    command = backend.command or []
+    flags = _PERMISSION_CONFLICT_FLAGS.get(backend.name, ())
+    for arg in command:
+        head = arg.split("=", 1)[0]  # tolerate --flag=value form
+        if head in flags:
+            return (
+                f"backend.command contains {head!r}, which sets the same "
+                f"write/execute posture as backend.permission_mode "
+                f"({backend.permission_mode!r}). These conflict -- remove one: "
+                f"use permission_mode for the posture, or clear permission_mode "
+                f"and drive it entirely through command."
+            )
+        # Codex's -c overrides of the posture config keys appear as their own
+        # `key=value` arg (e.g. `-c approval_policy=never` is two tokens);
+        # match the key directly rather than the `-c` token.
+        if backend.name == "codex" and head in _CODEX_POSTURE_KEYS:
+            return (
+                f"backend.command overrides codex's {head!r} via -c, which "
+                f"conflicts with backend.permission_mode "
+                f"({backend.permission_mode!r}) -- remove one."
+            )
+    return None
+
+
+_CODEX_POSTURE_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
 
 
 class BackendProfileConfig(BaseModel):

@@ -55,6 +55,13 @@ def test_aec_delay_ms_defaults_to_none() -> None:
     assert AudioConfig().aec_delay_ms is None
 
 
+def test_approval_phrase_is_opt_in_and_validated() -> None:
+    assert InteractionConfig().approval_phrase is None
+    assert InteractionConfig(approval_phrase="cobalt night and gale").approval_phrase == "cobalt night and gale"
+    with pytest.raises(ValueError, match="common affirmations"):
+        InteractionConfig(approval_phrase="yes")
+
+
 # --- AEC estimate sidecar: run_convobox.py's diagnostic write, the
 # Settings TUI's read -- deliberately NOT part of convobox.yaml itself
 # (see write_aec_estimate's docstring for why). ---
