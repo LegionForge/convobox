@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from convobox.approval import DEFAULT_DENY_PHRASES, ApprovalDetector
+from convobox.approval import DEFAULT_DENY_PHRASES, DEFAULT_EXPLAIN_PHRASES, ApprovalDetector
 
 
 @pytest.fixture
@@ -34,6 +34,31 @@ def test_deny_case_insensitive(detector: ApprovalDetector) -> None:
 
 def test_deny_embedded_in_sentence(detector: ApprovalDetector) -> None:
     assert detector.check("no, cancel that please") == "deny"
+
+
+@pytest.mark.parametrize("phrase", DEFAULT_EXPLAIN_PHRASES)
+def test_default_explain_phrases_match(detector: ApprovalDetector, phrase: str) -> None:
+    assert detector.check(phrase) == "explain"
+
+
+def test_explain_case_insensitive(detector: ApprovalDetector) -> None:
+    assert detector.check("EXPLAIN") == "explain"
+
+
+def test_explain_embedded_in_sentence(detector: ApprovalDetector) -> None:
+    assert detector.check("can you clarify what this does?") == "explain"
+    assert detector.check("wait, help") == "explain"
+
+
+def test_no_false_positive_explain_on_substring(detector: ApprovalDetector) -> None:
+    # word-boundary aware, like approve/deny: "helpful" is not "help".
+    assert detector.check("that would be helpful") == "discuss"
+
+
+def test_custom_explain_phrases() -> None:
+    detector = ApprovalDetector(approval_phrase="nightingale", explain_phrases=["tell me more"])
+    assert detector.check("tell me more") == "explain"
+    assert detector.check("explain") == "discuss"  # not in the custom list
 
 
 def test_unmatched_speech_is_discuss(detector: ApprovalDetector) -> None:
@@ -99,3 +124,20 @@ def test_empty_deny_phrase_raises() -> None:
 def test_approval_phrase_also_in_deny_phrases_raises() -> None:
     with pytest.raises(ValueError, match="ambiguous vocabulary"):
         ApprovalDetector(approval_phrase="nightingale", deny_phrases=["nightingale"])
+
+
+def test_empty_explain_phrase_raises() -> None:
+    with pytest.raises(ValueError, match="normalize to nothing"):
+        ApprovalDetector(approval_phrase="nightingale", explain_phrases=["!!!"])
+
+
+def test_approval_phrase_also_in_explain_phrases_raises() -> None:
+    with pytest.raises(ValueError, match="ambiguous vocabulary"):
+        ApprovalDetector(approval_phrase="nightingale", explain_phrases=["nightingale"])
+
+
+def test_deny_and_explain_phrases_overlap_raises() -> None:
+    with pytest.raises(ValueError, match="ambiguous vocabulary"):
+        ApprovalDetector(
+            approval_phrase="nightingale", deny_phrases=["stop"], explain_phrases=["stop"]
+        )

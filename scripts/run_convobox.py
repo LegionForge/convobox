@@ -620,8 +620,8 @@ class ContinuePromptGate:
 
 
 class ApprovalPromptGate:
-    """Tracks whether ConvoBox is waiting for an approve/deny/discuss reply
-    to a pending destructive-action approval request
+    """Tracks whether ConvoBox is waiting for an approve/deny/explain/discuss
+    reply to a pending destructive-action approval request
     (docs/DESIGN-0.3.0-interaction-and-safety.md, Phase 3).
 
     Pure state machine, same family as BargeInMonitor/ListeningGate/
@@ -641,32 +641,46 @@ class ApprovalPromptGate:
        treated as consent, only as still waiting or an explicit
        timeout-implies-decline" -- the design doc's central safety
        invariant for this phase.
-    2. `observe_transcript()` does NOT end the wait for "discuss" -- an
-       approval prompt must stay open and answerable across a clarifying
-       exchange (confirmed live against a real codex app-server, see the
-       design doc's Phase 3 section: a 20s delay plus an interleaved
-       unrelated request didn't invalidate a pending approval). A discuss
-       reply also resets the waiting clock (`now` is re-recorded), so an
+    2. `observe_transcript()` does NOT end the wait for "explain"/"discuss"
+       -- an approval prompt must stay open and answerable across a
+       clarifying exchange (confirmed live against a real codex app-server,
+       see the design doc's Phase 3 section: a 20s delay plus an
+       interleaved unrelated request didn't invalidate a pending approval).
+       Both also reset the waiting clock (`now` is re-recorded), so an
        ongoing back-and-forth can't be cut off mid-conversation by the
        timeout that exists to catch genuine silence, not genuine
-       engagement.
+       engagement. "explain" additionally carries `pending_explanation`
+       back out to the caller to speak (JP, 2026-07-23) -- the same full
+       detail already shown in the TUI/log, read aloud because the
+       operator explicitly asked this time; "discuss" gets no spoken reply
+       (neither adapter has a live channel to actually converse on).
     3. There is no "pass" outcome. `ApprovalDetector.check()` never falls
        through to normal command routing the way `ContinueDetector` does --
        every non-empty utterance while a decision is pending is
-       approve/deny/discuss, by construction.
+       approve/deny/explain/discuss, by construction.
     """
 
     def __init__(self, detector: ApprovalDetector, timeout_s: float) -> None:
         self._detector = detector
         self.timeout_s = timeout_s
         self._waiting_since: float | None = None
+        self._pending_explanation: str | None = None
 
     @property
     def is_waiting(self) -> bool:
         return self._waiting_since is not None
 
-    def start_waiting(self, now: float) -> None:
+    @property
+    def pending_explanation(self) -> str | None:
+        """The full detail for the currently-pending request (set via
+        start_waiting), spoken back on an "explain" outcome. None if no
+        detail was available for this request (e.g. neither event.content
+        nor event.tool_input was populated)."""
+        return self._pending_explanation
+
+    def start_waiting(self, now: float, explanation: str | None = None) -> None:
         self._waiting_since = now
+        self._pending_explanation = explanation
 
     def observe_timeout(self, now: float) -> Literal["deny"] | None:
         """Call once per watchdog tick. Returns "deny" exactly once, the
@@ -683,12 +697,16 @@ class ApprovalPromptGate:
 
     def observe_transcript(
         self, transcript: str, now: float
-    ) -> Literal["approve", "deny", "discuss"] | None:
+    ) -> Literal["approve", "deny", "explain", "discuss"] | None:
         """Call for every utterance while is_waiting (caller checks
-        is_waiting first). "approve"/"deny" end the wait. "discuss" keeps
-        waiting and resets the clock (see class docstring, point 2). An
-        utterance that normalizes to nothing (pure noise/silence artifact)
-        returns None and changes nothing -- still waiting, clock unchanged.
+        is_waiting first). "approve"/"deny" end the wait. "explain"/"discuss"
+        both keep waiting and reset the clock (see class docstring, point
+        2) -- "explain" additionally tells the caller to speak
+        pending_explanation back, "discuss" is silent (neither adapter has
+        a live channel to actually converse on, see the caller's own
+        handling for why). An utterance that normalizes to nothing (pure
+        noise/silence artifact) returns None and changes nothing -- still
+        waiting, clock unchanged.
         """
         outcome = self._detector.check(transcript)
         if outcome == "approve":
@@ -697,6 +715,9 @@ class ApprovalPromptGate:
         if outcome == "deny":
             self._waiting_since = None
             return "deny"
+        if outcome == "explain":
+            self._waiting_since = now
+            return "explain"
         if outcome == "discuss":
             self._waiting_since = now
             return "discuss"
@@ -1123,6 +1144,28 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                 tui_state.waiting_hint = None
 
 
+def _render_approval_explanation(
+    content: str | None, tool: str | None, tool_input: str | None
+) -> str:
+    """Full detail for a pending approval, spoken back on an "explain"
+    outcome (JP, 2026-07-23) -- unlike render_approval_request_for_speech's
+    deliberately terse automatic announcement, this is only ever read aloud
+    because the operator explicitly asked for more.
+
+    Cross-backend: Codex populates event.content (a full human-readable
+    description, _describe_approval_request); Claude Code's hook-based
+    APPROVAL_REQUEST instead carries tool/tool_input (raw JSON), so this
+    falls back to rendering those when content is empty. Never returns
+    empty -- always something sayable, even if genuinely no detail was
+    captured for this request.
+    """
+    if content:
+        return content
+    if tool_input:
+        return f"{tool or 'This request'} with input: {tool_input}"
+    return f"No further detail is available for {tool or 'this request'}."
+
+
 def _on_backend_event(
     tui_state: ConversationTuiState | None,
     last_spoken_response: LastSpokenResponse,
@@ -1163,7 +1206,12 @@ def _on_backend_event(
     """
     if event.type == BackendEventType.APPROVAL_REQUEST:
         if approval_gate is not None:
-            approval_gate.start_waiting(time.monotonic())
+            approval_gate.start_waiting(
+                time.monotonic(),
+                explanation=_render_approval_explanation(
+                    event.content, event.tool, event.tool_input
+                ),
+            )
         # event.content is a verbose, log/TUI-oriented description -- only
         # Codex's adapter populates it today (_describe_approval_request);
         # Claude Code's hook-based APPROVAL_REQUEST carries its info in
@@ -1889,9 +1937,26 @@ async def run(args: argparse.Namespace) -> None:
                     # app-server connection could technically take other
                     # traffic, but forwarding a "discuss" utterance as a real
                     # turn is not-yet-built work) -- it just keeps the
-                    # prompt open and stays pending.
+                    # prompt open and stays pending. "explain" (JP,
+                    # 2026-07-23) is the one exception with an actual spoken
+                    # reply: the operator explicitly asked what they're
+                    # approving, so the full detail (same as the TUI/log
+                    # already show) gets read back via the same
+                    # announce_after_delay path "Approval confirmed." uses,
+                    # 0s delay since nothing is resuming here to self-barge-in
+                    # on.
                     if approval_gate is not None and approval_gate.is_waiting:
                         approval_outcome = approval_gate.observe_transcript(text, time.monotonic())
+                        if approval_outcome == "explain":
+                            explanation = approval_gate.pending_explanation or (
+                                "No further detail is available for this request."
+                            )
+                            log.info(
+                                "operator asked to explain the pending approval -- speaking: %r",
+                                explanation,
+                            )
+                            orchestrator.announce_after_delay(explanation, 0.0)
+                            continue
                         if approval_outcome == "discuss":
                             log.info(
                                 "approval remains pending while the operator reviews/discusses: %r",

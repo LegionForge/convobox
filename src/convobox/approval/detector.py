@@ -48,7 +48,23 @@ DEFAULT_DENY_PHRASES: tuple[str, ...] = (
     "not now",
 )
 
-_Outcome = Literal["approve", "deny", "discuss"]
+# On-demand request for more detail than the terse spoken approval
+# announcement gives (render_approval_request_for_speech deliberately
+# doesn't read the command/args aloud automatically -- see its own
+# docstring). "explain" is a THIRD safety tier, distinct from generic
+# "discuss": ordinary discuss chatter just keeps the prompt open with no
+# reply (neither adapter has a live channel to actually converse on), but
+# an explicit ask for detail gets an explicit spoken answer -- the same
+# full description already shown in the TUI/log, just also read aloud
+# because the operator asked for it this time. JP, 2026-07-23.
+DEFAULT_EXPLAIN_PHRASES: tuple[str, ...] = (
+    "explain",
+    "explanation",
+    "clarify",
+    "help",
+)
+
+_Outcome = Literal["approve", "deny", "explain", "discuss"]
 
 
 def _normalize(text: str) -> str:
@@ -58,26 +74,29 @@ def _normalize(text: str) -> str:
 
 
 class ApprovalDetector:
-    """Classifies a transcript as "approve" / "deny" / "discuss", for the
-    Phase 3 approval prompt (docs/DESIGN-0.3.0-interaction-and-safety.md):
+    """Classifies a transcript as "approve" / "deny" / "explain" / "discuss",
+    for the Phase 3 approval prompt (docs/DESIGN-0.3.0-interaction-and-safety.md):
     ConvoBox has surfaced a pending destructive-action approval request and
     is waiting for the user's voice decision.
 
     Constructed with a `ConfirmwordDetector`-shaped approval phrase (required
     -- there is no safe default, the whole point is a phrase the operator
-    chose deliberately) and an optional deny-phrase list (defaults to
-    ``DEFAULT_DENY_PHRASES``). ``check()`` never returns ``None``: any
-    non-empty transcript that isn't the approval phrase or a deny phrase is
-    "discuss", since a pending approval must stay answerable across a
-    clarifying exchange rather than being dropped or routed elsewhere. An
-    empty/whitespace-only transcript returns ``None`` (no signal at all --
-    the caller's own silence-timeout handling covers "no answer").
+    chose deliberately), an optional deny-phrase list (defaults to
+    ``DEFAULT_DENY_PHRASES``), and an optional explain-phrase list (defaults
+    to ``DEFAULT_EXPLAIN_PHRASES``). ``check()`` never returns ``None``: any
+    non-empty transcript that isn't the approval phrase, a deny phrase, or
+    an explain phrase is "discuss", since a pending approval must stay
+    answerable across a clarifying exchange rather than being dropped or
+    routed elsewhere. An empty/whitespace-only transcript returns ``None``
+    (no signal at all -- the caller's own silence-timeout handling covers
+    "no answer").
     """
 
     def __init__(
         self,
         approval_phrase: str,
         deny_phrases: list[str] | None = None,
+        explain_phrases: list[str] | None = None,
     ) -> None:
         self._confirm = ConfirmwordDetector(approval_phrase)
 
@@ -90,12 +109,33 @@ class ApprovalDetector:
             )
         self._deny: list[tuple[str, str]] = [(p, _normalize(p)) for p in deny_list]
 
+        explain_list = explain_phrases if explain_phrases is not None else list(DEFAULT_EXPLAIN_PHRASES)
+        empty = [p for p in explain_list if not _normalize(p)]
+        if empty:
+            raise ValueError(
+                f"explain_phrases contain phrase(s) that normalize to nothing "
+                f"and would never match: {empty!r}"
+            )
+        self._explain: list[tuple[str, str]] = [(p, _normalize(p)) for p in explain_list]
+
         approval_normalized = _normalize(approval_phrase)
         overlap = {n for _, n in self._deny if n == approval_normalized}
         if overlap:
             raise ValueError(
                 f"approval_phrase {approval_phrase!r} also appears in "
                 f"deny_phrases, an ambiguous vocabulary: {overlap!r}"
+            )
+        overlap = {n for _, n in self._explain if n == approval_normalized}
+        if overlap:
+            raise ValueError(
+                f"approval_phrase {approval_phrase!r} also appears in "
+                f"explain_phrases, an ambiguous vocabulary: {overlap!r}"
+            )
+        overlap = {n for _, n in self._explain} & {n for _, n in self._deny}
+        if overlap:
+            raise ValueError(
+                f"deny_phrases and explain_phrases overlap, an ambiguous "
+                f"vocabulary: {overlap!r}"
             )
 
     @property
@@ -104,11 +144,12 @@ class ApprovalDetector:
         return self._confirm.approval_phrase
 
     def check(self, transcript: str) -> _Outcome | None:
-        """"approve", "deny", "discuss", or None for an empty transcript.
+        """"approve", "deny", "explain", "discuss", or None for an empty
+        transcript.
 
-        Word-boundary aware for approve/deny, like the other detectors: a
-        phrase is recognized embedded in a sentence but not as a substring
-        of a larger word. Anything else non-empty is "discuss".
+        Word-boundary aware for approve/deny/explain, like the other
+        detectors: a phrase is recognized embedded in a sentence but not as
+        a substring of a larger word. Anything else non-empty is "discuss".
         """
         normalized = _normalize(transcript)
         if not normalized:
@@ -119,4 +160,7 @@ class ApprovalDetector:
         for _, phrase in self._deny:
             if f" {phrase} " in padded:
                 return "deny"
+        for _, phrase in self._explain:
+            if f" {phrase} " in padded:
+                return "explain"
         return "discuss"
