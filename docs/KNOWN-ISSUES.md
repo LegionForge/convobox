@@ -112,6 +112,25 @@ looks like the known allocator quirk rather than a real shortage
 earlier in the same session) -- no separate out-of-band check needed the
 next time this recurs.
 
+**Follow-up (2026-07-22): the same leak also surfaces as a bare numpy
+`MemoryError`, which the `except RuntimeError` above did NOT catch --
+now fixed.** Live-confirmed mid-UAT, testing Codex `approve` mode right
+after PR #133 merged the full `permission_mode` design: an unhandled
+`numpy._core._exceptions._ArrayMemoryError: Unable to allocate 1.15 MiB
+for an array with shape (1, 376, 400)`, raised from `np.fft.rfft` inside
+faster-whisper's own feature extractor (computing the mel spectrogram,
+*before* ctranslate2's encode step ever runs) -- crashed the whole
+session exactly like the original 2026-07-14 incidents this mitigation
+exists to prevent. Confirmed via `_ArrayMemoryError.__mro__` that this
+is a `MemoryError` subclass, not a `RuntimeError` -- an entirely
+different exception hierarchy than what ctranslate2 itself raises for
+the same underlying native-allocator pressure, so the existing catch
+never had a chance of covering it. Both `LocalTranscriber.transcribe()`
+and `_reload_model()` now catch `(RuntimeError, MemoryError)` together.
+See `docs/field-notes/2026-07-22-native-allocator-leak-also-surfaces-as-numpy-memoryerror.md`
+for the full writeup; `tests/test_transcriber.py::test_numpy_array_memory_error_is_recovered_not_raised`
+covers it the same way the RuntimeError case already was.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")

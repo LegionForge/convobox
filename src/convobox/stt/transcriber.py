@@ -334,7 +334,7 @@ class LocalTranscriber(STTEngine):
         gc.collect()
         try:
             self._model = self._build_model()
-        except RuntimeError:
+        except (RuntimeError, MemoryError):
             logger.error(
                 "STT model reload ALSO failed -- staying unavailable, will "
                 "retry on the next utterance instead of crashing the "
@@ -378,7 +378,7 @@ class LocalTranscriber(STTEngine):
             # try (ctranslate2's native encode() failure surfaces during
             # iteration, not the transcribe() call itself) and the timing.
             segment_list = list(segments)
-        except RuntimeError as exc:
+        except (RuntimeError, MemoryError) as exc:
             if (
                 self._custom_factory is None
                 and self._device_override is None
@@ -426,14 +426,27 @@ class LocalTranscriber(STTEngine):
             # different reason: reducing peak usage during the reload
             # itself, not reclaiming the underlying leak). The practical
             # mitigation is recycling the model object, which resets its
-            # allocator state. Broad `except RuntimeError` is deliberate,
-            # not lazy: reloading-and-treating-as-unheard is SAFE
-            # regardless of the actual cause (it can only make an STT
+            # allocator state. Broad `except (RuntimeError, MemoryError)`
+            # is deliberate, not lazy: reloading-and-treating-as-unheard is
+            # SAFE regardless of the actual cause (it can only make an STT
             # hiccup non-fatal, never mask a silent wrong answer), and the
             # full exception is still logged at WARNING with a traceback --
             # nothing here is silently swallowed, it's converted from a
             # fatal crash into a loud, recoverable one. One lost utterance
             # is a far better failure mode than losing the entire session.
+            #
+            # MemoryError added to the catch, not just RuntimeError --
+            # live-confirmed 2026-07-22: this same leak also surfaces as a
+            # bare `numpy._core._exceptions._ArrayMemoryError` (a
+            # MemoryError subclass, NOT a RuntimeError) when the failure
+            # happens inside numpy's own rfft call in faster-whisper's
+            # feature extractor rather than inside ctranslate2's encode
+            # step -- trying to allocate a tiny (~1MB) array, so genuinely
+            # the same native-allocator-pressure quirk, not real memory
+            # exhaustion. Before this fix, that manifestation was NOT
+            # caught here at all and crashed the whole live session with
+            # an unhandled traceback, identical in effect to the original
+            # 2026-07-14 incident this except block was written for.
             logger.warning(
                 "faster-whisper native transcribe() failure -- reloading the "
                 "STT model and treating this utterance as unheard "

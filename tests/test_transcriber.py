@@ -92,6 +92,40 @@ def test_native_allocator_failure_is_recovered_not_raised() -> None:
     assert result.duration_s == pytest.approx(1.0)  # 16000 samples @ 16kHz
 
 
+def test_numpy_array_memory_error_is_recovered_not_raised() -> None:
+    # Live-confirmed 2026-07-22: the same native-allocator-pressure leak
+    # this except block exists for ALSO surfaces as a bare
+    # numpy._core._exceptions._ArrayMemoryError (a MemoryError subclass,
+    # NOT a RuntimeError) when the failure happens inside numpy's own
+    # rfft call in faster-whisper's feature extractor rather than inside
+    # ctranslate2's own encode step. Before this was added to the catch,
+    # this manifestation crashed the entire live voice loop with an
+    # unhandled traceback -- identical in effect to the original
+    # 2026-07-14 RuntimeError incident this except block already covers.
+    class _MemoryErrorModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, audio: np.ndarray, language: str | None = None):
+            self.calls += 1
+            if self.calls == 1:
+                raise MemoryError("Unable to allocate 1.15 MiB for an array with shape (1, 376, 400)")
+            segments = [_FakeSegment(text="hello world", avg_logprob=-0.2)]
+            info = _FakeInfo(language="en", language_probability=0.95)
+            return segments, info
+
+    failing_model = _MemoryErrorModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: failing_model)
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert result.text == ""
+    assert result.segments == []
+
+    # And the NEXT utterance (post-reload) succeeds normally, same as the
+    # RuntimeError recovery already guarantees.
+    result2 = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert result2.text == "hello world"
+
+
 def test_native_allocator_failure_reloads_the_model() -> None:
     # The reload must actually replace self._model (calling the factory
     # again), not just catch-and-ignore -- otherwise every subsequent
