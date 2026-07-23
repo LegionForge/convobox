@@ -782,6 +782,28 @@ section is the live-mic pass that closes the gap.
   covers the phase-3 approval gate's wait (`approval_gate.is_waiting` --
   see `_working_watchdog`'s status-derivation block) now that voice
   approval is wired live.
+- **[U12] "Explain"/"clarify"/"help" during a pending approval now gets a
+  spoken answer, not silence (JP, 2026-07-23).** Previously, any utterance
+  during a pending approval that wasn't the approval phrase or a deny
+  phrase was classified "discuss" and got no spoken reply at all -- the
+  prompt stayed open (correct) but the operator got zero feedback that
+  their question was even heard. `ApprovalDetector` now has a fourth
+  outcome, "explain" (`DEFAULT_EXPLAIN_PHRASES`: explain/explanation/
+  clarify/help), distinct from generic "discuss": it speaks the full
+  detail of the pending request back via `orchestrator.announce_after_delay`
+  (0s delay -- nothing is resuming here to self-barge-in on, unlike the
+  "Approval confirmed." announcement's 2s delay). Deliberately reverses
+  `render_approval_request_for_speech`'s "don't read commands aloud
+  automatically" caution ONLY on explicit request -- same content already
+  shown in the TUI/log, just also spoken because the operator asked.
+  Unit-tested (`tests/test_approval.py`, `tests/test_approval_prompt_gate.py`)
+  including cross-backend content resolution (Codex's `event.content` vs.
+  Claude Code's `tool`/`tool_input`, since only Codex populates `content`).
+  **Live UAT still needed**: trigger a real pending approval on each
+  backend, say "explain", and confirm the full detail is actually spoken
+  clearly (not just present in the log) -- the detector/gate logic is
+  solid but the actual TTS readback of a real (possibly long) command
+  string hasn't been heard live yet.
 
 ## 10. Response tiering (`interaction.tier_responses: true`)
 
