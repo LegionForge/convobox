@@ -133,6 +133,33 @@ nothing -> flat files -> sqlite -> postgres/pgvector, user-configurable,
 with ConvoBox suggesting optional installs as needs grow. (Same
 install-at-setup philosophy as engines.)
 
+### Tone-of-voice / prosody perception (proposed, not yet decided)
+JP, 2026-07-23: a read-only prototype that gives the response layer a
+sense of HOW something was said, not just what was said.
+
+1. Keep the existing microphone audio long enough to analyze a rolling
+   2-3-second window.
+2. Run that window through a local prosody model.
+3. Emit modest cues such as `energy: high`, `valence: positive`,
+   `uncertainty: possible`, plus a confidence score -- not a single
+   "mood" label.
+4. Give those cues to the response layer as optional context ("the
+   speaker sounds excited," not "the speaker is excited") -- a hint the
+   backend prompt may use for pacing/warmth, never a fact asserted back
+   to the user.
+5. Log and evaluate during UAT, with an easy on/off config switch.
+
+Start with arousal/valence, not sarcasm detection -- more reliable,
+easier to validate against your own impressions in a live UAT session,
+and directly useful for pacing/warmth without needing to get a much
+harder classification problem right first.
+
+**First milestone: read-only.** Observes and logs cues, changes no
+behavior at all. Only if those cues consistently feel useful over a
+short live test does the dialogue prompt get to see them -- same
+"prove it's real before it affects behavior" bar this project already
+holds itself to elsewhere (e.g. AEC telemetry before AEC defaults).
+
 ### "Works well" budgets (decided: tunable, not yet numbered)
 Time-to-first-audio, interrupt latency, echo drops/minute become
 tracked numbers with per-user tunable targets -- auditory processing
