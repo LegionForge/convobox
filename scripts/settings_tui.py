@@ -1193,7 +1193,12 @@ def render(state: TuiState, width: int, height: int) -> list[str]:
     status = f" status: {state.status}"
     if len(summary) > 1:
         status += f" | {summary[1]}"
-    lines.append(fit(status, width))
+    # Same highlighting as the "Tip:" line at the bottom of this render
+    # (which shows this exact same state.status text) -- previously only
+    # that copy was highlighted, so a bracketed key like "[S]" appeared
+    # bold+cyan at the bottom of the screen but plain here, right next to
+    # where the operator is actually looking after an edit.
+    lines.append(_highlight_keys(fit(status, width)))
     lines.append(_section_tabs(state, width))
     lines.append("+" + "-" * (width - 2) + "+")
 
@@ -1297,6 +1302,20 @@ def draw(state: TuiState) -> None:
     sys.stdout.flush()
 
 
+def _field_updated_status(spec: FieldSpec, dirty: bool) -> str:
+    """Status line shown right after a field changes -- live UAT feedback,
+    2026-07-22: a plain "{label} updated" gave no indication that the
+    change was only staged, not saved. The dirty-state header line says
+    this too, but it's a separate line the operator isn't necessarily
+    looking at at the exact moment they just made a change; naming the
+    save key right in the same message that confirms the edit closes
+    that gap without relying on them to notice it elsewhere.
+    """
+    if dirty:
+        return f"{spec.label} updated -- [S] to save"
+    return f"{spec.label} updated"
+
+
 def _toggle_or_cycle(state: TuiState) -> None:
     spec = state.current_field()
     if spec is None:
@@ -1326,7 +1345,7 @@ def _toggle_or_cycle(state: TuiState) -> None:
     else:
         _set_value(state.working, spec, new_value)
     state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(mode="python")
-    state.status = f"{spec.label} updated"
+    state.status = _field_updated_status(spec, state.dirty)
 
 
 def _prompt_edit(state: TuiState) -> None:
@@ -1348,7 +1367,7 @@ def _prompt_edit(state: TuiState) -> None:
     else:
         _set_value(state.working, spec, new_value)
     state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(mode="python")
-    state.status = f"{spec.label} updated"
+    state.status = _field_updated_status(spec, state.dirty)
 
 
 def _restore_original(state: TuiState) -> None:
@@ -1387,7 +1406,12 @@ def _save(state: TuiState) -> None:
         return
     state.original = state.working.model_copy(deep=True)
     state.dirty = False
-    state.status = f"saved to {state.path}"
+    # Explicit that quitting is now safe -- the operator just watched the
+    # dirty-state header/save hint tell them to press [S]; closing the
+    # loop here means they don't have to separately notice the header
+    # flipping back to "clean" before trusting that [Q] won't discard
+    # anything (live UAT feedback, 2026-07-22).
+    state.status = f"saved to {state.path} -- [Q] to quit"
 
 
 async def _test_state(state: TuiState) -> None:

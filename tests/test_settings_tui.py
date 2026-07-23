@@ -553,6 +553,72 @@ def test_render_header_omits_save_quit_hint_when_clean(tmp_path: Path) -> None:
     assert "[Q]" not in header
 
 
+# --- edit/save status messages: live UAT feedback, 2026-07-22 -- right
+# after changing a value, the only feedback was "{label} updated", with no
+# mention that the change is only staged until [S] is pressed. The dirty
+# header says this too, but it's a separate line the operator isn't
+# necessarily looking at at the exact moment they just made a change. ---
+
+
+def test_toggle_or_cycle_status_names_the_save_key_when_now_dirty() -> None:
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "echo_cancellation"
+    )
+
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.dirty is True
+    assert state.status == "Echo cancellation updated -- [S] to save"
+
+
+def test_toggle_or_cycle_status_omits_save_hint_when_edit_returns_to_original() -> None:
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "echo_cancellation"
+    )
+
+    settings_tui._toggle_or_cycle(state)  # now dirty
+    settings_tui._toggle_or_cycle(state)  # toggled back -- matches original again
+
+    assert state.dirty is False
+    assert state.status == "Echo cancellation updated"
+    assert "[S]" not in state.status
+
+
+def test_render_status_line_highlights_the_save_hint_same_as_the_tip_line() -> None:
+    # Regression: the top "status:" line showed this exact text too but
+    # was never passed through _highlight_keys, so a bracketed key
+    # appeared bold+cyan at the bottom "Tip:" line and plain here.
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.status = "Echo cancellation updated -- [S] to save"
+
+    status_line = render(state, 120, 30)[2]
+    assert "\x1b[1m\x1b[36m[S]\x1b[0m" in status_line
+
+
+def test_save_status_names_the_quit_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    voice = "en_US-lessac-medium"
+    (tmp_path / f"{voice}.onnx").write_bytes(b"x")
+    (tmp_path / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(**{"tts.voice": voice})
+    path = tmp_path / "convobox.yaml"
+    state = TuiState(path=path, original=AppConfig(), working=config)
+    state.dirty = True
+
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ENTER")  # confirm the save modal
+    settings_tui._save(state)
+
+    assert state.dirty is False
+    assert state.status == f"saved to {path} -- [Q] to quit"
+
+
 def test_render_modal_widens_to_fit_long_detail_lines_without_truncating() -> None:
     # Regression: box_width used to be sized off the input buffer alone, so
     # a longer detail line (like the quit-confirmation escape-hatch hint
