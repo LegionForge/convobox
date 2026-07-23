@@ -827,13 +827,26 @@ async def probe_backend(config: AppConfig) -> str:
     return f"Backend probe started for {config.backend.name!r}"
 
 
-async def probe_audio(config: AppConfig) -> str:
-    """Play a short tone on the configured speaker; record the configured
-    mic and play the recording back through the speaker so you can
-    actually hear whether the right mic is picking you up -- a level
-    meter alone (the old behavior here) confirms *something* is being
-    captured but not that it's the mic you think it is, or that it
-    sounds right. Live UAT feedback, 2026-07-22.
+async def probe_audio(config: AppConfig, field_key: str | None = None) -> str:
+    """Test the device(s) relevant to the currently selected field.
+
+    field_key == "input_device": mic only -- record from it and play the
+    recording back through the configured speaker, so you can actually
+    hear whether the right mic is picking you up (a level meter alone
+    confirms *something* is captured, not that it's the right device or
+    sounds right).
+    field_key == "output_device": speaker only -- play a short tone.
+    Anything else (no field selected, or a non-device audio field like
+    sample_rate/echo_cancellation/aec_delay_ms): test both, same as
+    before -- there's no single device those fields are specifically
+    about.
+
+    Live UAT feedback, 2026-07-22: this used to test BOTH directions
+    unconditionally regardless of which field was selected, so pressing
+    [t] on Input device also played an unrelated output tone first --
+    which read as "it's just playing a tone, not testing the mic",
+    since the actual mic-test playback that followed immediately after
+    wasn't distinctly noticed as a separate thing.
 
     Reuses scripts/audio_devices.py's own device-resolution, tone, and
     record+playback functions directly (collect_devices/resolve_spec/
@@ -850,32 +863,39 @@ async def probe_audio(config: AppConfig) -> str:
 
     import audio_devices as ad
 
+    test_output = field_key != "input_device"
+    test_input = field_key != "output_device"
+
     results: list[str] = []
     with contextlib.redirect_stdout(io.StringIO()):
+        # Resolved regardless of test_output: test_input still needs it as
+        # test_input_device's playback target.
         out_devices = ad.collect_devices(sd, "output")
         if config.audio.output_device:
             out_idx, out_err = ad.resolve_spec(config.audio.output_device, out_devices)
         else:
             out_idx, out_err = ad._default_index(sd, "output"), None
-        if out_idx is not None:
-            name = sd.query_devices(out_idx)["name"]
-            ad.play_test_tone(sd, out_idx, seconds=0.6)
-            results.append(f"speaker OK: played 0.6s tone on {name!r}")
-        else:
-            results.append(f"speaker: {out_err or 'no device found'}")
+        if test_output:
+            if out_idx is not None:
+                name = sd.query_devices(out_idx)["name"]
+                ad.play_test_tone(sd, out_idx, seconds=0.6)
+                results.append(f"speaker OK: played 0.6s tone on {name!r}")
+            else:
+                results.append(f"speaker: {out_err or 'no device found'}")
 
-        in_devices = ad.collect_devices(sd, "input")
-        if config.audio.input_device:
-            in_idx, in_err = ad.resolve_spec(config.audio.input_device, in_devices)
-        else:
-            in_idx, in_err = ad._default_index(sd, "input"), None
-        if in_idx is not None:
-            rms_db, peak_db = ad.test_input_device(
-                sd, in_idx, seconds=1.2, playback_device=out_idx
-            )
-            results.append(f"mic: {ad.format_level(rms_db, peak_db)} (played back)")
-        else:
-            results.append(f"mic: {in_err or 'no device found'}")
+        if test_input:
+            in_devices = ad.collect_devices(sd, "input")
+            if config.audio.input_device:
+                in_idx, in_err = ad.resolve_spec(config.audio.input_device, in_devices)
+            else:
+                in_idx, in_err = ad._default_index(sd, "input"), None
+            if in_idx is not None:
+                rms_db, peak_db = ad.test_input_device(
+                    sd, in_idx, seconds=1.2, playback_device=out_idx
+                )
+                results.append(f"mic: {ad.format_level(rms_db, peak_db)} (played back)")
+            else:
+                results.append(f"mic: {in_err or 'no device found'}")
 
     return " | ".join(results)
 
@@ -1451,7 +1471,8 @@ async def _test_state(state: TuiState) -> None:
         elif section == "backend":
             state.status = await probe_backend(state.working)
         elif section == "audio":
-            state.status = await probe_audio(state.working)
+            field = state.current_field()
+            state.status = await probe_audio(state.working, field.key if field else None)
         else:
             state.status = f"{section} configuration validated"
     except Exception as exc:  # noqa: BLE001

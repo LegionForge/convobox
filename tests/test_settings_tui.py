@@ -939,6 +939,130 @@ async def test_probe_audio_reuses_audio_devices_functions_and_reports_both_direc
     assert "this must not leak" not in captured.out
 
 
+# --- field_key: [t] should test only the currently selected device, not
+# always both -- live UAT feedback, 2026-07-22: pressing [t] on Input
+# device also played an unrelated output tone first, which read as "it's
+# just playing a tone, not testing the mic" since the mic-test playback
+# that followed immediately after wasn't distinctly noticed. ---
+
+
+@pytest.mark.asyncio
+async def test_probe_audio_input_device_field_tests_mic_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_play_test_tone(sd: object, index: int, seconds: float = 1.0) -> None:
+        calls.append("play_test_tone")
+
+    def fake_test_input_device(
+        sd: object, index: int, seconds: float = 3.0, playback_device: int | None = None
+    ) -> tuple[float, float]:
+        calls.append("test_input_device")
+        return -30.0, -12.0
+
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "X")])
+    monkeypatch.setattr(audio_devices, "resolve_spec", lambda spec, devices: (0, None))
+    monkeypatch.setattr(audio_devices, "play_test_tone", fake_play_test_tone)
+    monkeypatch.setattr(audio_devices, "test_input_device", fake_test_input_device)
+    monkeypatch.setattr(audio_devices, "format_level", lambda rms, peak: f"rms={rms} peak={peak}")
+    _install_fake_sounddevice(monkeypatch, query_devices=lambda index: {"name": "X"})
+
+    config = _make_config(**{"audio.output_device": "X, MME", "audio.input_device": "X, MME"})
+    result = await settings_tui.probe_audio(config, "input_device")
+
+    assert calls == ["test_input_device"]
+    assert "mic:" in result
+    assert "speaker" not in result
+
+
+@pytest.mark.asyncio
+async def test_probe_audio_output_device_field_tests_speaker_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_play_test_tone(sd: object, index: int, seconds: float = 1.0) -> None:
+        calls.append("play_test_tone")
+
+    def fake_test_input_device(
+        sd: object, index: int, seconds: float = 3.0, playback_device: int | None = None
+    ) -> tuple[float, float]:
+        calls.append("test_input_device")
+        return -30.0, -12.0
+
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "X")])
+    monkeypatch.setattr(audio_devices, "resolve_spec", lambda spec, devices: (0, None))
+    monkeypatch.setattr(audio_devices, "play_test_tone", fake_play_test_tone)
+    monkeypatch.setattr(audio_devices, "test_input_device", fake_test_input_device)
+    _install_fake_sounddevice(monkeypatch, query_devices=lambda index: {"name": "X"})
+
+    config = _make_config(**{"audio.output_device": "X, MME", "audio.input_device": "X, MME"})
+    result = await settings_tui.probe_audio(config, "output_device")
+
+    assert calls == ["play_test_tone"]
+    assert "speaker OK" in result
+    assert "mic" not in result
+
+
+@pytest.mark.asyncio
+async def test_probe_audio_tests_both_when_no_device_field_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Other audio fields (sample_rate, echo_cancellation, aec_delay_ms) or
+    # no selection at all aren't specifically about one device -- default
+    # to testing both, same as before this field-aware behavior existed.
+    calls: list[str] = []
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "X")])
+    monkeypatch.setattr(audio_devices, "resolve_spec", lambda spec, devices: (0, None))
+    monkeypatch.setattr(
+        audio_devices, "play_test_tone", lambda sd, index, seconds=1.0: calls.append("play_test_tone")
+    )
+    monkeypatch.setattr(
+        audio_devices,
+        "test_input_device",
+        lambda sd, index, seconds=3.0, playback_device=None: (calls.append("test_input_device"), (-30.0, -12.0))[1],
+    )
+    monkeypatch.setattr(audio_devices, "format_level", lambda rms, peak: f"rms={rms} peak={peak}")
+    _install_fake_sounddevice(monkeypatch, query_devices=lambda index: {"name": "X"})
+
+    config = _make_config(**{"audio.output_device": "X, MME", "audio.input_device": "X, MME"})
+    result = await settings_tui.probe_audio(config, "sample_rate")
+
+    assert calls == ["play_test_tone", "test_input_device"]
+    assert "speaker OK" in result
+    assert "mic:" in result
+
+
+@pytest.mark.asyncio
+async def test_test_state_passes_the_selected_field_key_to_probe_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voice = "en_US-lessac-medium"
+    (tmp_path / f"{voice}.onnx").write_bytes(b"x")
+    (tmp_path / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+
+    captured: dict[str, object] = {}
+
+    async def fake_probe_audio(config: object, field_key: str | None = None) -> str:
+        captured["field_key"] = field_key
+        return "ok"
+
+    monkeypatch.setattr(settings_tui, "probe_audio", fake_probe_audio)
+
+    config = _make_config(**{"tts.voice": voice})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "input_device"
+    )
+
+    await settings_tui._test_state(state)
+
+    assert captured["field_key"] == "input_device"
+
+
 @pytest.mark.asyncio
 async def test_probe_audio_reports_resolution_errors_without_raising(
     monkeypatch: pytest.MonkeyPatch,
