@@ -245,7 +245,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("backend", "name", "Name", "choice", _CHOICE_BACKENDS, help_text="Which coding agent ConvoBox should drive."),
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
             FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
-            FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex."),
+            FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex. Space-separated, e.g. `codex.cmd --model gpt-5.6-terra` -- NOT comma-separated like the list fields elsewhere in this TUI (e.g. safeword phrases); a stray comma becomes part of the argument text and the command will fail to launch."),
             FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default). approve: may act, but every write/command needs voice approval via your approval_phrase -- real on both Codex (native per-call approval channel) and Claude Code (a PreToolUse hook this adapter builds itself, since headless mode has no native one -- see claude_code.py's module docstring). permissive: acts without asking (dangerous). No effect on opencode (set at `opencode serve` launch). Do NOT also set a permission flag in Command -- that's a conflict."),
             FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched). Override per-run with run_convobox.py --working-dir."),
         ),
@@ -659,16 +659,38 @@ def validate_config(config: AppConfig) -> ValidationReport:
             report.errors.append(
                 f"backend.command is required when backend.name is {config.backend.name!r}"
             )
-        elif shutil.which(config.backend.command[0]) is None:
-            # Dependency-level check: the backend is a local CLI ConvoBox
-            # spawns, so if its executable isn't on PATH the loop will fail
-            # with a bare FileNotFoundError at first utterance. A warning
-            # (not an error) surfaces it at save time without blocking --
-            # PATH at edit time may legitimately differ from run time.
-            report.warnings.append(
-                f"backend command {config.backend.command[0]!r} was not found on PATH -- "
-                f"is {config.backend.name} installed? it will fail to start until it is"
-            )
+        else:
+            # A token ending in a stray comma is a near-certain typo, not a
+            # real command argument -- this field is space-separated
+            # (shlex-style: "claude --model x"), unlike list_str fields
+            # elsewhere in this same TUI (e.g. safeword.hard_stop_phrases),
+            # which ARE comma-separated. Live-found 2026-07-22: typing
+            # "codex.cmd, --model, gpt-5.6-terra" here (following that
+            # OTHER convention by habit) parses via shlex.split into
+            # ["codex.cmd,", "--model,", "gpt-5.6-terra"] -- syntactically
+            # valid-looking, silently wrong, and only surfaced as a bare
+            # `FileNotFoundError: [WinError 2]` deep in a live session
+            # crash, with nothing connecting it back to the typo. A hard
+            # error (not a warning) since a trailing comma is never a
+            # legitimate argument, unlike a not-yet-on-PATH executable.
+            comma_tokens = [t for t in config.backend.command if t.endswith(",")]
+            if comma_tokens:
+                fixed = [t.rstrip(",") for t in config.backend.command]
+                report.errors.append(
+                    f"backend.command token(s) {comma_tokens!r} end with a comma -- "
+                    f"this field is space-separated, not comma-separated (did you mean {fixed!r}?)"
+                )
+            elif shutil.which(config.backend.command[0]) is None:
+                # Dependency-level check: the backend is a local CLI
+                # ConvoBox spawns, so if its executable isn't on PATH the
+                # loop will fail with a bare FileNotFoundError at first
+                # utterance. A warning (not an error) surfaces it at save
+                # time without blocking -- PATH at edit time may
+                # legitimately differ from run time.
+                report.warnings.append(
+                    f"backend command {config.backend.command[0]!r} was not found on PATH -- "
+                    f"is {config.backend.name} installed? it will fail to start until it is"
+                )
     if config.backend.name == "opencode" and not config.backend.url.startswith(("http://", "https://")):
         report.warnings.append(
             "backend.url does not start with http:// or https://; the connection may fail"

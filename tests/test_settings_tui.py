@@ -277,6 +277,45 @@ def test_validate_config_skips_path_check_for_opencode(monkeypatch: pytest.Monke
     assert consulted == []
 
 
+def test_validate_config_rejects_backend_command_with_stray_trailing_commas() -> None:
+    # Live UAT incident, 2026-07-22: typing "codex.cmd, --model, gpt-5.6-terra"
+    # into the Command field (following this same TUI's OTHER convention --
+    # list_str fields like safeword phrases ARE comma-separated) parses via
+    # shlex.split into ["codex.cmd,", "--model,", "gpt-5.6-terra"] --
+    # syntactically valid-looking, silently wrong, and it saved without any
+    # error. The session crashed hard mid-UAT with a bare
+    # `FileNotFoundError: [WinError 2]` with nothing connecting it to the typo.
+    config = _make_config(
+        **{"backend.name": "codex", "backend.command": ["codex.cmd,", "--model,", "gpt-5.6-terra"]}
+    )
+    report = validate_config(config)
+    assert any(
+        "end with a comma" in e and "codex.cmd" in e and "gpt-5.6-terra" in e for e in report.errors
+    )
+
+
+def test_validate_config_comma_typo_error_suggests_the_fixed_command() -> None:
+    config = _make_config(
+        **{"backend.name": "codex", "backend.command": ["codex.cmd,", "--model,", "gpt-5.6-terra"]}
+    )
+    report = validate_config(config)
+    error = next(e for e in report.errors if "end with a comma" in e)
+    assert "['codex.cmd', '--model', 'gpt-5.6-terra']" in error
+
+
+def test_validate_config_comma_typo_takes_priority_over_path_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A comma-mangled token also won't resolve via shutil.which -- the
+    # specific "you likely mistyped this" error should fire instead of the
+    # generic "not found on PATH" warning, not alongside it.
+    monkeypatch.setattr(settings_tui.shutil, "which", lambda cmd: None)
+    config = _make_config(**{"backend.name": "codex", "backend.command": ["codex.cmd,"]})
+    report = validate_config(config)
+    assert any("end with a comma" in e for e in report.errors)
+    assert not any("not found on PATH" in w for w in report.warnings)
+
+
 def test_backup_and_save_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "convobox.yaml"
     path.write_text("backend:\n  name: opencode\n", encoding="utf-8")
