@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from convobox.config import AppConfig
@@ -1034,6 +1035,122 @@ async def test_probe_audio_tests_both_when_no_device_field_selected(
     assert "mic:" in result
 
 
+# --- _probe_input_device_live: live UAT feedback, 2026-07-23 -- the
+# plain [t] test only showed a single level reading after the whole
+# recording finished. A live-updating bar while actually speaking makes
+# gain problems (clipping, too quiet, wrong device) easier to judge than
+# one static number. Input device now records ~3s with the level shown
+# live in the TUI's own status line (via draw()), not a raw terminal
+# overlay; every other audio field keeps the quicker non-live probe. ---
+
+
+class _FakeInputStream:
+    """Stands in for sounddevice.InputStream -- fires the callback once
+    with a fixed sample on __enter__, matching how the real stream would
+    invoke it from its own audio thread, without needing real hardware
+    or real elapsed time."""
+
+    def __init__(self, samplerate: int, channels: int, device: int, callback: object) -> None:
+        self._callback = callback
+
+    def __enter__(self) -> "_FakeInputStream":
+        indata = np.array([[0.25]], dtype=np.float32)
+        self._callback(indata, 1, None, None)  # type: ignore[misc]
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_probe_input_device_live_shows_a_live_status_while_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "Mic A")])
+    monkeypatch.setattr(audio_devices, "resolve_spec", lambda spec, devices: (0, None))
+    monkeypatch.setattr(audio_devices, "_default_index", lambda sd, kind: None)
+    monkeypatch.setattr(audio_devices, "level_meter", lambda audio: (-18.0, -6.0))
+    monkeypatch.setattr(audio_devices, "format_level", lambda rms, peak: f"rms={rms} peak={peak}")
+    played_back: list[tuple[object, int, int | None]] = []
+    monkeypatch.setattr(
+        audio_devices,
+        "_play_recording",
+        lambda sd, audio, rate, playback_device: played_back.append((audio, rate, playback_device)),
+    )
+    _install_fake_sounddevice(
+        monkeypatch,
+        InputStream=_FakeInputStream,
+        query_devices=lambda index: {"name": "Mic A", "default_samplerate": 16000},
+    )
+
+    drawn_statuses: list[str] = []
+    monkeypatch.setattr(settings_tui, "draw", lambda state: drawn_statuses.append(state.status))
+
+    config = _make_config(**{"audio.input_device": "Mic A, MME", "audio.output_device": None})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+
+    result = await settings_tui._probe_input_device_live(state, seconds=0.05)
+
+    assert any("recording, speak normally" in s and "rms=" in s for s in drawn_statuses)
+    assert result == "mic: rms=-18.0 peak=-6.0 (played back)"
+    assert len(played_back) == 1
+    assert played_back[0][2] is None  # out_idx: no output_device configured, no default resolvable
+
+
+@pytest.mark.asyncio
+async def test_probe_input_device_live_reports_missing_device_without_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [])
+    monkeypatch.setattr(
+        audio_devices, "resolve_spec", lambda spec, devices: (None, f"no device matching {spec!r}")
+    )
+    monkeypatch.setattr(audio_devices, "_default_index", lambda sd, kind: None)
+    _install_fake_sounddevice(monkeypatch)
+
+    config = _make_config(**{"audio.input_device": "Nonexistent Mic"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+
+    result = await settings_tui._probe_input_device_live(state, seconds=0.05)
+
+    assert "no device matching" in result
+
+
+@pytest.mark.asyncio
+async def test_test_state_uses_live_probe_for_input_device_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voice = "en_US-lessac-medium"
+    (tmp_path / f"{voice}.onnx").write_bytes(b"x")
+    (tmp_path / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+
+    async def fake_live_probe(state: TuiState, seconds: float = 3.0) -> str:
+        return "live probe ran"
+
+    async def fake_probe_audio(config: object, field_key: str | None = None) -> str:
+        return "plain probe ran"
+
+    monkeypatch.setattr(settings_tui, "_probe_input_device_live", fake_live_probe)
+    monkeypatch.setattr(settings_tui, "probe_audio", fake_probe_audio)
+
+    config = _make_config(**{"tts.voice": voice})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "input_device"
+    )
+
+    await settings_tui._test_state(state)
+    assert state.status == "live probe ran"
+
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "output_device"
+    )
+    await settings_tui._test_state(state)
+    assert state.status == "plain probe ran"
+
+
 @pytest.mark.asyncio
 async def test_test_state_passes_the_selected_field_key_to_probe_audio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1054,13 +1171,15 @@ async def test_test_state_passes_the_selected_field_key_to_probe_audio(
     config = _make_config(**{"tts.voice": voice})
     state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
     state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+    # Not input_device: that field now routes to _probe_input_device_live
+    # instead of probe_audio (see test_test_state_uses_live_probe_for_input_device_field).
     state.selected_field = next(
-        i for i, f in enumerate(state.current_fields()) if f.key == "input_device"
+        i for i, f in enumerate(state.current_fields()) if f.key == "output_device"
     )
 
     await settings_tui._test_state(state)
 
-    assert captured["field_key"] == "input_device"
+    assert captured["field_key"] == "output_device"
 
 
 @pytest.mark.asyncio
