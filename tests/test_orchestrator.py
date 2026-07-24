@@ -858,6 +858,15 @@ def test_render_question_handles_malformed_input() -> None:
     assert render_question_for_speech("not json") is None
     assert render_question_for_speech('{"questions": "nope"}') is None
     assert render_question_for_speech('{"questions": [{"options": []}]}') is None
+    # Valid JSON, but the top level isn't an object at all.
+    assert render_question_for_speech("[1, 2, 3]") is None
+    # A non-dict entry inside "questions" is skipped, not a crash.
+    assert render_question_for_speech('{"questions": ["not a dict"]}') is None
+    # A non-dict entry inside "options" is skipped; the question itself
+    # still speaks (its options list just ends up empty).
+    assert render_question_for_speech(
+        '{"questions": [{"question": "Proceed?", "options": ["not a dict"]}]}'
+    ) == "The agent is asking: Proceed?"
 
 
 # --- voice-gated tool approval (Phase 3,
