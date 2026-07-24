@@ -452,7 +452,7 @@ class ClaudeCodeAdapter(BackendAdapter):
                 stderr=asyncio.subprocess.DEVNULL,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        except (OSError, TimeoutError, asyncio.TimeoutError):
+        except (OSError, TimeoutError):
             logger.warning("claude mcp list failed; permissive mode will not grant MCP tools", exc_info=True)
             return []
         return _parse_mcp_list_output(stdout.decode(errors="replace"))
@@ -481,7 +481,7 @@ class ClaudeCodeAdapter(BackendAdapter):
     ) -> None:
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             with contextlib.suppress(OSError):
                 writer.close()
             return
@@ -657,7 +657,7 @@ class ClaudeCodeAdapter(BackendAdapter):
             proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             with contextlib.suppress(ProcessLookupError, OSError):
                 proc.kill()
             with contextlib.suppress(Exception):

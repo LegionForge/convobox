@@ -7,7 +7,7 @@ import numpy as np
 
 MAX_TEXT_LENGTH = 10_000
 
-_CONTROL_CHARS = {c for c in range(0x00, 0x20)} | {0x7F}
+_CONTROL_CHARS = {c for c in range(0x20)} | {0x7F}
 _CONTROL_TRANSLATION = {c: None for c in _CONTROL_CHARS if c not in (0x09, 0x0A, 0x0D)}
 
 

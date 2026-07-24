@@ -4,7 +4,7 @@ import asyncio
 import queue
 from collections.abc import AsyncIterator
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 
@@ -93,7 +93,7 @@ class MicrophoneStream:
             self._stream = None
             self._queue.put(_CLOSE_SENTINEL)
 
-    def __enter__(self) -> MicrophoneStream:
+    def __enter__(self) -> Self:
         self.start()
         return self
 

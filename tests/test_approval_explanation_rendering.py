@@ -1,7 +1,6 @@
 """Tests for approval explanation rendering modes (plain vs. verbose)."""
 
 import json
-import pytest
 
 
 def test_render_approval_explanation_plain_uses_content_when_available() -> None:

@@ -9,8 +9,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-from convobox.interrupt_presets import resolve_preset
 from convobox.approval import ApprovalDetector
+from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
 from convobox.resumeword import DEFAULT_RESUME_WORD
 
@@ -310,7 +310,7 @@ _PERMISSION_CONFLICT_FLAGS: dict[str, tuple[str, ...]] = {
 }
 
 
-def detect_permission_conflict(backend: "BackendConfig") -> str | None:
+def detect_permission_conflict(backend: BackendConfig) -> str | None:
     """Return an error message if backend.command carries a permission-posture
     flag that conflicts with backend.permission_mode, else None.
 

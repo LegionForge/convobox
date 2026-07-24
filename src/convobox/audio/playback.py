@@ -27,7 +27,7 @@ def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """
     if src_rate == dst_rate or len(audio) == 0:
         return audio
-    n_dst = int(round(len(audio) * dst_rate / src_rate))
+    n_dst = round(len(audio) * dst_rate / src_rate)
     if n_dst <= 0:
         return np.zeros(0, dtype=np.float32)
     src_x = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
@@ -99,7 +99,7 @@ def _device_output_rate(sd: object, device: str | int | None, source_rate: int) 
     try:
         info = sd.query_devices(device, "output")  # type: ignore[attr-defined]
         native = int(info["default_samplerate"])
-    except Exception:
+    except Exception:  # noqa: BLE001 -- unpredictable across drivers/host-APIs, degrade to source_rate
         return source_rate
     return native if native > 0 else source_rate
 
