@@ -336,12 +336,11 @@ class LocalTranscriber(STTEngine):
         try:
             self._model = self._build_model()
         except (RuntimeError, MemoryError):
-            logger.error(
+            logger.exception(
                 "STT model reload ALSO failed -- staying unavailable, will "
                 "retry on the next utterance instead of crashing the "
                 "session (%s)",
                 _memory_diagnostic(),
-                exc_info=True,
             )
             return False
         return True
@@ -351,14 +350,12 @@ class LocalTranscriber(STTEngine):
         audio = np.ascontiguousarray(audio, dtype=np.float32)
         start = time.perf_counter()
 
-        if self._model is None:
-            # A previous reload attempt failed and left no usable model
-            # (see _reload_model's docstring) -- retry building one now,
-            # since there's no model here whose .transcribe() call could
-            # itself raise the RuntimeError the except block below exists
-            # to catch.
-            if not self._reload_model():
-                return self._empty_result(audio, start)
+        # A previous reload attempt failed and left no usable model (see
+        # _reload_model's docstring) -- retry building one now, since
+        # there's no model here whose .transcribe() call could itself
+        # raise the RuntimeError the except block below exists to catch.
+        if self._model is None and not self._reload_model():
+            return self._empty_result(audio, start)
 
         model = self._model
         if model is None:

@@ -175,6 +175,7 @@ def test_validate_config_passes_when_voice_files_exist(tmp_path: Path, monkeypat
 
     config = _make_config(
         **{
+            "tts.engine": "piper",
             "tts.voice": voice,
         }
     )
@@ -184,8 +185,32 @@ def test_validate_config_passes_when_voice_files_exist(tmp_path: Path, monkeypat
 
 def test_validate_config_reports_missing_voice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
-    report = validate_config(AppConfig())
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
+    report = validate_config(config)
     assert any("tts.voice is required" in msg for msg in report.errors)
+
+
+def test_validate_config_reports_missing_kokoro_voice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": None})
+    report = validate_config(config)
+    assert any("tts.voice is required" in msg for msg in report.errors)
+
+
+def test_validate_config_warns_when_kokoro_model_files_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(
+        **{
+            "tts.engine": "kokoro",
+            "tts.voice": "af_sarah",
+            "tts.model_path": str(tmp_path / "missing-model.onnx"),
+            "tts.voices_path": str(tmp_path / "missing-voices.bin"),
+        }
+    )
+    report = validate_config(config)
+    assert report.errors == []
+    assert any("tts.model_path" in msg for msg in report.warnings)
+    assert any("tts.voices_path" in msg for msg in report.warnings)
 
 
 # --- STT device: pick-from-list rather than free text (JP's ask: "we

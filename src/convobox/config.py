@@ -9,8 +9,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-from convobox.interrupt_presets import resolve_preset
 from convobox.approval import ApprovalDetector
+from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
 from convobox.resumeword import DEFAULT_RESUME_WORD
 
@@ -92,10 +92,16 @@ class STTConfig(BaseModel):
 
 
 class TTSConfig(BaseModel):
-    engine: str = "piper"
-    voice: str | None = None
+    # Kokoro is the permissively licensed default. Piper remains available
+    # as an explicit opt-in extra because piper-tts is GPL-3.0.
+    engine: str = "kokoro"
+    voice: str | None = "af_sarah"
     rate: float = 1.0
     volume: float = 1.0
+    # kokoro only: the shared model/voice bundle and phonemizer language.
+    model_path: str = ".models/kokoro/kokoro-v1.0.onnx"
+    voices_path: str = ".models/kokoro/voices-v1.0.bin"
+    language: str = "en-us"
     # piper only: select a speaker for a multi-speaker voice, by name
     # (matching the voice's own speaker_id_map, e.g. "prudence" for
     # en_GB-semaine-medium) or a raw numeric index. None (default) uses
@@ -310,7 +316,7 @@ _PERMISSION_CONFLICT_FLAGS: dict[str, tuple[str, ...]] = {
 }
 
 
-def detect_permission_conflict(backend: "BackendConfig") -> str | None:
+def detect_permission_conflict(backend: BackendConfig) -> str | None:
     """Return an error message if backend.command carries a permission-posture
     flag that conflicts with backend.permission_mode, else None.
 

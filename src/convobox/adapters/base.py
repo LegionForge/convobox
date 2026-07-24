@@ -87,7 +87,7 @@ class BackendAdapter(ABC):
         posting a prompt. Implementations must return (not raise) on
         timeout -- a caller that never consumes events() must not deadlock.
         """
-        return None
+        return
 
     def set_interactive_approvals(self, enabled: bool) -> None:
         """Opt in to holding a backend approval request for the operator.
@@ -104,7 +104,7 @@ class BackendAdapter(ABC):
         wires the hook; ``"plan"``/``"permissive"`` don't), and this
         method stays the inherited no-op for it.
         """
-        return None
+        return
 
     async def resolve_pending_approval(self, approved: bool) -> bool:
         """Answer this adapter's currently-pending tool-call approval
@@ -141,4 +141,4 @@ class BackendAdapter(ABC):
         "unclosed transport" tracebacks (seen on Windows with the subprocess
         adapters). Must be idempotent and must not raise.
         """
-        return None
+        return

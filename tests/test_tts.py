@@ -92,6 +92,7 @@ from unittest.mock import patch  # noqa: E402
 
 
 def test_init_loads_the_voice_and_computes_sample_rate() -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     fake_voice = _FakeVoice([])
     with patch("piper.PiperVoice.load", return_value=fake_voice) as mock_load:
         engine = PiperTTSEngine("model.onnx", config_path="model.onnx.json")
@@ -105,6 +106,7 @@ def test_init_loads_the_voice_and_computes_sample_rate() -> None:
 
 
 def test_init_builds_a_syn_config_when_rate_or_volume_is_non_default() -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     from piper.config import SynthesisConfig
 
     fake_voice = _FakeVoice([])
@@ -201,6 +203,7 @@ async def test_default_rate_and_volume_pass_no_syn_config() -> None:
 
 @pytest.mark.asyncio
 async def test_custom_rate_and_volume_build_a_syn_config() -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     from piper.config import SynthesisConfig
 
     engine, voice = _make_engine([[np.array([1], dtype=np.int16)]], rate=2.0, volume=0.5)
@@ -271,6 +274,7 @@ def test_resolve_speaker_on_single_speaker_voice_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_configured_speaker_reaches_the_syn_config() -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     from piper.config import SynthesisConfig
 
     engine, voice = _make_engine(

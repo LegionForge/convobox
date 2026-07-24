@@ -16,6 +16,14 @@ _STREAM_DONE = object()
 class PiperTTSEngine(TTSEngine):
     """Local TTS via the piper-tts Python package.
 
+    Opt-in only: piper-tts is GPL-3.0 and deliberately NOT in this
+    project's main dependencies (see DEPENDENCY_LICENSE_AUDIT.md) — it's
+    only available via `uv sync --extra piper` / `pip install
+    convobox[piper]`. Kokoro (kokoro-onnx, MIT + Apache-2.0) is the
+    default engine. This class is always importable even without
+    piper-tts installed (the actual `import piper` is lazy, inside
+    _load_voice); only constructing an instance requires it.
+
     Input text is sanitized (sanitize_text) and passed to piper's in-process
     Python API — never shelled out to. This keeps untrusted LLM-response text
     off any shell command line.
@@ -98,8 +106,17 @@ class PiperTTSEngine(TTSEngine):
         # Typed Any, not a real PiperVoice annotation: piper-tts ships no
         # type stubs and its Python API surface has varied across releases
         # (see class docstring) — importing here also keeps piper-tts as a
-        # lazy dependency rather than a module-level import.
-        from piper import PiperVoice
+        # lazy, opt-in dependency rather than a module-level import.
+        try:
+            from piper import PiperVoice
+        except ImportError as e:
+            raise ImportError(
+                "PiperTTSEngine requires the 'piper-tts' package, which is "
+                "GPL-3.0 and not installed by default (see "
+                "DEPENDENCY_LICENSE_AUDIT.md). Install it explicitly with "
+                "`uv sync --extra piper` or `pip install piper-tts` if you "
+                "want to use it."
+            ) from e
 
         return PiperVoice.load(self._model_path, config_path=self._config_path)
 
