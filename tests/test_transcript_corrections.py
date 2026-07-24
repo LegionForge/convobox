@@ -32,6 +32,23 @@ def test_more_specific_correction_wins_over_shorter_one() -> None:
     assert corrector.correct("yellow garden") == "Yellow Garden"
 
 
+def test_no_configured_corrections_leaves_the_transcript_untouched() -> None:
+    # No compiled pattern to match against -- the common case (feature
+    # unused) must be a cheap, exact passthrough, not an empty-alternation
+    # regex that happens to match nothing.
+    assert TranscriptCorrector({}).correct("say this exactly") == "say this exactly"
+    assert TranscriptCorrector(None).correct("say this exactly") == "say this exactly"
+
+
+def test_config_rejects_a_correction_source_that_normalizes_to_nothing() -> None:
+    # Distinct from test_config_rejects_empty_correction_target below:
+    # this is the SOURCE side (the phrase to match) normalizing to
+    # nothing, e.g. punctuation-only -- checked first, before the
+    # replacement-side check.
+    with pytest.raises(ValueError, match="source"):
+        STTConfig(corrections={"...": "something"})
+
+
 def test_config_rejects_empty_correction_target() -> None:
     with pytest.raises(ValueError, match="replacement"):
         STTConfig(corrections={"the green": "..."})

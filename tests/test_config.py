@@ -5,9 +5,11 @@ from pathlib import Path
 import pytest
 
 from convobox.config import (
+    AppConfig,
     AudioConfig,
     InteractionConfig,
     aec_estimate_path,
+    load_config,
     read_aec_estimate,
     resolve_config_path,
     write_aec_estimate,
@@ -40,6 +42,18 @@ def test_resolve_config_path_explicit_path_wins_over_env_var(
 ) -> None:
     monkeypatch.setenv("CONVOBOX_CONFIG", "from-env.yaml")
     assert resolve_config_path("explicit.yaml") == Path("explicit.yaml")
+
+
+def test_load_config_returns_defaults_when_the_resolved_file_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    # First-run UX: no convobox.yaml yet must produce a working default
+    # AppConfig, not a FileNotFoundError -- this is the path a brand-new
+    # install takes before ever running the Settings TUI.
+    missing = tmp_path / "does-not-exist.yaml"
+    config = load_config(missing)
+    assert isinstance(config, AppConfig)
+    assert config == AppConfig()
 
 
 # --- AEC delay auto-tune sentinel ---
@@ -128,3 +142,14 @@ def test_approval_phrase_rejects_a_common_affirmation_only_phrase() -> None:
 
 def test_approval_timeout_s_has_a_sane_default() -> None:
     assert InteractionConfig().approval_timeout_s == 30.0
+
+
+def test_approval_explanation_mode_rejects_an_unrecognized_value() -> None:
+    # Fail fast at config load, not at the first live approval prompt --
+    # same discipline as approval_phrase's own validator just above.
+    assert InteractionConfig().approval_explanation_mode == "plain"
+    assert InteractionConfig(approval_explanation_mode="verbose").approval_explanation_mode == (
+        "verbose"
+    )
+    with pytest.raises(ValueError, match="plain or verbose"):
+        InteractionConfig(approval_explanation_mode="chatty")
