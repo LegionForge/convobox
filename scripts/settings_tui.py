@@ -672,20 +672,27 @@ def validate_config(config: AppConfig) -> ValidationReport:
     elif config.tts.engine == "kokoro":
         if not config.tts.voice:
             report.errors.append("tts.voice is required when tts.engine is kokoro")
-        # Unlike Piper's per-voice auto-download, the shared kokoro model/voices
-        # files (tts.model_path/voices_path) have no fetch-on-demand path here --
-        # a warning, not an error, since a not-yet-downloaded pair is a normal
-        # first-run state, not a broken config to hard-block saving.
+        # A cheap existence check only, deliberately NOT resolve_kokoro_model_paths
+        # (which downloads): render() calls validate_config on every frame via
+        # _section_summary, so an actual ~326MB download attempt here would
+        # freeze the TUI on the very next keystroke after these go missing,
+        # not just on an explicit [S]/[T] action. The real auto-download-on-
+        # first-use happens in create_tts_engine instead, exercised by [t]'s
+        # probe_tts and by run_convobox.py's real startup -- both places the
+        # operator has already asked for the engine to actually be built.
         if not Path(config.tts.model_path).exists():
             report.warnings.append(
-                f"tts.model_path {config.tts.model_path!r} does not exist -- download it "
-                "from https://github.com/thewh1teagle/kokoro-onnx/releases"
+                f"tts.model_path {config.tts.model_path!r} does not exist yet -- "
+                "it will be downloaded automatically the first time TTS is used "
+                "([t] to test, or downloaded from "
+                "https://github.com/thewh1teagle/kokoro-onnx/releases)"
             )
         if not Path(config.tts.voices_path).exists():
             report.warnings.append(
-                f"tts.voices_path {config.tts.voices_path!r} does not exist -- download it: "
-                "wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
-                "model-files-v1.0/voices-v1.0.bin -P .models/kokoro/"
+                f"tts.voices_path {config.tts.voices_path!r} does not exist yet -- "
+                "it will be downloaded automatically the first time TTS is used "
+                "([t] to test, or downloaded from "
+                "https://github.com/thewh1teagle/kokoro-onnx/releases)"
             )
 
     if config.backend.name in {"claude-code", "codex"}:

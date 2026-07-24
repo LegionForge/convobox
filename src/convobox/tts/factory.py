@@ -3,12 +3,25 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import httpx
+
 from convobox.config import TTSConfig
 from convobox.tts.base import TTSEngine
 from convobox.tts.kokoro import KokoroTTSEngine
 from convobox.tts.piper import PiperTTSEngine
 
 DEFAULT_VOICES_DIR = Path(".models/piper")
+
+# Same release tag hosts both files (confirmed against the kokoro-onnx
+# package's own README instructions, 2026-07-24) -- unlike Piper's
+# per-voice HuggingFace catalog, Kokoro ships exactly one fixed
+# model + voice-bundle pair, so there's no name to look up, just these
+# two fixed filenames.
+_KOKORO_RELEASE_BASE = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+)
+_KOKORO_MODEL_FILENAME = "kokoro-v1.0.onnx"
+_KOKORO_VOICES_FILENAME = "voices-v1.0.bin"
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +68,59 @@ def resolve_voice_paths(
     return model_path, config_path
 
 
+def _download_kokoro_asset(filename: str, dest: Path) -> None:
+    logger.info(
+        "Kokoro asset %r not downloaded yet -- fetching to %s (one-time, ~326MB "
+        "for the model file)",
+        filename, dest,
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    url = f"{_KOKORO_RELEASE_BASE}/{filename}"
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        # read=None: these are large one-time downloads (the model file is
+        # ~326MB) -- httpx's default 5s read timeout would abort mid-stream
+        # on a normal connection. Same pattern as opencode.py's own
+        # long-poll timeouts (short connect, unbounded read).
+        with httpx.stream(
+            "GET", url, follow_redirects=True, timeout=httpx.Timeout(10.0, read=None)
+        ) as response:
+            response.raise_for_status()
+            with tmp.open("wb") as f:
+                for chunk in response.iter_bytes():
+                    f.write(chunk)
+        tmp.replace(dest)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise FileNotFoundError(
+            f"Kokoro asset {filename!r} could not be downloaded automatically "
+            f"({exc}). Download it manually from {url} and place it at {dest}"
+        ) from exc
+
+
+def resolve_kokoro_model_paths(model_path: str, voices_path: str) -> tuple[Path, Path]:
+    """Ensure the shared Kokoro model + voices files exist locally, downloading
+    them from the upstream kokoro-onnx release first if either is missing.
+
+    Mirrors resolve_voice_paths' auto-download-on-first-use convention
+    (docs/ROADMAP.md's "carry the same convention to Kokoro's engine factory
+    once it lands") -- unlike Piper's per-voice catalog, there's no voice
+    name to look up here, just these two fixed files at whatever local path
+    config.tts.model_path/voices_path name.
+    """
+    model = Path(model_path)
+    voices = Path(voices_path)
+    if not model.exists():
+        _download_kokoro_asset(_KOKORO_MODEL_FILENAME, model)
+    if not voices.exists():
+        _download_kokoro_asset(_KOKORO_VOICES_FILENAME, voices)
+    if not model.exists() or not voices.exists():
+        raise FileNotFoundError(
+            f"Kokoro model files did not download successfully to {model} / {voices}"
+        )
+    return model, voices
+
+
 def create_tts_engine(
     config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR
 ) -> TTSEngine:
@@ -62,9 +128,12 @@ def create_tts_engine(
     if config.engine == "kokoro":
         if config.voice is None:
             raise ValueError("tts.voice is not set; Kokoro needs a voice name")
+        model_path, voices_path = resolve_kokoro_model_paths(
+            config.model_path, config.voices_path
+        )
         return KokoroTTSEngine(
-            model_path=config.model_path,
-            voices_path=config.voices_path,
+            model_path=str(model_path),
+            voices_path=str(voices_path),
             voice=config.voice,
             speed=config.rate,
             lang=config.language,

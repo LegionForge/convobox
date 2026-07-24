@@ -97,6 +97,11 @@ def test_create_tts_engine_rejects_unknown_engine(tmp_path: Path) -> None:
 def test_create_tts_engine_constructs_kokoro_with_config_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    model_path = tmp_path / "model.onnx"
+    voices_path = tmp_path / "voices.bin"
+    _touch(model_path)
+    _touch(voices_path)
+
     calls: list[dict[str, object]] = []
 
     class _FakeKokoroTTSEngine:
@@ -110,8 +115,8 @@ def test_create_tts_engine_constructs_kokoro_with_config_fields(
             engine="kokoro",
             voice="af_sarah",
             rate=1.2,
-            model_path="model.onnx",
-            voices_path="voices.bin",
+            model_path=str(model_path),
+            voices_path=str(voices_path),
             language="en-us",
         ),
         voices_dir=tmp_path,
@@ -120,8 +125,8 @@ def test_create_tts_engine_constructs_kokoro_with_config_fields(
     assert isinstance(engine, _FakeKokoroTTSEngine)
     assert calls == [
         {
-            "model_path": "model.onnx",
-            "voices_path": "voices.bin",
+            "model_path": str(model_path),
+            "voices_path": str(voices_path),
             "voice": "af_sarah",
             "speed": 1.2,
             "lang": "en-us",
@@ -132,6 +137,71 @@ def test_create_tts_engine_constructs_kokoro_with_config_fields(
 def test_create_tts_engine_kokoro_requires_a_voice(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="voice"):
         create_tts_engine(TTSConfig(engine="kokoro", voice=None), voices_dir=tmp_path)
+
+
+# --- resolve_kokoro_model_paths: the shared model/voices files auto-download
+# on first use, same convention as resolve_voice_paths for Piper (see
+# docs/ROADMAP.md's "carry the same convention to Kokoro's engine factory
+# once it lands"). Unlike Piper's per-voice catalog, there's no voice name
+# to look up -- just these two fixed files. ---
+
+
+def test_resolve_kokoro_model_paths_returns_existing_files_without_downloading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_path = tmp_path / "model.onnx"
+    voices_path = tmp_path / "voices.bin"
+    _touch(model_path)
+    _touch(voices_path)
+
+    def _fail_if_called(filename: str, dest: Path) -> None:
+        raise AssertionError(f"should not download {filename!r}, files already exist")
+
+    monkeypatch.setattr(factory_module, "_download_kokoro_asset", _fail_if_called)
+
+    model, voices = factory_module.resolve_kokoro_model_paths(
+        str(model_path), str(voices_path)
+    )
+
+    assert model == model_path
+    assert voices == voices_path
+
+
+def test_resolve_kokoro_model_paths_downloads_missing_files_automatically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_path = tmp_path / "model.onnx"
+    voices_path = tmp_path / "voices.bin"
+
+    calls: list[str] = []
+
+    def _fake_download(filename: str, dest: Path) -> None:
+        calls.append(filename)
+        _touch(dest)
+
+    monkeypatch.setattr(factory_module, "_download_kokoro_asset", _fake_download)
+
+    model, voices = factory_module.resolve_kokoro_model_paths(
+        str(model_path), str(voices_path)
+    )
+
+    assert calls == [factory_module._KOKORO_MODEL_FILENAME, factory_module._KOKORO_VOICES_FILENAME]
+    assert model == model_path
+    assert voices == voices_path
+
+
+def test_resolve_kokoro_model_paths_download_failure_raises_actionable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fake_download(filename: str, dest: Path) -> None:
+        raise FileNotFoundError(f"asset {filename!r} could not be downloaded automatically (boom)")
+
+    monkeypatch.setattr(factory_module, "_download_kokoro_asset", _fake_download)
+
+    with pytest.raises(FileNotFoundError, match="could not be downloaded automatically"):
+        factory_module.resolve_kokoro_model_paths(
+            str(tmp_path / "model.onnx"), str(tmp_path / "voices.bin")
+        )
 
 
 def test_create_tts_engine_constructs_piper_with_resolved_paths_and_config(
