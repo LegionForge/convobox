@@ -80,7 +80,8 @@ uv sync --extra dev        # test/lint tooling
 ```
 
 ConvoBox never bundles a speech engine you didn't ask for — the default
-STT model (faster-whisper) and TTS voices (Piper) download the first
+STT model (faster-whisper) and TTS engine (Kokoro, Apache 2.0 — Piper is
+available as an opt-in `--extra piper`, see below) download the first
 time you actually use them, not at install time.
 
 **Supported today:**
@@ -92,7 +93,7 @@ time you actually use them, not at install time.
 | **Platform**| Windows 11                                                            | Linux, macOS                         |
 | **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
 | **STT**     | faster-whisper                                                        | —                                     |
-| **TTS**     | Piper                                                                 | —                                     |
+| **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; real synthesis verified programmatically against the actual model, not yet a live voice session with real speakers) |
 
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
@@ -114,8 +115,8 @@ no services, daemons, or registry/system entries. To remove it:
 
 1. **Delete the project folder.** This removes the cloned source, the
    `uv`/`pip` virtual environment, your `convobox.yaml` config, and any
-   downloaded Piper voices (cached at `.models/piper/` inside the
-   project).
+   downloaded TTS files (Kokoro's model/voices at `.models/kokoro/`,
+   or Piper voices at `.models/piper/` if you opted into that extra).
 2. **If you installed it into a different environment** with `pip install
    -e .` instead of `uv sync`, first run `pip uninstall convobox` in that
    environment.
@@ -248,9 +249,14 @@ single, simple, unencumbered open-source project; ongoing development is
 optionally supported via Patreon/Ko-fi rather than a commercial license
 (links TBD).
 
-One outstanding technical item this decision depends on: the current
-default TTS engine, `piper-tts`, is GPL-3.0 and imported in-process,
-which would make a distributed ConvoBox a GPL-encumbered mix rather than
-cleanly MIT. See [DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md)
-for the full audit — recommended fix is swapping the default engine to
-Kokoro (Apache 2.0), not yet implemented.
+The technical item this decision depended on is now fixed (2026-07-24):
+the default TTS engine is Kokoro (Apache 2.0, code and model weights),
+not `piper-tts`. Piper remains available as an explicit opt-in extra
+(`uv sync --extra piper`) for anyone who wants it, but a plain `uv sync`/
+`pip install .` never pulls in GPL-3.0 code, so a default ConvoBox
+install/distribution stays cleanly MIT. See
+[DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md) for the full
+audit, including one deliberate deviation from its own original
+recommendation (keeping Piper in the codebase as opt-in, rather than
+removing it entirely) and what's still not independently verified
+(individual Kokoro voice files' own licenses).
