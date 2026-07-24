@@ -1831,20 +1831,18 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
 
     Allows UP/DOWN/LEFT/RIGHT/Space to cycle freely in this nested context
     without interfering with main tab navigation. [t] tests the voice.
-    """
-    try:
-        voices = list(_choices_for(
-            FieldSpec(
-                section="tts", key="voice", kind="kokoro_voice",
-                label="Voice", help_text="", is_required=True
-            ),
-            config
-        ))
-    except Exception:
-        voices = ["af_sarah"]  # fallback
 
+    Uses the module-level _TTS_VOICE_KOKORO_FIELD (the real FieldSpec for
+    tts.voice) rather than constructing a new one -- a prior version built
+    an ad hoc FieldSpec with an invalid `is_required` kwarg, which raised
+    on every open and was silently swallowed by a blanket except, always
+    falling back to a single hardcoded voice. That bug shipped invisibly
+    because the failure path looked identical to "working, only one
+    voice downloaded."
+    """
+    voices = list(_choices_for(_TTS_VOICE_KOKORO_FIELD, config))
     if not voices:
-        voices = ["af_sarah"]
+        voices = [_KOKORO_VOICE_UNAVAILABLE]
 
     # Start at current voice if it's in the list, else start at first
     try:
@@ -1853,18 +1851,18 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
         index = 0
 
     while True:
-        # Draw voice picker modal
+        unavailable = voices[index] == _KOKORO_VOICE_UNAVAILABLE
         detail_lines = [
             "Use arrows or Space to cycle through voices:",
             "",
             "Left/Right or Up/Down to move between voices",
             "Space to cycle forward",
-            "[t] to test the current voice",
+            "[t] to test the current voice" if not unavailable else "",
             "Enter to confirm, Esc to cancel",
         ]
         _draw_modal(
             "Select Kokoro Voice",
-            f"Editing tts.voice",
+            "Editing tts.voice",
             detail_lines,
             voices[index],
             choice_options=voices,
@@ -1875,9 +1873,12 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
         if key == "ESC":
             return False, current
         if key == "ENTER":
+            if unavailable:
+                # Nothing real to accept -- same convention as the
+                # generic editor's own handling of this sentinel.
+                return False, current
             return True, voices[index]
-        if key.lower() == "t":
-            # Test the current voice
+        if key.lower() == "t" and not unavailable:
             try:
                 asyncio.run(_test_kokoro_voice(voices[index], config))
             except Exception:  # noqa: BLE001
