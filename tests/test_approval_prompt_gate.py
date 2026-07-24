@@ -177,7 +177,7 @@ def test_codex_approval_event_populates_pending_explanation_from_content() -> No
 def test_claude_code_approval_event_populates_pending_explanation_from_tool_input() -> None:
     # Claude Code's hook-based APPROVAL_REQUEST carries tool/tool_input,
     # not content (see _on_backend_event's own comment) -- pending_explanation
-    # must still have something sayable.
+    # must still have something sayable. Tests plain mode (the default).
     gate = _gate()
     _on_backend_event(
         None,
@@ -189,8 +189,10 @@ def test_claude_code_approval_event_populates_pending_explanation_from_tool_inpu
         ),
         "cobalt night and gale",
         gate,
+        approval_explanation_mode="plain",
     )
-    assert gate.pending_explanation == 'Write with input: {"file_path": "config.yaml"}'
+    # Plain mode extracts the file_path and makes it human-friendly
+    assert "config.yaml" in gate.pending_explanation and "Create or edit" in gate.pending_explanation
 
 
 def test_render_approval_explanation_prefers_content_over_tool_input() -> None:
@@ -200,9 +202,16 @@ def test_render_approval_explanation_prefers_content_over_tool_input() -> None:
 
 
 def test_render_approval_explanation_falls_back_to_tool_input() -> None:
-    assert _render_approval_explanation(None, "Bash", '{"cmd": "ls"}') == (
+    # Verbose mode shows raw JSON
+    assert _render_approval_explanation(None, "Bash", '{"cmd": "ls"}', explanation_mode="verbose") == (
         'Bash with input: {"cmd": "ls"}'
     )
+
+
+def test_render_approval_explanation_plain_mode_extracts_intent() -> None:
+    # Plain mode extracts human-friendly details, not raw tool name
+    result = _render_approval_explanation(None, "Write", '{"file_path": "test.py"}', explanation_mode="plain")
+    assert "test.py" in result and "Create or edit" in result
 
 
 def test_render_approval_explanation_never_empty_with_no_detail_at_all() -> None:

@@ -1144,13 +1144,66 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                 tui_state.waiting_hint = None
 
 
-def _render_approval_explanation(
+def _render_approval_explanation_verbose(
     content: str | None, tool: str | None, tool_input: str | None
+) -> str:
+    """Verbose explanation: technical details, raw JSON if available."""
+    if content:
+        return content
+    if tool_input:
+        return f"{tool or 'This request'} with input: {tool_input}"
+    return f"No further detail is available for {tool or 'this request'}."
+
+
+def _render_approval_explanation_plain(
+    content: str | None, tool: str | None, tool_input: str | None
+) -> str:
+    """Plain language explanation: human-friendly intent extraction.
+
+    For Codex: content is already human-readable, return as-is.
+    For Claude Code: parse tool_input JSON to extract key details:
+      - file operations: "create/edit file {path}"
+      - commands: "run: {command}"
+      - other: list the main parameters
+    Falls back gracefully when data is missing.
+    """
+    if content:
+        return content
+    if tool_input:
+        try:
+            import json
+            data = json.loads(tool_input) if isinstance(tool_input, str) else tool_input
+            # Common Claude Code approval patterns
+            if (tool and "write" in tool.lower()) or "path" in data or "file_path" in data:
+                path = data.get("path") or data.get("file_path") or "a file"
+                return f"Create or edit the file: {path}"
+            if (tool and ("bash" in tool.lower() or "sh" in tool.lower() or "command" in tool.lower())) or "command" in data or "cmd" in data:
+                cmd = data.get("command") or data.get("cmd") or "a command"
+                return f"Run: {cmd}"
+            if (tool and "str_replace" in tool.lower()) or "file_text" in data:
+                file_text = data.get("file_text", "")
+                return f"Edit the file: {file_text}" if file_text else "Edit a file"
+            # Fallback: show the tool name and top-level keys
+            keys = ", ".join(list(data.keys())[:3])
+            return f"{tool or 'This request'} ({keys})" if keys else f"{tool or 'This request'}"
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            # If JSON parsing fails, fall back to the verbose version
+            return f"{tool or 'This request'} with input: {tool_input}"
+    return f"No further detail is available for {tool or 'this request'}."
+
+
+def _render_approval_explanation(
+    content: str | None, tool: str | None, tool_input: str | None,
+    explanation_mode: str = "plain"
 ) -> str:
     """Full detail for a pending approval, spoken back on an "explain"
     outcome (JP, 2026-07-23) -- unlike render_approval_request_for_speech's
     deliberately terse automatic announcement, this is only ever read aloud
     because the operator explicitly asked for more.
+
+    explanation_mode: "plain" (default) or "verbose"
+    - "plain": human-friendly intent extraction (tool-name + key parameters)
+    - "verbose": technical details, raw JSON if available
 
     Cross-backend: Codex populates event.content (a full human-readable
     description, _describe_approval_request); Claude Code's hook-based
@@ -1159,11 +1212,10 @@ def _render_approval_explanation(
     empty -- always something sayable, even if genuinely no detail was
     captured for this request.
     """
-    if content:
-        return content
-    if tool_input:
-        return f"{tool or 'This request'} with input: {tool_input}"
-    return f"No further detail is available for {tool or 'this request'}."
+    if explanation_mode == "plain":
+        return _render_approval_explanation_plain(content, tool, tool_input)
+    else:  # "verbose"
+        return _render_approval_explanation_verbose(content, tool, tool_input)
 
 
 def _on_backend_event(
@@ -1172,6 +1224,7 @@ def _on_backend_event(
     event: BackendEvent,
     approval_phrase: str | None = None,
     approval_gate: ApprovalPromptGate | None = None,
+    approval_explanation_mode: str = "plain",
 ) -> None:
     """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
     and full-detail panes from the real backend event stream, AND records
@@ -1209,7 +1262,8 @@ def _on_backend_event(
             approval_gate.start_waiting(
                 time.monotonic(),
                 explanation=_render_approval_explanation(
-                    event.content, event.tool, event.tool_input
+                    event.content, event.tool, event.tool_input,
+                    approval_explanation_mode
                 ),
             )
         # event.content is a verbose, log/TUI-oriented description -- only
@@ -1495,6 +1549,7 @@ async def run(args: argparse.Namespace) -> None:
         on_event=lambda e: _on_backend_event(
             tui_state, last_spoken_response, e,
             config.interaction.approval_phrase, approval_gate,
+            config.interaction.approval_explanation_mode,
         ),
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,

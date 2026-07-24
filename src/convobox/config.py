@@ -183,6 +183,11 @@ class InteractionConfig(BaseModel):
     # on purpose: deciding whether to approve a real destructive action
     # deserves more time than a quick "continue/stop" reflex.
     approval_timeout_s: float = 30.0
+    # "verbose" = raw approval data (tool name + JSON input, technical).
+    # "plain" = human-friendly intent extraction (file paths, command names).
+    # Only affects the explanation spoken back when the operator says "explain"
+    # during a pending approval -- not the automatic approval announcement.
+    approval_explanation_mode: str = "plain"
 
     @field_validator("approval_phrase")
     @classmethod
@@ -195,6 +200,16 @@ class InteractionConfig(BaseModel):
             # wraps ConfirmwordDetector) is the authority on this; not
             # duplicated here.
             ApprovalDetector(v)
+        return v
+
+    @field_validator("approval_explanation_mode")
+    @classmethod
+    def _validate_explanation_mode(cls, v: str) -> str:
+        if v not in ("plain", "verbose"):
+            modes = "plain or verbose"
+            raise ValueError(
+                f"approval_explanation_mode must be {modes}, not {v!r}"
+            )
         return v
 
 
