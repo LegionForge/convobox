@@ -68,6 +68,31 @@ substantially more than that is now on `main`:
   off the last phoneme; it now pads the START the same way, so the
   first phoneme of a phrase — including the safeword — isn't lost while
   the VAD is still building confidence to trigger.
+- **Kokoro (Apache 2.0) shipped as the default TTS engine, 2026-07-24**
+  (PRs #141, #144) — the second TTS engine this section previously
+  listed as "on the roadmap" (see the 2026-07-12 entry below) is done,
+  not pending. Piper moved to an explicit opt-in extra
+  (`uv sync --extra piper`) rather than a main dependency, resolving the
+  GPL-encumbrance concern `DEPENDENCY_LICENSE_AUDIT.md` raised — a
+  default ConvoBox install/distribution is now cleanly MIT. Also
+  shipped: a real per-voice picker in the Settings TUI (cycles the 54
+  actual voices in the downloaded voices file, not free text), per-engine
+  profile memory (switching `tts.engine` no longer loses the other
+  engine's settings), a side-by-side Kokoro/Piper compare action (`[c]`,
+  speaks the same test phrase through both so you can actually hear the
+  difference — the existing `[t]` test never played anything, only
+  confirmed synthesis succeeded), and a forced voice-refresh action
+  (`[d]`, for when kokoro-onnx's upstream release adds voices to an
+  already-downloaded file). Real end-to-end testing against the actual
+  model files (not mocks) also found and fixed a genuine bug upstream in
+  `kokoro-onnx` itself: a single unpunctuated run of text exceeding the
+  model's ~510-phoneme batch limit could hang synthesis forever (a
+  detached background task dying silently, confirmed via 0% CPU for
+  10+ minutes) — now recovers with a bounded timeout instead. Not yet
+  done: a live voice session with real speakers (verified
+  programmatically against the real model so far, per the README
+  support matrix), and individual Kokoro voice files' own licenses
+  haven't been independently re-checked the way Piper's were.
 
 Fully wired and config-driven, all with real-pipeline verification where
 a live microphone session was possible; several items (the TUI's full
@@ -112,7 +137,9 @@ in. ~500 automated tests, mypy/ruff/bandit clean. A Settings TUI
 (`scripts/settings_tui.py`, config editing) and a live conversation TUI
 (`--tui`, see the "Since 0.2.0" section above) are both shipped, not
 roadmap items anymore. Still open: Linux/macOS aren't validated yet, and
-a second TTS/STT engine (Kokoro) is on the roadmap ([ROADMAP.md](ROADMAP.md)).
+a second TTS/STT engine (Kokoro) is on the roadmap ([ROADMAP.md](ROADMAP.md))
+-- kept as-written for history; Kokoro has since shipped as the default
+TTS engine, 2026-07-24, see the "Since 0.2.0" section above.
 
 The rest of this section is the earlier progress log, kept for history.
 
