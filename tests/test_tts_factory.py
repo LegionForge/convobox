@@ -14,6 +14,31 @@ def _touch(path: Path) -> None:
     path.write_bytes(b"")
 
 
+class _FakeStreamResponse:
+    """Mimics the httpx.stream(...) context manager's return value --
+    just enough surface (raise_for_status, iter_bytes) for
+    _download_kokoro_asset's real body to run against, without a real
+    network call.
+    """
+
+    def __init__(self, chunks: list[bytes], status_error: Exception | None = None) -> None:
+        self._chunks = chunks
+        self._status_error = status_error
+
+    def raise_for_status(self) -> None:
+        if self._status_error is not None:
+            raise self._status_error
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+    def __enter__(self) -> "_FakeStreamResponse":
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+
 def test_resolve_voice_paths_returns_existing_files(tmp_path: Path) -> None:
     _touch(tmp_path / "en_US-lessac-medium.onnx")
     _touch(tmp_path / "en_US-lessac-medium.onnx.json")
@@ -89,9 +114,9 @@ def test_resolve_voice_paths_incomplete_download_raises(
         resolve_voice_paths("en_US-lessac-medium", tmp_path)
 
 
-def test_create_tts_engine_rejects_unset_voice(tmp_path: Path) -> None:
+def test_create_tts_engine_rejects_unset_piper_voice(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="tts.voice is not set"):
-        create_tts_engine(TTSConfig(voice=None), voices_dir=tmp_path)
+        create_tts_engine(TTSConfig(engine="piper", voice=None), voices_dir=tmp_path)
 
 
 def test_create_tts_engine_rejects_unknown_engine(tmp_path: Path) -> None:
@@ -207,6 +232,66 @@ def test_resolve_kokoro_model_paths_download_failure_raises_actionable_error(
         factory_module.resolve_kokoro_model_paths(
             str(tmp_path / "model.onnx"), str(tmp_path / "voices.bin")
         )
+
+
+def test_resolve_kokoro_model_paths_incomplete_download_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # _download_kokoro_asset "succeeds" (no exception) but doesn't actually
+    # produce the file -- must not be silently treated as success, same
+    # discipline as resolve_voice_paths' own incomplete-download check.
+    monkeypatch.setattr(factory_module, "_download_kokoro_asset", lambda filename, dest: None)
+
+    with pytest.raises(FileNotFoundError, match="did not download successfully"):
+        factory_module.resolve_kokoro_model_paths(
+            str(tmp_path / "model.onnx"), str(tmp_path / "voices.bin")
+        )
+
+
+# --- _download_kokoro_asset itself: the tests above all monkeypatch this
+# function away, so its own body (the real httpx streaming, tmp-file-then-
+# rename, and error-cleanup logic) had zero coverage -- these exercise it
+# directly against a fake httpx.stream response instead. ---
+
+
+def test_download_kokoro_asset_streams_to_a_tmp_file_then_renames_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "kokoro-v1.0.onnx"
+    captured: dict[str, object] = {}
+
+    def _fake_stream(method: str, url: str, **kwargs: object) -> _FakeStreamResponse:
+        captured["method"] = method
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return _FakeStreamResponse([b"chunk-a-", b"chunk-b"])
+
+    monkeypatch.setattr(factory_module.httpx, "stream", _fake_stream)
+
+    factory_module._download_kokoro_asset("kokoro-v1.0.onnx", dest)
+
+    assert dest.read_bytes() == b"chunk-a-chunk-b"
+    assert not dest.with_suffix(dest.suffix + ".part").exists()
+    assert captured["method"] == "GET"
+    assert captured["url"] == f"{factory_module._KOKORO_RELEASE_BASE}/kokoro-v1.0.onnx"
+    assert captured["kwargs"]["follow_redirects"] is True
+
+
+def test_download_kokoro_asset_cleans_up_tmp_file_on_http_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "kokoro-v1.0.onnx"
+
+    def _fake_stream(method: str, url: str, **kwargs: object) -> _FakeStreamResponse:
+        return _FakeStreamResponse([], status_error=RuntimeError("404 not found"))
+
+    monkeypatch.setattr(factory_module.httpx, "stream", _fake_stream)
+
+    with pytest.raises(FileNotFoundError, match="could not be downloaded automatically"):
+        factory_module._download_kokoro_asset("kokoro-v1.0.onnx", dest)
+
+    assert not dest.exists()
+    assert not dest.with_suffix(dest.suffix + ".part").exists()
 
 
 def test_create_tts_engine_constructs_piper_with_resolved_paths_and_config(
