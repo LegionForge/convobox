@@ -38,7 +38,11 @@ class PauseListeningDetector:
     """
 
     def __init__(self, pause_phrases: list[str] | None = None) -> None:
-        phrases = pause_phrases if pause_phrases is not None else list(DEFAULT_PAUSE_PHRASES)
+        phrases = (
+            pause_phrases
+            if pause_phrases is not None
+            else list(DEFAULT_PAUSE_PHRASES)
+        )
         empty = [phrase for phrase in phrases if not _normalize(phrase)]
         if empty:
             raise ValueError(

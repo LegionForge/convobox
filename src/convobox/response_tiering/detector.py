@@ -71,8 +71,16 @@ class ContinueDetector:
         continue_phrases: list[str] | None = None,
         decline_phrases: list[str] | None = None,
     ) -> None:
-        continue_list = continue_phrases if continue_phrases is not None else list(DEFAULT_CONTINUE_PHRASES)
-        decline_list = decline_phrases if decline_phrases is not None else list(DEFAULT_DECLINE_PHRASES)
+        continue_list = (
+            continue_phrases
+            if continue_phrases is not None
+            else list(DEFAULT_CONTINUE_PHRASES)
+        )
+        decline_list = (
+            decline_phrases
+            if decline_phrases is not None
+            else list(DEFAULT_DECLINE_PHRASES)
+        )
 
         empty = [p for p in (*continue_list, *decline_list) if not _normalize(p)]
         if empty:
@@ -81,10 +89,16 @@ class ContinueDetector:
                 f"to nothing and would never match: {empty!r}"
             )
 
-        self._continue: list[tuple[str, str]] = [(p, _normalize(p)) for p in continue_list]
-        self._decline: list[tuple[str, str]] = [(p, _normalize(p)) for p in decline_list]
+        self._continue = [
+            (p, _normalize(p)) for p in continue_list
+        ]  # list[tuple[str, str]]
+        self._decline = [
+            (p, _normalize(p)) for p in decline_list
+        ]  # list[tuple[str, str]]
 
-        overlap = {n for _, n in self._continue} & {n for _, n in self._decline}
+        overlap = {n for _, n in self._continue} & {
+            n for _, n in self._decline
+        }
         if overlap:
             raise ValueError(
                 f"the same phrase(s) appear in both continue_phrases and "

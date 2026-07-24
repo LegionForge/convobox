@@ -84,7 +84,10 @@ class PiperTTSEngine(TTSEngine):
         num_speakers = self._voice.config.num_speakers
         if 0 <= index < num_speakers:
             return index
-        available = ", ".join(repr(name) for name in sorted(speaker_map)) or "none (single-speaker voice)"
+        available = (
+            ", ".join(repr(name) for name in sorted(speaker_map))
+            or "none (single-speaker voice)"
+        )
         raise ValueError(
             f"speaker {speaker!r} not found for this voice "
             f"(num_speakers={num_speakers}). Named speakers: {available}. "

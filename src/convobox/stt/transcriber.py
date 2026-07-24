@@ -80,7 +80,8 @@ def _register_cuda_dll_directories() -> None:
             bin_dir_str = str(bin_dir)
             path_entries = os.environ.get("PATH", "").split(os.pathsep)
             if bin_dir_str not in path_entries:
-                os.environ["PATH"] = bin_dir_str + os.pathsep + os.environ.get("PATH", "")
+                current_path = os.environ.get("PATH", "")
+                os.environ["PATH"] = bin_dir_str + os.pathsep + current_path
 
 
 _register_cuda_dll_directories()

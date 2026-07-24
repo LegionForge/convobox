@@ -81,11 +81,13 @@ class UtteranceSegmenter:
         # grow with everything buffered, not just with confident speech --
         # this also means prefix-padding windows (below) count toward it,
         # consistent with that same "everything buffered" rationale.
-        self._max_run_windows = (
-            None
-            if self._config.max_utterance_s is None
-            else max(1, round(self._config.max_utterance_s * _SAMPLE_RATE / _WINDOW_SAMPLES))
-        )
+        if self._config.max_utterance_s is None:
+            self._max_run_windows = None
+        else:
+            seconds = self._config.max_utterance_s
+            self._max_run_windows = max(
+                1, round(seconds * _SAMPLE_RATE / _WINDOW_SAMPLES)
+            )
 
         self._carry = np.empty(0, dtype=np.float32)
         self._speech: list[np.ndarray] = []

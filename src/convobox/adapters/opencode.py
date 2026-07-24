@@ -84,7 +84,11 @@ class OpenCodeAdapter(BackendAdapter):
         model: str | None = None,
     ) -> None:
         self._base_url = url.rstrip("/")
-        self._client = client if client is not None else httpx.AsyncClient(base_url=self._base_url)
+        self._client = (
+            client
+            if client is not None
+            else httpx.AsyncClient(base_url=self._base_url)
+        )
         # Only close a client we created; an injected one (tests) is the
         # caller's to manage.
         self._owns_client = client is None

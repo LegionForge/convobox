@@ -12,7 +12,9 @@ DEFAULT_VOICES_DIR = Path(".models/piper")
 logger = logging.getLogger(__name__)
 
 
-def resolve_voice_paths(voice: str, voices_dir: Path = DEFAULT_VOICES_DIR) -> tuple[Path, Path]:
+def resolve_voice_paths(
+    voice: str, voices_dir: Path = DEFAULT_VOICES_DIR
+) -> tuple[Path, Path]:
     """Map a Piper voice key (e.g. "en_US-lessac-medium") to its local files,
     downloading it first if it isn't cached yet.
 
@@ -52,7 +54,9 @@ def resolve_voice_paths(voice: str, voices_dir: Path = DEFAULT_VOICES_DIR) -> tu
     return model_path, config_path
 
 
-def create_tts_engine(config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR) -> TTSEngine:
+def create_tts_engine(
+    config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR
+) -> TTSEngine:
     """Build the TTSEngine described by config.tts -- the only place that reads it.
 
     TTSConfig.voice/rate/volume existed in config.py with nothing wired to
@@ -61,7 +65,8 @@ def create_tts_engine(config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR) 
     """
     if config.engine != "piper":
         raise NotImplementedError(
-            f"tts.engine {config.engine!r} is not implemented; only 'piper' is available"
+            f"tts.engine {config.engine!r} is not implemented; "
+            f"only 'piper' is available"
         )
     if config.voice is None:
         raise ValueError(

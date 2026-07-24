@@ -33,12 +33,12 @@ class LanguageTracker:
 
     @property
     def dominant(self) -> str | None:
-        """The session's established language, or None before any confident detection."""
+        """The session's established language, or None before confident detection."""
         if not self._history:
             return None
         return Counter(self._history).most_common(1)[0][0]
 
     def agrees(self, language: str) -> bool:
-        """True if ``language`` matches the dominant language, or there isn't one yet."""
+        """True if ``language`` matches the dominant language, or none is established yet."""
         dominant = self.dominant
         return dominant is None or dominant == language

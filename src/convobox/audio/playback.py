@@ -52,10 +52,13 @@ class _StreamResampler:
     """
 
     def __init__(self, src_rate: int, dst_rate: int) -> None:
-        self._step = src_rate / dst_rate  # source samples advanced per output sample
+        # source samples advanced per output sample
+        self._step = src_rate / dst_rate
         self._passthrough = src_rate == dst_rate
-        self._buf = np.zeros(0, dtype=np.float32)  # unconsumed source samples
-        self._pos = 0.0  # next output sample's position within _buf (source-sample units)
+        # unconsumed source samples
+        self._buf = np.zeros(0, dtype=np.float32)
+        # next output sample's position within _buf (source-sample units)
+        self._pos = 0.0
 
     def process(self, chunk: np.ndarray) -> np.ndarray:
         if self._passthrough:

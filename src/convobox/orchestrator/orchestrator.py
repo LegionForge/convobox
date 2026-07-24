@@ -26,7 +26,9 @@ _MD_ASTERISK_RE = re.compile(r"\*+")
 _MD_UNDERSCORE_RE = re.compile(r"(?<![\w/])_+|_+(?![\w/])")
 # Heading markers and blockquote markers at line starts; list bullets
 # ("- item", "+ item" -- "* item" is already covered by the asterisk rule).
-_MD_LINE_NOISE_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-+][ \t]+)", re.MULTILINE)
+_MD_LINE_NOISE_RE = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-+][ \t]+)", re.MULTILINE
+)
 _COLLAPSE_SPACE_RE = re.compile(r"[ \t]{2,}")
 _COLLAPSE_BLANK_RE = re.compile(r"\n{3,}")
 
