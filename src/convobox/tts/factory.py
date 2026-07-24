@@ -5,6 +5,7 @@ from pathlib import Path
 
 from convobox.config import TTSConfig
 from convobox.tts.base import TTSEngine
+from convobox.tts.kokoro import KokoroTTSEngine
 from convobox.tts.piper import PiperTTSEngine
 
 DEFAULT_VOICES_DIR = Path(".models/piper")
@@ -57,17 +58,24 @@ def resolve_voice_paths(
 def create_tts_engine(
     config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR
 ) -> TTSEngine:
-    """Build the TTSEngine described by config.tts -- the only place that reads it.
+    """Build the TTSEngine described by config.tts -- the only place that reads it."""
+    if config.engine == "kokoro":
+        if config.voice is None:
+            raise ValueError("tts.voice is not set; Kokoro needs a voice name")
+        return KokoroTTSEngine(
+            model_path=config.model_path,
+            voices_path=config.voices_path,
+            voice=config.voice,
+            speed=config.rate,
+            lang=config.language,
+        )
 
-    TTSConfig.voice/rate/volume existed in config.py with nothing wired to
-    them; every script constructed a PiperTTSEngine by hand with a
-    hardcoded voice. This is that missing wiring.
-    """
     if config.engine != "piper":
         raise NotImplementedError(
             f"tts.engine {config.engine!r} is not implemented; "
-            f"only 'piper' is available"
+            "available engines are 'kokoro' and 'piper'"
         )
+
     if config.voice is None:
         raise ValueError(
             "tts.voice is not set. Pick one with: python scripts/voice_picker.py"

@@ -92,10 +92,16 @@ class STTConfig(BaseModel):
 
 
 class TTSConfig(BaseModel):
-    engine: str = "piper"
-    voice: str | None = None
+    # Kokoro is the permissively licensed default. Piper remains available
+    # as an explicit opt-in extra because piper-tts is GPL-3.0.
+    engine: str = "kokoro"
+    voice: str | None = "af_sarah"
     rate: float = 1.0
     volume: float = 1.0
+    # kokoro only: the shared model/voice bundle and phonemizer language.
+    model_path: str = ".models/kokoro/kokoro-v1.0.onnx"
+    voices_path: str = ".models/kokoro/voices-v1.0.bin"
+    language: str = "en-us"
     # piper only: select a speaker for a multi-speaker voice, by name
     # (matching the voice's own speaker_id_map, e.g. "prudence" for
     # en_GB-semaine-medium) or a raw numeric index. None (default) uses

@@ -90,8 +90,48 @@ def test_create_tts_engine_rejects_unset_voice(tmp_path: Path) -> None:
 
 
 def test_create_tts_engine_rejects_unknown_engine(tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError, match="kokoro"):
-        create_tts_engine(TTSConfig(engine="kokoro", voice="x"), voices_dir=tmp_path)
+    with pytest.raises(NotImplementedError, match="bogus"):
+        create_tts_engine(TTSConfig(engine="bogus", voice="x"), voices_dir=tmp_path)
+
+
+def test_create_tts_engine_constructs_kokoro_with_config_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeKokoroTTSEngine:
+        def __init__(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(factory_module, "KokoroTTSEngine", _FakeKokoroTTSEngine)
+
+    engine = create_tts_engine(
+        TTSConfig(
+            engine="kokoro",
+            voice="af_sarah",
+            rate=1.2,
+            model_path="model.onnx",
+            voices_path="voices.bin",
+            language="en-us",
+        ),
+        voices_dir=tmp_path,
+    )
+
+    assert isinstance(engine, _FakeKokoroTTSEngine)
+    assert calls == [
+        {
+            "model_path": "model.onnx",
+            "voices_path": "voices.bin",
+            "voice": "af_sarah",
+            "speed": 1.2,
+            "lang": "en-us",
+        }
+    ]
+
+
+def test_create_tts_engine_kokoro_requires_a_voice(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="voice"):
+        create_tts_engine(TTSConfig(engine="kokoro", voice=None), voices_dir=tmp_path)
 
 
 def test_create_tts_engine_constructs_piper_with_resolved_paths_and_config(
@@ -109,7 +149,7 @@ def test_create_tts_engine_constructs_piper_with_resolved_paths_and_config(
     monkeypatch.setattr(factory_module, "PiperTTSEngine", _FakePiperTTSEngine)
 
     engine = create_tts_engine(
-        TTSConfig(voice="en_US-lessac-medium", rate=1.5, volume=0.8),
+        TTSConfig(engine="piper", voice="en_US-lessac-medium", rate=1.5, volume=0.8),
         voices_dir=tmp_path,
     )
 
@@ -140,7 +180,7 @@ def test_create_tts_engine_passes_speaker_through(
     monkeypatch.setattr(factory_module, "PiperTTSEngine", _FakePiperTTSEngine)
 
     create_tts_engine(
-        TTSConfig(voice="en_GB-semaine-medium", speaker="prudence"),
+        TTSConfig(engine="piper", voice="en_GB-semaine-medium", speaker="prudence"),
         voices_dir=tmp_path,
     )
 

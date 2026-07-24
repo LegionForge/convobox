@@ -106,7 +106,7 @@ def _highlight_keys(text: str) -> str:
 
 _CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
 _CHOICE_PERMISSION_MODES = ("plan", "approve", "permissive")
-_CHOICE_TTS_ENGINES = ("piper",)
+_CHOICE_TTS_ENGINES = ("kokoro", "piper")
 _CHOICE_STT_ENGINES = ("faster-whisper",)
 # Pulled from the real dependency (faster_whisper.utils.available_models()),
 # not a hand-maintained duplicate -- stays correct automatically as
@@ -231,11 +231,14 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         key="tts",
         label="TTS",
         fields=(
-            FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. Piper is the first supported local engine."),
-            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="Installed Piper voice key, such as en_US-lessac-medium."),
-            FieldSpec("tts", "speaker", "Speaker", "optional_str", help_text="Only for multi-speaker voices (e.g. en_GB-semaine-medium, en_GB-aru-medium, en_GB-vctk-medium, en_US-libritts-high) -- a speaker name from that voice's own list, or a raw numeric index. Leave unset for single-speaker voices or the voice's own default speaker. [t] will report an error naming the available speakers if this doesn't match."),
+            FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. kokoro (default) is permissively licensed (MIT + Apache-2.0); piper is GPL-3.0 and requires the separate `piper` extra (`uv sync --extra piper`)."),
+            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="kokoro: a voice name from kokoro-onnx's bundled voices (e.g. af_sarah). piper: an installed Piper voice key, such as en_US-lessac-medium."),
+            FieldSpec("tts", "model_path", "Model path", "str", help_text="kokoro only: path to the kokoro-v1.0.onnx model file."),
+            FieldSpec("tts", "voices_path", "Voices path", "str", help_text="kokoro only: path to the voices-v1.0.bin voice bundle."),
+            FieldSpec("tts", "language", "Language", "str", help_text="kokoro only: phonemizer language code, e.g. en-us."),
+            FieldSpec("tts", "speaker", "Speaker", "optional_str", help_text="piper only: only for multi-speaker voices (e.g. en_GB-semaine-medium, en_GB-aru-medium, en_GB-vctk-medium, en_US-libritts-high) -- a speaker name from that voice's own list, or a raw numeric index. Leave unset for single-speaker voices or the voice's own default speaker. [t] will report an error naming the available speakers if this doesn't match."),
             FieldSpec("tts", "rate", "Rate", "float", help_text="Speech speed multiplier. 1.0 is normal."),
-            FieldSpec("tts", "volume", "Volume", "float", help_text="Speech loudness multiplier. 1.0 is normal."),
+            FieldSpec("tts", "volume", "Volume", "float", help_text="Speech loudness multiplier. 1.0 is normal. piper only -- kokoro has no volume control."),
         ),
     ),
     SectionSpec(
@@ -282,6 +285,18 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
 
 
 def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tuple[FieldSpec, ...]:
+    if section.key == "tts":
+        if config.tts.engine == "kokoro":
+            return tuple(
+                field for field in section.fields
+                if field.key in {"engine", "voice", "model_path", "voices_path", "language", "rate"}
+            )
+        if config.tts.engine == "piper":
+            return tuple(
+                field for field in section.fields
+                if field.key in {"engine", "voice", "speaker", "rate", "volume"}
+            )
+        return section.fields
     if section.key != "backend":
         return section.fields
     backend_name = config.backend.name
@@ -654,6 +669,24 @@ def validate_config(config: AppConfig) -> ValidationReport:
                 resolve_voice_paths(config.tts.voice, DEFAULT_VOICES_DIR)
             except FileNotFoundError as exc:
                 report.errors.append(str(exc))
+    elif config.tts.engine == "kokoro":
+        if not config.tts.voice:
+            report.errors.append("tts.voice is required when tts.engine is kokoro")
+        # Unlike Piper's per-voice auto-download, the shared kokoro model/voices
+        # files (tts.model_path/voices_path) have no fetch-on-demand path here --
+        # a warning, not an error, since a not-yet-downloaded pair is a normal
+        # first-run state, not a broken config to hard-block saving.
+        if not Path(config.tts.model_path).exists():
+            report.warnings.append(
+                f"tts.model_path {config.tts.model_path!r} does not exist -- download it "
+                "from https://github.com/thewh1teagle/kokoro-onnx/releases"
+            )
+        if not Path(config.tts.voices_path).exists():
+            report.warnings.append(
+                f"tts.voices_path {config.tts.voices_path!r} does not exist -- download it: "
+                "wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+                "model-files-v1.0/voices-v1.0.bin -P .models/kokoro/"
+            )
 
     if config.backend.name in {"claude-code", "codex"}:
         if not config.backend.command:
