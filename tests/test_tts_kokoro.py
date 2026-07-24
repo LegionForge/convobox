@@ -172,3 +172,56 @@ async def test_is_speaking_false_after_empty_synthesis() -> None:
     await engine.synthesize("\x00")
 
     assert engine.is_speaking() is False
+
+
+# --- Stalled-stream recovery: live-confirmed 2026-07-24 against the real
+# kokoro-onnx package. create_stream() starts a detached
+# asyncio.create_task(process_batches()) with no exception handling -- if
+# a batch's internal call raises (confirmed trigger: text producing more
+# than the model's ~510-phoneme batch limit hits an IndexError deep
+# inside kokoro-onnx's own _create_audio), the task dies silently and
+# NEVER enqueues the end-of-stream sentinel, so the consumer's
+# `await queue.get()` blocks forever -- confirmed live (0% CPU,
+# indefinitely) against the real package, not assumed. synthesize_stream
+# now wait_for's each chunk (_CHUNK_TIMEOUT_S) specifically to bound this. ---
+
+
+class _FakeStalledKokoro:
+    """Mimics the real hang: create_stream() returns an async generator
+    that never yields and never raises -- exactly what kokoro-onnx's own
+    queue.get() does once its producer task has died silently."""
+
+    def create_stream(self, text: str, voice: str, speed: float, lang: str) -> AsyncIterator[tuple[np.ndarray, int]]:
+        return self._stream()
+
+    async def _stream(self) -> AsyncIterator[tuple[np.ndarray, int]]:
+        await asyncio.Event().wait()  # never set -- blocks forever, like the real hang
+        yield np.zeros(1, dtype=np.float32), 24000  # pragma: no cover -- unreachable
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_recovers_from_a_stalled_producer(monkeypatch: pytest.MonkeyPatch) -> None:
+    import convobox.tts.kokoro as kokoro_module
+
+    monkeypatch.setattr(kokoro_module, "_CHUNK_TIMEOUT_S", 0.05)
+    with patch("kokoro_onnx.Kokoro", return_value=_FakeStalledKokoro()):
+        engine = KokoroTTSEngine("model.onnx", "voices.bin")
+
+    with pytest.raises(RuntimeError, match="stalled"):
+        await engine.synthesize("this would hang forever without the timeout guard")
+
+    # The engine must recover cleanly, not stay stuck "speaking" forever.
+    assert engine.is_speaking() is False
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_does_not_time_out_on_normal_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A tight timeout must never fire for chunks that arrive well within it.
+    import convobox.tts.kokoro as kokoro_module
+
+    monkeypatch.setattr(kokoro_module, "_CHUNK_TIMEOUT_S", 5.0)
+    engine, _ = _make_engine([[(np.array([0.1], dtype=np.float32), 24000)]])
+
+    audio = await engine.synthesize("quick")
+
+    assert audio.shape == (1,)
