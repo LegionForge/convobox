@@ -1788,11 +1788,39 @@ def _toggle_or_cycle(state: TuiState) -> None:
     state.status = _field_updated_status(spec, state.dirty)
 
 
+async def _test_kokoro_voice(voice: str, config: AppConfig) -> None:
+    """Test-speak a sample phrase with the given Kokoro voice."""
+    try:
+        tts = create_tts_engine(
+            engine="kokoro",
+            voice=voice,
+            model_path=str(resolve_voice_paths("kokoro")[0]),
+            voices_path=str(resolve_voice_paths("kokoro")[1]),
+        )
+    except Exception:
+        return
+
+    test_phrase = f"Testing {voice} LegionForge ConvoBox Voice Testing"
+    try:
+        # Collect all audio chunks
+        audio_data = []
+        sample_rate = tts.sample_rate
+        async for chunk in tts.synthesize_stream(test_phrase):
+            audio_data.append(chunk)
+        if audio_data:
+            import sounddevice
+            combined = np.concatenate(audio_data)
+            sounddevice.play(combined, samplerate=sample_rate)
+            sounddevice.wait()
+    except Exception:
+        pass
+
+
 def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, str]:
     """Dedicated submenu for selecting a Kokoro voice.
 
     Allows UP/DOWN/LEFT/RIGHT/Space to cycle freely in this nested context
-    without interfering with main tab navigation.
+    without interfering with main tab navigation. [t] tests the voice.
     """
     try:
         voices = list(_choices_for(
@@ -1821,6 +1849,7 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
             "",
             "↑/↓ or ←/→ to move between voices",
             "Space to cycle forward",
+            "[t] to test the current voice",
             "Enter to confirm, Esc to cancel",
         ]
         _draw_modal(
@@ -1837,6 +1866,13 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
             return False, current
         if key == "ENTER":
             return True, voices[index]
+        if key.lower() == "t":
+            # Test the current voice
+            try:
+                asyncio.run(_test_kokoro_voice(voices[index], config))
+            except Exception:  # noqa: BLE001
+                pass  # Silently fail on test errors; return to picker
+            continue
 
         # All arrow keys and space cycle through voices in this context
         if key in {"LEFT", "UP"}:
