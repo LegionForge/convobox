@@ -1432,10 +1432,12 @@ def render_modal(
     max_box_width = int(width * 0.8)
     box_width = min(max_box_width, max(52, longest_line + 4, len(buffer) + 8))
     left_pad = max(0, (width - box_width) // 2 - 1)
-    right_pad = max(0, width - left_pad - box_width - 2)
-    box_top = " " * left_pad + border + border * (box_width - 2) + border + " " * right_pad
-    lines.append(box_top[:width])
-    inner_width = box_width - 2
+    # Ensure box fits within terminal width without truncation
+    actual_box_width = min(box_width, width - left_pad - 2)
+    right_pad = width - left_pad - actual_box_width - 2
+    box_top = " " * left_pad + border + border * (actual_box_width - 2) + border + " " * right_pad
+    lines.append(box_top)
+    inner_width = actual_box_width - 2
     for idx in range(body_height):
         if idx < len(content_lines):
             # _highlight_keys AFTER fit(), same ordering rule as the main
@@ -1448,9 +1450,9 @@ def render_modal(
             + "|"
             + inner
             + "|"
-            + " " * max(0, width - left_pad - box_width - 2)
+            + " " * max(0, width - left_pad - actual_box_width - 2)
         )
-    lines.append(box_top[:width])
+    lines.append(box_top)
     tip = (
         " Tip: Escape cancels the modal and returns to the editor"
         if severity == "normal"
