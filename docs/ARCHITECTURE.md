@@ -27,7 +27,7 @@ flowchart TB
         STT["LocalTranscriber · faster-whisper · auto-detect by default · decoder + language confidence"]:::pipeline
         SW["SafewordDetector · deterministic substring match · no LLM in this path"]:::safety
         ORCH["Orchestrator · hard-stop precedence · empty-transcript guard · busy/idle routing"]:::routing
-        TTS["PiperTTSEngine · sanitize_text · streaming synthesis"]:::pipeline
+        TTS["TTSEngine · Kokoro (default) or Piper · sanitize_text · streaming synthesis"]:::pipeline
         PLAY["AudioPlayer · barge-in stop()"]:::pipeline
     end
 
@@ -111,7 +111,7 @@ flowchart TB
     SEND["send_text · fresh command"]:::backend
     EVENTS["drain SSE events · TEXT / TOOL_CALL / TOOL_RESULT / ERROR / DONE"]:::backend
     SPEAKQ{"TEXT event with prose? · strip_code_for_speech removes code and diffs"}:::decision
-    SPEAK["Piper TTS synthesis · fire-and-forget task · AudioPlayer to speakers"]:::step
+    SPEAK["TTS synthesis (Kokoro default, Piper opt-in) · fire-and-forget task · AudioPlayer to speakers"]:::step
     SILENT["nothing spoken · code and diffs stay on screen"]:::dropped
 
     WIN --> ACC --> ENDQ
@@ -139,13 +139,13 @@ Current candidate stack for the local pipeline:
   segmentation
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — local
   speech-to-text
-- A local TTS engine (Kokoro or Piper — not yet finalized, though licensing
-  now favors Kokoro: the current `piper-tts` package is GPL-3.0, which
-  would make ConvoBox a GPL-encumbered distribution rather than the clean
-  MIT project it's meant to be — see
-  [../DEPENDENCY_LICENSE_AUDIT.md](../DEPENDENCY_LICENSE_AUDIT.md)). Whatever the
-  choice, response text must never be interpolated directly into a shell
-  command to invoke it — see
+- A local TTS engine — Kokoro (Apache 2.0, default since 2026-07-24) or
+  Piper (GPL-3.0, opt-in only via `uv sync --extra piper`, kept out of
+  the default install for exactly the licensing reason this section used
+  to flag as unresolved — see
+  [../DEPENDENCY_LICENSE_AUDIT.md](../DEPENDENCY_LICENSE_AUDIT.md)).
+  Whatever the choice, response text must never be interpolated directly
+  into a shell command to invoke it — see
   [LESSONS-FROM-VOICE-OPENCODE.md](LESSONS-FROM-VOICE-OPENCODE.md).
 - [Ollama](https://ollama.com) — for the optional local LLM cleanup pass,
   if testing shows it's warranted
