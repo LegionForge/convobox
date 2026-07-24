@@ -29,21 +29,39 @@ channel, editor as canvas.
   convobox[kokoro], convobox[aec] already exists); the TTSEngine ABC
   already anticipates this (its docstring named Kokoro years... hours
   in advance). STT needs the same ABC treatment as TTS.
-- Kokoro (Apache-2.0) is the first second-engine, proving the plug
-  points. The voice-picker TUI experience is KEPT AS-IS conceptually
-  (JP's explicit call) and adapted per engine -- note Kokoro's voice
-  model differs from piper's per-voice-ONNX HuggingFace catalog
-  (built-in voice set, no download-per-voice), so the picker's
-  browse/audition/choose/persist flow stays while its
-  catalog/download mechanics become engine-specific.
-- **Auto-download-on-first-use, shipped for Piper 2026-07-20** (see
-  `create_tts_engine`/`resolve_voice_paths` in
-  `src/convobox/tts/factory.py`): a voice named in config that isn't
-  cached yet is downloaded automatically instead of raising with a
-  "run voice_picker.py yourself" hint -- mirrors the STT model's
-  existing one-time-download-then-offline pattern
-  (`convobox.stt.transcriber`). Carry the same convention to Kokoro's
-  engine factory once it lands, not just the picker UX noted above.
+- **Kokoro (Apache-2.0) has landed and is now the default engine**
+  (shipped 2026-07-24, PR #141) -- MIT + Apache-2.0 end to end, unlike
+  Piper (GPL-3.0), which moved to an explicit opt-in extra
+  (`uv sync --extra piper`) rather than a main dependency. See
+  DEPENDENCY_LICENSE_AUDIT.md.
+- **Auto-download-on-first-use, shipped for Piper 2026-07-20, carried
+  to Kokoro 2026-07-24** (see `create_tts_engine`/`resolve_voice_paths`/
+  `resolve_kokoro_model_paths` in `src/convobox/tts/factory.py`): a
+  voice/model named in config that isn't cached yet is downloaded
+  automatically. Kokoro also gained `refresh_kokoro_voices()` (`[d]` in
+  the Settings TUI) to force a re-download when the file's already
+  cached -- the auto-download path only fetches when missing, so it
+  would never notice kokoro-onnx's upstream release adding voices to an
+  already-downloaded file otherwise.
+- **Settings TUI voice picker for Kokoro, shipped 2026-07-24 (PR #144)
+  -- narrower than originally envisioned here, noted honestly.** This
+  section originally assumed adapting `scripts/voice_picker_tui.py`'s
+  full-screen browse-and-audition-before-picking experience for Kokoro
+  ("the picker's browse/audition/choose/persist flow stays while its
+  catalog/download mechanics become engine-specific"). What actually
+  shipped instead: `tts.voice`
+  in `scripts/settings_tui.py` becomes a real cycle-through-the-54-actual-
+  voices field (`kind="kokoro_voice"`, reading the real downloaded voices
+  file directly) when engine is kokoro -- naming and selection only, no
+  audition-before-picking step. `voice_picker.py`/`voice_picker_tui.py`
+  remain Piper-only (they browse Piper's per-voice HuggingFace catalog,
+  which has no Kokoro equivalent -- Kokoro ships all 54 voices in one
+  fixed bundle). A real "hear each candidate voice before choosing" flow
+  for Kokoro -- arguably more valuable there than for Piper, since there's
+  no per-voice download decision to make first -- remains unbuilt.
+  `[c]` (side-by-side Kokoro/Piper compare, same PR) is a related but
+  different feature: it speaks one fixed phrase through each engine's
+  currently-configured voice, not a sampler across Kokoro's own 54 voices.
 
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice

@@ -1,6 +1,6 @@
 # Dependency license audit: can ConvoBox stay a clean MIT project?
 
-## Status: issue identified, not yet fixed
+## Status: primary fix shipped 2026-07-24 (PR #141) -- see "What actually shipped" below for one deliberate deviation from this audit's own recommendation #2
 
 **Decision (2026-07-10): ConvoBox stays MIT, free for everyone —
 personal and commercial use alike, no paid tier — matching the permissive
@@ -104,7 +104,7 @@ ends up in use, its specific voice/model files need their own check.
 | torch | Apache-2.0 / BSD / MIT (compound, no copyleft component) | Verified directly from installed package metadata |
 | onnxruntime | MIT | Verified directly from installed package metadata |
 | httpx, httpx-sse, pydantic, pyyaml, sounddevice, numpy | MIT / BSD (various) | Verified directly from installed package metadata |
-| **Kokoro-82M** (candidate replacement, not currently used) | Apache 2.0, code AND model weights | Verified via web search against the model's own Hugging Face page |
+| **Kokoro-82M** (default TTS engine since 2026-07-24, PR #141) | Apache 2.0, code AND model weights | Verified via web search against the model's own Hugging Face page. Individual voice files' own licenses not yet independently re-checked (see "What actually shipped" item 3 below). |
 | aec-audio-processing (optional `[aec]` extra, added 2026-07-11) | BSD-3-Clause | Verified directly from the bundled `dist-info/licenses/LICENSE` (the wheel's METADATA declares no license field — the LICENSE file is the authority); wraps Google's WebRTC audio processing module, itself BSD-3 |
 
 ## Recommended fix
@@ -116,27 +116,41 @@ Piper ("not yet finalized"). This audit resolves that choice in the
 licensing-safe direction: Kokoro-82M is Apache 2.0 for both code and
 model weights, genuinely permissive, no GPL entanglement.
 
-**Not done in this pass, deliberately** (matches how the OpenCode API
-finding was handled — document precisely, don't touch code without a
-green light):
-1. Implement `KokoroTTSEngine` (subclass of `TTSEngine`, same shape as
-   `PiperTTSEngine` — see `.tours/03-extension-points-modularity.tour`'s
-   checklist for adding a new TTS engine).
-2. Remove `PiperTTSEngine` from the codebase rather than keep it as an
-   opt-in — with no separate tier system anymore (everything is just MIT,
-   free for everyone), keeping a GPL'd engine around at all, even
-   optional, means "is this specific ConvoBox install still cleanly MIT?"
-   depends on which engine a given user enabled. Simpler and more honest
-   to just not ship a GPL dependency at all.
-3. Pull and read Kokoro's actual voice/model files' individual licenses
-   the same way this audit should still do for Piper's lessac voice —
-   don't assume "Apache 2.0 model" means every individual voice file
-   shipped with it carries identical terms without checking.
-4. Re-run this same audit methodology (installed-package metadata first,
-   targeted web search for anything not resolvable locally) after any
-   dependency changes — this is exactly the kind of check that's cheap to
-   automate and easy to silently regress on (e.g. a routine `uv sync`
-   pulling in a new transitive GPL dependency without anyone noticing).
+## What actually shipped (2026-07-24, PR #141)
+
+1. **Done.** `KokoroTTSEngine` implemented (`src/convobox/tts/kokoro.py`,
+   subclass of `TTSEngine`, same shape as `PiperTTSEngine`) and made the
+   default engine (`TTSConfig.engine: str = "kokoro"`).
+2. **Deviated from this audit's own recommendation, deliberately --
+   flagging that plainly rather than letting the audit read as if #2
+   happened as originally written.** This audit recommended removing
+   `PiperTTSEngine` from the codebase entirely. What shipped instead:
+   Piper stays in the codebase but moves to an explicit opt-in extra
+   (`uv sync --extra piper` / `pip install convobox[piper]`), matching
+   the existing `[aec]`/`[cuda]` extra pattern -- not a main dependency,
+   so a plain `uv sync`/`pip install .` never pulls in GPL-3.0 code.
+   This resolves the concern this audit actually led with (a *default*
+   ConvoBox install/distribution stays clean MIT) but does NOT fully
+   resolve the narrower point raised in the original #2: a user who
+   deliberately opts into `--extra piper` and then distributes THAT
+   install still creates a GPL-encumbered combined work -- the
+   opt-in is a real, active choice on their part at that point, not an
+   accident, but it's still worth being precise that "Piper opt-in
+   exists in the codebase" and "ConvoBox the project is unconditionally
+   clean MIT" are two different claims. `docs/ROADMAP.md` and
+   `README.md`'s License section both describe the shipped (opt-in)
+   shape, not a hypothetical fully-Piper-free one.
+3. **Still not done.** Pull and read Kokoro's actual voice/model files'
+   individual licenses the same way this audit should still do for
+   Piper's lessac voice -- don't assume "Apache 2.0 model" means every
+   individual voice file shipped with it (54 as of the `model-files-v1.0`
+   release) carries identical terms without checking.
+4. **Still not done.** Re-run this same audit methodology (installed-
+   package metadata first, targeted web search for anything not
+   resolvable locally) after any dependency changes -- this is exactly
+   the kind of check that's cheap to automate and easy to silently
+   regress on (e.g. a routine `uv sync` pulling in a new transitive GPL
+   dependency without anyone noticing).
 
 ## Other things worth double-checking later, not yet done
 

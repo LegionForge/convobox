@@ -46,11 +46,29 @@ backend:
 # tts -- how ConvoBox speaks (text-to-speech).
 # ---------------------------------------------------------------------------
 tts:
-  engine: piper           # only "piper" is implemented today
-  voice: en_US-lessac-medium   # a downloaded Piper voice key; REQUIRED to
-                          # hear anything. Browse/download/audition with:
-                          #   python scripts/voice_picker_tui.py
-                          # (it can write your choice back here for you).
+  engine: kokoro          # "kokoro" (default) | "piper"
+  # -- kokoro: MIT + Apache-2.0 end to end, no extra install needed.
+  #    voice is one of the 54 names bundled in voices_path below (e.g.
+  #    af_sarah, am_adam, bf_emma, jf_alpha, zf_xiaoxiao -- naming
+  #    convention: <language><gender>_<name>). model_path/voices_path
+  #    auto-download on first use (~326MB + ~28MB, one time); use
+  #    `python scripts/settings_tui.py`'s TTS section ([Space]/arrows
+  #    cycles the real downloaded voices, [d] force-redownloads if a
+  #    newer kokoro-onnx release adds voices this list doesn't show).
+  voice: af_sarah
+  model_path: .models/kokoro/kokoro-v1.0.onnx
+  voices_path: .models/kokoro/voices-v1.0.bin
+  language: en-us         # kokoro only: phonemizer language. Only en-us/
+                          # en-gb are confirmed to work well; other Kokoro
+                          # voices (e.g. jf_alpha, zf_xiaoxiao) may need a
+                          # matching language here too -- not yet verified.
+  # -- piper: GPL-3.0, requires `uv sync --extra piper` first. voice is a
+  #    downloaded Piper voice key (e.g. en_US-lessac-medium); REQUIRED to
+  #    hear anything with this engine. Browse/download/audition with:
+  #      python scripts/voice_picker_tui.py
+  #    (it can write your choice back here for you.) Switch engine to
+  #    "piper" above, then set:
+  # voice: en_US-lessac-medium
   # Some Piper voices are genuinely multi-speaker (e.g. en_GB-semaine-medium:
   # 4 named speakers, en_GB-aru-medium: 12, en_GB-vctk-medium: 109,
   # en_US-libritts-high: 904) -- pick one by name from that voice's own
@@ -59,7 +77,12 @@ tts:
   # at startup listing the real available names for that voice.
   # speaker: prudence
   rate: 1.0               # speech speed (1.0 normal, 1.2 faster, 0.8 slower)
-  volume: 1.0             # loudness (1.0 normal, 0.5 half)
+  volume: 1.0             # loudness (1.0 normal, 0.5 half). piper only --
+                          # kokoro has no volume control.
+  # Settings TUI tip: switching tts.engine remembers each engine's own
+  # voice/settings (tts_profiles), and [c] speaks the same test phrase
+  # through both Kokoro and Piper back to back so you can compare before
+  # choosing.
 
 # ---------------------------------------------------------------------------
 # stt -- how ConvoBox hears you (speech-to-text, faster-whisper, all local).

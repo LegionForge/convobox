@@ -23,8 +23,11 @@ def test_example_config_reflects_documented_defaults() -> None:
     config = load_config(_EXAMPLE)
     # Spot-check the values the comments promise, across every section.
     assert config.backend.name == "opencode"
-    assert config.tts.engine == "piper"
-    assert config.tts.voice == "en_US-lessac-medium"
+    assert config.tts.engine == "kokoro"
+    assert config.tts.voice == "af_sarah"
+    assert config.tts.model_path == ".models/kokoro/kokoro-v1.0.onnx"
+    assert config.tts.voices_path == ".models/kokoro/voices-v1.0.bin"
+    assert config.tts.language == "en-us"
     assert config.stt.model == "base"
     assert config.audio.echo_cancellation is False
     assert config.audio.sample_rate == 16000
