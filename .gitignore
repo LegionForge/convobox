@@ -44,3 +44,18 @@ scripts/_tone.py
 # (message-log dumps, one-off test artifacts) -- generalizes the same
 # pattern _diag.py/_tone.py already used above.
 /_*
+
+# Web UI and persistent history -- contains user transcripts, approvals, commands.
+# KEEP THIS unless you explicitly want to track history in a PRIVATE repo.
+# See docs/SECURITY.md for opt-in flow.
+.convobox-history/
+.convobox.db
+
+# Web server logs (may contain event data, tool inputs, responses)
+.convobox-web.log
+convobox-web-*.log
+.convobox-cache/
+
+# Private/scratch directories
+.scratch/
+.private/
