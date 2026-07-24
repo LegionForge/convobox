@@ -1779,17 +1779,84 @@ def _toggle_or_cycle(state: TuiState) -> None:
     state.status = _field_updated_status(spec, state.dirty)
 
 
+def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, str]:
+    """Dedicated submenu for selecting a Kokoro voice.
+
+    Allows UP/DOWN/LEFT/RIGHT/Space to cycle freely in this nested context
+    without interfering with main tab navigation.
+    """
+    try:
+        voices = list(_choices_for(
+            FieldSpec(
+                section="tts", key="voice", kind="kokoro_voice",
+                label="Voice", help_text="", is_required=True
+            ),
+            config
+        ))
+    except Exception:
+        voices = ["af_sarah"]  # fallback
+
+    if not voices:
+        voices = ["af_sarah"]
+
+    # Start at current voice if it's in the list, else start at first
+    try:
+        index = voices.index(_format_value(current))
+    except (ValueError, IndexError):
+        index = 0
+
+    while True:
+        # Draw voice picker modal
+        detail_lines = [
+            "Use arrows or Space to cycle through voices:",
+            "",
+            "↑/↓ or ←/→ to move between voices",
+            "Space to cycle forward",
+            "Enter to confirm, Esc to cancel",
+        ]
+        _draw_modal(
+            "Select Kokoro Voice",
+            f"Editing tts.voice",
+            detail_lines,
+            voices[index],
+            choice_options=voices,
+            choice_value=voices[index],
+        )
+
+        key = read_key()
+        if key == "ESC":
+            return False, current
+        if key == "ENTER":
+            return True, voices[index]
+
+        # All arrow keys and space cycle through voices in this context
+        if key in {"LEFT", "UP"}:
+            index = (index - 1) % len(voices)
+        elif key in {"RIGHT", "DOWN", " "}:
+            index = (index + 1) % len(voices)
+
+
 def _prompt_edit(state: TuiState) -> None:
     spec = state.current_field()
     if spec is None:
         state.status = "nothing to edit in this section"
         return
     current = _get_value(state.working, spec)
-    try:
-        accepted, new_value = _edit_value_interactive(spec, current, state.working)
-    except Exception as exc:  # noqa: BLE001
-        state.status = f"invalid value: {exc}"
-        return
+
+    # Use dedicated voice picker for kokoro_voice fields
+    if spec.kind == "kokoro_voice":
+        try:
+            accepted, new_value = _kokoro_voice_picker_modal(current, state.working)
+        except Exception as exc:  # noqa: BLE001
+            state.status = f"invalid value: {exc}"
+            return
+    else:
+        try:
+            accepted, new_value = _edit_value_interactive(spec, current, state.working)
+        except Exception as exc:  # noqa: BLE001
+            state.status = f"invalid value: {exc}"
+            return
+
     if not accepted:
         state.status = "edit cancelled"
         return
