@@ -282,6 +282,33 @@ async def test_thread_start_with_no_id_raises(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
+async def test_send_text_clears_busy_when_the_turn_start_request_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # send_text sets _busy = True before awaiting turn/start and relies on
+    # its own except/re-raise to unset it if the request fails -- nothing
+    # else clears busy on this path (the reader task never sees a
+    # turn/started notification for a request that never got a response).
+    # Untested before this: every existing failure-flavored scenario
+    # (thread/start with no id, process death) fails BEFORE or entirely
+    # outside send_text's own try block.
+    adapter = _adapter()
+    try:
+        await adapter._ensure_thread()
+
+        async def _boom(method: str, params: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("app-server rejected turn/start")
+
+        monkeypatch.setattr(adapter, "_request", _boom)
+
+        with pytest.raises(RuntimeError, match="rejected turn/start"):
+            await adapter.send_text("hi")
+        assert adapter.is_busy() is False
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_hard_stop_before_any_send_is_a_noop() -> None:
     adapter = _adapter()
     await adapter.send_hard_stop()
@@ -518,6 +545,54 @@ async def test_failed_turn_yields_error_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_response_ignores_unknown_and_already_done_futures() -> None:
+    # _resolve_response is the reader task's only path back to a waiting
+    # _request() call; a response for an id nobody's waiting on (already
+    # popped, or resolved twice by a malformed server) must be a silent
+    # no-op, not a KeyError or an InvalidStateError from calling
+    # set_result/set_exception on an already-done future.
+    adapter = _adapter()
+
+    adapter._resolve_response({"id": 999, "result": {}})  # nothing pending at all
+
+    future: asyncio.Future[dict[str, object]] = asyncio.get_running_loop().create_future()
+    future.set_result({"already": "done"})
+    adapter._pending[1] = future
+    adapter._resolve_response({"id": 1, "result": {"new": "value"}})
+    assert future.result() == {"already": "done"}
+
+
+@pytest.mark.asyncio
+async def test_answer_server_request_declines_unknown_methods_generically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A server->client request whose method isn't in _APPROVAL_DENY_PAYLOADS
+    # (some future app-server protocol addition) falls back to a generic
+    # decline rather than hanging the turn forever or raising a KeyError.
+    adapter = _adapter()
+    written: list[dict[str, object]] = []
+
+    async def _capture(payload: dict[str, object]) -> None:
+        written.append(payload)
+
+    monkeypatch.setattr(adapter, "_write", _capture)
+    await adapter._answer_server_request({"id": 42, "method": "some/unknown/method"})
+    assert written == [{"jsonrpc": "2.0", "id": 42, "result": {"decision": "decline"}}]
+
+
+def test_handle_notification_bare_error_method_yields_error_event() -> None:
+    # Distinct from a failed turn/completed: a bare top-level "error"
+    # notification (protocol-level, not turn-scoped) must still surface
+    # as an ERROR event rather than being one of the deliberately-ignored
+    # notification types.
+    adapter = _adapter()
+    adapter._handle_notification({"method": "error", "params": {"message": "boom"}})
+    event = adapter._events.get_nowait()
+    assert event.type == BackendEventType.ERROR
+    assert event.content is not None and "boom" in event.content
+
+
+@pytest.mark.asyncio
 async def test_process_death_ends_events_and_clears_busy() -> None:
     adapter = _adapter()
     try:
@@ -632,3 +707,57 @@ def test_resolve_command_falls_back_to_bare_name_when_nothing_resolves(
 
     adapter = CodexAdapter(["codex", "--flag"])
     assert adapter._command == ["codex", "--flag"]
+
+
+def test_resolve_command_leaves_non_codex_binary_names_untouched_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The .cmd/.exe shim guessing loop only exists to resolve a bare
+    # "codex" on PATH; a caller who already named a specific wrapper
+    # binary (e.g. a custom launcher script) must pass through unchanged,
+    # without even consulting which() -- untested before this, since both
+    # existing Windows-path tests use "codex" as the head token.
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(mod.os, "name", "nt", raising=False)
+
+    def _unexpected_which(name: str) -> str | None:
+        raise AssertionError(f"shutil.which({name!r}) should not be called for a non-codex binary")
+
+    monkeypatch.setattr(mod.shutil, "which", _unexpected_which)
+
+    adapter = CodexAdapter(["my-custom-codex-wrapper", "--flag"])
+    assert adapter._command == ["my-custom-codex-wrapper", "--flag"]
+
+
+def test_permission_config_args_unknown_mode_passes_no_overrides() -> None:
+    # permission_mode is a plain string with no validation between
+    # BackendConfig and CodexAdapter's constructor -- an unrecognized
+    # value (typo, future mode not yet wired here) must degrade to no
+    # -c overrides rather than raising or silently picking a posture.
+    from convobox.adapters.codex import _permission_config_args
+
+    assert _permission_config_args("nonexistent-mode") == []
+
+
+def test_describe_approval_request_file_change_uses_the_changes_field() -> None:
+    import convobox.adapters.codex as mod
+
+    text = mod._describe_approval_request(
+        "item/fileChange/requestApproval",
+        {"changes": "diff --git a/x b/x\n+added line"},
+    )
+    assert "FILE CHANGE" in text
+    assert "Requested change:" in text
+    assert "diff --git a/x b/x" in text
+
+
+def test_describe_approval_request_includes_cwd_and_reason_when_present() -> None:
+    import convobox.adapters.codex as mod
+
+    text = mod._describe_approval_request(
+        "item/commandExecution/requestApproval",
+        {"command": "rm -rf /tmp/x", "cwd": "/home/user/project", "reason": "cleanup"},
+    )
+    assert "Working directory: /home/user/project" in text
+    assert "Reason: cleanup" in text
