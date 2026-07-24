@@ -1481,9 +1481,14 @@ def _draw_modal(
         except OSError:
             width = 100 if width is None else width
             height = 30 if height is None else height
+    # Clear-to-end-of-line on every row (\x1b[K), not just cursor-home --
+    # relying on exact-width padding to overwrite the previous frame is
+    # fragile against any width miscalculation (e.g. wide Unicode chars
+    # mis-measured by the terminal), which otherwise leaves stale
+    # fragments from a wider previous frame visible past the new content.
     sys.stdout.write(
         "\x1b[H"
-        + "\n".join(
+        + "\x1b[K\n".join(
             render_modal(
                 title,
                 prompt,
@@ -1496,6 +1501,7 @@ def _draw_modal(
                 choice_value=choice_value,
             )
         )
+        + "\x1b[K"
     )
     sys.stdout.flush()
 
@@ -1730,7 +1736,11 @@ def read_key() -> str:
 
 def draw(state: TuiState) -> None:
     size = os.get_terminal_size()
-    sys.stdout.write("\x1b[H" + "\n".join(render(state, size.columns, size.lines)))
+    # Clear-to-end-of-line on every row -- see _draw_modal's comment for why
+    # relying on exact-width padding alone isn't reliable enough.
+    sys.stdout.write(
+        "\x1b[H" + "\x1b[K\n".join(render(state, size.columns, size.lines)) + "\x1b[K"
+    )
     sys.stdout.flush()
 
 
@@ -1847,7 +1857,7 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
         detail_lines = [
             "Use arrows or Space to cycle through voices:",
             "",
-            "↑/↓ or ←/→ to move between voices",
+            "Left/Right or Up/Down to move between voices",
             "Space to cycle forward",
             "[t] to test the current voice",
             "Enter to confirm, Esc to cancel",
