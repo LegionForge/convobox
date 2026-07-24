@@ -27,6 +27,7 @@ def test_resolve_voice_paths_returns_existing_files(tmp_path: Path) -> None:
 def test_resolve_voice_paths_downloads_a_missing_voice_automatically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     calls: list[tuple[str, Path]] = []
 
     def _fake_download_voice(key: str, voices_dir: Path) -> None:
@@ -46,6 +47,7 @@ def test_resolve_voice_paths_downloads_a_missing_voice_automatically(
 def test_resolve_voice_paths_does_not_redownload_an_existing_voice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     _touch(tmp_path / "en_US-lessac-medium.onnx")
     _touch(tmp_path / "en_US-lessac-medium.onnx.json")
     calls: list[str] = []
@@ -62,6 +64,8 @@ def test_resolve_voice_paths_does_not_redownload_an_existing_voice(
 def test_resolve_voice_paths_download_failure_raises_actionable_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
+
     def _fail(key: str, voices_dir: Path) -> None:
         raise RuntimeError("404 not found")
 
@@ -74,6 +78,7 @@ def test_resolve_voice_paths_download_failure_raises_actionable_error(
 def test_resolve_voice_paths_incomplete_download_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("piper", reason="piper-tts is GPL-3.0, opt-in only (uv sync --extra piper)")
     # download_voice "succeeds" (no exception) but doesn't actually produce
     # both expected files -- must not be silently treated as success.
     monkeypatch.setattr(
