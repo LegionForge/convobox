@@ -224,6 +224,37 @@ def test_model_stays_unavailable_after_a_failed_reload_and_retries_next_call() -
     assert calls["count"] == 3
 
 
+def test_transcribe_with_model_already_none_and_reload_failing_again_returns_empty() -> None:
+    # Distinct from the test above: that one exercises transcribe()'s
+    # `except (RuntimeError, MemoryError)` handler (the model exists,
+    # THEN its own .transcribe() call fails). This covers the separate
+    # early-exit at the top of transcribe() -- `if self._model is None
+    # and not self._reload_model(): return self._empty_result(...)` --
+    # which fires when a model is already absent (e.g. left over from a
+    # prior call's own failed reload) before any model.transcribe() is
+    # even attempted this call.
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: _FakeModel())
+    transcriber._model = None  # simulate the post-failure state directly
+
+    def failing_factory() -> _FakeModel:
+        raise RuntimeError("mkl_malloc: failed to allocate memory")
+
+    transcriber._custom_factory = failing_factory
+
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+
+    assert result.text == ""
+    assert result.segments == []
+    assert result.avg_logprob == pytest.approx(-10.0)
+    assert transcriber._model is None  # still broken, not left in a half-built state
+
+    # And the NEXT call still retries rather than staying stuck (same
+    # "not permanently broken" guarantee the test above covers).
+    transcriber._custom_factory = lambda: _FakeModel()
+    result2 = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert result2.text == "hello world"
+
+
 def test_reload_drops_the_old_model_reference_before_rebuilding() -> None:
     # The old (broken) model must be released (self._model set to None)
     # BEFORE the factory is called again for the replacement -- reduces
