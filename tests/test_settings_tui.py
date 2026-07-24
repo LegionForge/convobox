@@ -63,7 +63,7 @@ def test_modal_edit_can_cancel_with_escape(monkeypatch: pytest.MonkeyPatch) -> N
     spec = FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str")
     keys = iter(["a", "b", "ESC"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
-    accepted, value = settings_tui._edit_value_interactive(spec, ["stop stop stop"])
+    accepted, value = settings_tui._edit_value_interactive(spec, ["stop stop stop"], AppConfig())
     assert accepted is False
     assert value == ["stop stop stop"]
 
@@ -72,7 +72,7 @@ def test_modal_edit_accepts_value_on_enter(monkeypatch: pytest.MonkeyPatch) -> N
     spec = FieldSpec("audio", "input_device", "Input device", "optional_str")
     keys = iter(["h", "i", "ENTER"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
-    accepted, value = settings_tui._edit_value_interactive(spec, "")
+    accepted, value = settings_tui._edit_value_interactive(spec, "", AppConfig())
     assert accepted is True
     assert value == "hi"
 
@@ -94,7 +94,7 @@ def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.Monke
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
     monkeypatch.setattr(settings_tui, "_draw_modal", _capture_draw)
 
-    accepted, value = settings_tui._edit_value_interactive(spec, "do-not-disturb")
+    accepted, value = settings_tui._edit_value_interactive(spec, "do-not-disturb", AppConfig())
     assert accepted is True
     assert value == "take-over"
     assert drawn == ["do-not-disturb", "conversational", "take-over"]
@@ -211,6 +211,155 @@ def test_validate_config_warns_when_kokoro_model_files_missing(tmp_path: Path, m
     assert report.errors == []
     assert any("tts.model_path" in msg for msg in report.warnings)
     assert any("tts.voices_path" in msg for msg in report.warnings)
+
+
+def _write_fake_kokoro_voices(path: Path, *names: str) -> None:
+    """A real, tiny npz archive shaped like the actual kokoro-onnx voices
+    file -- same format list_kokoro_voices reads, verified in
+    tests/test_tts_factory.py against a real downloaded voices-v1.0.bin."""
+    np.savez(path, **{name: np.zeros((1, 1), dtype=np.float32) for name in names})
+    path.with_suffix(path.suffix + ".npz").rename(path)
+
+
+# --- Kokoro voice picker: tts.voice becomes a real "cycle the actually
+# downloaded voices" field for kokoro (unlike Piper's free-text voice
+# key), since Kokoro's voices are a fixed, closed set baked into
+# tts.voices_path rather than a per-voice download catalog. ---
+
+
+def test_tts_section_shows_kokoro_voice_field_only_for_kokoro_engine() -> None:
+    kokoro_config = _make_config(**{"tts.engine": "kokoro"})
+    kokoro_state = TuiState(
+        path=Path("convobox.yaml"), original=kokoro_config, working=kokoro_config.model_copy(deep=True)
+    )
+    kokoro_state.selected_section = next(i for i, s in enumerate(kokoro_state.sections) if s.key == "tts")
+    kokoro_fields = kokoro_state.current_fields()
+    voice_field = next(f for f in kokoro_fields if f.key == "voice")
+    assert voice_field.kind == "kokoro_voice"
+    assert "model_path" in {f.key for f in kokoro_fields}
+    assert "speaker" not in {f.key for f in kokoro_fields}
+
+    piper_config = _make_config(**{"tts.engine": "piper"})
+    piper_state = TuiState(
+        path=Path("convobox.yaml"), original=piper_config, working=piper_config.model_copy(deep=True)
+    )
+    piper_state.selected_section = next(i for i, s in enumerate(piper_state.sections) if s.key == "tts")
+    piper_fields = piper_state.current_fields()
+    piper_voice_field = next(f for f in piper_fields if f.key == "voice")
+    assert piper_voice_field.kind == "optional_str"
+    assert "speaker" in {f.key for f in piper_fields}
+    assert "model_path" not in {f.key for f in piper_fields}
+
+
+def test_kokoro_voice_choices_returns_real_voices_when_downloaded(tmp_path: Path) -> None:
+    voices_path = tmp_path / "voices.bin"
+    _write_fake_kokoro_voices(voices_path, "af_sarah", "am_adam")
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voices_path": str(voices_path)})
+
+    assert settings_tui._kokoro_voice_choices(config) == ["af_sarah", "am_adam"]
+
+
+def test_kokoro_voice_choices_falls_back_to_placeholder_when_not_downloaded(tmp_path: Path) -> None:
+    config = _make_config(
+        **{"tts.engine": "kokoro", "tts.voices_path": str(tmp_path / "missing.bin")}
+    )
+
+    assert settings_tui._kokoro_voice_choices(config) == [settings_tui._KOKORO_VOICE_UNAVAILABLE]
+
+
+def test_choices_for_dispatches_kokoro_voice(tmp_path: Path) -> None:
+    voices_path = tmp_path / "voices.bin"
+    _write_fake_kokoro_voices(voices_path, "af_sarah", "am_adam")
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voices_path": str(voices_path)})
+    spec = FieldSpec("tts", "voice", "Voice", "kokoro_voice")
+
+    assert settings_tui._choices_for(spec, config) == ("af_sarah", "am_adam")
+
+
+def test_edit_kokoro_voice_field_cycles_through_real_voices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voices_path = tmp_path / "voices.bin"
+    _write_fake_kokoro_voices(voices_path, "af_sarah", "am_adam", "bf_emma")
+    config = _make_config(
+        **{"tts.engine": "kokoro", "tts.voices_path": str(voices_path), "tts.voice": "af_sarah"}
+    )
+    spec = FieldSpec("tts", "voice", "Voice", "kokoro_voice")
+
+    keys = iter(["RIGHT", "RIGHT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._edit_value_interactive(spec, "af_sarah", config)
+
+    assert accepted is True
+    assert value == "bf_emma"
+
+
+def test_edit_kokoro_voice_field_enter_on_placeholder_cancels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Voices not downloaded yet -- the only "choice" is the placeholder.
+    # Cycling to it (RIGHT, since the current value "af_sarah" isn't in
+    # the single-item choices list) then accepting must not write the
+    # placeholder text into tts.voice.
+    config = _make_config(
+        **{"tts.engine": "kokoro", "tts.voices_path": str(tmp_path / "missing.bin"), "tts.voice": "af_sarah"}
+    )
+    spec = FieldSpec("tts", "voice", "Voice", "kokoro_voice")
+
+    keys = iter(["RIGHT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._edit_value_interactive(spec, "af_sarah", config)
+
+    assert accepted is False
+    assert value == "af_sarah"
+
+
+def test_toggle_or_cycle_kokoro_voice_field_advances_to_next_real_voice(tmp_path: Path) -> None:
+    voices_path = tmp_path / "voices.bin"
+    _write_fake_kokoro_voices(voices_path, "af_sarah", "am_adam")
+    config = _make_config(
+        **{"tts.engine": "kokoro", "tts.voices_path": str(voices_path), "tts.voice": "af_sarah"}
+    )
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "voice")
+
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.tts.voice == "am_adam"
+
+
+def test_toggle_or_cycle_kokoro_voice_field_leaves_voice_untouched_when_not_downloaded(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(
+        **{
+            "tts.engine": "kokoro",
+            "tts.voices_path": str(tmp_path / "missing.bin"),
+            "tts.voice": "af_sarah",
+        }
+    )
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "voice")
+
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.tts.voice == "af_sarah"
+    assert "not downloaded yet" in state.status
+
+
+def test_help_panel_shows_real_kokoro_voice_choices(tmp_path: Path) -> None:
+    voices_path = tmp_path / "voices.bin"
+    _write_fake_kokoro_voices(voices_path, "af_sarah", "am_adam")
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voices_path": str(voices_path)})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "voice")
+
+    lines = settings_tui._help_panel_lines(state, 80, 20)
+
+    assert any("af_sarah" in line and "am_adam" in line for line in lines)
 
 
 # --- STT device: pick-from-list rather than free text (JP's ask: "we
@@ -809,14 +958,15 @@ def test_choices_for_dispatches_by_kind(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [_fake_device(0, "X")])
     monkeypatch.setattr(audio_devices, "dedupe_devices", lambda devs, show_all=False: devs)
 
+    config = AppConfig()
     device_spec = FieldSpec("audio", "input_device", "Input device", "device")
-    assert settings_tui._choices_for(device_spec) == (settings_tui._SYSTEM_DEFAULT, "X, MME")
+    assert settings_tui._choices_for(device_spec, config) == (settings_tui._SYSTEM_DEFAULT, "X, MME")
 
     choice_spec = FieldSpec("interaction", "interrupt_preset", "Preset", "choice", ("a", "b"))
-    assert settings_tui._choices_for(choice_spec) == ("a", "b")
+    assert settings_tui._choices_for(choice_spec, config) == ("a", "b")
 
     bool_spec = FieldSpec("audio", "echo_cancellation", "Echo cancellation", "bool")
-    assert settings_tui._choices_for(bool_spec) == ("false", "true")
+    assert settings_tui._choices_for(bool_spec, config) == ("false", "true")
 
 
 # --- bool fields are pickable, not typed: live UAT feedback that Enter on
@@ -831,7 +981,7 @@ def test_edit_bool_field_cycles_with_space_like_a_choice_field(
     keys = iter([" ", "ENTER"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
 
-    accepted, value = settings_tui._edit_value_interactive(spec, False)
+    accepted, value = settings_tui._edit_value_interactive(spec, False, AppConfig())
 
     assert accepted is True
     assert value is True
@@ -844,7 +994,7 @@ def test_edit_bool_field_ignores_typed_keystrokes(monkeypatch: pytest.MonkeyPatc
     keys = iter(["f", "l", "a", "s", "e", "ENTER"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
 
-    accepted, value = settings_tui._edit_value_interactive(spec, True)
+    accepted, value = settings_tui._edit_value_interactive(spec, True, AppConfig())
 
     assert accepted is True
     # Untouched by the stray keystrokes -- still the original current value.
@@ -886,7 +1036,7 @@ def test_edit_device_field_arrow_cycle_and_enter_accepts_sentinel_as_none(
     # accept that as None, not the literal sentinel text.
     keys = iter(["RIGHT", "RIGHT", "ENTER"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
-    accepted, value = settings_tui._edit_value_interactive(spec, None)
+    accepted, value = settings_tui._edit_value_interactive(spec, None, AppConfig())
 
     assert accepted is True
     assert value is None
@@ -904,7 +1054,7 @@ def test_edit_device_field_enter_immediately_keeps_current_value(
 
     keys = iter(["ENTER"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
-    accepted, value = settings_tui._edit_value_interactive(spec, "Speaker A, MME")
+    accepted, value = settings_tui._edit_value_interactive(spec, "Speaker A, MME", AppConfig())
 
     assert accepted is True
     assert value == "Speaker A, MME"

@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 import httpx
+import numpy as np
 
 from convobox.config import TTSConfig
 from convobox.tts.base import TTSEngine
@@ -119,6 +120,34 @@ def resolve_kokoro_model_paths(model_path: str, voices_path: str) -> tuple[Path,
             f"Kokoro model files did not download successfully to {model} / {voices}"
         )
     return model, voices
+
+
+def list_kokoro_voices(voices_path: str) -> list[str]:
+    """List every voice name bundled in a downloaded Kokoro voices file.
+
+    Deliberately does NOT construct a KokoroTTSEngine to do this --
+    Kokoro.get_voices() needs a full instance, which means loading the
+    entire ~326MB ONNX model into an onnxruntime.InferenceSession just to
+    read a name list. This reads the voices archive directly instead, the
+    same bare `np.load(voices_path)` call kokoro_onnx's own __init__ uses
+    internally (confirmed via inspect.getsource, not guessed) -- cheap
+    (no model, no inference session) and gives the identical name list
+    (verified live against a real downloaded voices-v1.0.bin: 54 names,
+    e.g. "af_sarah", "bm_george", "jf_alpha" -- kokoro-onnx's own
+    <lang><gender>_<name> convention).
+
+    Returns [] if the file doesn't exist yet or isn't a readable archive
+    (e.g. a partial download) -- callers should treat that as "not
+    browsable yet, download it first," not a hard error.
+    """
+    path = Path(voices_path)
+    if not path.exists():
+        return []
+    try:
+        with np.load(path) as voices:
+            return sorted(voices.files)
+    except Exception:  # noqa: BLE001 -- best-effort discovery, never raise into a picker UI
+        return []
 
 
 def create_tts_engine(

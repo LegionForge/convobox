@@ -52,7 +52,12 @@ from convobox.config import (
     resolve_config_path,
 )
 from convobox.stt.factory import create_stt_engine
-from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine, resolve_voice_paths
+from convobox.tts.factory import (
+    DEFAULT_VOICES_DIR,
+    create_tts_engine,
+    list_kokoro_voices,
+    resolve_voice_paths,
+)
 from convobox.listening_pause import PauseListeningDetector
 from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 
@@ -143,6 +148,7 @@ class FieldSpec:
         "device",
         "list_str",
         "command",
+        "kokoro_voice",
     ]
     choices: tuple[str, ...] = ()
     help_text: str = ""
@@ -232,7 +238,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         label="TTS",
         fields=(
             FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. kokoro (default) is permissively licensed (MIT + Apache-2.0); piper is GPL-3.0 and requires the separate `piper` extra (`uv sync --extra piper`)."),
-            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="kokoro: a voice name from kokoro-onnx's bundled voices (e.g. af_sarah). piper: an installed Piper voice key, such as en_US-lessac-medium."),
+            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="piper only: an installed Piper voice key, such as en_US-lessac-medium."),
             FieldSpec("tts", "model_path", "Model path", "str", help_text="kokoro only: path to the kokoro-v1.0.onnx model file."),
             FieldSpec("tts", "voices_path", "Voices path", "str", help_text="kokoro only: path to the voices-v1.0.bin voice bundle."),
             FieldSpec("tts", "language", "Language", "str", help_text="kokoro only: phonemizer language code, e.g. en-us."),
@@ -284,12 +290,39 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
 )
 
 
+# Swapped in for tts.voice when engine is kokoro (see _visible_fields_for_section)
+# -- the base "voice" FieldSpec above is Piper's free-text field (any
+# HuggingFace-catalog voice name, auto-downloaded); Kokoro's voices are a
+# fixed, closed set baked into the downloaded voices file, so a real
+# picker (kind="kokoro_voice", see _kokoro_voice_choices) fits better than
+# free text a typo could silently break.
+_TTS_VOICE_KOKORO_FIELD = FieldSpec(
+    "tts", "voice", "Voice", "kokoro_voice",
+    help_text=(
+        "A Kokoro voice name. Space/Left/Right cycles the real voices in "
+        "tts.voices_path (54 as of kokoro-onnx's v1.0 release) -- download "
+        "it first via [t] if the list shows only the placeholder below. "
+        "Naming convention: <language><gender>_<name> -- af_/am_ = American "
+        "English female/male, bf_/bm_ = British English, ef_/em_ = Spanish, "
+        "ff_ = French, hf_/hm_ = Hindi, if_/im_ = Italian, jf_/jm_ = "
+        "Japanese, pf_/pm_ = Portuguese, zf_/zm_ = Mandarin. tts.language "
+        "isn't auto-adjusted when you change voices -- non-English voices "
+        "need a matching phonemizer language too, and only en-us/en-gb are "
+        "confirmed to work well here so far."
+    ),
+)
+
+
 def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tuple[FieldSpec, ...]:
     if section.key == "tts":
         if config.tts.engine == "kokoro":
-            return tuple(
+            fields = tuple(
                 field for field in section.fields
                 if field.key in {"engine", "voice", "model_path", "voices_path", "language", "rate"}
+            )
+            return tuple(
+                _TTS_VOICE_KOKORO_FIELD if field.key == "voice" else field
+                for field in fields
             )
         if config.tts.engine == "piper":
             return tuple(
@@ -487,6 +520,24 @@ def _parse_value(spec: FieldSpec, raw: str, current: Any) -> Any:
 # empty buffer can never be confused with each other.
 _SYSTEM_DEFAULT = "(system default)"
 
+# The kokoro_voice picker's placeholder when tts.voices_path hasn't been
+# downloaded yet -- same "never let a picker offer zero choices" reasoning
+# as _SYSTEM_DEFAULT: _cycle_choice raises on an empty list, which would
+# crash the modal on the very first Left/Right/Space press. Landing on
+# this instead of a real voice name on ENTER is treated as "nothing
+# picked" (see _edit_value_interactive), not a literal value to save.
+_KOKORO_VOICE_UNAVAILABLE = "(voices file not downloaded -- press [t] to fetch it)"
+
+
+def _kokoro_voice_choices(config: AppConfig) -> list[str]:
+    """Real voice names from the downloaded tts.voices_path file, or the
+    placeholder above if it isn't downloaded yet (list_kokoro_voices
+    already degrades to [] for a missing/corrupt file; this is just the
+    picker-safe non-empty wrapper around that, same shape as
+    _device_choices for audio devices)."""
+    voices = list_kokoro_voices(config.tts.voices_path)
+    return voices if voices else [_KOKORO_VOICE_UNAVAILABLE]
+
 
 def _device_choices(kind: Literal["input", "output"]) -> list[str]:
     """Real, deduped device names for the picker.
@@ -512,23 +563,26 @@ def _device_choices(kind: Literal["input", "output"]) -> list[str]:
     return [_SYSTEM_DEFAULT] + [f"{d['name']}, {d['hostapi']}" for d in devices]
 
 
-def _choices_for(spec: FieldSpec) -> tuple[str, ...]:
+def _choices_for(spec: FieldSpec, config: AppConfig) -> tuple[str, ...]:
     """The live choice list for a field -- static for `choice` fields,
-    freshly enumerated (real connected devices) for `device` fields, a
-    fixed true/false pair for `bool` fields (live UAT feedback,
-    2026-07-22: a typed bool field let a mistype like "flase" through to
-    a raw ValueError instead of just being unselectable).
+    freshly enumerated (real connected devices, or real downloaded Kokoro
+    voices) for `device`/`kokoro_voice` fields, a fixed true/false pair for
+    `bool` fields (live UAT feedback, 2026-07-22: a typed bool field let a
+    mistype like "flase" through to a raw ValueError instead of just being
+    unselectable).
     """
     if spec.kind == "device":
         kind: Literal["input", "output"] = "input" if spec.key == "input_device" else "output"
         return tuple(_device_choices(kind))
+    if spec.kind == "kokoro_voice":
+        return tuple(_kokoro_voice_choices(config))
     if spec.kind == "bool":
         return ("false", "true")
     return spec.choices
 
 
-def _choice_index(spec: FieldSpec, current: Any) -> int:
-    choices = _choices_for(spec)
+def _choice_index(spec: FieldSpec, current: Any, config: AppConfig) -> int:
+    choices = _choices_for(spec, config)
     if not choices:
         return -1
     # Device fields are str | None; None maps to _SYSTEM_DEFAULT (always
@@ -545,11 +599,11 @@ def _choice_index(spec: FieldSpec, current: Any) -> int:
     return -1
 
 
-def _cycle_choice(spec: FieldSpec, current: Any, delta: int) -> str:
-    choices = _choices_for(spec)
+def _cycle_choice(spec: FieldSpec, current: Any, delta: int, config: AppConfig) -> str:
+    choices = _choices_for(spec, config)
     if not choices:
         raise ValueError("no choices configured")
-    idx = _choice_index(spec, current)
+    idx = _choice_index(spec, current, config)
     return choices[(idx + delta) % len(choices)]
 
 
@@ -1097,6 +1151,9 @@ def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
     if spec.kind == "choice" and spec.choices:
         lines.append("")
         lines.extend(_wrap_text("Choices: " + ", ".join(spec.choices), width))
+    if spec.kind == "kokoro_voice":
+        lines.append("")
+        lines.extend(_wrap_text("Choices: " + ", ".join(_kokoro_voice_choices(state.working)), width))
     if spec.section == "audio" and spec.key == "aec_delay_ms":
         lines.append("")
         lines.extend(_wrap_text(_aec_estimate_summary(state.path), width))
@@ -1227,8 +1284,8 @@ def _draw_modal(
     sys.stdout.flush()
 
 
-def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
-    is_pickable = spec.kind in ("choice", "device", "bool")
+def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) -> tuple[bool, Any]:
+    is_pickable = spec.kind in ("choice", "device", "bool", "kokoro_voice")
     # Device fields are str | None; _format_value(None) is the display
     # string "(unset)", which isn't in _choices_for's list and would break
     # cycling/index-lookup. Seed the buffer with the picker's own sentinel
@@ -1248,7 +1305,7 @@ def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
         ]
     else:
         detail_lines = [f"Current: {_format_value(current)}", hint]
-    choice_options = list(_choices_for(spec)) if is_pickable else None
+    choice_options = list(_choices_for(spec, config)) if is_pickable else None
     _draw_modal(
         f"Edit {spec.label}",
         prompt,
@@ -1269,10 +1326,16 @@ def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
                 # "the user explicitly picked system default," never
                 # _parse_value's "buffer is empty, keep current" case.
                 return True, None
+            if spec.kind == "kokoro_voice" and buffer == _KOKORO_VOICE_UNAVAILABLE:
+                # The placeholder shown when tts.voices_path isn't
+                # downloaded yet -- there's nothing real to accept, so
+                # this is a cancel, not a value (never write the
+                # placeholder text itself into tts.voice).
+                return False, current
             return True, _parse_value(spec, accepted, current)
         if is_pickable:
             if key in {"LEFT", "UP"}:
-                buffer = _cycle_choice(spec, buffer, -1)
+                buffer = _cycle_choice(spec, buffer, -1, config)
                 _draw_modal(
                     f"Edit {spec.label}",
                     prompt,
@@ -1283,7 +1346,7 @@ def _edit_value_interactive(spec: FieldSpec, current: Any) -> tuple[bool, Any]:
                 )
                 continue
             if key in {"RIGHT", "DOWN", " "}:
-                buffer = _cycle_choice(spec, buffer, 1)
+                buffer = _cycle_choice(spec, buffer, 1, config)
                 _draw_modal(
                     f"Edit {spec.label}",
                     prompt,
@@ -1478,9 +1541,9 @@ def _toggle_or_cycle(state: TuiState) -> None:
     new_value: bool | str | None
     if spec.kind == "bool":
         new_value = not bool(current)
-    elif spec.kind in ("choice", "device"):
+    elif spec.kind in ("choice", "device", "kokoro_voice"):
         try:
-            new_value = _cycle_choice(spec, current, 1)
+            new_value = _cycle_choice(spec, current, 1, state.working)
         except ValueError:
             state.status = "no choices configured"
             return
@@ -1488,6 +1551,12 @@ def _toggle_or_cycle(state: TuiState) -> None:
             # The underlying field is str | None; unset means None, not
             # the display sentinel.
             new_value = None
+        if spec.kind == "kokoro_voice" and new_value == _KOKORO_VOICE_UNAVAILABLE:
+            # Nothing real to cycle to yet -- leave tts.voice untouched
+            # rather than writing the placeholder text as if it were a
+            # real voice name.
+            state.status = "tts.voices_path not downloaded yet -- press [t] to fetch it"
+            return
     else:
         state.status = "space toggles booleans and cycles choices only"
         return
@@ -1508,7 +1577,7 @@ def _prompt_edit(state: TuiState) -> None:
         return
     current = _get_value(state.working, spec)
     try:
-        accepted, new_value = _edit_value_interactive(spec, current)
+        accepted, new_value = _edit_value_interactive(spec, current, state.working)
     except Exception as exc:  # noqa: BLE001
         state.status = f"invalid value: {exc}"
         return
