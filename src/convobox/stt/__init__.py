@@ -8,7 +8,7 @@ __all__ = [
     "LanguageTracker",
     "LocalTranscriber",
     "STTEngine",
-    "TranscriptResult",
     "TranscriptCorrector",
+    "TranscriptResult",
     "create_stt_engine",
 ]

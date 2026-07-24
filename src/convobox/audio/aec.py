@@ -104,7 +104,12 @@ class AecDumpWriter:
 
     @staticmethod
     def _open(path: Path) -> wave.Wave_write:
-        w = wave.open(str(path), "wb")
+        # Not a context manager on purpose: the returned handle is written to
+        # incrementally across this object's whole lifetime (write_reference/
+        # write_capture, called per-frame from a long-lived capture/playback
+        # thread) and closed explicitly in close() -- there is no single
+        # function scope a `with` block could wrap around that usage.
+        w = wave.open(str(path), "wb")  # noqa: SIM115
         w.setnchannels(1)
         w.setsampwidth(2)  # int16 -- APM's native sample width
         w.setframerate(_AEC_RATE)

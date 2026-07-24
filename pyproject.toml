@@ -23,7 +23,17 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "mypy>=1.13",
-    "ruff>=0.15",
+    # Upper-bounded, unlike the others here: CI's lint job (LegionForge/
+    # dev-rig's lint.yml) installs via `pip install -e ".[dev]"`, which does
+    # NOT read this repo's uv.lock -- so an unbounded ruff dependency here
+    # means the next ruff release can silently start enforcing new
+    # default-on rules in CI while every local `uv run ruff` (pinned to
+    # uv.lock's exact version) stays green and shows nothing wrong.
+    # Live-confirmed 2026-07-24: 0.15.21 (uv.lock) -> 0.16.0 (latest on
+    # PyPI at the time) added RUF022/G201/SIM102/PIE808/etc, breaking CI's
+    # lint job on `main` while every local run passed. Re-verify against
+    # the new version's diff before bumping this bound.
+    "ruff>=0.15,<0.17",
     "bandit>=1.9",
 ]
 # Acoustic echo cancellation (WebRTC APM, BSD-3). A separate extra, NOT

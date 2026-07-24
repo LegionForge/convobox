@@ -413,7 +413,7 @@ class CodexAdapter(BackendAdapter):
             proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             with contextlib.suppress(ProcessLookupError, OSError):
                 proc.kill()
             with contextlib.suppress(Exception):

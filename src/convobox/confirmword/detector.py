@@ -48,7 +48,7 @@ _COMMON_AFFIRMATIONS: frozenset[str] = frozenset(
         "sure", "ok", "okay", "okey", "fine", "right", "correct",
         "affirmative", "definitely", "absolutely", "certainly",
         # English fillers / hesitations that STT emits for "uh-huh"-class sounds
-        "uh", "huh", "uhhuh", "mmhmm", "mhm", "hmm", "mm", "yep",
+        "uh", "huh", "uhhuh", "mmhmm", "mhm", "hmm", "mm",
         "please", "do", "it", "go", "now", "and", "the",
         # other languages JP uses (roadmap called these out explicitly)
         "oui",              # French

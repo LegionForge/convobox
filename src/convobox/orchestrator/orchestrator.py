@@ -315,7 +315,7 @@ class Orchestrator:
         if self._on_event_hook is not None:
             try:
                 self._on_event_hook(event)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Called synchronously from inside _consume_events()'s
                 # async-for loop -- an uncaught exception here would kill
                 # _events_task, silently stopping event consumption
