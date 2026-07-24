@@ -1409,9 +1409,14 @@ def render_modal(
     if choice_options:
         selected = choice_value if choice_value in choice_options else (choice_options[0] if choice_options else None)
         content_lines.extend(["", "Options:"])
+        # Pre-calculate max option width to avoid oversizing the modal
+        # Reserve 4 chars for " > " prefix, then cap at 70 chars display width
+        max_option_display = 70
         for option in choice_options:
             marker = ">" if option == selected else " "
-            content_lines.append(f" {marker} {option}")
+            # Truncate long options with ellipsis if needed
+            display_option = option if len(option) <= max_option_display else option[:max_option_display-3] + "..."
+            content_lines.append(f" {marker} {display_option}")
     content_lines.append("")
     content_lines.append(
         "Esc cancel | Enter accept"
@@ -1423,7 +1428,9 @@ def render_modal(
     # line (e.g. a save/quit hint) longer than the old fixed floor was
     # silently truncated mid-word since fit() has no wrapping.
     longest_line = max((len(line) for line in content_lines), default=0)
-    box_width = min(width - 4, max(52, longest_line + 4, len(buffer) + 8))
+    # Cap box width at 80% of terminal width to prevent overflow; minimum 52 chars
+    max_box_width = int(width * 0.8)
+    box_width = min(max_box_width, max(52, longest_line + 4, len(buffer) + 8))
     left_pad = max(0, (width - box_width) // 2 - 1)
     right_pad = max(0, width - left_pad - box_width - 2)
     box_top = " " * left_pad + border + border * (box_width - 2) + border + " " * right_pad
