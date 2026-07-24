@@ -24,7 +24,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from convobox.adapters.base import BackendEventType
-from convobox.adapters.claude_code import ClaudeCodeAdapter, _parse_mcp_list_output, _resolve_flags
+from convobox.adapters.claude_code import (
+    ClaudeCodeAdapter,
+    _APPROVAL_DECISION_TIMEOUT_S,
+    _APPROVAL_HOST,
+    _parse_mcp_list_output,
+    _resolve_flags,
+)
 
 _FAKE_CLI = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))]
 
@@ -93,6 +99,51 @@ def test_ensure_settings_file_is_written_once() -> None:
         assert first == second
     finally:
         first.unlink()
+
+
+@pytest.mark.asyncio
+async def test_ensure_proc_wires_approval_env_and_settings_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every test above calls _ensure_approval_server/_ensure_settings_file
+    # directly -- none of them go through _ensure_proc() itself, so a bug
+    # in how IT assembles the env vars/--settings flag before the real
+    # spawn (e.g. a typo'd env key, or forgetting to add the flag) would
+    # slip past every one of them. This drives the real subprocess spawn
+    # (same real fake_claude_cli.py every other adapter test uses) and
+    # inspects exactly what reached it.
+    adapter = _adapter()  # permission_mode="approve" -> _interactive_approval=True
+    captured: dict[str, object] = {}
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def capturing_spawn(*args: object, **kwargs: object):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        return await real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    import convobox.adapters.claude_code as mod
+
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", capturing_spawn)
+
+    try:
+        await adapter.send_text("hello")
+        await asyncio.wait_for(adapter._events.get(), timeout=10.0)
+
+        env = captured["env"]
+        assert env is not None
+        assert env["CONVOBOX_APPROVAL_HOST"] == _APPROVAL_HOST
+        assert env["CONVOBOX_APPROVAL_TOKEN"] == adapter._approval_token
+        assert env["CONVOBOX_APPROVAL_TIMEOUT_S"] == str(_APPROVAL_DECISION_TIMEOUT_S)
+        assert int(env["CONVOBOX_APPROVAL_PORT"]) == adapter._approval_port
+
+        args = captured["args"]
+        assert "--settings" in args
+        settings_arg = args[args.index("--settings") + 1]
+        assert Path(settings_arg) == adapter._settings_path
+    finally:
+        await adapter.aclose()
+        if adapter._settings_path is not None:
+            adapter._settings_path.unlink(missing_ok=True)
 
 
 # --- the approval TCP server + event queue ---
@@ -329,6 +380,47 @@ async def test_permissive_mode_writes_an_mcp_permissions_settings_file(
     finally:
         adapter._settings_path = None
         path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_ensure_proc_wires_mcp_settings_flag_when_permissive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same gap as the interactive-approval test above, for the OTHER
+    # branch of _ensure_proc()'s if/elif: test_permissive_mode_writes_an_
+    # mcp_permissions_settings_file calls _ensure_mcp_permissions_settings_
+    # file() directly, never through _ensure_proc() itself, so a bug in
+    # how _ensure_proc wires the resulting path into the real spawn's
+    # --settings flag would go uncaught.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, permission_mode="permissive")
+    monkeypatch.setattr(
+        adapter, "_enumerate_mcp_server_names", AsyncMock(return_value=["obsidian"])
+    )
+    captured: dict[str, object] = {}
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def capturing_spawn(*args: object, **kwargs: object):
+        captured["args"] = args
+        return await real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    import convobox.adapters.claude_code as mod
+
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", capturing_spawn)
+
+    try:
+        await adapter.send_text("hello")
+        await asyncio.wait_for(adapter._events.get(), timeout=10.0)
+
+        args = captured["args"]
+        assert "--settings" in args
+        settings_arg = args[args.index("--settings") + 1]
+        assert Path(settings_arg) == adapter._settings_path
+        data = json.loads(Path(settings_arg).read_text())
+        assert data == {"permissions": {"allow": ["mcp__obsidian"]}}
+    finally:
+        await adapter.aclose()
+        if adapter._settings_path is not None:
+            adapter._settings_path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
