@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -360,6 +361,244 @@ def test_help_panel_shows_real_kokoro_voice_choices(tmp_path: Path) -> None:
     lines = settings_tui._help_panel_lines(state, 80, 20)
 
     assert any("af_sarah" in line and "am_adam" in line for line in lines)
+
+
+# --- TTS per-engine profile memory: switching tts.engine used to lose
+# whatever voice/settings the OTHER engine had, since both share the same
+# underlying TTSConfig fields -- mirrors backend_profiles' existing
+# per-backend memory (test_switching_backends_remembers_backend_specific_values
+# above), and is what makes [c] compare (below) able to hear both engines
+# using each one's own real settings rather than whatever's currently active. ---
+
+
+def test_switching_tts_engine_remembers_engine_specific_values() -> None:
+    config = _make_config(
+        **{
+            "tts.engine": "kokoro",
+            "tts.voice": "af_sarah",
+            "tts.rate": 1.2,
+        }
+    )
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+
+    settings_tui._switch_tts_engine(state.working, "piper")
+    assert state.working.tts.engine == "piper"
+    assert state.working.tts.voice is None  # piper has no sensible default voice
+    assert state.working.tts_profiles["kokoro"].voice == "af_sarah"
+    assert state.working.tts_profiles["kokoro"].rate == 1.2
+
+    state.working.tts.voice = "en_US-lessac-medium"
+    state.working.tts.speaker = "prudence"
+    settings_tui._switch_tts_engine(state.working, "kokoro")
+    assert state.working.tts.engine == "kokoro"
+    assert state.working.tts.voice == "af_sarah"
+    assert state.working.tts.rate == 1.2
+    assert state.working.tts.speaker is None  # piper-only field, cleared on switch to kokoro
+    assert state.working.tts_profiles["piper"].voice == "en_US-lessac-medium"
+    assert state.working.tts_profiles["piper"].speaker == "prudence"
+
+    settings_tui._switch_tts_engine(state.working, "piper")
+    assert state.working.tts.voice == "en_US-lessac-medium"
+    assert state.working.tts.speaker == "prudence"
+
+
+def test_switching_tts_engine_to_itself_is_a_noop() -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": "af_bella"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+
+    settings_tui._switch_tts_engine(state.working, "kokoro")
+
+    assert state.working.tts.voice == "af_bella"
+    assert state.working.tts_profiles == {}
+
+
+def test_prompt_edit_switches_tts_engine_via_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": "af_sarah"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "engine")
+
+    keys = iter(["RIGHT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    settings_tui._prompt_edit(state)
+
+    assert state.working.tts.engine == "piper"
+    assert state.working.tts_profiles["kokoro"].voice == "af_sarah"
+
+
+# --- [c] compare: hear Kokoro and Piper speak the same phrase back to
+# back, each built from its own remembered profile, without touching
+# tts.engine or anything staged for save. ---
+
+
+def test_compare_tts_engines_only_available_in_tts_section() -> None:
+    config = _make_config()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+
+    asyncio.run(settings_tui._compare_tts_engines(state))
+
+    assert "only available in the TTS section" in state.status
+
+
+def test_tts_config_for_comparison_returns_none_when_piper_has_no_voice() -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": "af_sarah"})
+
+    assert settings_tui._tts_config_for_comparison(config, "piper") is None
+    kokoro_config = settings_tui._tts_config_for_comparison(config, "kokoro")
+    assert kokoro_config is not None
+    assert kokoro_config.voice == "af_sarah"
+
+
+def test_tts_config_for_comparison_uses_remembered_profile_not_active_fields() -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": "af_sarah"})
+    config.tts_profiles["piper"] = settings_tui.TTSProfileConfig(voice="en_US-lessac-medium")
+
+    piper_config = settings_tui._tts_config_for_comparison(config, "piper")
+
+    assert piper_config is not None
+    assert piper_config.engine == "piper"
+    assert piper_config.voice == "en_US-lessac-medium"
+
+
+def test_compare_tts_engines_plays_both_and_never_mutates_working_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": "af_sarah"})
+    config.tts_profiles["piper"] = settings_tui.TTSProfileConfig(voice="en_US-lessac-medium")
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    before = state.working.model_dump(mode="python")
+
+    class _FakeEngine:
+        def __init__(self, tag: str) -> None:
+            self.sample_rate = 24000
+            self._tag = tag
+
+        async def synthesize(self, text: str) -> np.ndarray:
+            return np.ones(10, dtype=np.float32)
+
+    built: list[str] = []
+
+    def _fake_create_tts_engine(tts_config, voices_dir):
+        built.append(tts_config.engine)
+        return _FakeEngine(tts_config.engine)
+
+    monkeypatch.setattr(settings_tui, "create_tts_engine", _fake_create_tts_engine)
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [])
+    played: list[str] = []
+    monkeypatch.setattr(audio_devices, "_default_index", lambda sd, kind: None)
+    monkeypatch.setattr(audio_devices, "_play_recording", lambda sd, audio, rate, device: played.append("played"))
+
+    asyncio.run(settings_tui._compare_tts_engines(state))
+
+    assert built == ["kokoro", "piper"]
+    assert played == ["played", "played"]
+    assert "kokoro:" in state.status and "piper:" in state.status
+    assert state.working.model_dump(mode="python") == before
+
+
+def test_compare_tts_engines_reports_engine_failure_without_stopping_the_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voice": "af_sarah"})
+    config.tts_profiles["piper"] = settings_tui.TTSProfileConfig(voice="en_US-lessac-medium")
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    def _fake_create_tts_engine(tts_config, voices_dir):
+        if tts_config.engine == "kokoro":
+            raise RuntimeError("boom")
+
+        class _FakeEngine:
+            sample_rate = 24000
+
+            async def synthesize(self, text: str) -> np.ndarray:
+                return np.ones(10, dtype=np.float32)
+
+        return _FakeEngine()
+
+    monkeypatch.setattr(settings_tui, "create_tts_engine", _fake_create_tts_engine)
+    _install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(audio_devices, "collect_devices", lambda sd, kind: [])
+    monkeypatch.setattr(audio_devices, "_default_index", lambda sd, kind: None)
+    monkeypatch.setattr(audio_devices, "_play_recording", lambda sd, audio, rate, device: None)
+
+    asyncio.run(settings_tui._compare_tts_engines(state))
+
+    assert "kokoro: RuntimeError: boom" in state.status
+    assert "piper: played" in state.status
+
+
+# --- [d] refresh Kokoro voices: force a fresh download, replacing
+# whatever's cached, for when kokoro-onnx's upstream release changes the
+# voice set. ---
+
+
+def test_refresh_kokoro_voices_downloads_and_reports_the_new_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voices_path = tmp_path / "voices.bin"
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voices_path": str(voices_path)})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    def _fake_refresh(path: str) -> None:
+        _write_fake_kokoro_voices(Path(path), "af_sarah", "am_adam", "new_voice")
+
+    monkeypatch.setattr(settings_tui, "refresh_kokoro_voices", _fake_refresh)
+
+    settings_tui._refresh_kokoro_voices(state)
+
+    assert "3 voices now available" in state.status
+
+
+def test_refresh_kokoro_voices_reports_download_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _make_config(**{"tts.engine": "kokoro", "tts.voices_path": str(tmp_path / "voices.bin")})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    def _fake_refresh(path: str) -> None:
+        raise FileNotFoundError("404 not found")
+
+    monkeypatch.setattr(settings_tui, "refresh_kokoro_voices", _fake_refresh)
+
+    settings_tui._refresh_kokoro_voices(state)
+
+    assert "voices refresh failed" in state.status
+
+
+def test_refresh_kokoro_voices_is_a_noop_for_piper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "piper"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    def _fail_if_called(path: str) -> None:
+        raise AssertionError("should not download for piper")
+
+    monkeypatch.setattr(settings_tui, "refresh_kokoro_voices", _fail_if_called)
+
+    settings_tui._refresh_kokoro_voices(state)
+
+    assert "only available for tts.engine=kokoro" in state.status
+
+
+def test_refresh_kokoro_voices_is_a_noop_outside_tts_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "kokoro"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+
+    def _fail_if_called(path: str) -> None:
+        raise AssertionError("should not download outside the tts section")
+
+    monkeypatch.setattr(settings_tui, "refresh_kokoro_voices", _fail_if_called)
+
+    settings_tui._refresh_kokoro_voices(state)
+
+    assert "only available for tts.engine=kokoro" in state.status
 
 
 # --- STT device: pick-from-list rather than free text (JP's ask: "we

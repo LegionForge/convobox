@@ -46,6 +46,8 @@ from convobox.adapters import create_backend_adapter
 from convobox.config import (
     AppConfig,
     BackendProfileConfig,
+    TTSConfig,
+    TTSProfileConfig,
     detect_permission_conflict,
     load_config,
     read_aec_estimate,
@@ -56,6 +58,7 @@ from convobox.tts.factory import (
     DEFAULT_VOICES_DIR,
     create_tts_engine,
     list_kokoro_voices,
+    refresh_kokoro_voices,
     resolve_voice_paths,
 )
 from convobox.listening_pause import PauseListeningDetector
@@ -128,6 +131,19 @@ _BACKEND_PROFILE_DEFAULTS: dict[str, BackendProfileConfig] = {
     "opencode": BackendProfileConfig(url="http://localhost:4096"),
     "claude-code": BackendProfileConfig(url="http://localhost:4096", command=["claude"]),
     "codex": BackendProfileConfig(url="http://localhost:4096", command=["codex"]),
+}
+# Same per-engine-memory pattern as _BACKEND_PROFILE_DEFAULTS above --
+# schema defaults per tts.engine, used both to seed a never-configured
+# profile and to fill any field a saved profile leaves unset (None).
+_TTS_PROFILE_DEFAULTS: dict[str, TTSProfileConfig] = {
+    "kokoro": TTSProfileConfig(
+        voice="af_sarah",
+        model_path=".models/kokoro/kokoro-v1.0.onnx",
+        voices_path=".models/kokoro/voices-v1.0.bin",
+        language="en-us",
+        rate=1.0,
+    ),
+    "piper": TTSProfileConfig(rate=1.0, volume=1.0),
 }
 
 
@@ -237,7 +253,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         key="tts",
         label="TTS",
         fields=(
-            FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. kokoro (default) is permissively licensed (MIT + Apache-2.0); piper is GPL-3.0 and requires the separate `piper` extra (`uv sync --extra piper`)."),
+            FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. kokoro (default) is permissively licensed (MIT + Apache-2.0); piper is GPL-3.0 and requires the separate `piper` extra (`uv sync --extra piper`). Each engine's own voice/settings are remembered when you switch away and back."),
             FieldSpec("tts", "voice", "Voice", "optional_str", help_text="piper only: an installed Piper voice key, such as en_US-lessac-medium."),
             FieldSpec("tts", "model_path", "Model path", "str", help_text="kokoro only: path to the kokoro-v1.0.onnx model file."),
             FieldSpec("tts", "voices_path", "Voices path", "str", help_text="kokoro only: path to the voices-v1.0.bin voice bundle."),
@@ -434,6 +450,67 @@ def _switch_backend(config: AppConfig, new_name: str) -> None:
         return
     _set_backend_profile(config, current_name, _backend_profile_from_active(config, current_name))
     _apply_backend_profile(config, new_name)
+
+
+def _tts_profile_defaults(name: str) -> TTSProfileConfig:
+    profile = _TTS_PROFILE_DEFAULTS.get(name)
+    if profile is None:
+        return TTSProfileConfig()
+    return profile.model_copy(deep=True)
+
+
+def _tts_profile_value(config: AppConfig, name: str) -> TTSProfileConfig:
+    profile = config.tts_profiles.get(name)
+    if profile is not None:
+        return profile.model_copy(deep=True)
+    return _tts_profile_defaults(name)
+
+
+def _set_tts_profile(config: AppConfig, name: str, profile: TTSProfileConfig) -> None:
+    config.tts_profiles[name] = profile.model_copy(deep=True)
+
+
+def _tts_profile_from_active(config: AppConfig, name: str) -> TTSProfileConfig:
+    if name == "kokoro":
+        return TTSProfileConfig(
+            voice=config.tts.voice,
+            model_path=config.tts.model_path,
+            voices_path=config.tts.voices_path,
+            language=config.tts.language,
+            rate=config.tts.rate,
+        )
+    return TTSProfileConfig(
+        voice=config.tts.voice,
+        rate=config.tts.rate,
+        volume=config.tts.volume,
+        speaker=config.tts.speaker,
+    )
+
+
+def _apply_tts_profile(config: AppConfig, name: str) -> None:
+    profile = _tts_profile_value(config, name)
+    defaults = _tts_profile_defaults(name)
+    config.tts.engine = name
+    config.tts.voice = profile.voice if profile.voice is not None else defaults.voice
+    config.tts.rate = profile.rate if profile.rate is not None else (defaults.rate or 1.0)
+    if name == "kokoro":
+        config.tts.model_path = profile.model_path or defaults.model_path or config.tts.model_path
+        config.tts.voices_path = profile.voices_path or defaults.voices_path or config.tts.voices_path
+        config.tts.language = profile.language or defaults.language or config.tts.language
+        # speaker is piper-only; clear it so a stale value never leaks
+        # into a saved config the kokoro branch would just ignore anyway.
+        config.tts.speaker = None
+    else:
+        config.tts.volume = profile.volume if profile.volume is not None else (defaults.volume or 1.0)
+        config.tts.speaker = profile.speaker
+
+
+def _switch_tts_engine(config: AppConfig, new_engine: str) -> None:
+    current_engine = config.tts.engine
+    if new_engine == current_engine:
+        return
+    _set_tts_profile(config, current_engine, _tts_profile_from_active(config, current_engine))
+    _apply_tts_profile(config, new_engine)
 
 
 def _format_value(value: Any) -> str:
@@ -881,6 +958,116 @@ async def probe_tts(config: AppConfig) -> str:
     return f"TTS probe succeeded ({total} samples @ {engine.sample_rate} Hz)"
 
 
+_COMPARE_TEST_PHRASE = "This is a test of the text to speech engine."
+
+
+def _tts_config_for_comparison(config: AppConfig, engine_name: str) -> TTSConfig | None:
+    """Build the TTSConfig `engine_name` would use, WITHOUT switching
+    config.tts.engine or mutating anything -- lets [c] compare hear both
+    engines using each one's own remembered tts_profiles (or the live
+    values, if that engine is the one currently active), same "don't
+    cross-contaminate the other engine's settings" reasoning as
+    _switch_tts_engine. Returns None if that engine has no voice
+    configured anywhere yet (nothing meaningful to synthesize -- e.g.
+    Piper before any voice has ever been picked, since unlike Kokoro it
+    has no single sensible default)."""
+    if config.tts.engine == engine_name:
+        return config.tts.model_copy(deep=True)
+    profile = _tts_profile_value(config, engine_name)
+    defaults = _tts_profile_defaults(engine_name)
+    voice = profile.voice if profile.voice is not None else defaults.voice
+    if voice is None:
+        return None
+    return TTSConfig(
+        engine=engine_name,
+        voice=voice,
+        rate=profile.rate if profile.rate is not None else (defaults.rate or 1.0),
+        volume=profile.volume if profile.volume is not None else (defaults.volume or 1.0),
+        model_path=profile.model_path or defaults.model_path or config.tts.model_path,
+        voices_path=profile.voices_path or defaults.voices_path or config.tts.voices_path,
+        language=profile.language or defaults.language or config.tts.language,
+        speaker=profile.speaker if engine_name == "piper" else None,
+    )
+
+
+async def _compare_tts_engines(state: TuiState) -> None:
+    """[c]: build BOTH Kokoro and Piper and speak the same test phrase
+    through each in turn, so the operator can actually HEAR the
+    difference before choosing -- probe_tts ([t]) only confirms synthesis
+    succeeds, it never plays anything back.
+
+    Each engine is built from ITS OWN remembered tts_profiles (see
+    _tts_config_for_comparison), not by mutating tts.engine back and
+    forth -- so comparing never disturbs the config actually staged for
+    save, and hearing Piper doesn't require first switching away from
+    Kokoro (or vice versa).
+    """
+    if state.current_section().key != "tts":
+        state.status = "[c] compare is only available in the TTS section"
+        return
+
+    import io
+
+    import sounddevice as sd
+
+    import audio_devices as ad
+
+    config = state.working
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_devices = ad.collect_devices(sd, "output")
+        if config.audio.output_device:
+            out_idx, _ = ad.resolve_spec(config.audio.output_device, out_devices)
+        else:
+            out_idx = ad._default_index(sd, "output")
+
+    results: list[str] = []
+    for engine_name in ("kokoro", "piper"):
+        tts_config = _tts_config_for_comparison(config, engine_name)
+        if tts_config is None:
+            results.append(f"{engine_name}: no voice configured yet")
+            continue
+        try:
+            engine = create_tts_engine(tts_config, DEFAULT_VOICES_DIR)
+            audio = await engine.synthesize(_COMPARE_TEST_PHRASE)
+        except Exception as exc:  # noqa: BLE001 -- report each engine's own failure, keep comparing the other
+            results.append(f"{engine_name}: {type(exc).__name__}: {exc}")
+            continue
+        if audio.size == 0:
+            results.append(f"{engine_name}: produced no audio")
+            continue
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ad._play_recording(sd, audio, engine.sample_rate, out_idx)
+            results.append(f"{engine_name}: played ({audio.shape[0]} samples @ {engine.sample_rate}Hz)")
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"{engine_name}: playback failed -- {type(exc).__name__}: {exc}")
+
+    state.status = " | ".join(results)
+
+
+def _refresh_kokoro_voices(state: TuiState) -> None:
+    """[d]: force a fresh download of tts.voices_path, replacing whatever
+    is already cached -- for when kokoro-onnx's upstream release adds or
+    changes voices and the local file predates that. The normal
+    auto-download-on-first-use path (resolve_kokoro_model_paths, used by
+    create_tts_engine) only fetches when the file is missing, so it would
+    never notice a newer release existing once something is already
+    cached locally. Only meaningful for tts.engine=kokoro; a no-op
+    (with an explanatory status) everywhere else.
+    """
+    if state.current_section().key != "tts" or state.working.tts.engine != "kokoro":
+        state.status = "[d] refresh voices is only available for tts.engine=kokoro"
+        return
+    state.status = "downloading the latest Kokoro voices file..."
+    try:
+        refresh_kokoro_voices(state.working.tts.voices_path)
+    except Exception as exc:  # noqa: BLE001 -- report, don't crash the TUI over a failed download
+        state.status = f"voices refresh failed: {exc}"
+        return
+    voices = list_kokoro_voices(state.working.tts.voices_path)
+    state.status = f"voices refreshed -- {len(voices)} voices now available"
+
+
 async def probe_stt(config: AppConfig) -> str:
     transcriber = create_stt_engine(config.stt)
     silence = np.zeros(int(config.audio.sample_rate), dtype=np.float32)
@@ -1148,6 +1335,26 @@ def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
                 width,
             )
         )
+    if spec.section == "tts":
+        lines.append("")
+        lines.extend(
+            _wrap_text(
+                "Press [c] to hear Kokoro and Piper speak the same test phrase back to "
+                "back -- each engine's own remembered voice/settings, without switching "
+                "tts.engine or losing anything staged.",
+                width,
+            )
+        )
+        if state.working.tts.engine == "kokoro":
+            lines.append("")
+            lines.extend(
+                _wrap_text(
+                    "Press [d] to redownload the Kokoro voices file, replacing whatever's "
+                    "cached -- use this if a newer kokoro-onnx release adds voices this "
+                    "list doesn't show yet.",
+                    width,
+                )
+            )
     if spec.kind == "choice" and spec.choices:
         lines.append("")
         lines.extend(_wrap_text("Choices: " + ", ".join(spec.choices), width))
@@ -1564,6 +1771,8 @@ def _toggle_or_cycle(state: TuiState) -> None:
         # backend.name is a choice field, so new_value is a str here; str()
         # makes that explicit for the type checker.
         _switch_backend(state.working, str(new_value))
+    elif spec.section == "tts" and spec.key == "engine":
+        _switch_tts_engine(state.working, str(new_value))
     else:
         _set_value(state.working, spec, new_value)
     state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(mode="python")
@@ -1586,6 +1795,8 @@ def _prompt_edit(state: TuiState) -> None:
         return
     if spec.section == "backend" and spec.key == "name":
         _switch_backend(state.working, new_value)
+    elif spec.section == "tts" and spec.key == "engine":
+        _switch_tts_engine(state.working, new_value)
     else:
         _set_value(state.working, spec, new_value)
     state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(mode="python")
@@ -1713,6 +1924,10 @@ def _handle_browse(state: TuiState, key: str) -> bool:
         _save(state)
     elif lowered == "t":
         asyncio.run(_test_state(state))
+    elif lowered == "c":
+        asyncio.run(_compare_tts_engines(state))
+    elif lowered == "d":
+        _refresh_kokoro_voices(state)
     return True
 
 

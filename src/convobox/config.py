@@ -119,6 +119,23 @@ class TTSConfig(BaseModel):
     speaker: str | None = None
 
 
+class TTSProfileConfig(BaseModel):
+    # Per-engine memory for the settings TUI, same shape/purpose as
+    # BackendProfileConfig: switching tts.engine (kokoro <-> piper) stages
+    # the OTHER engine's fields here first, so switching back restores
+    # them instead of losing whatever voice/settings you had -- and lets
+    # the Settings TUI build a real engine for EITHER one (e.g. for a
+    # side-by-side comparison) without cross-contaminating the currently
+    # active engine's own fields.
+    voice: str | None = None
+    model_path: str | None = None
+    voices_path: str | None = None
+    language: str | None = None
+    rate: float | None = None
+    volume: float | None = None
+    speaker: str | None = None
+
+
 class InteractionConfig(BaseModel):
     # What happens when the user talks while a response is playing --
     # one of the named presets in convobox.interrupt_presets.PRESETS
@@ -367,6 +384,7 @@ class AppConfig(BaseModel):
     vad: VADConfig = Field(default_factory=VADConfig)
     stt: STTConfig = Field(default_factory=STTConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
+    tts_profiles: dict[str, TTSProfileConfig] = Field(default_factory=dict)
     safeword: SafewordConfig = Field(default_factory=SafewordConfig)
     backend: BackendConfig = Field(default_factory=BackendConfig)
     backend_profiles: dict[str, BackendProfileConfig] = Field(default_factory=dict)

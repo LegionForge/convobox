@@ -329,6 +329,44 @@ def test_list_kokoro_voices_returns_empty_for_a_corrupt_file(tmp_path: Path) -> 
     assert factory_module.list_kokoro_voices(str(voices_path)) == []
 
 
+# --- refresh_kokoro_voices: unlike resolve_kokoro_model_paths' auto-
+# download-on-first-use (only fetches when missing), this always
+# re-fetches -- for when kokoro-onnx's upstream release adds/changes
+# voices and the locally cached file predates that. ---
+
+
+def test_refresh_kokoro_voices_redownloads_even_when_already_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voices_path = tmp_path / "voices.bin"
+    voices_path.write_bytes(b"stale cached content")
+
+    calls: list[str] = []
+
+    def _fake_download(filename: str, dest: Path) -> None:
+        calls.append(filename)
+        dest.write_bytes(b"fresh content")
+
+    monkeypatch.setattr(factory_module, "_download_kokoro_asset", _fake_download)
+
+    factory_module.refresh_kokoro_voices(str(voices_path))
+
+    assert calls == [factory_module._KOKORO_VOICES_FILENAME]
+    assert voices_path.read_bytes() == b"fresh content"
+
+
+def test_refresh_kokoro_voices_propagates_download_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fake_download(filename: str, dest: Path) -> None:
+        raise FileNotFoundError(f"asset {filename!r} could not be downloaded automatically (boom)")
+
+    monkeypatch.setattr(factory_module, "_download_kokoro_asset", _fake_download)
+
+    with pytest.raises(FileNotFoundError, match="could not be downloaded automatically"):
+        factory_module.refresh_kokoro_voices(str(tmp_path / "voices.bin"))
+
+
 def test_create_tts_engine_constructs_piper_with_resolved_paths_and_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -150,6 +150,20 @@ def list_kokoro_voices(voices_path: str) -> list[str]:
         return []
 
 
+def refresh_kokoro_voices(voices_path: str) -> None:
+    """Force a fresh download of the Kokoro voices file, replacing
+    whatever is already cached there.
+
+    Unlike resolve_kokoro_model_paths' auto-download-on-first-use (which
+    only fetches when the file is missing), this always re-fetches --
+    for when kokoro-onnx's upstream release adds or changes voices and
+    the locally cached file predates that. list_kokoro_voices always
+    reads the file fresh, so a new voice becomes pickable immediately
+    after this returns, no cache to invalidate elsewhere.
+    """
+    _download_kokoro_asset(_KOKORO_VOICES_FILENAME, Path(voices_path))
+
+
 def create_tts_engine(
     config: TTSConfig, voices_dir: Path = DEFAULT_VOICES_DIR
 ) -> TTSEngine:
