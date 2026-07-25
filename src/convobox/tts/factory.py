@@ -51,7 +51,21 @@ def resolve_voice_paths(
             "use scripts/voice_picker.py to browse/audition other voices)",
             voice, voices_dir,
         )
-        from piper.download_voices import download_voice
+        try:
+            from piper.download_voices import download_voice
+        except ModuleNotFoundError as exc:
+            # piper-tts is an opt-in extra (GPL-3.0, see
+            # DEPENDENCY_LICENSE_AUDIT.md), deliberately not installed by
+            # default. Without this catch, switching tts.engine to piper
+            # in an env that never ran `uv sync --extra piper` propagates
+            # a raw ModuleNotFoundError straight out of validate_config,
+            # which settings_tui.py's render() calls on every frame --
+            # crashing the whole TUI instead of showing a validation
+            # error (live-confirmed, 2026-07-24).
+            raise FileNotFoundError(
+                "piper-tts is not installed in this environment. Install it "
+                "with: uv sync --extra piper"
+            ) from exc
 
         voices_dir.mkdir(parents=True, exist_ok=True)
         try:
