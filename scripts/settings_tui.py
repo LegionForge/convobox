@@ -1408,15 +1408,44 @@ def render_modal(
     content_lines.extend(detail_lines)
     if choice_options:
         selected = choice_value if choice_value in choice_options else (choice_options[0] if choice_options else None)
+        try:
+            selected_idx = choice_options.index(selected) if selected is not None else 0
+        except ValueError:
+            selected_idx = 0
         content_lines.extend(["", "Options:"])
         # Pre-calculate max option width to avoid oversizing the modal
         # Reserve 4 chars for " > " prefix, then cap at 70 chars display width
         max_option_display = 70
-        for option in choice_options:
-            marker = ">" if option == selected else " "
+        # Scroll the option list so the selection is always visible --
+        # UAT feedback, 2026-07-24: a 54-voice Kokoro list only ever
+        # rendered the first ~15 entries (whatever fit body_height); once
+        # the selected index moved past that static window, the `>`
+        # marker scrolled off screen with zero visual feedback -- arrow
+        # keys visibly changed the "Current:"/buffer line but the list
+        # itself never appeared to move. Reserve 2 extra rows against
+        # body_height for the "more above/below" indicators regardless of
+        # whether both end up shown -- simpler than exact accounting and
+        # the margin is cheap against a normal terminal height.
+        fixed_remaining = 2  # "Esc.../Enter..." + "> buffer" rows still to come
+        available = max(3, body_height - len(content_lines) - fixed_remaining - 2)
+        total = len(choice_options)
+        if total <= available:
+            window_start, window_end = 0, total
+        else:
+            half = available // 2
+            window_start = max(0, selected_idx - half)
+            window_end = min(total, window_start + available)
+            window_start = max(0, window_end - available)
+        if window_start > 0:
+            content_lines.append(f"   ... {window_start} more above ...")
+        for i in range(window_start, window_end):
+            option = choice_options[i]
+            marker = ">" if i == selected_idx else " "
             # Truncate long options with ellipsis if needed
             display_option = option if len(option) <= max_option_display else option[:max_option_display-3] + "..."
             content_lines.append(f" {marker} {display_option}")
+        if window_end < total:
+            content_lines.append(f"   ... {total - window_end} more below ...")
     content_lines.append("")
     content_lines.append(
         "Esc cancel | Enter accept"
@@ -1798,32 +1827,47 @@ def _toggle_or_cycle(state: TuiState) -> None:
     state.status = _field_updated_status(spec, state.dirty)
 
 
-async def _test_kokoro_voice(voice: str, config: AppConfig) -> None:
-    """Test-speak a sample phrase with the given Kokoro voice."""
-    try:
-        tts = create_tts_engine(
-            engine="kokoro",
-            voice=voice,
-            model_path=str(resolve_voice_paths("kokoro")[0]),
-            voices_path=str(resolve_voice_paths("kokoro")[1]),
-        )
-    except Exception:
-        return
+async def _test_kokoro_voice(voice: str, config: AppConfig) -> str:
+    """Synthesize and play a sample phrase with the given Kokoro voice,
+    returning a one-line result the caller can show the operator.
 
-    test_phrase = f"Testing {voice} LegionForge ConvoBox Voice Testing"
-    try:
-        # Collect all audio chunks
-        audio_data = []
-        sample_rate = tts.sample_rate
-        async for chunk in tts.synthesize_stream(test_phrase):
-            audio_data.append(chunk)
-        if audio_data:
-            import sounddevice
-            combined = np.concatenate(audio_data)
-            sounddevice.play(combined, samplerate=sample_rate)
-            sounddevice.wait()
-    except Exception:
-        pass
+    Reuses _compare_tts_engines' own established pattern (build a real
+    TTSConfig, engine.synthesize(), play through the CONFIGURED output
+    device via audio_devices' resolve_spec/_play_recording) rather than
+    a bespoke path -- a prior version called create_tts_engine with
+    kwargs it doesn't accept, and resolve_voice_paths (a Piper-only
+    function) on the literal string "kokoro", then swallowed the
+    resulting TypeError in a blanket except, so [t] silently did nothing
+    at all. sounddevice.play() alone (the prior version's fallback)
+    would also have ignored config.audio.output_device and played
+    through the SYSTEM default device instead of the configured one.
+    """
+    import io
+
+    import sounddevice as sd
+
+    import audio_devices as ad
+
+    tts_config = _tts_config_for_comparison(config, "kokoro")
+    if tts_config is None:
+        tts_config = TTSConfig(engine="kokoro", voice=voice)
+    else:
+        tts_config = tts_config.model_copy(update={"voice": voice})
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_devices = ad.collect_devices(sd, "output")
+        if config.audio.output_device:
+            out_idx, _ = ad.resolve_spec(config.audio.output_device, out_devices)
+        else:
+            out_idx = ad._default_index(sd, "output")
+
+    engine = create_tts_engine(tts_config, DEFAULT_VOICES_DIR)
+    audio = await engine.synthesize(f"Testing {voice}. LegionForge ConvoBox voice testing.")
+    if audio.size == 0:
+        return f"{voice}: produced no audio"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ad._play_recording(sd, audio, engine.sample_rate, out_idx)
+    return f"{voice}: played ({audio.shape[0]} samples @ {engine.sample_rate}Hz)"
 
 
 def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, str]:
@@ -1850,6 +1894,7 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
     except (ValueError, IndexError):
         index = 0
 
+    last_test_result: str | None = None
     while True:
         unavailable = voices[index] == _KOKORO_VOICE_UNAVAILABLE
         detail_lines = [
@@ -1860,6 +1905,8 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
             "[t] to test the current voice" if not unavailable else "",
             "Enter to confirm, Esc to cancel",
         ]
+        if last_test_result is not None:
+            detail_lines.extend(["", last_test_result])
         _draw_modal(
             "Select Kokoro Voice",
             "Editing tts.voice",
@@ -1879,10 +1926,21 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
                 return False, current
             return True, voices[index]
         if key.lower() == "t" and not unavailable:
+            # Show a "testing..." state immediately -- synthesis + real
+            # playback takes a couple of seconds, and the picker would
+            # otherwise look frozen with no feedback that [t] did anything.
+            _draw_modal(
+                "Select Kokoro Voice",
+                "Editing tts.voice",
+                [*detail_lines[:-1], f"Testing {voices[index]}..."],
+                voices[index],
+                choice_options=voices,
+                choice_value=voices[index],
+            )
             try:
-                asyncio.run(_test_kokoro_voice(voices[index], config))
-            except Exception:  # noqa: BLE001
-                pass  # Silently fail on test errors; return to picker
+                last_test_result = asyncio.run(_test_kokoro_voice(voices[index], config))
+            except Exception as exc:  # noqa: BLE001 -- surfaced to the operator below, not swallowed
+                last_test_result = f"test failed: {type(exc).__name__}: {exc}"
             continue
 
         # All arrow keys and space cycle through voices in this context
@@ -1890,6 +1948,7 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
             index = (index - 1) % len(voices)
         elif key in {"RIGHT", "DOWN", " "}:
             index = (index + 1) % len(voices)
+        last_test_result = None
 
 
 def _prompt_edit(state: TuiState) -> None:
