@@ -114,6 +114,35 @@ def test_resolve_voice_paths_incomplete_download_raises(
         resolve_voice_paths("en_US-lessac-medium", tmp_path)
 
 
+def test_resolve_voice_paths_when_piper_not_installed_raises_actionable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real crash, live-confirmed 2026-07-24: switching tts.engine to piper
+    in an environment that never ran `uv sync --extra piper` (piper-tts is
+    an opt-in GPL-3.0 extra, not installed by default) propagated a raw
+    ModuleNotFoundError out of resolve_voice_paths, past validate_config's
+    narrower except FileNotFoundError, straight into settings_tui.py's
+    render() (called on every frame) -- crashing the whole TUI instead of
+    surfacing a validation error. Deliberately does NOT importorskip: this
+    must run in every environment, including ones with piper installed,
+    since it simulates the missing-module case regardless of what's
+    actually present.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fake_import(name: str, *args: object, **kwargs: object):
+        if name == "piper.download_voices" or name.startswith("piper."):
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with pytest.raises(FileNotFoundError, match="piper-tts is not installed"):
+        resolve_voice_paths("en_US-lessac-medium", tmp_path)
+
+
 def test_create_tts_engine_rejects_unset_piper_voice(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="tts.voice is not set"):
         create_tts_engine(TTSConfig(engine="piper", voice=None), voices_dir=tmp_path)
