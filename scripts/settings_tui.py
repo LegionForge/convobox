@@ -2030,18 +2030,23 @@ async def _test_piper_speaker(speaker: str, config: AppConfig) -> str:
     this needs a voice already set -- speakers only exist relative to a
     specific voice's own speaker_id_map.
     """
+    tts_config = _tts_config_for_comparison(config, "piper")
+    # _tts_config_for_comparison returns the live config unconditionally
+    # when its engine already matches "piper" -- even with voice=None --
+    # so voice must be checked explicitly here too, not just "is None".
+    # Checked BEFORE importing sounddevice/audio_devices below: CI runners
+    # (Linux, no PortAudio installed) raise OSError just from importing
+    # sounddevice, confirmed live in GitHub Actions run 30150052201 --
+    # this early-return path must never touch that import at all.
+    if tts_config is None or tts_config.voice is None:
+        return "no piper voice configured yet -- pick + save one first"
+
     import io
 
     import sounddevice as sd
 
     import audio_devices as ad
 
-    tts_config = _tts_config_for_comparison(config, "piper")
-    # _tts_config_for_comparison returns the live config unconditionally
-    # when its engine already matches "piper" -- even with voice=None --
-    # so voice must be checked explicitly here too, not just "is None".
-    if tts_config is None or tts_config.voice is None:
-        return "no piper voice configured yet -- pick + save one first"
     speaker_value = None if speaker == _PIPER_SPEAKER_DEFAULT else speaker
     tts_config = tts_config.model_copy(update={"speaker": speaker_value})
     label = speaker if speaker_value is not None else "voice's default speaker"
