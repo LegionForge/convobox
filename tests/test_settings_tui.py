@@ -724,6 +724,18 @@ def test_tts_config_for_comparison_uses_remembered_profile_not_active_fields() -
     assert piper_config.voice == "en_US-lessac-medium"
 
 
+def test_compare_test_phrase_names_the_engine() -> None:
+    # [c] compare plays Kokoro then Piper back to back -- naming the
+    # engine in the spoken phrase itself makes each one identifiable by
+    # ear alone, not just by reading the status line afterward.
+    assert settings_tui._compare_test_phrase("piper") == (
+        "This is a test using the 'piper' text to speech engine."
+    )
+    assert settings_tui._compare_test_phrase("kokoro") == (
+        "This is a test using the 'kokoro' text to speech engine."
+    )
+
+
 def test_compare_tts_engines_plays_both_and_never_mutates_working_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

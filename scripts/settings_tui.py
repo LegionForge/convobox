@@ -1054,7 +1054,11 @@ async def probe_tts(config: AppConfig) -> str:
     return f"TTS probe succeeded ({total} samples @ {engine.sample_rate} Hz)"
 
 
-_COMPARE_TEST_PHRASE = "This is a test of the text to speech engine."
+def _compare_test_phrase(engine_name: str) -> str:
+    """Names the engine in the spoken phrase itself, so [c]'s back-to-back
+    Kokoro/Piper playback is identifiable by ear alone, not just by
+    reading the status line afterward."""
+    return f"This is a test using the {engine_name!r} text to speech engine."
 
 
 def _tts_config_for_comparison(config: AppConfig, engine_name: str) -> TTSConfig | None:
@@ -1124,7 +1128,7 @@ async def _compare_tts_engines(state: TuiState) -> None:
             continue
         try:
             engine = create_tts_engine(tts_config, DEFAULT_VOICES_DIR)
-            audio = await engine.synthesize(_COMPARE_TEST_PHRASE)
+            audio = await engine.synthesize(_compare_test_phrase(engine_name))
         except Exception as exc:  # noqa: BLE001 -- report each engine's own failure, keep comparing the other
             results.append(f"{engine_name}: {type(exc).__name__}: {exc}")
             continue
