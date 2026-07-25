@@ -63,6 +63,40 @@ channel, editor as canvas.
   different feature: it speaks one fixed phrase through each engine's
   currently-configured voice, not a sampler across Kokoro's own 54 voices.
 
+### Alternative local STT engines (watching, not decided)
+Prompted by a 2026-07-25 look at [siddsachar/row-bot#152](https://github.com/siddsachar/row-bot/issues/152),
+which pointed at [FunASR](https://github.com/modelscope/FunASR) (Alibaba/
+ModelScope's speech toolkit, MIT, Python-native, actively released) and its
+flagship model **SenseVoice-Small** as a possible alternative to
+`faster-whisper`. Architecturally a non-autoregressive transformer encoder
+(no decoder loop) rather than faster-whisper's encoder-decoder design --
+that's the real source of its speed claim, not a tuning trick.
+
+**Why watching, not prototyping yet:**
+- The only benchmark offered ("~70ms for a 10s clip," i.e. RTF ~0.007 vs.
+  faster-whisper's measured 0.05-0.13 here) has no hardware, dataset, or
+  methodology attached, and came from an account that turned out to be a
+  FunASR project insider (a co-author on FunASR's own release commits)
+  promoting into an unrelated repo's issue tracker -- treat as marketing,
+  not a community-verified number.
+- Zero accuracy (WER) figures anywhere in that thread.
+- The license story doesn't hold up as advertised: the toolkit itself is
+  MIT, but SenseVoiceSmall's *weights* ship under a separate, more
+  restrictive "FunASR Model Open Source License Agreement," and it
+  actually covers 5 languages (Chinese, Cantonese, English, Japanese,
+  Korean), not the "50+" claimed in the issue. A sibling model,
+  Fun-ASR-Nano-2512, is genuinely Apache-2.0 and worth a look if this gets
+  revisited.
+
+**What would actually justify picking this up:** an independent side-by-
+side WER + latency test on this project's own hardware/audio, not the
+issue's own numbers taken on faith -- same "prove it's real before it
+affects behavior" bar this roadmap already holds itself to elsewhere
+(AEC telemetry, tone-of-voice prosody above). `funasr` is a real PyPI
+package (Python-native, WebSocket streaming support), so a prototype
+would be straightforward to wire up as a second STTEngine implementation
+if the numbers ever check out.
+
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)
