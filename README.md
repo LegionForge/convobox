@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
+💛 [Support this project](https://legionforge.org/donations) — LegionForge is open-source and independently maintained.
+
 A local, backend-agnostic voice frontend for CLI coding agents. It sits
 between you and whichever coding agent CLI you're driving — Claude Code,
 Codex, OpenCode, and eventually others — and lets you work by voice
