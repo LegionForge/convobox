@@ -10,7 +10,9 @@ from convobox.tui.render import (
     _YELLOW,
     _fit,
     _heartbeat_color,
+    _stt_device_tag,
     _visible_len,
+    _windowed,
     _wrap,
     render_conversation_frame,
 )
@@ -180,6 +182,14 @@ def test_diagnostics_line_shows_stt_device_cuda_in_green() -> None:
     assert "stt: cuda" in plain_lines[1]
 
 
+def test_stt_device_tag_falls_back_to_the_raw_device_name() -> None:
+    # Neither of the two special-cased devices (cuda gets green, cpu gets
+    # plain "stt: cpu") -- an engine reporting something else (e.g. "mps",
+    # or a faster-whisper build string) must still render something
+    # readable rather than only ever recognizing two hardcoded values.
+    assert _stt_device_tag("mps") == "stt: mps"
+
+
 def test_diagnostics_line_stt_device_does_not_swallow_dim_styling_for_rest_of_line() -> None:
     # Regression: the cuda tag embeds its own color+reset mid-line (unlike
     # the heartbeat/REC tags, which are always last) -- it must restore
@@ -308,6 +318,13 @@ def test_transcript_scrolls_to_most_recent_when_overflowing() -> None:
     assert "message 0 " not in joined  # earliest scrolled off
 
 
+def test_windowed_returns_nothing_for_an_empty_source_without_dividing_by_zero() -> None:
+    # An empty transcript/detail pane hits this before the max_offset
+    # computation below it -- guards against a stale nonzero scroll
+    # offset against zero real content ever reaching that math.
+    assert _windowed([], pane_height=10, offset=5) == ([], 0)
+
+
 # --- scrollable panes: transcript_scroll / detail_scroll / focus_pane ---
 
 
@@ -375,6 +392,13 @@ def test_wrap_empty_paragraph_becomes_blank_line() -> None:
     assert _wrap("a\n\nb", width=10) == ["a", "", "b"]
 
 
+def test_wrap_returns_nothing_for_a_non_positive_width() -> None:
+    # A pane collapsed to zero/negative width (extreme resize) must not
+    # attempt to wrap into it -- there's nowhere to put a single word.
+    assert _wrap("some text", width=0) == []
+    assert _wrap("some text", width=-5) == []
+
+
 def test_fit_pads_short_ansi_text_to_visible_width() -> None:
     colored = "\x1b[31mhi\x1b[0m"
     fitted = _fit(colored, 10)
@@ -395,6 +419,20 @@ def test_fit_truncates_when_visible_text_actually_overflows() -> None:
     fitted = _fit("this is definitely too long for ten", 10)
     assert _visible_len(fitted) == 10
     assert fitted.endswith("...")
+
+
+def test_fit_returns_empty_for_a_non_positive_width() -> None:
+    assert _fit("anything", 0) == ""
+    assert _fit("anything", -3) == ""
+
+
+def test_fit_clips_without_an_ellipsis_when_too_narrow_for_one() -> None:
+    # width <= 3 has no room for a 3-character "..." plus any real
+    # content -- falls back to a bare clip instead of an ellipsis-only
+    # (or negative-length) result.
+    fitted = _fit("overflowing text", 2)
+    assert _visible_len(fitted) == 2
+    assert "..." not in fitted
 
 
 def test_update_mic_level_takes_first_reading_as_is() -> None:
