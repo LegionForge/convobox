@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import re
 import shlex
@@ -27,6 +28,7 @@ import time
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable, Coroutine
 from typing import Any, Literal
 
 import numpy as np
@@ -165,6 +167,8 @@ class FieldSpec:
         "list_str",
         "command",
         "kokoro_voice",
+        "piper_voice",
+        "piper_speaker",
     ]
     choices: tuple[str, ...] = ()
     help_text: str = ""
@@ -328,6 +332,35 @@ _TTS_VOICE_KOKORO_FIELD = FieldSpec(
     ),
 )
 
+# Swapped in for tts.voice/tts.speaker when engine is piper -- same
+# reasoning as _TTS_VOICE_KOKORO_FIELD above: picking from what's actually
+# installed beats free text a typo could silently break. Unlike Kokoro's
+# fixed 54-voice set, Piper's real catalog is 163 voices/44 languages
+# (scripts/voice_picker.py's job to browse/download); this picker only
+# offers voices ALREADY downloaded, same "never trigger a surprise network
+# call just by cycling" stance as the Kokoro picker.
+_TTS_VOICE_PIPER_FIELD = FieldSpec(
+    "tts", "voice", "Voice", "piper_voice",
+    help_text=(
+        "An installed Piper voice key, such as en_US-lessac-medium. "
+        "Space/Left/Right cycles voices already downloaded to .models/piper "
+        "-- use scripts/voice_picker.py to browse/download from Piper's "
+        "full 163-voice/44-language catalog first if the list is empty."
+    ),
+)
+_TTS_SPEAKER_PIPER_FIELD = FieldSpec(
+    "tts", "speaker", "Speaker", "piper_speaker",
+    help_text=(
+        "Only for multi-speaker voices (e.g. en_GB-semaine-medium: 4 named "
+        "speakers, en_GB-aru-medium: 12, en_GB-vctk-medium: 109, "
+        "en_US-libritts-high: 904). Space/Left/Right cycles the CURRENT "
+        "voice's own real speaker names, read from its downloaded config -- "
+        "'(voice default)' clears back to the voice's own default speaker. "
+        "Shows unavailable if tts.voice isn't set/saved/downloaded yet, or "
+        "is a genuinely single-speaker voice."
+    ),
+)
+
 
 def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tuple[FieldSpec, ...]:
     if section.key == "tts":
@@ -341,10 +374,12 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
                 for field in fields
             )
         if config.tts.engine == "piper":
-            return tuple(
+            fields = tuple(
                 field for field in section.fields
                 if field.key in {"engine", "voice", "speaker", "rate", "volume"}
             )
+            swap = {"voice": _TTS_VOICE_PIPER_FIELD, "speaker": _TTS_SPEAKER_PIPER_FIELD}
+            return tuple(swap.get(field.key, field) for field in fields)
         return section.fields
     if section.key != "backend":
         return section.fields
@@ -616,6 +651,57 @@ def _kokoro_voice_choices(config: AppConfig) -> list[str]:
     return voices if voices else [_KOKORO_VOICE_UNAVAILABLE]
 
 
+# Same "never offer zero choices" reasoning as _KOKORO_VOICE_UNAVAILABLE.
+_PIPER_VOICE_UNAVAILABLE = "(no voices downloaded -- use scripts/voice_picker.py to download one)"
+# Piper speaker picker's "use this voice's own default speaker" choice --
+# always first, same role as _SYSTEM_DEFAULT for device fields (tts.speaker
+# is str | None; None means "voice's default", not a literal string to save).
+_PIPER_SPEAKER_DEFAULT = "(voice default)"
+_PIPER_SPEAKER_UNAVAILABLE = "(pick + save a downloaded voice first, or it has no named speakers)"
+
+
+def _piper_voice_choices() -> list[str]:
+    """Locally installed Piper voice keys (e.g. "en_US-lessac-medium"),
+    or the placeholder above if none are downloaded yet. Deliberately
+    does NOT browse Piper's full 163-voice HuggingFace catalog here --
+    that's scripts/voice_picker.py's job (search/download/audition);
+    this picker, like the Kokoro one, only offers what's already on
+    disk, so cycling here never triggers a surprise network download.
+    """
+    import voice_picker
+
+    voices = voice_picker.installed_voices(DEFAULT_VOICES_DIR)
+    return voices if voices else [_PIPER_VOICE_UNAVAILABLE]
+
+
+def _piper_speaker_choices(config: AppConfig) -> list[str]:
+    """Named speakers for the CURRENTLY CONFIGURED Piper voice (tts.voice),
+    read directly from that voice's own downloaded .onnx.json sidecar --
+    speaker_id_map lives in that config JSON already (confirmed live,
+    2026-07-24: reading a real downloaded en_GB-aru-medium.onnx.json
+    yields the identical speaker_id_map PiperVoice.load() would produce),
+    so this needs no ONNX model load just to list names. Returns the
+    unavailable placeholder if no voice is set, it isn't downloaded, or
+    it's a genuinely single-speaker voice (empty map) -- nothing real to
+    pick in any of those cases.
+    """
+    voice = config.tts.voice
+    if not voice:
+        return [_PIPER_SPEAKER_UNAVAILABLE]
+    json_path = DEFAULT_VOICES_DIR / f"{voice}.onnx.json"
+    if not json_path.exists():
+        return [_PIPER_SPEAKER_UNAVAILABLE]
+    try:
+        with json_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return [_PIPER_SPEAKER_UNAVAILABLE]
+    speaker_map = data.get("speaker_id_map") or {}
+    if not speaker_map:
+        return [_PIPER_SPEAKER_UNAVAILABLE]
+    return [_PIPER_SPEAKER_DEFAULT, *sorted(speaker_map)]
+
+
 def _device_choices(kind: Literal["input", "output"]) -> list[str]:
     """Real, deduped device names for the picker.
 
@@ -653,6 +739,10 @@ def _choices_for(spec: FieldSpec, config: AppConfig) -> tuple[str, ...]:
         return tuple(_device_choices(kind))
     if spec.kind == "kokoro_voice":
         return tuple(_kokoro_voice_choices(config))
+    if spec.kind == "piper_voice":
+        return tuple(_piper_voice_choices())
+    if spec.kind == "piper_speaker":
+        return tuple(_piper_speaker_choices(config))
     if spec.kind == "bool":
         return ("false", "true")
     return spec.choices
@@ -662,10 +752,16 @@ def _choice_index(spec: FieldSpec, current: Any, config: AppConfig) -> int:
     choices = _choices_for(spec, config)
     if not choices:
         return -1
-    # Device fields are str | None; None maps to _SYSTEM_DEFAULT (always
-    # index 0, see _device_choices) so cycling from unset advances to the
-    # first real device instead of appearing to do nothing.
-    lookup = current if current is not None else _SYSTEM_DEFAULT
+    # Device/piper_speaker fields are str | None; None maps to that field's
+    # own "(unset)" sentinel (always index 0, see _device_choices /
+    # _piper_speaker_choices) so cycling from unset advances to the first
+    # real choice instead of appearing to do nothing.
+    if current is not None:
+        lookup = current
+    elif spec.kind == "piper_speaker":
+        lookup = _PIPER_SPEAKER_DEFAULT
+    else:
+        lookup = _SYSTEM_DEFAULT
     try:
         return choices.index(lookup)
     except ValueError:
@@ -1361,6 +1457,12 @@ def _help_panel_lines(state: TuiState, width: int, height: int) -> list[str]:
     if spec.kind == "kokoro_voice":
         lines.append("")
         lines.extend(_wrap_text("Choices: " + ", ".join(_kokoro_voice_choices(state.working)), width))
+    if spec.kind == "piper_voice":
+        lines.append("")
+        lines.extend(_wrap_text("Choices: " + ", ".join(_piper_voice_choices()), width))
+    if spec.kind == "piper_speaker":
+        lines.append("")
+        lines.extend(_wrap_text("Choices: " + ", ".join(_piper_speaker_choices(state.working)), width))
     if spec.section == "audio" and spec.key == "aec_delay_ms":
         lines.append("")
         lines.extend(_wrap_text(_aec_estimate_summary(state.path), width))
@@ -1796,7 +1898,7 @@ def _toggle_or_cycle(state: TuiState) -> None:
     new_value: bool | str | None
     if spec.kind == "bool":
         new_value = not bool(current)
-    elif spec.kind in ("choice", "device", "kokoro_voice"):
+    elif spec.kind in ("choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"):
         try:
             new_value = _cycle_choice(spec, current, 1, state.working)
         except ValueError:
@@ -1812,6 +1914,15 @@ def _toggle_or_cycle(state: TuiState) -> None:
             # real voice name.
             state.status = "tts.voices_path not downloaded yet -- press [t] to fetch it"
             return
+        if spec.kind == "piper_voice" and new_value == _PIPER_VOICE_UNAVAILABLE:
+            state.status = "no piper voices downloaded -- use scripts/voice_picker.py first"
+            return
+        if spec.kind == "piper_speaker":
+            if new_value == _PIPER_SPEAKER_UNAVAILABLE:
+                state.status = "no named speakers for the current tts.voice"
+                return
+            if new_value == _PIPER_SPEAKER_DEFAULT:
+                new_value = None
     else:
         state.status = "space toggles booleans and cycles choices only"
         return
@@ -1870,50 +1981,124 @@ async def _test_kokoro_voice(voice: str, config: AppConfig) -> str:
     return f"{voice}: played ({audio.shape[0]} samples @ {engine.sample_rate}Hz)"
 
 
-def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, str]:
-    """Dedicated submenu for selecting a Kokoro voice.
-
-    Allows UP/DOWN/LEFT/RIGHT/Space to cycle freely in this nested context
-    without interfering with main tab navigation. [t] tests the voice.
-
-    Uses the module-level _TTS_VOICE_KOKORO_FIELD (the real FieldSpec for
-    tts.voice) rather than constructing a new one -- a prior version built
-    an ad hoc FieldSpec with an invalid `is_required` kwarg, which raised
-    on every open and was silently swallowed by a blanket except, always
-    falling back to a single hardcoded voice. That bug shipped invisibly
-    because the failure path looked identical to "working, only one
-    voice downloaded."
+async def _test_piper_voice(voice: str, config: AppConfig) -> str:
+    """Synthesize and play a sample phrase with the given Piper voice --
+    same established pattern as _test_kokoro_voice (real TTSConfig,
+    engine.synthesize(), playback through the CONFIGURED output device).
     """
-    voices = list(_choices_for(_TTS_VOICE_KOKORO_FIELD, config))
-    if not voices:
-        voices = [_KOKORO_VOICE_UNAVAILABLE]
+    import io
 
-    # Start at current voice if it's in the list, else start at first
+    import sounddevice as sd
+
+    import audio_devices as ad
+
+    tts_config = _tts_config_for_comparison(config, "piper")
+    if tts_config is None:
+        tts_config = TTSConfig(engine="piper", voice=voice)
+    else:
+        tts_config = tts_config.model_copy(update={"voice": voice})
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_devices = ad.collect_devices(sd, "output")
+        if config.audio.output_device:
+            out_idx, _ = ad.resolve_spec(config.audio.output_device, out_devices)
+        else:
+            out_idx = ad._default_index(sd, "output")
+
+    engine = create_tts_engine(tts_config, DEFAULT_VOICES_DIR)
+    audio = await engine.synthesize(f"Testing {voice}. LegionForge ConvoBox voice testing.")
+    if audio.size == 0:
+        return f"{voice}: produced no audio"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ad._play_recording(sd, audio, engine.sample_rate, out_idx)
+    return f"{voice}: played ({audio.shape[0]} samples @ {engine.sample_rate}Hz)"
+
+
+async def _test_piper_speaker(speaker: str, config: AppConfig) -> str:
+    """Synthesize and play a sample phrase with the CURRENT Piper voice
+    (config.tts.voice) using the given speaker. Unlike voice testing,
+    this needs a voice already set -- speakers only exist relative to a
+    specific voice's own speaker_id_map.
+    """
+    import io
+
+    import sounddevice as sd
+
+    import audio_devices as ad
+
+    tts_config = _tts_config_for_comparison(config, "piper")
+    # _tts_config_for_comparison returns the live config unconditionally
+    # when its engine already matches "piper" -- even with voice=None --
+    # so voice must be checked explicitly here too, not just "is None".
+    if tts_config is None or tts_config.voice is None:
+        return "no piper voice configured yet -- pick + save one first"
+    speaker_value = None if speaker == _PIPER_SPEAKER_DEFAULT else speaker
+    tts_config = tts_config.model_copy(update={"speaker": speaker_value})
+    label = speaker if speaker_value is not None else "voice's default speaker"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_devices = ad.collect_devices(sd, "output")
+        if config.audio.output_device:
+            out_idx, _ = ad.resolve_spec(config.audio.output_device, out_devices)
+        else:
+            out_idx = ad._default_index(sd, "output")
+
+    engine = create_tts_engine(tts_config, DEFAULT_VOICES_DIR)
+    audio = await engine.synthesize(f"Testing speaker {label}. LegionForge ConvoBox voice testing.")
+    if audio.size == 0:
+        return f"{label}: produced no audio"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ad._play_recording(sd, audio, engine.sample_rate, out_idx)
+    return f"{label}: played ({audio.shape[0]} samples @ {engine.sample_rate}Hz)"
+
+
+def _scrollable_test_picker_modal(
+    modal_title: str,
+    editing_prompt: str,
+    choices: list[str],
+    unavailable_sentinel: str,
+    current: str | None,
+    test_fn: Callable[[str], Coroutine[Any, Any, str]] | None,
+) -> tuple[bool, str | None]:
+    """Generic scrolling choice picker with an optional [t] test key --
+    shared core behind the Kokoro-voice, Piper-voice, and Piper-speaker
+    pickers. Arrows/Space cycle with the selection always visible
+    (render_modal's own choice_options windowing keeps the `>` marker in
+    view regardless of list length -- UAT feedback, 2026-07-24: a 54-entry
+    list previously only ever showed the first ~15, so cycling past that
+    changed the "Current:" line with zero visible list movement). Enter
+    confirms, Esc cancels. [t], if given, synthesizes+plays the current
+    choice and shows a real result or error line -- never silently
+    swallowed (a prior Kokoro-only version did exactly that, see
+    _test_kokoro_voice's docstring for the specific bug).
+    """
+    if not choices:
+        choices = [unavailable_sentinel]
     try:
-        index = voices.index(_format_value(current))
+        index = choices.index(_format_value(current))
     except (ValueError, IndexError):
         index = 0
 
     last_test_result: str | None = None
     while True:
-        unavailable = voices[index] == _KOKORO_VOICE_UNAVAILABLE
+        unavailable = choices[index] == unavailable_sentinel
         detail_lines = [
-            "Use arrows or Space to cycle through voices:",
+            "Use arrows or Space to cycle:",
             "",
-            "Left/Right or Up/Down to move between voices",
+            "Left/Right or Up/Down to move",
             "Space to cycle forward",
-            "[t] to test the current voice" if not unavailable else "",
+            "[t] to test the current selection" if (test_fn is not None and not unavailable) else "",
             "Enter to confirm, Esc to cancel",
         ]
         if last_test_result is not None:
             detail_lines.extend(["", last_test_result])
         _draw_modal(
-            "Select Kokoro Voice",
-            "Editing tts.voice",
+            modal_title,
+            editing_prompt,
             detail_lines,
-            voices[index],
-            choice_options=voices,
-            choice_value=voices[index],
+            choices[index],
+            choice_options=choices,
+            choice_value=choices[index],
         )
 
         key = read_key()
@@ -1924,31 +2109,87 @@ def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, s
                 # Nothing real to accept -- same convention as the
                 # generic editor's own handling of this sentinel.
                 return False, current
-            return True, voices[index]
-        if key.lower() == "t" and not unavailable:
+            return True, choices[index]
+        if key.lower() == "t" and test_fn is not None and not unavailable:
             # Show a "testing..." state immediately -- synthesis + real
             # playback takes a couple of seconds, and the picker would
             # otherwise look frozen with no feedback that [t] did anything.
             _draw_modal(
-                "Select Kokoro Voice",
-                "Editing tts.voice",
-                [*detail_lines[:-1], f"Testing {voices[index]}..."],
-                voices[index],
-                choice_options=voices,
-                choice_value=voices[index],
+                modal_title,
+                editing_prompt,
+                [*detail_lines[:-1], f"Testing {choices[index]}..."],
+                choices[index],
+                choice_options=choices,
+                choice_value=choices[index],
             )
             try:
-                last_test_result = asyncio.run(_test_kokoro_voice(voices[index], config))
+                last_test_result = asyncio.run(test_fn(choices[index]))
             except Exception as exc:  # noqa: BLE001 -- surfaced to the operator below, not swallowed
                 last_test_result = f"test failed: {type(exc).__name__}: {exc}"
             continue
 
-        # All arrow keys and space cycle through voices in this context
+        # All arrow keys and space cycle through choices in this context
         if key in {"LEFT", "UP"}:
-            index = (index - 1) % len(voices)
+            index = (index - 1) % len(choices)
         elif key in {"RIGHT", "DOWN", " "}:
-            index = (index + 1) % len(voices)
+            index = (index + 1) % len(choices)
         last_test_result = None
+
+
+def _kokoro_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, str | None]:
+    """Dedicated submenu for selecting a Kokoro voice.
+
+    Uses the module-level _TTS_VOICE_KOKORO_FIELD (the real FieldSpec for
+    tts.voice) rather than constructing a new one -- a prior version built
+    an ad hoc FieldSpec with an invalid `is_required` kwarg, which raised
+    on every open and was silently swallowed by a blanket except, always
+    falling back to a single hardcoded voice. That bug shipped invisibly
+    because the failure path looked identical to "working, only one
+    voice downloaded."
+    """
+    voices = list(_choices_for(_TTS_VOICE_KOKORO_FIELD, config))
+    return _scrollable_test_picker_modal(
+        "Select Kokoro Voice",
+        "Editing tts.voice",
+        voices,
+        _KOKORO_VOICE_UNAVAILABLE,
+        current,
+        lambda v: _test_kokoro_voice(v, config),
+    )
+
+
+def _piper_voice_picker_modal(current: str, config: AppConfig) -> tuple[bool, str | None]:
+    """Dedicated submenu for selecting an installed Piper voice."""
+    voices = _piper_voice_choices()
+    return _scrollable_test_picker_modal(
+        "Select Piper Voice",
+        "Editing tts.voice",
+        voices,
+        _PIPER_VOICE_UNAVAILABLE,
+        current,
+        lambda v: _test_piper_voice(v, config),
+    )
+
+
+def _piper_speaker_picker_modal(current: str | None, config: AppConfig) -> tuple[bool, str | None]:
+    """Dedicated submenu for selecting a named speaker of the CURRENT
+    Piper voice (config.tts.voice). current=None (unset) is seeded as
+    _PIPER_SPEAKER_DEFAULT so the picker starts on "(voice default)",
+    same convention as the device picker's _SYSTEM_DEFAULT seeding.
+    """
+    speakers = _piper_speaker_choices(config)
+    seed = _PIPER_SPEAKER_DEFAULT if current is None else current
+    accepted, chosen = _scrollable_test_picker_modal(
+        "Select Piper Speaker",
+        "Editing tts.speaker",
+        speakers,
+        _PIPER_SPEAKER_UNAVAILABLE,
+        seed,
+        lambda s: _test_piper_speaker(s, config),
+    )
+    if accepted and chosen == _PIPER_SPEAKER_DEFAULT:
+        return True, None
+    return accepted, chosen
 
 
 def _prompt_edit(state: TuiState) -> None:
@@ -1958,10 +2199,23 @@ def _prompt_edit(state: TuiState) -> None:
         return
     current = _get_value(state.working, spec)
 
-    # Use dedicated voice picker for kokoro_voice fields
+    # Use a dedicated picker for kokoro_voice/piper_voice/piper_speaker
+    # fields instead of the generic free-text/cycle editor.
     if spec.kind == "kokoro_voice":
         try:
             accepted, new_value = _kokoro_voice_picker_modal(current, state.working)
+        except Exception as exc:  # noqa: BLE001
+            state.status = f"invalid value: {exc}"
+            return
+    elif spec.kind == "piper_voice":
+        try:
+            accepted, new_value = _piper_voice_picker_modal(current, state.working)
+        except Exception as exc:  # noqa: BLE001
+            state.status = f"invalid value: {exc}"
+            return
+    elif spec.kind == "piper_speaker":
+        try:
+            accepted, new_value = _piper_speaker_picker_modal(current, state.working)
         except Exception as exc:  # noqa: BLE001
             state.status = f"invalid value: {exc}"
             return
@@ -1976,8 +2230,13 @@ def _prompt_edit(state: TuiState) -> None:
         state.status = "edit cancelled"
         return
     if spec.section == "backend" and spec.key == "name":
+        # backend.name is always a "choice" field (never one of the
+        # picker kinds above that can return None), so this is a real
+        # invariant, not a defensive workaround.
+        assert isinstance(new_value, str)
         _switch_backend(state.working, new_value)
     elif spec.section == "tts" and spec.key == "engine":
+        assert isinstance(new_value, str)
         _switch_tts_engine(state.working, new_value)
     else:
         _set_value(state.working, spec, new_value)

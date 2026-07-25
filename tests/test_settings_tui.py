@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -222,13 +223,28 @@ def _write_fake_kokoro_voices(path: Path, *names: str) -> None:
     path.with_suffix(path.suffix + ".npz").rename(path)
 
 
+def _write_fake_piper_voice(
+    voices_dir: Path, key: str, speaker_id_map: dict[str, int] | None = None
+) -> None:
+    """A minimal installed-Piper-voice pair: an empty .onnx (only its
+    existence/stem matters to installed_voices' glob) and a real .onnx.json
+    sidecar carrying speaker_id_map -- the same field _piper_speaker_choices
+    reads directly, confirmed live 2026-07-24 against a real downloaded
+    en_GB-aru-medium.onnx.json to match what PiperVoice.load() would expose.
+    """
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    (voices_dir / f"{key}.onnx").write_bytes(b"")
+    config: dict[str, object] = {"speaker_id_map": speaker_id_map or {}}
+    (voices_dir / f"{key}.onnx.json").write_text(json.dumps(config), encoding="utf-8")
+
+
 # --- Kokoro voice picker: tts.voice becomes a real "cycle the actually
 # downloaded voices" field for kokoro (unlike Piper's free-text voice
 # key), since Kokoro's voices are a fixed, closed set baked into
 # tts.voices_path rather than a per-voice download catalog. ---
 
 
-def test_tts_section_shows_kokoro_voice_field_only_for_kokoro_engine() -> None:
+def test_tts_section_shows_engine_specific_voice_picker_kind_per_engine() -> None:
     kokoro_config = _make_config(**{"tts.engine": "kokoro"})
     kokoro_state = TuiState(
         path=Path("convobox.yaml"), original=kokoro_config, working=kokoro_config.model_copy(deep=True)
@@ -247,8 +263,13 @@ def test_tts_section_shows_kokoro_voice_field_only_for_kokoro_engine() -> None:
     piper_state.selected_section = next(i for i, s in enumerate(piper_state.sections) if s.key == "tts")
     piper_fields = piper_state.current_fields()
     piper_voice_field = next(f for f in piper_fields if f.key == "voice")
-    assert piper_voice_field.kind == "optional_str"
-    assert "speaker" in {f.key for f in piper_fields}
+    # Piper voice/speaker also get dedicated pickers now (not free text) --
+    # same "pick from what's real, not free text a typo could break"
+    # reasoning as Kokoro's picker, added after live UAT feedback asked for
+    # it (2026-07-25).
+    assert piper_voice_field.kind == "piper_voice"
+    piper_speaker_field = next(f for f in piper_fields if f.key == "speaker")
+    assert piper_speaker_field.kind == "piper_speaker"
     assert "model_path" not in {f.key for f in piper_fields}
 
 
@@ -361,6 +382,248 @@ def test_help_panel_shows_real_kokoro_voice_choices(tmp_path: Path) -> None:
     lines = settings_tui._help_panel_lines(state, 80, 20)
 
     assert any("af_sarah" in line and "am_adam" in line for line in lines)
+
+
+# --- Piper voice/speaker pickers: same "pick from what's real, not free
+# text a typo could break" reasoning as Kokoro's picker above, added after
+# live UAT feedback asked for parity (2026-07-25). Unlike Kokoro's fixed
+# 54-voice set, Piper voices are individually downloaded (installed_voices
+# globs .models/piper's real *.onnx files) and some are genuinely
+# multi-speaker (speaker_id_map read directly from each voice's own
+# .onnx.json sidecar, no model load needed -- confirmed live against a
+# real downloaded en_GB-aru-medium.onnx.json). ---
+
+
+def test_piper_voice_choices_returns_real_installed_voices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_US-lessac-medium")
+    _write_fake_piper_voice(tmp_path, "en_GB-alan-medium")
+
+    assert settings_tui._piper_voice_choices() == ["en_GB-alan-medium", "en_US-lessac-medium"]
+
+
+def test_piper_voice_choices_falls_back_to_placeholder_when_none_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path / "empty")
+
+    assert settings_tui._piper_voice_choices() == [settings_tui._PIPER_VOICE_UNAVAILABLE]
+
+
+def test_piper_speaker_choices_returns_default_plus_real_speakers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-aru-medium", {"03": 0, "01": 1, "06": 2})
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-aru-medium"})
+
+    choices = settings_tui._piper_speaker_choices(config)
+
+    # "(voice default)" always first (maps to None -- the picker-safe
+    # sentinel for "use the voice's own default speaker"), then the
+    # real names sorted, matching how they'd be typed/matched elsewhere.
+    assert choices == [settings_tui._PIPER_SPEAKER_DEFAULT, "01", "03", "06"]
+
+
+def test_piper_speaker_choices_unavailable_when_voice_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
+
+    assert settings_tui._piper_speaker_choices(config) == [settings_tui._PIPER_SPEAKER_UNAVAILABLE]
+
+
+def test_piper_speaker_choices_unavailable_when_voice_not_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_US-lessac-medium"})
+
+    assert settings_tui._piper_speaker_choices(config) == [settings_tui._PIPER_SPEAKER_UNAVAILABLE]
+
+
+def test_piper_speaker_choices_unavailable_for_single_speaker_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_US-lessac-medium", {})  # empty speaker_id_map
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_US-lessac-medium"})
+
+    assert settings_tui._piper_speaker_choices(config) == [settings_tui._PIPER_SPEAKER_UNAVAILABLE]
+
+
+def test_choices_for_dispatches_piper_voice_and_speaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-aru-medium", {"01": 0})
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-aru-medium"})
+
+    voice_spec = FieldSpec("tts", "voice", "Voice", "piper_voice")
+    speaker_spec = FieldSpec("tts", "speaker", "Speaker", "piper_speaker")
+
+    assert settings_tui._choices_for(voice_spec, config) == ("en_GB-aru-medium",)
+    assert settings_tui._choices_for(speaker_spec, config) == (settings_tui._PIPER_SPEAKER_DEFAULT, "01")
+
+
+def test_toggle_or_cycle_piper_voice_field_advances_to_next_real_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-alan-medium")
+    _write_fake_piper_voice(tmp_path, "en_US-lessac-medium")
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-alan-medium"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "voice")
+
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.tts.voice == "en_US-lessac-medium"
+
+
+def test_toggle_or_cycle_piper_speaker_field_maps_default_sentinel_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-aru-medium", {"01": 0})
+    config = _make_config(
+        **{"tts.engine": "piper", "tts.voice": "en_GB-aru-medium", "tts.speaker": "01"}
+    )
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "speaker")
+
+    # Cycling from "01" (index 1) advances to index 0, "(voice default)" --
+    # which must be written as None, not the literal sentinel text.
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.tts.speaker is None
+
+
+def test_toggle_or_cycle_piper_speaker_field_leaves_speaker_untouched_when_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None, "tts.speaker": None})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "speaker")
+
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.tts.speaker is None
+    assert "no named speakers" in state.status
+
+
+def test_piper_voice_picker_modal_cycle_and_confirm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-alan-medium")
+    _write_fake_piper_voice(tmp_path, "en_US-lessac-medium")
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-alan-medium"})
+
+    keys = iter(["RIGHT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._piper_voice_picker_modal("en_GB-alan-medium", config)
+
+    assert accepted is True
+    assert value == "en_US-lessac-medium"
+
+
+def test_piper_voice_picker_modal_esc_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-alan-medium")
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-alan-medium"})
+
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ESC")
+    accepted, value = settings_tui._piper_voice_picker_modal("en_GB-alan-medium", config)
+
+    assert accepted is False
+    assert value == "en_GB-alan-medium"
+
+
+def test_piper_voice_picker_modal_enter_on_placeholder_cancels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path / "empty")
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
+
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ENTER")
+    accepted, value = settings_tui._piper_voice_picker_modal(None, config)
+
+    assert accepted is False
+
+
+def test_piper_speaker_picker_modal_starts_on_default_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-aru-medium", {"01": 0, "02": 1})
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-aru-medium", "tts.speaker": None})
+
+    # From "(voice default)" (index 0, since current=None seeds it there),
+    # RIGHT advances to "01", ENTER confirms.
+    keys = iter(["RIGHT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._piper_speaker_picker_modal(None, config)
+
+    assert accepted is True
+    assert value == "01"
+
+
+def test_piper_speaker_picker_modal_confirming_default_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    _write_fake_piper_voice(tmp_path, "en_GB-aru-medium", {"01": 0})
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_GB-aru-medium", "tts.speaker": "01"})
+
+    # Starts on "01" (current); LEFT wraps back to "(voice default)", ENTER confirms.
+    keys = iter(["LEFT", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._piper_speaker_picker_modal("01", config)
+
+    assert accepted is True
+    assert value is None
+
+
+def test_test_piper_speaker_reports_when_no_voice_configured() -> None:
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
+
+    result = asyncio.run(settings_tui._test_piper_speaker("01", config))
+
+    assert "pick + save" in result
+
+
+# --- render_modal choice-window scrolling: a long choice list (e.g.
+# Piper's/Kokoro's real voice counts) must keep the selected `>` marker
+# visible, not just render the first N entries and silently truncate the
+# rest -- live UAT feedback, 2026-07-24: cycling past a static ~15-entry
+# window changed the "Current:"/buffer line with zero visible list
+# movement, since the marker had scrolled off-screen with no indicator. ---
+
+
+def test_render_modal_scrolls_to_keep_far_selection_visible() -> None:
+    choices = [f"voice_{i:02d}" for i in range(60)]
+    lines = render_modal(
+        "Select Voice", "Editing tts.voice", [], "voice_55", 100, 30,
+        choice_options=choices, choice_value="voice_55",
+    )
+    joined = "\n".join(lines)
+    assert "| > voice_55" in joined
+    assert "more above" in joined
+    # The far end of the list is genuinely off-window here -- confirms
+    # this is windowing, not just dumping everything.
+    assert "voice_00" not in joined
+
+
+def test_render_modal_shows_no_scroll_indicators_when_everything_fits() -> None:
+    choices = ["a", "b", "c"]
+    lines = render_modal(
+        "Select Voice", "Editing tts.voice", [], "b", 100, 30,
+        choice_options=choices, choice_value="b",
+    )
+    joined = "\n".join(lines)
+    assert "more above" not in joined
+    assert "more below" not in joined
+    assert "| > b" in joined
 
 
 # --- TTS per-engine profile memory: switching tts.engine used to lose
