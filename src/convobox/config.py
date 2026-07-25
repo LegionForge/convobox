@@ -371,6 +371,49 @@ def detect_permission_conflict(backend: BackendConfig) -> str | None:
 _CODEX_POSTURE_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
 
 
+class WebConfig(BaseModel):
+    # Off by default -- the web UI (docs/WEB-UI-ARCHITECTURE.md) is opt-in,
+    # same posture as everything else security/privacy-relevant in this
+    # config (echo_cancellation, approval_phrase, etc.).
+    enabled: bool = False
+    # Loopback only by default: this server has no authentication (the
+    # local-device trust model docs/WEB-UI-ARCHITECTURE.md's Security
+    # section describes), so binding it to a non-loopback address exposes
+    # an unauthenticated view of live transcripts/tool calls to anything
+    # that can reach the port. 0.0.0.0 is allowed but only as an explicit,
+    # deliberate choice -- see the validator below.
+    bind_address: str = "127.0.0.1"
+    port: int = 5173
+    # Persisting transcripts/tool-call history to disk is a bigger privacy
+    # commitment than just viewing a live session, so it needs its own
+    # opt-in separate from `enabled` -- enabling the web UI alone must not
+    # silently start writing history.
+    history_tracking_enabled: bool = False
+    history_dir: str = ".convobox-history"
+
+    @field_validator("bind_address")
+    @classmethod
+    def _validate_bind_address(cls, v: str) -> str:
+        if v in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+            return v
+        if v.startswith("127."):  # rest of the IPv4 loopback block
+            return v
+        raise ValueError(
+            f"web.bind_address {v!r} is a specific non-loopback address, "
+            "which this server (no authentication) should never be bound "
+            "to directly -- use 127.0.0.1 (localhost) for local-only "
+            "access, or 0.0.0.0 if you deliberately want it reachable on "
+            "every interface (e.g. from another device on your LAN)."
+        )
+
+    @field_validator("port")
+    @classmethod
+    def _validate_port(cls, v: int) -> int:
+        if not (1 <= v <= 65535):
+            raise ValueError(f"web.port {v!r} must be between 1 and 65535")
+        return v
+
+
 class BackendProfileConfig(BaseModel):
     # Per-backend memory for the settings TUI. `url`/`model` matter for
     # opencode; `command` matters for claude-code and codex.
@@ -389,6 +432,7 @@ class AppConfig(BaseModel):
     backend: BackendConfig = Field(default_factory=BackendConfig)
     backend_profiles: dict[str, BackendProfileConfig] = Field(default_factory=dict)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
 
 
 def resolve_config_path(path: str | Path | None = None) -> Path:

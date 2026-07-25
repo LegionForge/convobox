@@ -8,6 +8,7 @@ from convobox.config import (
     AppConfig,
     AudioConfig,
     InteractionConfig,
+    WebConfig,
     aec_estimate_path,
     load_config,
     read_aec_estimate,
@@ -153,3 +154,48 @@ def test_approval_explanation_mode_rejects_an_unrecognized_value() -> None:
     )
     with pytest.raises(ValueError, match="plain or verbose"):
         InteractionConfig(approval_explanation_mode="chatty")
+
+
+# --- WebConfig: off/loopback-only by default (docs/WEB-UI-ARCHITECTURE.md's
+# "no authentication, local-device trust model" -- a wrong default here
+# means an unauthenticated view of live transcripts/tool calls reachable
+# from the network). ---
+
+
+def test_web_config_defaults_to_disabled_and_loopback() -> None:
+    web = WebConfig()
+    assert web.enabled is False
+    assert web.bind_address == "127.0.0.1"
+    assert web.history_tracking_enabled is False
+
+
+def test_web_config_accepts_loopback_addresses() -> None:
+    assert WebConfig(bind_address="127.0.0.1").bind_address == "127.0.0.1"
+    assert WebConfig(bind_address="localhost").bind_address == "localhost"
+    assert WebConfig(bind_address="127.5.5.5").bind_address == "127.5.5.5"
+    assert WebConfig(bind_address="::1").bind_address == "::1"
+
+
+def test_web_config_allows_0_0_0_0_as_an_explicit_choice() -> None:
+    # Deliberately allowed (e.g. reachable from another device on the same
+    # LAN) -- only a SPECIFIC non-loopback address is rejected, since that
+    # usually means a typo'd real IP rather than an intentional "all
+    # interfaces" choice.
+    assert WebConfig(bind_address="0.0.0.0").bind_address == "0.0.0.0"
+
+
+def test_web_config_rejects_a_specific_non_loopback_address() -> None:
+    with pytest.raises(ValueError, match="non-loopback"):
+        WebConfig(bind_address="192.168.1.50")
+
+
+def test_web_config_rejects_an_out_of_range_port() -> None:
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        WebConfig(port=0)
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        WebConfig(port=70000)
+
+
+def test_app_config_wires_a_default_web_config() -> None:
+    assert isinstance(AppConfig().web, WebConfig)
+    assert AppConfig().web.enabled is False

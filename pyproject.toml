@@ -77,6 +77,14 @@ cuda = [
 piper = [
     "piper-tts>=1.2",
 ]
+# The local web UI (docs/WEB-UI-ARCHITECTURE.md): a FastAPI app that streams
+# live events over SSE and serves history from SQLite (stdlib, no extra
+# needed). A separate extra, not part of the main dependencies, since most
+# CLI/TUI-only users never need a web server or its dependency footprint.
+web = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 
 [project.scripts]
 convobox-spike = "scripts.spike:main"
