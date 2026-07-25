@@ -1138,6 +1138,54 @@ def test_render_modal_uses_same_chrome() -> None:
     assert "Esc cancel | Enter confirm" in joined
 
 
+def test_render_modal_hint_override_replaces_generic_esc_enter_text() -> None:
+    # Confirm Save uses this to spell out exactly what happens, since the
+    # generic "Esc cancel | Enter confirm" doesn't say WHAT gets saved or
+    # that cancelling discards nothing -- live UAT feedback, 2026-07-25.
+    lines = render_modal(
+        "Confirm Save",
+        "Save changes to convobox.yaml?",
+        ["This writes a backup first."],
+        "",
+        100,
+        30,
+        hint_override="Esc cancel without saving | Enter accept and save changes to convobox.yaml?",
+    )
+    joined = "\n".join(lines)
+    assert "Esc cancel without saving | Enter accept and save changes to convobox.yaml?" in joined
+    # The generic text must not also appear -- overridden, not appended.
+    assert "Esc cancel | Enter confirm" not in joined
+    assert "Esc cancel | Enter accept" not in joined
+
+
+def test_save_confirmation_shows_explicit_hint_with_real_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voice = "en_US-lessac-medium"
+    (tmp_path / f"{voice}.onnx").write_bytes(b"x")
+    (tmp_path / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_tui, "DEFAULT_VOICES_DIR", tmp_path)
+    config = _make_config(**{"tts.voice": voice})
+    path = tmp_path / "convobox.yaml"
+    state = TuiState(path=path, original=AppConfig(), working=config)
+    state.dirty = True
+
+    captured: dict[str, object] = {}
+
+    def _spy_confirm_modal(title: str, prompt: str, detail_lines: list[str], **kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(settings_tui, "_confirm_modal", _spy_confirm_modal)
+    settings_tui._save(state)
+
+    assert captured["hint_override"] == (
+        f"Esc cancel without saving | Enter accept and save changes to {path}?"
+    )
+    # _save genuinely saved (the spy returned True, same as a real Enter press).
+    assert state.dirty is False
+
+
 def test_render_modal_marks_destructive_actions_more_strongly() -> None:
     lines = render_modal(
         "Confirm Revert",
@@ -1376,7 +1424,7 @@ def test_handle_browse_quit_confirmation_shows_save_hint(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         settings_tui,
         "_draw_modal",
-        lambda title, prompt, detail_lines, buffer="", severity="normal": drawn.extend(detail_lines),
+        lambda title, prompt, detail_lines, buffer="", **kwargs: drawn.extend(detail_lines),
     )
     monkeypatch.setattr(settings_tui, "read_key", lambda: "ESC")
 

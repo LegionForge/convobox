@@ -1488,12 +1488,22 @@ def render_modal(
     severity: Literal["normal", "destructive"] = "normal",
     choice_options: list[str] | None = None,
     choice_value: str | None = None,
+    hint_override: str | None = None,
 ) -> list[str]:
     width = max(width, 80)
     height = max(height, 24)
     border = "=" if severity == "destructive" else "-"
     accent = f"{_RED}{_BOLD}" if severity == "destructive" else f"{_CYAN}{_BOLD}"
     tone = " DANGER " if severity == "destructive" else " INFO "
+    # hint_override lets a specific dialog (e.g. Confirm Save) spell out
+    # exactly what Esc/Enter do in its own words -- live UAT feedback,
+    # 2026-07-25: the generic "Esc cancel | Enter confirm" didn't say
+    # WHAT gets saved or that cancelling discards nothing, which matters
+    # more here than in most confirm dialogs (Revert has the opposite
+    # Esc/Enter risk profile, so it deliberately keeps the generic text).
+    default_hint = "Esc cancel | Enter confirm" if severity == "normal" else "Esc back out carefully | Enter confirm"
+    hint_text = hint_override or default_hint
+    footer_hint = hint_override or ("Esc cancel | Enter accept" if severity == "normal" else "Esc back out carefully | Enter accept")
     lines: list[str] = []
     lines.append(fit(f" ConvoBox Settings TUI | {title} ", width))
     lines.append(fit(f" status: {prompt}", width))
@@ -1502,10 +1512,7 @@ def render_modal(
     # needs to be unmissable, not read off as part of the status line.
     lines.append(
         _REVERSE
-        + fit(
-            f" {tone}{'Esc cancel | Enter confirm' if severity == 'normal' else 'Esc back out carefully | Enter confirm'} ",
-            width,
-        )
+        + fit(f" {tone}{hint_text} ", width)
         + _RESET
     )
     lines.append(accent + "+" + border * (width - 2) + "+" + _RESET)
@@ -1553,11 +1560,7 @@ def render_modal(
         if window_end < total:
             content_lines.append(f"   ... {total - window_end} more below ...")
     content_lines.append("")
-    content_lines.append(
-        "Esc cancel | Enter accept"
-        if severity == "normal"
-        else "Esc back out carefully | Enter accept"
-    )
+    content_lines.append(footer_hint)
     content_lines.append(f"> {buffer}")
     # Sized off the actual content, not just the input buffer -- a detail
     # line (e.g. a save/quit hint) longer than the old fixed floor was
@@ -1607,6 +1610,7 @@ def _draw_modal(
     choice_value: str | None = None,
     width: int | None = None,
     height: int | None = None,
+    hint_override: str | None = None,
 ) -> None:
     if width is None or height is None:
         try:
@@ -1634,6 +1638,7 @@ def _draw_modal(
                 severity=severity,
                 choice_options=choice_options,
                 choice_value=choice_value,
+                hint_override=hint_override,
             )
         )
         + "\x1b[K"
@@ -1737,9 +1742,10 @@ def _confirm_modal(
     prompt: str,
     detail_lines: list[str],
     severity: Literal["normal", "destructive"] = "normal",
+    hint_override: str | None = None,
 ) -> bool:
     while True:
-        _draw_modal(title, prompt, detail_lines, "", severity=severity)
+        _draw_modal(title, prompt, detail_lines, "", severity=severity, hint_override=hint_override)
         key = read_key()
         if key == "ESC":
             return False
@@ -2274,6 +2280,7 @@ def _save(state: TuiState) -> None:
         "Confirm Save",
         f"Save changes to {state.path}?",
         detail,
+        hint_override=f"Esc cancel without saving | Enter accept and save changes to {state.path}?",
     ):
         state.status = "save cancelled"
         return
