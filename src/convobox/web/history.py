@@ -99,7 +99,7 @@ class HistoryDB:
         if backend_event is not None and backend_event.type in _RESPONSE_EVENT_TYPES:
             backend_response = backend_event.content or backend_event.tool_output
         backend_event_json = (
-            json.dumps(_event_to_dict(backend_event)) if backend_event is not None else None
+            json.dumps(event_to_dict(backend_event)) if backend_event is not None else None
         )
         now = time.time()
         cursor = self._conn.execute(
@@ -171,7 +171,10 @@ class HistoryDB:
         self._conn.close()
 
 
-def _event_to_dict(event: BackendEvent) -> dict[str, Any]:
+def event_to_dict(event: BackendEvent) -> dict[str, Any]:
+    """JSON-able shape shared by the history row's backend_event_json column
+    and the live SSE stream (see convobox.web.app) -- one place defining
+    what a BackendEvent looks like over the wire."""
     return {
         "type": event.type.value,
         "content": event.content,
