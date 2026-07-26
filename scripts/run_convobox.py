@@ -1503,6 +1503,8 @@ async def run(args: argparse.Namespace) -> None:
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
+    if args.web:
+        config.web.enabled = True
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
     # a phrase to recognize, and does nothing if the active backend never
@@ -1547,21 +1549,61 @@ async def run(args: argparse.Namespace) -> None:
         tui_state.aec_dump_active = args.aec_dump is not None and config.audio.echo_cancellation
     # Web UI (docs/WEB-UI-ARCHITECTURE.md): off by default (web_forwarder is
     # None, on_event's dispatch below skips it entirely -- zero behavior
-    # change from before this existed). web.enabled alone gets live SSE
-    # broadcast with no persistence; web.history_tracking_enabled on top of
-    # that adds SQLite storage -- WebEventForwarder's own two independently-
-    # optional halves. No server is started here yet (a separate --web
-    # flag/follow-up); this only wires the plumbing so events reach
-    # HistoryDB/EventBroadcaster once something does start one.
+    # change from before this existed). web.enabled alone gets a real local
+    # server with live SSE broadcast and no persistence; web.history_tracking_
+    # enabled on top of that adds SQLite storage -- WebEventForwarder's own
+    # two independently-optional halves.
+    #
+    # web_app_history is ALWAYS constructed when web.enabled (real file when
+    # tracking is on, otherwise a throwaway in-memory DB) -- create_app's
+    # REST endpoints (/api/sessions etc.) need *some* HistoryDB to query
+    # regardless. It is only ever passed to WebEventForwarder's own
+    # `history` kwarg when tracking is actually on, though -- with tracking
+    # off, nothing ever gets written to it (by design: no persistence means
+    # no persistence, not "persisted somewhere you didn't ask for"), so the
+    # REST endpoints just honestly report empty; the live SSE tap still
+    # works either way, since that's the other, always-on half.
     web_forwarder = None
+    web_server = None
+    web_server_task: asyncio.Task[None] | None = None
     if config.web.enabled:
-        web_history = (
+        # Lazy, opt-in import: fastapi/uvicorn are the "web" extra (`uv sync
+        # --extra web`), not a main dependency -- most CLI/TUI-only users
+        # never need a web server or its dependency footprint, same
+        # reasoning as aec/piper/cuda's own extras.
+        try:
+            import uvicorn
+
+            from convobox.web.app import create_app
+        except ImportError as e:
+            raise ImportError(
+                "web.enabled is set but the 'web' extra isn't installed. "
+                "Install it with `uv sync --extra web` (or "
+                "`pip install -e '.[web]'`) to use the web UI."
+            ) from e
+        web_broadcaster = EventBroadcaster()
+        web_app_history = (
             HistoryDB(Path(config.web.history_dir) / "events.db")
             if config.web.history_tracking_enabled
-            else None
+            else HistoryDB(Path(":memory:"))
         )
         web_forwarder = WebEventForwarder(
-            new_session_id(), history=web_history, broadcaster=EventBroadcaster()
+            new_session_id(),
+            history=web_app_history if config.web.history_tracking_enabled else None,
+            broadcaster=web_broadcaster,
+        )
+        web_app = create_app(db=web_app_history, broadcaster=web_broadcaster)
+        web_uvicorn_config = uvicorn.Config(
+            web_app,
+            host=config.web.bind_address,
+            port=config.web.port,
+            log_level="warning",
+        )
+        web_server = uvicorn.Server(web_uvicorn_config)
+        web_server_task = asyncio.ensure_future(web_server.serve())
+        log.info(
+            "web UI listening on http://%s:%d (history_tracking=%s)",
+            config.web.bind_address, config.web.port, config.web.history_tracking_enabled,
         )
 
     def _dispatch_event(event: BackendEvent) -> None:
@@ -1613,6 +1655,7 @@ async def run(args: argparse.Namespace) -> None:
         player.wait()
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        await _stop_web_server(web_server, web_server_task)
         return
 
     # Imported lazily so --text mode works on hosts without PortAudio.
@@ -2329,6 +2372,7 @@ async def run(args: argparse.Namespace) -> None:
             await watchdog_task
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        await _stop_web_server(web_server, web_server_task)
         # aclose() above already closes stdin/terminates/awaits the
         # subprocess, but on Windows ProactorEventLoop, closing a pipe
         # transport schedules the actual OS-handle teardown via
@@ -2357,6 +2401,20 @@ async def _drain_until_idle(adapter, timeout_s: float) -> None:  # type: ignore[
             await asyncio.sleep(0.5)
             return
     log.warning("backend still busy after %.0fs; giving up the wait", timeout_s)
+
+
+async def _stop_web_server(server: object | None, task: "asyncio.Task[None] | None") -> None:
+    """Shut down the web UI's uvicorn server (if one was started), used from
+    every exit path (--text mode's early return, the mic loop's `finally`).
+    Setting should_exit=True is uvicorn's own documented graceful-shutdown
+    signal -- server.serve()'s own loop notices it and returns on its next
+    iteration, which is what task then awaits."""
+    if server is None:
+        return
+    server.should_exit = True  # type: ignore[attr-defined]
+    if task is not None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def main() -> None:
@@ -2416,6 +2474,15 @@ def main() -> None:
             "Only affects the mic loop, not --text mode. Log output moves to "
             f"{_TUI_LOG_FILE} -- interleaving ordinary log lines with the "
             "alt-screen redraw would garble the display."
+        ),
+    )
+    parser.add_argument(
+        "--web", action="store_true",
+        help=(
+            "start the local web UI server alongside this session; overrides "
+            "web.enabled. See docs/WEB-UI-ARCHITECTURE.md. Requires the "
+            "'web' extra (`uv sync --extra web`). Bind address/port/history "
+            "settings still come from convobox.yaml's web.* fields."
         ),
     )
     parser.add_argument(

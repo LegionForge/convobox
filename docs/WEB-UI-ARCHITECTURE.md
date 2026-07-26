@@ -433,12 +433,17 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 ## Phase 1 MVP
 
 **Scope (Phase 1):**
-- ✅ SQLite schema + HistoryDB class
-- ✅ FastAPI app with /api/sessions, /api/events/stream
-- ✅ React frontend: Transcript + ApprovalPanel
-- ✅ Integration: run_convobox.py → HistoryDB
-- ✅ Config: web.enabled, web.history_tracking_enabled
-- ✅ Security: localhost-only bind, privacy docs
+- ✅ SQLite schema + HistoryDB class (2026-07-25)
+- ✅ FastAPI app with /api/sessions, /api/events/stream (2026-07-25)
+- ❌ React frontend: Transcript + ApprovalPanel -- NOT STARTED, the one
+  remaining item (see "Next Steps" #4 below; every other line here was
+  wrongly pre-checked in this doc's very first version, before any of it
+  existed -- fixed to reflect what's actually built as of 2026-07-25)
+- ✅ Integration: run_convobox.py → HistoryDB, + a real uvicorn server
+  started via `--web`/web.enabled (2026-07-25)
+- ✅ Config: web.enabled, web.history_tracking_enabled (2026-07-25)
+- ✅ Security: localhost-only bind (validated, 0.0.0.0 allowed only as an
+  explicit choice); privacy docs still TODO (usage/dev docs, see #6 below)
 
 **Out of scope (Phase 2+):**
 - Persistent browser UI state (sidebar collapse, scroll position)
@@ -475,37 +480,64 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 
 ## Next Steps
 
-1. **Implement HistoryDB** (convobox/web/history.py)
-   - SQLite schema initialization
-   - CRUD operations
-   - Query interface
+1. **Implement HistoryDB** (convobox/web/history.py) -- DONE (2026-07-25).
+   SQLite schema, CRUD, query interface, 100% test coverage. Two
+   deviations from this doc's original sketch, both confirmed necessary
+   by real test failures while building it: `list_sessions()`/
+   `get_active_session()` order by the sub-second `timestamp` REAL
+   column, not `MAX(created_at)` (second-resolution text, which ties and
+   sorts unspecified for two sessions touched in the same second); and
+   `get_session_events()` returns OLDEST first (chat reading order), not
+   "most recent first."
 
-2. **Implement FastAPI app** (convobox/web/app.py)
-   - Routes: /api/sessions, /api/events/stream
-   - Event broadcasting (asyncio.Queue)
-   - Health check + startup/shutdown
+2. **Implement FastAPI app** (convobox/web/app.py) -- DONE (2026-07-25).
+   /health, /api/sessions, /api/sessions/{id}/events, /clear, /export,
+   and a real SSE /api/events/stream, using `EventBroadcaster`
+   (convobox/web/stream.py) for proper multi-subscriber fan-out -- this
+   doc's original single shared `asyncio.Queue` sketch would only have
+   delivered each event to whichever ONE consumer drained it, silently
+   wrong the moment a second browser tab opened the stream. Also: this
+   doc's `allow_origins=["http://127.0.0.1:*"]` CORS sketch doesn't
+   actually work (`CORSMiddleware.allow_origins` does an exact string
+   match, no mid-string wildcard) -- use `allow_origin_regex` instead,
+   confirmed live against both a matching and a rejected Origin header.
 
-3. **Integrate with run_convobox.py**
-   - Pass session_id to callbacks
-   - Wire web event handler alongside TUI
-   - Add --web flag
+3. **Integrate with run_convobox.py** -- DONE (2026-07-25).
+   `WebEventForwarder` (convobox/web/bridge.py) is a callable that plugs
+   into `Orchestrator`'s existing `on_event` hook -- no change to
+   `Orchestrator` itself was needed, it already had exactly this
+   extension point. `run()` now starts a real `uvicorn.Server` as a
+   background asyncio task when `web.enabled` (via config or the new
+   `--web` flag), lazily importing fastapi/uvicorn (the optional "web"
+   extra) only when actually needed, and shuts it down cleanly on every
+   exit path (`--text` mode's early return, the mic loop's `finally`).
+   Live-verified end to end: a real `run_convobox.py --web --text`
+   session answered a genuine HTTP request to `/health` while running,
+   and its events landed in a real SQLite file.
 
-4. **Implement React frontend** (web/frontend/)
-   - Fetch + stream events
-   - Render Transcript + ApprovalPanel
-   - Session switching
+4. **Implement React frontend** (web/frontend/) -- NOT STARTED. Still
+   the biggest remaining gap. A plain HTML/JS first pass (no build
+   toolchain) is a reasonable starting point rather than reaching
+   straight for React/Vite -- revisit once there's a concrete UI slice
+   to build, not before.
 
-5. **Add config schema** (src/convobox/config.py)
-   - WebConfig model
-   - Validation (bind_address warning)
-   - Integration into ConvoBoxConfig
+5. **Add config schema** (src/convobox/config.py) -- DONE (2026-07-25).
+   `WebConfig`: `enabled`/`history_tracking_enabled` both off by default,
+   `bind_address` validator rejects a specific non-loopback address
+   (this server has no auth) while still allowing `0.0.0.0` as an
+   explicit choice, `port` validated to a real port range.
 
-6. **Documentation**
-   - Update README: web UI section
-   - Add docs/WEB-UI-USAGE.md for users
-   - Add docs/WEB-UI-DEV.md for contributors
+6. **Documentation** -- partially done: this file is now kept current
+   as each slice landed (see the DONE notes above and CHANGELOG-worthy
+   detail in git history: `feat(config)`/`feat(web)` commits, 2026-07-25).
+   docs/WEB-UI-USAGE.md and docs/WEB-UI-DEV.md are still unwritten --
+   worth doing once the frontend exists, so usage docs describe the
+   real UI rather than a still-hypothetical one.
 
 ---
 
-**Status:** Architecture complete, ready for implementation.  
-**Estimated effort:** Phase 1 = ~3-4 days (1 person, full-time).
+**Status:** Backend complete and live-verified (history storage, FastAPI
+app, SSE fan-out, orchestrator wiring, `--web` flag) -- built across
+several small, independently-committed slices per this project's
+one-work-set-at-a-time convention, not the single ~3-4 day push this doc
+originally estimated. Frontend is the one remaining Phase 1 item.
