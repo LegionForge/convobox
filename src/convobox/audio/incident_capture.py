@@ -107,7 +107,7 @@ class IncidentCapture:
                     self._history_samples[name] -= excess
 
     def _open(self, name: str) -> wave.Wave_write:
-        assert self._directory is not None
+        assert self._directory is not None  # nosec B101 -- set by trigger() before _open() is ever called
         writer = wave.open(str(self._directory / f"{name}.wav"), "wb")  # noqa: SIM115
         writer.setnchannels(1)
         writer.setsampwidth(2)
@@ -115,7 +115,7 @@ class IncidentCapture:
         return writer
 
     def _write_manifest(self) -> None:
-        assert self._directory is not None
+        assert self._directory is not None  # nosec B101 -- set by trigger() before _write_manifest() is ever called
         manifest = {
             "created": datetime.now().astimezone().isoformat(timespec="seconds"),
             "pre_roll_s": self.before_s,
