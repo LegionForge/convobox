@@ -128,6 +128,16 @@ flowchart TB
     SPEAKQ -->|"code only"| SILENT
 ```
 
+## Optional: the web UI
+
+A parallel, opt-in subsystem sits alongside the pipeline above rather than
+inside it: a local browser view of a live session (transcripts, backend
+responses, tool calls) over Server-Sent Events, plus optional SQLite
+history. Off by default (`web.enabled`/`--web`), zero effect on the core
+pipeline when unused. See [WEB-UI-ARCHITECTURE.md](WEB-UI-ARCHITECTURE.md)
+for the design and [WEB-UI-USAGE.md](WEB-UI-USAGE.md)/
+[WEB-UI-DEV.md](WEB-UI-DEV.md) for the user/contributor guides.
+
 ## Component software
 
 Current candidate stack for the local pipeline:
