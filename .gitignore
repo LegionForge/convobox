@@ -5,6 +5,7 @@
 # already covers the files; this also catches the directory itself so an
 # empty/future-dated run doesn't show up as an untracked-but-visible dir.
 .aec-dumps/
+.incident-captures/
 __pycache__/
 *.pyc
 .pytest_cache/
