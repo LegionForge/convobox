@@ -18,8 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
-from convobox.adapters.base import BackendEvent
-from convobox.web.history import HistoryDB, event_to_dict
+from convobox.web.history import HistoryDB
 from convobox.web.stream import EventBroadcaster
 
 # Loopback-only, any port -- CORSMiddleware's allow_origins does an exact
@@ -40,10 +39,12 @@ _HEARTBEAT_INTERVAL_S = 15.0
 
 
 async def sse_lines(
-    queue: asyncio.Queue[BackendEvent], heartbeat_interval: float = _HEARTBEAT_INTERVAL_S
+    queue: asyncio.Queue[dict[str, Any]], heartbeat_interval: float = _HEARTBEAT_INTERVAL_S
 ) -> AsyncIterator[str]:
-    """The wire format for one SSE connection: a queued BackendEvent becomes
-    a `data: ...` line, an idle gap becomes a `: heartbeat` comment line.
+    """The wire format for one SSE connection: a queued JSON-able payload
+    (already shaped by whoever broadcast it -- see WebEventForwarder)
+    becomes a `data: ...` line, an idle gap becomes a `: heartbeat` comment
+    line.
 
     Split out from stream_events()'s route body so it's testable as a plain
     async generator over a queue -- exercising the *route* end-to-end would
@@ -55,8 +56,8 @@ async def sse_lines(
     """
     while True:
         try:
-            event = await asyncio.wait_for(queue.get(), timeout=heartbeat_interval)
-            yield f"data: {json.dumps(event_to_dict(event))}\n\n"
+            payload = await asyncio.wait_for(queue.get(), timeout=heartbeat_interval)
+            yield f"data: {json.dumps(payload)}\n\n"
         except TimeoutError:
             yield ": heartbeat\n\n"
 

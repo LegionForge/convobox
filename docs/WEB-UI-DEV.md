@@ -29,17 +29,38 @@ config.web.enabled:` branch), rather than failing to import the whole
 
 ## How a real event gets from the mic to the browser
 
+Backend events (responses, tool calls) and the user's OWN transcripts are
+two genuinely separate paths in — `Orchestrator.on_event` only ever sees
+the former (a transcript is what PROMPTS a backend event, not one itself),
+so there are two entry points into `WebEventForwarder`:
+
 ```
-Orchestrator._on_event(event)
-  -> on_event hook (run_convobox.py's _dispatch_event)
-       -> _on_backend_event(...)      # TUI/logging, unchanged
-       -> web_forwarder(event)        # WebEventForwarder.__call__, if web.enabled
-            -> HistoryDB.append_event(...)       # only if history_tracking_enabled
-            -> EventBroadcaster.broadcast(event)  # always, if web.enabled
+Orchestrator._on_event(event)                        run_convobox.py's 3 call sites for
+  -> on_event hook (run_convobox.py's _dispatch_event)  orchestrator.handle_transcript(text):
+       -> _on_backend_event(...)  # TUI/logging          mic loop, --text mode, queued interjection
+       -> web_forwarder(event)  # WebEventForwarder.__call__
+                                                        -> web_forwarder.forward_transcript(text)
+            (both, if web.enabled)                          (if web.enabled)
+                 |                                                |
+                 v                                                v
+       HistoryDB.append_event(...)  # only if history_tracking_enabled, both paths
+       EventBroadcaster.broadcast(payload)  # always, if web.enabled, both paths
                  -> every subscribed browser's asyncio.Queue
                       -> GET /api/events/stream's sse_lines() generator
                            -> `data: {...}\n\n` over the open SSE connection
 ```
+
+`EventBroadcaster` carries plain JSON-able dicts, not `BackendEvent`
+objects — a transcript has no `BackendEvent` representation (no backend
+adapter ever emits one), so whoever is broadcasting (`WebEventForwarder`)
+shapes the payload before handing it to the broadcaster, which stays
+opaque to what it's carrying.
+
+Found live while building a demo of this feature (2026-07-26): the
+original wiring only ever called `WebEventForwarder.__call__`
+(BackendEvents), never anything for the user's own recognized speech —
+so a captured session showed backend responses appearing with no visible
+prompt. `forward_transcript()` closes that gap.
 
 `WebEventForwarder` is the entire integration surface — `Orchestrator`
 itself was never modified to support this; it already had a generic

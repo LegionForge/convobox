@@ -1014,6 +1014,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
     continue_gate: ContinuePromptGate | None = None,
     approval_gate: ApprovalPromptGate | None = None,
+    web_forwarder: WebEventForwarder | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
@@ -1071,6 +1072,8 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         queued_text = interject_queue.flush_if_idle(busy, playing)
         if queued_text is not None:
             log.info("delivering queued interjection now that the turn is idle: %r", queued_text)
+            if web_forwarder is not None:
+                web_forwarder.forward_transcript(queued_text)
             try:
                 await orchestrator.handle_transcript(queued_text)
             except Exception as exc:  # noqa: BLE001
@@ -1650,6 +1653,8 @@ async def run(args: argparse.Namespace) -> None:
         text = transcript_corrector.correct(args.text)
         if text != args.text:
             log.info("corrected transcript before command routing: %r -> %r", args.text, text)
+        if web_forwarder is not None:
+            web_forwarder.forward_transcript(text)
         await orchestrator.handle_transcript(text)
         await _drain_until_idle(adapter, timeout_s=args.timeout)
         player.wait()
@@ -1953,6 +1958,7 @@ async def run(args: argparse.Namespace) -> None:
         _working_watchdog(
             adapter, player, WorkingIndicator(), orchestrator, interject_queue,
             segmenter, listening_gate, tui_state, continue_gate, approval_gate,
+            web_forwarder,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
@@ -2319,6 +2325,8 @@ async def run(args: argparse.Namespace) -> None:
                     # before this point, correctly: neither delivers a fresh
                     # response right now.
                     tui_state.full_detail = ""
+                if web_forwarder is not None:
+                    web_forwarder.forward_transcript(text)
                 try:
                     await orchestrator.handle_transcript(text)
                 except Exception as exc:  # noqa: BLE001

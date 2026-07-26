@@ -8,7 +8,6 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.web.app import create_app, sse_lines
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
@@ -153,8 +152,8 @@ def test_static_mount_does_not_shadow_api_routes(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_sse_lines_yields_a_data_line_for_a_queued_event() -> None:
-    queue: asyncio.Queue[BackendEvent] = asyncio.Queue()
-    await queue.put(BackendEvent(type=BackendEventType.TEXT, content="hello"))
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    await queue.put({"type": "response", "content": "hello"})
 
     gen = sse_lines(queue)
     line = await gen.__anext__()
@@ -165,7 +164,7 @@ async def test_sse_lines_yields_a_data_line_for_a_queued_event() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_lines_yields_a_heartbeat_comment_on_idle_timeout() -> None:
-    queue: asyncio.Queue[BackendEvent] = asyncio.Queue()
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
     gen = sse_lines(queue, heartbeat_interval=0.01)
     line = await gen.__anext__()
@@ -209,9 +208,7 @@ async def test_stream_events_broadcasts_a_live_event_over_a_real_socket(
             await asyncio.sleep(0.01)
         else:
             pytest.fail("no subscriber appeared for the SSE stream")
-        await broadcaster.broadcast(
-            BackendEvent(type=BackendEventType.TEXT, content="live event")
-        )
+        await broadcaster.broadcast({"type": "response", "content": "live event"})
 
     async with httpx.AsyncClient(base_url=base_url) as client, client.stream(
         "GET", "/api/events/stream"

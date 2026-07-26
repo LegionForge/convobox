@@ -77,8 +77,8 @@ async def test_broadcasts_to_a_subscriber_when_given() -> None:
     # the scheduled task a turn to actually run before checking the queue.
     await asyncio.sleep(0)
 
-    event = queue.get_nowait()
-    assert event.content == "live"
+    payload = queue.get_nowait()
+    assert payload["content"] == "live"
 
 
 def test_broadcaster_none_skips_broadcast_but_does_not_raise() -> None:
@@ -97,7 +97,7 @@ async def test_forwards_to_both_history_and_broadcaster_together(db: HistoryDB) 
     await asyncio.sleep(0)
 
     assert db.get_session_events(session_id)[0]["backend_response"] == "both"
-    assert queue.get_nowait().content == "both"
+    assert queue.get_nowait()["content"] == "both"
 
 
 # --- Integration: a real Orchestrator wired with WebEventForwarder as its
@@ -148,4 +148,41 @@ async def test_orchestrator_wired_with_web_forwarder_persists_and_broadcasts(
     stored = db.get_session_events(session_id)
     assert len(stored) == 1
     assert stored[0]["backend_response"] == "wired end to end"
-    assert queue.get_nowait().content == "wired end to end"
+    assert queue.get_nowait()["content"] == "wired end to end"
+
+
+# --- forward_transcript: the OTHER half of the web wiring gap this session
+# found while building a demo -- Orchestrator.on_event only ever sees
+# BackendEvents (backend responses/tool calls), never the user's own
+# recognized speech that prompted one, so run_convobox.py's call sites for
+# Orchestrator.handle_transcript() also call this directly. ---
+
+
+def test_forward_transcript_persists_to_history_when_given(db: HistoryDB) -> None:
+    session_id = new_session_id()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
+
+    forwarder.forward_transcript("what should I work on next")
+
+    stored = db.get_session_events(session_id)
+    assert len(stored) == 1
+    assert stored[0]["event_type"] == "transcript"
+    assert stored[0]["user_transcript"] == "what should I work on next"
+
+
+def test_forward_transcript_with_no_history_does_not_raise() -> None:
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=None)
+    forwarder.forward_transcript("hello")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_forward_transcript_broadcasts_to_a_subscriber() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder.forward_transcript("hello")
+    await asyncio.sleep(0)
+
+    payload = queue.get_nowait()
+    assert payload == {"type": "transcript", "content": "hello"}
