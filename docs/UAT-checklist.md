@@ -607,6 +607,11 @@ did).
   cause first (see
   `docs/field-notes/2026-07-25-timing-coincidence-is-not-echo-correlation.md`)
   before landing back on this already-known gap -- still not built.
+  **Decision (JP, 2026-07-26): assume no for now** on building a resume
+  mechanism -- see `docs/DESIGN-barge-in.md`'s "Open questions" for the
+  full note, including JP's observation that these backchannel-shaped
+  utterances have tended to read as affirmative in content, worth
+  rechecking before this gets revisited for real.
 - **[G8] `BargeInMonitor` can fire against a response that produced NO
   audio yet.** `AudioPlayer.is_playing()`
   (`src/convobox/audio/playback.py:257-258`) returns `True` as soon as

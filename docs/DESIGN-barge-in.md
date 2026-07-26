@@ -313,3 +313,12 @@ TV can't trip the resume word); `duck` mode; full-duplex generative direction.
   `interaction.tier_responses`'s own reveal-state? Not scoped or built —
   needs real design work, and the audio behavior can't be verified without
   a live mic session.
+
+  **Decision (JP, 2026-07-26): assume no for now** — don't build a resume
+  mechanism yet. Live observation to carry forward when this gets
+  revisited: the backchannel-shaped utterances caught during self-barge-in
+  incidents have tended to read as affirmative in content (not neutral
+  filler/noise) — worth checking whether that pattern holds up over more
+  sessions, and whether it changes the calculus on resume-after-backchannel
+  (an affirmative-leaning backchannel arguably strengthens the case that
+  cutting the response short was the wrong call) before deciding for real.
