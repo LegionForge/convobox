@@ -599,7 +599,34 @@ did).
   costs the rest of the response, even though it's correctly not
   forwarded as a command) -- that gap is the false-interruption-recovery
   item flagged in `docs/DESIGN-barge-in.md`'s open questions, not yet
-  built.
+  built. **Live-reconfirmed 2026-07-25**: a bounded incident capture
+  (`.incident-captures/20260725-214824/`) caught exactly this -- a real,
+  brief utterance ("Thank you very much.") correctly classified and
+  dropped as backchannel, muted anyway because the mute already fired
+  pre-classification. A cross-correlation ruled out AEC echo as the
+  cause first (see
+  `docs/field-notes/2026-07-25-timing-coincidence-is-not-echo-correlation.md`)
+  before landing back on this already-known gap -- still not built.
+- **[G8] `BargeInMonitor` can fire against a response that produced NO
+  audio yet.** `AudioPlayer.is_playing()`
+  (`src/convobox/audio/playback.py:257-258`) returns `True` as soon as
+  the playback thread starts, not when the first real audio block is
+  written -- there is a real TTS-synthesis-latency window where
+  `is_playing()` is `True` and zero reference frames have been fed. If
+  the user keeps talking during that window (normal in rapid
+  back-and-forth conversation), `BargeInMonitor.observe()` correctly
+  fires by its own inputs, but the log ("barge-in: sustained speech
+  during playback -- stopping audio") reads exactly like a real
+  interruption even though nothing was ever audible. Confirmed live
+  2026-07-25: two such events showed an *identical* `reverse` (AEC
+  reference) frame count immediately before and after the "interrupted"
+  response, proving zero audio was ever output. Functionally harmless
+  under `on_new_words: now` (the new words are still taken correctly) --
+  the defect is diagnostic/UX, not correctness. See
+  `docs/field-notes/2026-07-25-player-is-playing-races-ahead-of-first-audio.md`.
+  Fix direction (not yet implemented): a `has_audible_output` flag set
+  at the same point `on_block_played` first fires, distinct from raw
+  thread liveness.
 
 ## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
 
