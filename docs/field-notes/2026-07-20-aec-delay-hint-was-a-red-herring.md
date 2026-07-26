@@ -15,7 +15,7 @@ provenance:
     - Claude Code (Anthropic claude-fable-5) — log analysis, synthetic experiments, WebRTC research, writing
   org: https://legionforge.org
   created: 2026-07-20T17:15:00-05:00
-  revised: 2026-07-20T17:15:00-05:00
+  revised: 2026-07-25T23:15:00-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -83,6 +83,24 @@ and 222ms — the auto-tune estimate the "fix" was restoring — was the
 *worst*** (40% self-barge rejection vs. 75-100% for 247-309ms, with
 noticeably higher variance). `309ms` was not stale cruft; it was a
 deliberate, evidence-based choice. The config edit was reverted.
+
+## Correction (2026-07-25)
+
+This note's central empirical claim — that `309ms` was the
+best-measured delay and `222ms`/auto the worst, based on
+`uat-acoustic-calibration/20260716-*` — does not survive a larger
+sample. A properly-repeated calibration run (n=25, 5+ repeats per
+delay value) found no statistically meaningful difference between
+`auto`/222ms, 272ms, 309ms, and 322ms; every value fully suppressed the
+one real echo event that occurred; and `309ms` was, in that larger
+sample, the *lowest* mean-suppression performer of the four, not the
+highest. See
+[[2026-07-25-timing-coincidence-is-not-echo-correlation]] for the full
+data and the corrected recommendation (leave `aec_delay_ms` unset). The
+methodological lesson this note already draws — "before touching a
+config value that looks wrong, check whether it was chosen
+deliberately" — still stands; it's the specific empirical verdict this
+note reached that turned out to be a small-sample artifact.
 
 ## What transfers
 
