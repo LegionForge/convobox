@@ -435,10 +435,13 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 **Scope (Phase 1):**
 - ✅ SQLite schema + HistoryDB class (2026-07-25)
 - ✅ FastAPI app with /api/sessions, /api/events/stream (2026-07-25)
-- ❌ React frontend: Transcript + ApprovalPanel -- NOT STARTED, the one
-  remaining item (see "Next Steps" #4 below; every other line here was
-  wrongly pre-checked in this doc's very first version, before any of it
-  existed -- fixed to reflect what's actually built as of 2026-07-25)
+- ✅ Frontend: plain HTML/JS (not React -- see "Next Steps" #4 below for
+  why), served as a static mount at "/". Transcript view + live SSE
+  render live; ApprovalPanel (approve/deny from the browser) is
+  deliberately still out of scope, see Out of scope below. (2026-07-26;
+  every line in this checklist was wrongly pre-checked in this doc's
+  very first version, before any of it existed -- fixed across two
+  sessions to reflect what's actually built.)
 - ✅ Integration: run_convobox.py → HistoryDB, + a real uvicorn server
   started via `--web`/web.enabled (2026-07-25)
 - ✅ Config: web.enabled, web.history_tracking_enabled (2026-07-25)
@@ -515,11 +518,26 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
    session answered a genuine HTTP request to `/health` while running,
    and its events landed in a real SQLite file.
 
-4. **Implement React frontend** (web/frontend/) -- NOT STARTED. Still
-   the biggest remaining gap. A plain HTML/JS first pass (no build
-   toolchain) is a reasonable starting point rather than reaching
-   straight for React/Vite -- revisit once there's a concrete UI slice
-   to build, not before.
+4. **Implement the frontend** -- DONE for Phase 1's viewing scope
+   (2026-07-26), plain HTML/JS as this section originally suggested as
+   the fallback, not React/Vite: `src/convobox/web/static/index.html`,
+   a single self-contained file (inline CSS/JS, no build step, no
+   framework), mounted by `create_app()` as a Starlette `StaticFiles`
+   mount at `"/"` -- registered LAST, after every `/api/*` route, so
+   route-registration order (not any special-casing) is what keeps it
+   from shadowing the API; a dedicated test
+   (`test_static_mount_does_not_shadow_api_routes`) asserts exactly
+   that. Renders session selection, historical events (fetched once on
+   load), and the live SSE stream appended in real time; all
+   event content is set via `textContent`, never `innerHTML`, per this
+   doc's own XSS-prevention note -- backend responses/tool
+   output/transcripts are untrusted content. No approve/deny UI (see Out
+   of scope). Live-verified: a real running server answered a genuine
+   `GET /` with the actual page (title tag confirmed) while `GET
+   /api/sessions` simultaneously still returned real JSON, not shadowed.
+   Confirmed via a real `uv build --wheel` that `static/index.html` is
+   actually packaged (hatchling includes it by default; nothing extra
+   needed in pyproject.toml).
 
 5. **Add config schema** (src/convobox/config.py) -- DONE (2026-07-25).
    `WebConfig`: `enabled`/`history_tracking_enabled` both off by default,
@@ -536,8 +554,11 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 
 ---
 
-**Status:** Backend complete and live-verified (history storage, FastAPI
-app, SSE fan-out, orchestrator wiring, `--web` flag) -- built across
-several small, independently-committed slices per this project's
-one-work-set-at-a-time convention, not the single ~3-4 day push this doc
-originally estimated. Frontend is the one remaining Phase 1 item.
+**Status:** Phase 1 viewing scope complete and live-verified end to end --
+history storage, FastAPI app, SSE fan-out, orchestrator wiring, `--web`
+flag, and a minimal HTML/JS frontend all in place -- built across several
+small, independently-committed slices per this project's one-work-set-
+at-a-time convention, not the single ~3-4 day push this doc originally
+estimated. What's left for a fuller Phase 1: approve/deny from the
+browser (deliberately out of scope so far, see "Out of scope" above),
+and docs/WEB-UI-USAGE.md / docs/WEB-UI-DEV.md (Next Steps #6).

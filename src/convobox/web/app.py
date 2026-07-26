@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from starlette.staticfiles import StaticFiles
 
 from convobox.adapters.base import BackendEvent
 from convobox.web.history import HistoryDB, event_to_dict
@@ -25,6 +27,12 @@ from convobox.web.stream import EventBroadcaster
 # allow_origins=["http://127.0.0.1:*"] entry might suggest), so matching
 # "whatever port the dev server picked" needs the regex form instead.
 _LOCALHOST_ORIGIN_REGEX = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
+
+# The plain HTML/JS frontend (docs/WEB-UI-ARCHITECTURE.md's "Next Steps":
+# start minimal, not a React/Vite toolchain). Path relative to this file,
+# not the process cwd, so it resolves correctly regardless of where
+# ConvoBox is installed/run from.
+_STATIC_DIR = Path(__file__).parent / "static"
 
 # Keep-alive heartbeat cadence for idle SSE connections -- some proxies and
 # browsers time out a connection with no bytes for ~30-60s.
@@ -122,5 +130,15 @@ def create_app(*, db: HistoryDB, broadcaster: EventBroadcaster | None = None) ->
                 broadcaster.unsubscribe(queue)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
+
+    # Mounted LAST, after every /api/* route above: Starlette matches
+    # routes in registration order, so the explicit /api/* paths always
+    # win their own exact matches regardless of this catch-all mount
+    # existing. html=True makes "/" serve static/index.html -- the plain
+    # HTML/JS frontend (no build step, docs/WEB-UI-ARCHITECTURE.md's own
+    # "Next Steps" guidance: start minimal, not a React/Vite toolchain).
+    app.mount(
+        "/", StaticFiles(directory=_STATIC_DIR, html=True), name="static"
+    )
 
     return app

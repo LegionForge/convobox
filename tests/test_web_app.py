@@ -121,6 +121,27 @@ def test_cors_rejects_a_non_loopback_origin(client: TestClient) -> None:
     assert "access-control-allow-origin" not in response.headers
 
 
+# --- Static frontend: mounted at "/" LAST, after every /api/* route, so it
+# must never shadow them -- these tests are exactly the "does route
+# registration order actually protect the API" check. ---
+
+
+def test_root_serves_the_frontend_index_html(client: TestClient) -> None:
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "ConvoBox" in response.text
+
+
+def test_static_mount_does_not_shadow_api_routes(client: TestClient) -> None:
+    # The exact regression this ordering exists to prevent: if the static
+    # mount were registered before the API routes (or matched greedily),
+    # this would 404 or return index.html instead of the real JSON route.
+    response = client.get("/api/sessions")
+    assert response.status_code == 200
+    assert response.json() == {"sessions": []}
+
+
 # --- sse_lines: the SSE wire-format generator itself, tested as a plain
 # async generator over a queue -- NOT through the /api/events/stream route.
 # httpx's ASGITransport fully drains the ASGI call before returning anything
