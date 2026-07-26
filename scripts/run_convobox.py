@@ -70,6 +70,7 @@ from _console import use_utf8_console
 from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.approval import ApprovalDetector
+from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
     detect_permission_conflict,
@@ -1618,6 +1619,14 @@ async def run(args: argparse.Namespace) -> None:
 
     canceller = None
     aec_dump = None
+    incident_capture = None
+    if args.capture_incidents is not None:
+        capture_root = Path(args.capture_incidents) if args.capture_incidents else Path(".incident-captures")
+        incident_capture = IncidentCapture(capture_root, args.capture_before_s, args.capture_after_s)
+        log.warning(
+            "incident audio capture ARMED -- retaining %.1fs in memory and writing only after "
+            "a barge-in or safeword to %s", args.capture_before_s, capture_root,
+        )
     mic_holder: dict[str, object] = {}
     if args.aec_dump is not None and not config.audio.echo_cancellation:
         log.warning(
@@ -1664,6 +1673,8 @@ async def run(args: argparse.Namespace) -> None:
 
         def _feed_reference(block, sample_rate) -> None:  # type: ignore[no-untyped-def]
             nonlocal delay_estimated
+            if incident_capture is not None:
+                incident_capture.observe_reference(block, sample_rate)
             if not delay_estimated:
                 out_lat = player.output_latency_s
                 mic = mic_holder.get("mic")
@@ -1697,6 +1708,8 @@ async def run(args: argparse.Namespace) -> None:
             config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
             " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
         )
+    elif incident_capture is not None:
+        player.on_block_played = incident_capture.observe_reference
 
     interrupt_axes = resolve_preset(config.interaction.interrupt_preset)
     monitor = BargeInMonitor(
@@ -1744,6 +1757,8 @@ async def run(args: argparse.Namespace) -> None:
         was_playing = False
         async for chunk in mic.stream():
             processed = canceller.process(chunk) if canceller is not None else chunk
+            if incident_capture is not None:
+                incident_capture.observe_mic(chunk, processed)
             if tui_state is not None:
                 # Post-AEC (if on): the signal VAD/STT actually sees, not
                 # the raw pre-cancellation mic. Decay-smoothed (see
@@ -1827,6 +1842,15 @@ async def run(args: argparse.Namespace) -> None:
             chunk_ms = 1000 * len(chunk) / config.audio.sample_rate
             if monitor.observe(segmenter.in_speech, playing, chunk_ms):
                 log.info("barge-in: sustained speech during playback -- stopping audio")
+                if incident_capture is not None:
+                    captured = incident_capture.trigger("barge-in", {
+                        "vad_threshold": config.vad.threshold,
+                        "barge_in_min_speech_ms": config.interaction.barge_in_min_speech_ms,
+                        "interrupt_preset": config.interaction.interrupt_preset,
+                        "aec_enabled": canceller is not None,
+                    })
+                    if captured is not None:
+                        log.warning("incident audio capture writing to %s", captured)
                 player.stop()
                 tts.stop()
                 if monitor.on_current_turn == "abort":
@@ -1895,6 +1919,14 @@ async def run(args: argparse.Namespace) -> None:
                 result = transcriber.transcribe(utterance)
                 text = result.text
                 is_hard_stop = safeword.check(text) is not None
+                if is_hard_stop and incident_capture is not None:
+                    captured = incident_capture.trigger("safeword", {
+                        "vad_threshold": config.vad.threshold,
+                        "transcript_duration_s": result.duration_s,
+                        "stt_latency_ms": result.latency_ms,
+                    })
+                    if captured is not None:
+                        log.warning("incident audio capture writing to %s", captured)
                 barged_in, barge_in_pending = barge_in_pending, False
                 if tui_state is not None:
                     tui_state.barge_in_active = False
@@ -2113,6 +2145,11 @@ async def run(args: argparse.Namespace) -> None:
                         continue
                     if echo_filter.is_echo(text):
                         if barged_in:
+                            if incident_capture is not None:
+                                incident_capture.trigger("self-barge-in", {
+                                    "gate": "spoken-echo-filter",
+                                    "token_overlap": token_overlap_ratio(text, last_spoken_response.text),
+                                })
                             log.warning(
                                 "dropped (spoken-echo filter, barge-in was our own echo): %r %s",
                                 text,
@@ -2254,6 +2291,8 @@ async def run(args: argparse.Namespace) -> None:
                 summary["directory"], summary["reference_s"], summary["reference_frames"],
                 summary["capture_s"], summary["capture_frames"], summary["duration_s"],
             )
+        if incident_capture is not None:
+            incident_capture.close()
         # Close the backend transport (subprocess pipes / HTTP client)
         # while the loop is still alive, so shutdown is quiet instead of
         # spraying 'Event loop is closed' tracebacks. Runs on Ctrl+C too
@@ -2305,6 +2344,22 @@ def main() -> None:
         help="how much the coding agent may do; overrides backend.permission_mode. "
         "plan=read-only (safe); approve=writes require voice approval (codex only); "
         "permissive=writes without asking. See docs/DESIGN-backend-sandboxing.md.",
+    )
+    parser.add_argument(
+        "--capture-incidents", nargs="?", const="", default=None, metavar="DIR",
+        help=(
+            "opt-in bounded diagnostic audio capture: retain a short in-memory pre-roll, "
+            "then write mic raw/processed and playback reference WAVs only after a barge-in "
+            "or safeword (default directory .incident-captures/)"
+        ),
+    )
+    parser.add_argument(
+        "--capture-before-s", type=float, default=5.0,
+        help="--capture-incidents: in-memory audio retained before a trigger (default 5)",
+    )
+    parser.add_argument(
+        "--capture-after-s", type=float, default=10.0,
+        help="--capture-incidents: audio written after a trigger (default 10)",
     )
     parser.add_argument("--device", default=None, help="input device name or index")
     parser.add_argument(
