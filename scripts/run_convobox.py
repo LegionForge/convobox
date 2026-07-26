@@ -88,6 +88,9 @@ from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, render_conversation_frame
 from convobox.resumeword import ResumeWordDetector
+from convobox.web.bridge import WebEventForwarder
+from convobox.web.history import HistoryDB, new_session_id
+from convobox.web.stream import EventBroadcaster
 
 log = logging.getLogger("convobox.run")
 
@@ -1542,16 +1545,40 @@ async def run(args: argparse.Namespace) -> None:
         tui_state.backend_name = config.backend.name
         tui_state.aec_enabled = config.audio.echo_cancellation
         tui_state.aec_dump_active = args.aec_dump is not None and config.audio.echo_cancellation
+    # Web UI (docs/WEB-UI-ARCHITECTURE.md): off by default (web_forwarder is
+    # None, on_event's dispatch below skips it entirely -- zero behavior
+    # change from before this existed). web.enabled alone gets live SSE
+    # broadcast with no persistence; web.history_tracking_enabled on top of
+    # that adds SQLite storage -- WebEventForwarder's own two independently-
+    # optional halves. No server is started here yet (a separate --web
+    # flag/follow-up); this only wires the plumbing so events reach
+    # HistoryDB/EventBroadcaster once something does start one.
+    web_forwarder = None
+    if config.web.enabled:
+        web_history = (
+            HistoryDB(Path(config.web.history_dir) / "events.db")
+            if config.web.history_tracking_enabled
+            else None
+        )
+        web_forwarder = WebEventForwarder(
+            new_session_id(), history=web_history, broadcaster=EventBroadcaster()
+        )
+
+    def _dispatch_event(event: BackendEvent) -> None:
+        _on_backend_event(
+            tui_state, last_spoken_response, event,
+            config.interaction.approval_phrase, approval_gate,
+            config.interaction.approval_explanation_mode,
+        )
+        if web_forwarder is not None:
+            web_forwarder(event)
+
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
         tts=tts,
         player=player,
-        on_event=lambda e: _on_backend_event(
-            tui_state, last_spoken_response, e,
-            config.interaction.approval_phrase, approval_gate,
-            config.interaction.approval_explanation_mode,
-        ),
+        on_event=_dispatch_event,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
     )
