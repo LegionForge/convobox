@@ -109,14 +109,63 @@ captures will support a trustworthy whole-signal cross-correlation
 without this blind spot. See the commit implementing this for the
 exact mechanism and its tests.
 
-## Not done, needs a decision
+## Follow-up (same day): tested the feed_reverse() hypothesis directly -- it didn't hold up
 
-Whether `EchoCanceller.feed_reverse()` itself (the REAL cancellation
-path, not just the diagnostic dump) should also get gap-aware silence
-padding fed into APM's actual reverse stream -- this would change live
-cancellation timing behavior, not just what gets logged, and can't be
-verified without a real mic/speaker session. Flagged for JP; not
-touched in this pass.
+JP confirmed he believes these incidents genuinely were TTS echo. That
+raised the natural next question: should `EchoCanceller.feed_reverse()`
+(the REAL cancellation path) get the same gap-aware silence padding, in
+case skipped reverse frames during a synthesis stall desync AEC3's
+delay alignment for everything afterward?
+
+Installed the real `aec-audio-processing` extra (build tools were
+already present: `meson`/`ninja`/`swig` via Homebrew) and ran the exact
+scenario against the actual WebRTC AEC3 binding, not a guess: a
+continuous synthetic far-end + matching mic echo, with a genuine
+0.5s/2.0s silent gap (the speaker really did stop, matching what a
+synthesis stall means), comparing "skip feed_reverse during the gap"
+(current behavior) against "feed real silence during the gap" (the
+hypothesized fix), measuring suppression well after the gap so
+convergence time isn't a confound. Across 5 random seeds x 2 gap
+lengths:
+
+```
+seed=1 gap=0.5s  skip=42.7dB  pad=43.0dB  diff=+0.4dB
+seed=1 gap=2.0s  skip=43.7dB  pad=42.8dB  diff=-1.0dB
+seed=2 gap=0.5s  skip=42.7dB  pad=43.1dB  diff=+0.5dB
+seed=2 gap=2.0s  skip=43.9dB  pad=43.9dB  diff=+0.1dB
+seed=3 gap=0.5s  skip=42.6dB  pad=42.9dB  diff=+0.3dB
+seed=3 gap=2.0s  skip=43.7dB  pad=43.7dB  diff=+0.0dB
+seed=7 gap=0.5s  skip=42.4dB  pad=43.1dB  diff=+0.6dB
+seed=7 gap=2.0s  skip=43.7dB  pad=44.0dB  diff=+0.2dB
+seed=42 gap=0.5s skip=42.7dB  pad=43.0dB  diff=+0.3dB
+seed=42 gap=2.0s skip=43.8dB  pad=43.8dB  diff=+0.0dB
+```
+
+**The difference is noise-level (within ±1dB, no consistent
+direction) regardless of gap length.** WebRTC AEC3 does not appear to
+rely on a fixed reverse/capture frame-count relationship the way the
+hypothesis assumed -- it's evidently more robust to a bounded gap of
+missing reverse frames than that. **Conclusion: `feed_reverse()` does
+NOT need the same fix.** Not implementing it -- there's now direct
+evidence it wouldn't help, and changing safety-adjacent AEC code
+without a measured benefit is exactly the wrong move. The diagnostic-
+only fix (above) stands on its own regardless, since a capture tool's
+timeline accuracy is a separate concern from real-time cancellation
+behavior.
+
+**What actually explains persistent echo, then?** The 2026-07-25
+incident's own logged AEC verdict was `UNDER-CANCELLING: ~12.0dB of
+echo headroom remains` -- AEC's own real-time telemetry already
+reported incomplete cancellation for that response, independent of any
+cross-correlation analysis. That's consistent with this project's
+already-documented, unresolved finding
+(`docs/KNOWN-ISSUES.md`'s "WebRTC APM's noise suppression / auto gain
+control are unused" entry): erratic 0.5-12dB attenuation, sometimes
+leaving real audible headroom, on this exact hardware. The likely
+answer isn't a new bug in the reference-feeding pipeline -- it's the
+already-known, already-proposed-but-JP-gated AEC quality gap. Worth
+revisiting that go-ahead now that there's a concrete incident
+consistent with it.
 
 ## What transfers
 
@@ -140,3 +189,14 @@ touched in this pass.
   conclusions both went unchallenged until the operator was asked
   directly and said no -- a one-line question that should probably
   happen before finalizing this class of diagnosis, not after.
+- **A plausible mechanism is still a hypothesis until it's tested against
+  the real thing, even when the reasoning reads solidly.** The
+  feed_reverse frame-skip theory above was structurally coherent and
+  directly analogous to a bug this same session just fixed in the
+  diagnostic path -- and it still didn't survive being run against the
+  real WebRTC AEC3 binding (5 seeds x 2 gap lengths, noise-level
+  difference throughout). Installing the real dependency to check
+  (`aec-audio-processing`, build tools already on hand) took a few
+  minutes and prevented shipping an unnecessary change to
+  safety-adjacent code on the strength of a good-sounding argument
+  alone. (validated-live, empirically)
