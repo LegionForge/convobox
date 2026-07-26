@@ -76,6 +76,7 @@ Optional extras, installed only if you want them:
 ```bash
 uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wheels)
 uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB, CUDA-only
+uv sync --extra web        # local browser UI for a live session (--web), see below
 uv sync --extra dev        # test/lint tooling
 ```
 
@@ -83,6 +84,12 @@ ConvoBox never bundles a speech engine you didn't ask for — the default
 STT model (faster-whisper) and TTS engine (Kokoro, Apache 2.0 — Piper is
 available as an opt-in `--extra piper`, see below) download the first
 time you actually use them, not at install time.
+
+**Optional web UI:** `python scripts/run_convobox.py --web` starts a
+local-only browser view of the live session (transcript, tool calls,
+optional persisted history) alongside the voice loop — off by default,
+no effect on anything else when unused. See
+[docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md).
 
 **Supported today:**
 
