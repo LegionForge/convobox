@@ -1,6 +1,6 @@
 ---
 title: Repeated self-barge-in was an over-narrow backchannel filter, not uncancelled AEC echo
-status: validated-live
+status: validated-live for the backchannel-filter fix (PR #108, still correct); the "not echo" causal claim below is now in question -- see 2026-07-26 correction
 date: 2026-07-20
 project: ConvoBox (github.com/LegionForge/convobox)
 versions: WebRTC AEC3 (aec-audio-processing), faster-whisper base, interrupt_preset conversational
@@ -19,6 +19,19 @@ license: CC BY 4.0 (intent; repo code MIT)
 ---
 
 # Repeated self-barge-in was an over-narrow backchannel filter, not uncancelled AEC echo
+
+> **Correction (2026-07-26).** The backchannel-filter FIX (PR #108) is
+> still correct and still needed regardless of the rest of this note.
+> But the "not echo" conclusion below rested on a cross-correlation
+> whose reference signal turned out to be time-compressed relative to
+> wall-clock time (a structural gap this investigation didn't know to
+> check for), AND on an unconfirmed assumption that the operator was the
+> speaker in the quoted utterances -- JP later reported directly that he
+> was not. See
+> [[2026-07-26-reference-capture-is-time-compressed-not-wall-clock]] for
+> the full re-examination. Treat "this was real human backchannel
+> speech, not echo" as unconfirmed, not established, until re-verified
+> against real audio.
 
 **Context for outsiders**: ConvoBox is a local voice frontend for CLI coding
 agents. With AEC (acoustic echo cancellation) enabled and

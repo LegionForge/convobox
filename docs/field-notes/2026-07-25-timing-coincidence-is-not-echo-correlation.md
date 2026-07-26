@@ -1,6 +1,6 @@
 ---
 title: Reference-vs-mic timing coincidence looked like echo, briefly -- a real cross-correlation said otherwise, and the actual mechanism was already fixed
-status: validated-live
+status: validated-live for the aec_delay_ms calibration finding (unaffected, still correct); the "not echo, this was operator backchannel" causal claim is now in question -- see 2026-07-26 correction
 date: 2026-07-25
 project: ConvoBox (github.com/LegionForge/convobox)
 versions: ConvoBox main @ fdd1b76; WebRTC AEC3; Silero VAD; is_backchannel() post-PR#108
@@ -20,6 +20,19 @@ license: CC BY 4.0 (intent; repo code MIT)
 ---
 
 # Reference-vs-mic timing coincidence looked like echo, briefly
+
+> **Correction (2026-07-26).** The `aec_delay_ms` calibration finding
+> below (auto/222ms is not measurably beaten by any explicit value) is
+> unaffected and still stands. But the "Mechanism" section's conclusion
+> that this incident was real operator backchannel speech, not echo,
+> rested on a cross-correlation whose reference signal turned out to be
+> time-compressed relative to wall-clock time whenever synthesis stalls
+> (a structural gap this investigation didn't know to check for), AND
+> on an unconfirmed assumption that the operator was the speaker in the
+> quoted utterance -- JP later reported directly that he was not. See
+> [[2026-07-26-reference-capture-is-time-compressed-not-wall-clock]] for
+> the full re-examination. Treat "this was backchannel, not echo" as
+> unconfirmed, not established, until re-verified against real audio.
 
 **Context for outsiders.** ConvoBox is a local voice frontend for CLI
 coding agents with open mic and speakers. This note documents a live

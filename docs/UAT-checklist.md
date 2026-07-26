@@ -611,7 +611,14 @@ did).
   mechanism -- see `docs/DESIGN-barge-in.md`'s "Open questions" for the
   full note, including JP's observation that these backchannel-shaped
   utterances have tended to read as affirmative in content, worth
-  rechecking before this gets revisited for real.
+  rechecking before this gets revisited for real. **Also 2026-07-26:**
+  the "cross-correlation ruled out AEC echo" claim just above is now
+  in question -- JP was not the speaker in the quoted utterance, and
+  the correlation method had a real blind spot (time-compressed
+  reference vs. wall-clock mic capture). See
+  `docs/field-notes/2026-07-26-reference-capture-is-time-compressed-not-wall-clock.md`.
+  This entry may turn out to be a G8/echo-adjacent incident, not a real
+  G7 backchannel one -- unresolved until re-verified against real audio.
 - **[G8] `BargeInMonitor` can fire against a response that produced NO
   audio yet.** `AudioPlayer.is_playing()`
   (`src/convobox/audio/playback.py:257-258`) returns `True` as soon as
