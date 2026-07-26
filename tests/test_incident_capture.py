@@ -130,3 +130,52 @@ def test_auto_closes_once_the_post_roll_window_elapses(
     capture.observe_mic(audio, audio)
 
     assert capture.active is False
+
+
+def test_observe_reference_pads_silence_across_a_synthesis_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # docs/field-notes/2026-07-26-reference-capture-is-time-compressed-not-wall-clock.md:
+    # observe_reference() is only called per real block WRITTEN to the
+    # device -- if synthesis stalls between blocks, nothing calls it for
+    # that real duration, so without gap-padding, reference.wav would be
+    # time-compressed relative to mic-raw.wav's continuous wall clock.
+    capture = IncidentCapture(tmp_path, before_s=10, after_s=10)
+    fake_now = 1000.0
+    monkeypatch.setattr(incident_capture_module.time, "monotonic", lambda: fake_now)
+    chunk = np.zeros(160, dtype=np.float32)  # 10ms @ 16kHz
+
+    capture.observe_reference(chunk, 16000)
+    # A 490ms gap beyond this chunk's own 10ms real duration -- e.g. a
+    # slow synthesis chunk in play_stream's streaming path.
+    fake_now = 1000.0 + 0.5
+    capture.observe_reference(chunk, 16000)
+
+    directory = capture.trigger("barge-in")
+    capture.close()
+
+    # 160 (first chunk) + ~7840 samples of padded silence (0.49s gap) +
+    # 160 (second chunk) -- NOT just 320, which is what a naive
+    # concatenation (the pre-fix behavior) would have written.
+    assert _frames(directory / "reference.wav") == 160 + 7840 + 160
+
+
+def test_observe_reference_does_not_pad_normal_back_to_back_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Consecutive blocks with only ordinary scheduling jitter (well under
+    # _REFERENCE_GAP_TOLERANCE_S) must NOT get silence inserted -- only a
+    # genuine stall should.
+    capture = IncidentCapture(tmp_path, before_s=10, after_s=10)
+    fake_now = 1000.0
+    monkeypatch.setattr(incident_capture_module.time, "monotonic", lambda: fake_now)
+    chunk = np.zeros(160, dtype=np.float32)  # 10ms @ 16kHz
+
+    capture.observe_reference(chunk, 16000)
+    fake_now = 1000.0 + 160 / 16000  # exactly on time, zero gap
+    capture.observe_reference(chunk, 16000)
+
+    directory = capture.trigger("barge-in")
+    capture.close()
+
+    assert _frames(directory / "reference.wav") == 160 + 160
