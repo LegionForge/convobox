@@ -41,6 +41,7 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 
 from convobox.audio.aec import EchoCanceller, _resample as _aec_resample
 from convobox.audio.capture import MicrophoneStream
+from convobox.audio.correlation import correlation_at_lag, estimate_reference_lag
 from convobox.audio.playback import AudioPlayer
 from convobox.config import VADConfig, load_config
 from convobox.interrupt_presets import resolve_preset
@@ -193,10 +194,10 @@ def _signal_diagnostics(
             if is_active
         ]
     )
-    lag_ms, raw_correlation = _estimate_reference_lag(
+    lag_ms, raw_correlation = estimate_reference_lag(
         reference_audio, raw_for_correlation, sample_rate
     )
-    processed_correlation = _correlation_at_lag(
+    processed_correlation = correlation_at_lag(
         reference_audio, processed_for_correlation, sample_rate, lag_ms
     )
     correlation_reduction = (
@@ -270,65 +271,6 @@ def _signal_diagnostics(
         "processed_audio": np.concatenate(processed_chunks).astype(np.float32),
     }
     return diagnostics, trace
-
-
-def _estimate_reference_lag(
-    reference: np.ndarray,
-    observed: np.ndarray,
-    sample_rate: int,
-    max_lag_ms: int = 500,
-) -> tuple[float | None, float | None]:
-    if reference.size < sample_rate or observed.size < sample_rate:
-        return None, None
-    # Speech-band correlation does not need 16kHz resolution.  Decimating to
-    # ~1kHz makes an exhaustive 0..500ms normalized-lag search cheap while
-    # retaining 1ms timing resolution.
-    stride = max(1, sample_rate // 1000)
-    ref = np.asarray(reference[::stride], dtype=np.float64)
-    obs = np.asarray(observed[::stride], dtype=np.float64)
-    ref -= np.mean(ref)
-    obs -= np.mean(obs)
-    max_lag = min(round(max_lag_ms * sample_rate / 1000 / stride), len(obs) - 2)
-    best_lag = 0
-    best_correlation: float | None = None
-    for lag in range(max_lag + 1):
-        length = min(len(ref), len(obs) - lag)
-        if length < 100:
-            break
-        left = ref[:length]
-        right = obs[lag : lag + length]
-        denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
-        if denominator <= 1e-12:
-            continue
-        correlation = float(np.dot(left, right) / denominator)
-        if best_correlation is None or abs(correlation) > abs(best_correlation):
-            best_lag = lag
-            best_correlation = correlation
-    if best_correlation is None:
-        return None, None
-    lag_ms = 1000.0 * best_lag * stride / sample_rate
-    return lag_ms, best_correlation
-
-
-def _correlation_at_lag(
-    reference: np.ndarray,
-    observed: np.ndarray,
-    sample_rate: int,
-    lag_ms: float | None,
-) -> float | None:
-    if lag_ms is None or reference.size == 0 or observed.size == 0:
-        return None
-    stride = max(1, sample_rate // 1000)
-    lag = round(lag_ms * sample_rate / 1000 / stride)
-    ref = np.asarray(reference[::stride], dtype=np.float64)
-    obs = np.asarray(observed[::stride], dtype=np.float64)
-    length = min(len(ref), len(obs) - lag)
-    if length < 100:
-        return None
-    left = ref[:length] - np.mean(ref[:length])
-    right = obs[lag : lag + length] - np.mean(obs[lag : lag + length])
-    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
-    return None if denominator <= 1e-12 else float(np.dot(left, right) / denominator)
 
 
 def _acquire_audio_lock() -> socket.socket:
