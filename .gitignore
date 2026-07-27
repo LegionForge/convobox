@@ -17,6 +17,10 @@ build/
 .env
 *.wav
 *.log
+# Manually rotated/renamed logs kept around for a diff (e.g.
+# convobox-tui.log.old.20260726) -- *.log above only matches the
+# unrotated name.
+*.log.old*
 uat-acoustic-calibration/
 .DS_Store
 
