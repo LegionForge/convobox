@@ -560,3 +560,90 @@ def test_on_block_played_reference_uses_device_rate(monkeypatch: pytest.MonkeyPa
     player.play(np.ones(2000, dtype=np.float32), sample_rate=22050)
     player.wait()
     assert seen_rates and all(r == 44100 for r in seen_rates)
+
+
+def test_play_stream_on_block_played_reference_uses_device_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # play() has its own on_block_played call site (_run); play_stream has a
+    # separate one (_run_stream) that was previously untested in isolation --
+    # same AEC-reference contract applies to both.
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(44100.0))
+    player = AudioPlayer(device="pinned")
+    seen_rates: list[int] = []
+    player.on_block_played = lambda block, rate: seen_rates.append(rate)
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.ones(2000, dtype=np.float32)
+
+    asyncio.run(player.play_stream(chunks(), sample_rate=22050))
+    player.wait()
+    assert seen_rates and all(r == 44100 for r in seen_rates)
+
+
+def test_play_stream_resampler_buffering_chunk_produces_no_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # _StreamResampler needs >=2 buffered source samples before it can
+    # interpolate anything; a first chunk too small to clear that bar makes
+    # play_stream's per-chunk resample come back empty, which must be
+    # skipped (no device write, no stream opened) rather than treated as
+    # real silence -- distinct from test_play_stream_with_no_chunks_never_
+    # touches_the_device, which covers zero chunks total, not "one chunk,
+    # still buffering."
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(48000.0))
+    player = AudioPlayer(device="pinned")
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.ones(1, dtype=np.float32)  # too short to interpolate yet
+        yield np.ones(2204, dtype=np.float32)  # completes the buffer
+
+    asyncio.run(player.play_stream(chunks(), sample_rate=22050))
+    player.wait()
+    stream = FakeOutputStream.instances[0]
+    # Only one device stream opened (on the second, non-empty chunk) and
+    # 0.1s worth of audio at 48000 (+/- rounding) -- not two streams, and
+    # not silence spliced in for the buffering chunk.
+    assert len(FakeOutputStream.instances) == 1
+    assert abs(stream.total_written() - 4800) <= 2
+
+
+def test_play_stream_stop_aborts_mid_block_loop() -> None:
+    # A single chunk longer than blocksize (1024) is written across several
+    # inner-loop iterations; stop() setting _stop between those writes must
+    # abort that inner loop too, not just the outer per-chunk queue.get()
+    # loop (already covered by test_play_stream_stop_aborts_playback_and_pull).
+    player = AudioPlayer()
+    wrote_first_block = threading.Event()
+    release = threading.Event()
+    original_write = FakeOutputStream.write
+
+    def gated_write(self: FakeOutputStream, block: np.ndarray) -> None:
+        original_write(self, block)
+        wrote_first_block.set()
+        release.wait(timeout=1)
+
+    FakeOutputStream.write = gated_write  # type: ignore[method-assign]
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.zeros(3000, dtype=np.float32)  # 1024 + 1024 + 952 across 3 blocks
+
+    async def scenario() -> None:
+        feed_task = asyncio.ensure_future(player.play_stream(chunks(), 16000))
+        for _ in range(200):  # up to 2s for the writer thread to reach the gate
+            if wrote_first_block.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert wrote_first_block.is_set()
+        player._stop.set()  # arm stop while the thread is parked mid-block-loop
+        release.set()
+        await asyncio.wait_for(feed_task, timeout=5)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        FakeOutputStream.write = original_write  # type: ignore[method-assign]
+    player.wait()
+
+    stream = FakeOutputStream.instances[0]
+    assert stream.total_written() == 1024  # aborted before the 2nd/3rd block
