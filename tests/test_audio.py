@@ -293,64 +293,26 @@ def test_is_playing_reflects_state() -> None:
     assert player.is_playing() is False
 
 
-def test_has_played_audio_is_false_until_the_first_block_actually_writes() -> None:
-    # docs/UAT-checklist.md [G8]: is_playing() reports True the instant the
-    # playback thread starts (and the device stream is opened), before a
-    # single sample has ever actually reached it -- a real gap that let
-    # BargeInMonitor fire against a response that produced no audible
-    # output yet. has_played_audio must stay False through that gap.
+def test_on_first_block_played_fires_again_on_a_new_play_call() -> None:
+    # first_block is a local reset at the top of _run() each call, so this
+    # is structurally guaranteed rather than needing its own instance-state
+    # reset (unlike the superseded has_played_audio flag this replaced) --
+    # still worth pinning as a regression test for the actual behavior.
     player = AudioPlayer()
-    stream_started = threading.Event()
-    release = threading.Event()
+    calls = 0
 
-    original_start = FakeOutputStream.start
+    def on_first() -> None:
+        nonlocal calls
+        calls += 1
 
-    def gated_start(self: FakeOutputStream) -> None:
-        original_start(self)
-        stream_started.set()
-        release.wait(timeout=1)
-
-    FakeOutputStream.start = gated_start  # type: ignore[method-assign]
-    try:
-        player.play(np.zeros(4096, dtype=np.float32), sample_rate=16000)
-        assert stream_started.wait(timeout=1)
-        # Thread alive, device stream open -- but nothing written yet.
-        assert player.is_playing() is True
-        assert player.has_played_audio is False
-        release.set()
-    finally:
-        FakeOutputStream.start = original_start  # type: ignore[method-assign]
-    player.wait()
-    assert player.has_played_audio is True
-
-
-def test_has_played_audio_resets_on_a_new_play_call() -> None:
-    player = AudioPlayer()
+    player.on_first_block_played = on_first
     player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
     player.wait()
-    assert player.has_played_audio is True
+    assert calls == 1
 
-    stream_started = threading.Event()
-    release = threading.Event()
-    original_start = FakeOutputStream.start
-
-    def gated_start(self: FakeOutputStream) -> None:
-        original_start(self)
-        stream_started.set()
-        release.wait(timeout=1)
-
-    FakeOutputStream.start = gated_start  # type: ignore[method-assign]
-    try:
-        player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
-        assert stream_started.wait(timeout=1)
-        # New playback's stream is open but hasn't written anything yet --
-        # must not still read True from the PREVIOUS play() call.
-        assert player.has_played_audio is False
-        release.set()
-    finally:
-        FakeOutputStream.start = original_start  # type: ignore[method-assign]
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
     player.wait()
-    assert player.has_played_audio is True
+    assert calls == 2
 
 
 # --- streaming playback (play_stream) ---
@@ -403,12 +365,19 @@ def test_play_stream_starts_audio_before_the_source_finishes() -> None:
     assert FakeOutputStream.instances[0].total_written() == 3072
 
 
-def test_play_stream_has_played_audio_is_false_before_the_first_chunk_arrives() -> None:
+def test_play_stream_on_first_block_played_has_not_fired_before_the_first_chunk_arrives() -> None:
     # The streaming path's version of [G8]'s gap is even wider than play()'s:
     # is_playing() goes True the instant play_stream() starts the playback
     # thread, before the source has yielded even ONE chunk -- the device
     # stream isn't opened at all yet (it's lazy, on the first real chunk).
     player = AudioPlayer()
+    became_audible = False
+
+    def on_first() -> None:
+        nonlocal became_audible
+        became_audible = True
+
+    player.on_first_block_played = on_first
     release = asyncio.Event()
 
     async def slow_source():  # type: ignore[no-untyped-def]
@@ -422,14 +391,14 @@ def test_play_stream_has_played_audio_is_false_before_the_first_chunk_arrives() 
                 break
             await asyncio.sleep(0.01)
         assert player.is_playing() is True
-        assert player.has_played_audio is False
+        assert became_audible is False
         assert FakeOutputStream.instances == []  # device never even opened yet
         release.set()
         await asyncio.wait_for(feed_task, timeout=5)
 
     asyncio.run(scenario())
     player.wait()
-    assert player.has_played_audio is True
+    assert became_audible is True
 
 
 def test_play_stream_stop_aborts_playback_and_pull() -> None:

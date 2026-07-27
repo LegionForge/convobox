@@ -141,25 +141,11 @@ class AudioPlayer:
         # open (None before first playback / when unreported). Consumers:
         # the AEC delay estimate.
         self.output_latency_s: float | None = None
-        # True once at least one real audio block has actually reached the
-        # output device for the CURRENT play()/play_stream() call -- distinct
-        # from is_playing() (thread liveness), which goes True the instant
-        # the playback thread starts, before the device is even opened.
-        # docs/UAT-checklist.md [G8]: BargeInMonitor can fire against a
-        # response that produced no audible output yet (TTS-synthesis
-        # latency window), and the log line reads exactly like a real
-        # interruption even though nothing was ever audible. Reset
-        # synchronously in play()/play_stream() (the CALLING thread), not
-        # inside _run()/_run_stream() (the playback thread), so a caller
-        # checking it immediately after starting a new playback never sees
-        # a stale True from the previous one.
-        self.has_played_audio = False
 
     def play(self, samples: np.ndarray, sample_rate: int) -> None:
         """Start playing samples. Non-blocking; replaces any current playback."""
         self.stop()
         self._stop.clear()
-        self.has_played_audio = False
         self._thread = threading.Thread(
             target=self._run, args=(samples, sample_rate), daemon=True
         )
@@ -190,7 +176,6 @@ class AudioPlayer:
                     break
                 block = samples[start : start + blocksize]
                 stream.write(block)
-                self.has_played_audio = True
                 if first_block:
                     first_block = False
                     if self.on_first_block_played is not None:
@@ -214,7 +199,6 @@ class AudioPlayer:
         """
         self.stop()
         self._stop.clear()
-        self.has_played_audio = False
         feed: queue.Queue[np.ndarray | None] = queue.Queue()
         self._thread = threading.Thread(
             target=self._run_stream, args=(feed, sample_rate), daemon=True
@@ -270,7 +254,6 @@ class AudioPlayer:
                         return
                     block = chunk[start : start + blocksize]
                     stream.write(block)
-                    self.has_played_audio = True
                     if first_block:
                         first_block = False
                         if self.on_first_block_played is not None:
