@@ -125,6 +125,42 @@ def test_close_is_idempotent() -> None:
     mic.close()  # must not raise
 
 
+def test_read_after_close_raises_and_lets_a_second_waiter_observe_it_too() -> None:
+    # close() puts one sentinel on the queue, but read() re-puts it after
+    # consuming it -- otherwise only the FIRST of several concurrent
+    # readers (a real shape: e.g. the main capture loop and a diagnostic
+    # tap both calling read()) would ever see the stream closed; every
+    # later caller would just block forever on an empty queue.
+    mic = MicrophoneStream()
+    mic.start()
+    mic.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        mic.read(timeout=1)
+    with pytest.raises(RuntimeError, match="closed"):
+        mic.read(timeout=1)  # a second waiter must see it too, not block
+
+
+@pytest.mark.asyncio
+async def test_stream_close_wakes_all_concurrent_waiters_via_requeue() -> None:
+    # Async counterpart of the read() re-queue behavior above. close() only
+    # puts ONE sentinel, so if two consumers are already blocked inside
+    # stream()'s queue.get() when it lands, only the first can dequeue it
+    # directly -- the requeue at the "if chunk is _CLOSE_SENTINEL" branch
+    # is what lets the second one see it too, instead of blocking forever.
+    mic = MicrophoneStream()
+    mic.start()
+    task_a = asyncio.ensure_future(mic.stream().__anext__())
+    task_b = asyncio.ensure_future(mic.stream().__anext__())
+    await asyncio.sleep(0.05)  # let both reach queue.get() in their worker threads
+    mic.close()
+
+    with pytest.raises(StopAsyncIteration):
+        await task_a
+    with pytest.raises(StopAsyncIteration):
+        await task_b
+
+
 def test_context_manager_starts_and_closes() -> None:
     with MicrophoneStream() as mic:
         assert isinstance(mic, MicrophoneStream)
