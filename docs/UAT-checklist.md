@@ -636,9 +636,18 @@ did).
   under `on_new_words: now` (the new words are still taken correctly) --
   the defect is diagnostic/UX, not correctness. See
   `docs/field-notes/2026-07-25-player-is-playing-races-ahead-of-first-audio.md`.
-  Fix direction (not yet implemented): a `has_audible_output` flag set
-  at the same point `on_block_played` first fires, distinct from raw
-  thread liveness.
+  **Fixed 2026-07-27**: `EchoAwarePlayer.audible` (`scripts/run_convobox.py`)
+  is set via `AudioPlayer.on_first_block_played` and reset synchronously in
+  `play()`/`play_stream()`, distinct from `is_playing()`'s raw thread
+  liveness. `BargeInMonitor.observe()`'s call site now passes
+  `player.audible` instead of `player.is_playing()` -- every OTHER
+  `is_playing()` use (the AEC-stats edge detection, the overlap gate, the
+  echo-tail guard, `QueuedInterjection.flush_if_idle`, `_working_watchdog`)
+  deliberately keeps thread-liveness semantics, since those care whether a
+  response is still in progress at all, not whether it's currently audible.
+  Verified with unit tests (`tests/test_run_convobox_echo.py`) mirroring
+  the same gated-stream technique used to confirm the original gap; not
+  live-mic verified (no mic access on this machine this session).
 - **[G9] Under-cancelled echo can be intelligible enough for STT to
   transcribe real words out of the assistant's own voice.** Confirmed
   live 2026-07-26 on an open-speaker (amplified desktop speakers) +

@@ -896,12 +896,35 @@ class EchoAwarePlayer(AudioPlayer):
     def __init__(self, device: str | int | None = None) -> None:
         super().__init__(device)
         self.playback_ended_at = 0.0  # time.monotonic() scale; 0 = never played
+        # True once the CURRENT response's audio has actually reached the
+        # output device -- distinct from is_playing() (thread liveness),
+        # which goes True the instant the playback thread starts, before
+        # the device is even opened. docs/UAT-checklist.md [G8]:
+        # BargeInMonitor firing off is_playing() alone could fire against
+        # a response that produced no audible output yet, reading in the
+        # log exactly like a real interruption even though nothing was
+        # ever audible. Reset synchronously in play()/play_stream() below
+        # (the CALLING thread), not inside AudioPlayer's own _run()/
+        # _run_stream() (the playback thread), so a caller checking it
+        # immediately after starting new playback never sees a stale True
+        # from the previous response. Set via on_first_block_played,
+        # which this class owns exclusively -- see _mark_audible.
+        self.audible = False
+        self.on_first_block_played = self._mark_audible
+
+    def _mark_audible(self) -> None:
+        self.audible = True
+        # Lets post-hoc tools (scripts/analyze_incident.py) locate a
+        # response in a capture's timeline directly from the log instead
+        # of a blind correlation search.
+        log.info("playback: first audio block reached output device")
 
     def play(self, samples, sample_rate) -> None:  # type: ignore[no-untyped-def]
         # Estimate set AFTER super().play(): AudioPlayer.play() begins by
         # calling self.stop() to replace any current playback, and that
         # lands in our stop() override, which would clamp a
         # freshly-written estimate straight back down to "now".
+        self.audible = False
         super().play(samples, sample_rate)
         self.playback_ended_at = time.monotonic() + len(samples) / sample_rate
 
@@ -910,6 +933,8 @@ class EchoAwarePlayer(AudioPlayer):
         # extends the estimate. max(estimate, now) restarts the clock after
         # a synthesis stall (playback caught up and went silent, so the
         # next chunk plays from "now", not from the stale estimate).
+        self.audible = False
+
         async def tracked():  # type: ignore[no-untyped-def]
             async for chunk in chunks:
                 base = max(self.playback_ended_at, time.monotonic())
@@ -1533,14 +1558,6 @@ async def run(args: argparse.Namespace) -> None:
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
         device=config.audio.output_device
     )
-    # Timing-only diagnostic, unconditional (cheap, and useful with or
-    # without AEC/incident-capture on): marks exactly when a response's
-    # audio actually becomes audible, distinct from is_playing()'s
-    # thread-start signal -- see AudioPlayer.on_first_block_played's
-    # docstring and docs/UAT-checklist.md [G8]/[G9]. Lets post-hoc tools
-    # (scripts/analyze_incident.py) locate a response in a capture's
-    # timeline directly from the log instead of a blind correlation search.
-    player.on_first_block_played = lambda: log.info("playback: first audio block reached output device")
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
     transcript_corrector = TranscriptCorrector(config.stt.corrections)
     # --tui only applies to the live mic loop, not --text mode (which
@@ -1923,7 +1940,19 @@ async def run(args: argparse.Namespace) -> None:
             # chunk (this one hasn't been fed yet) -- one chunk (~32ms) of
             # lag, irrelevant against the sustained-speech threshold.
             chunk_ms = 1000 * len(chunk) / config.audio.sample_rate
-            if monitor.observe(segmenter.in_speech, playing, chunk_ms):
+            # [G8] fix: gate BargeInMonitor on audibility, not thread
+            # liveness. `playing` (is_playing()) goes True the instant the
+            # playback thread starts, before the device is even opened --
+            # `player.audible` (set via on_first_block_played) only goes
+            # True once a real block has actually reached the speaker, so
+            # sustained user speech during that TTS-synthesis-latency
+            # window no longer reads as a barge-in against audio that was
+            # never audible. Every OTHER use of `playing` above (the
+            # AEC-stats edge detection, was_playing, the tail guard) keeps
+            # thread-liveness semantics deliberately -- those care whether
+            # a response is still in progress at all, not whether it's
+            # currently audible.
+            if monitor.observe(segmenter.in_speech, player.audible, chunk_ms):
                 log.info("barge-in: sustained speech during playback -- stopping audio")
                 if incident_capture is not None:
                     captured = incident_capture.trigger("barge-in", {

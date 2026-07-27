@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -125,6 +126,105 @@ def test_mute_player_never_marks_playback(silent_output_stream: None) -> None:
     player.play(np.zeros(22050, dtype=np.float32), sample_rate=22050)
     assert player.playback_ended_at == 0.0
     assert player.is_playing() is False
+    # [G8]: --mute never opens a real device stream, so on_first_block_played
+    # never fires -- audible must stay False, matching is_playing()'s
+    # always-False behavior for this player.
+    assert player.audible is False
+
+
+# --- [G8]: audible (BargeInMonitor's gate, not is_playing()'s thread liveness) ---
+
+
+def test_echo_aware_player_becomes_audible_once_a_block_is_written(
+    silent_output_stream: None,
+) -> None:
+    player = EchoAwarePlayer()
+    player.play(np.zeros(22050, dtype=np.float32), sample_rate=22050)
+    player.wait()
+    assert player.audible is True
+
+
+def test_echo_aware_player_audible_is_false_until_the_first_block_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The actual [G8] gap: is_playing() (thread alive, device opened) can be
+    # True for a real TTS-synthesis-latency window before any block has
+    # actually reached the speaker. audible must stay False through that
+    # window -- gate the fake stream's start() to pause there and check.
+    stream_started = threading.Event()
+    release = threading.Event()
+
+    class GatedStream:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            stream_started.set()
+            release.wait(timeout=1)
+
+        def write(self, samples: object) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "convobox.audio.playback.import_sounddevice",
+        lambda: SimpleNamespace(OutputStream=GatedStream),
+    )
+    player = EchoAwarePlayer()
+    player.play(np.zeros(4096, dtype=np.float32), sample_rate=16000)
+    assert stream_started.wait(timeout=1)
+    assert player.is_playing() is True
+    assert player.audible is False  # device open, but nothing written yet
+    release.set()
+    player.wait()
+    assert player.audible is True
+
+
+def test_echo_aware_player_audible_resets_on_a_new_play_call(
+    silent_output_stream: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = EchoAwarePlayer()
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
+    player.wait()
+    assert player.audible is True
+
+    stream_started = threading.Event()
+    release = threading.Event()
+
+    class GatedStream:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            stream_started.set()
+            release.wait(timeout=1)
+
+        def write(self, samples: object) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "convobox.audio.playback.import_sounddevice",
+        lambda: SimpleNamespace(OutputStream=GatedStream),
+    )
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
+    assert stream_started.wait(timeout=1)
+    # New playback's stream is open but hasn't written anything yet -- must
+    # not still read True from the PREVIOUS play() call.
+    assert player.audible is False
+    release.set()
+    player.wait()
+    assert player.audible is True
 
 
 # --- stage-1 text-level echo suppression ---
