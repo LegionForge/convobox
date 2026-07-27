@@ -127,6 +127,16 @@ class AudioPlayer:
         # realtime far-end reference (acoustic echo cancellation); must be
         # fast and must not raise.
         self.on_block_played: Callable[[np.ndarray, int], None] | None = None
+        # Fires exactly once per play()/play_stream() call, at the same
+        # point the first real block reaches on_block_played -- i.e. when
+        # this response's audio is actually audible, not just "a playback
+        # thread exists" (is_playing() is true from thread-start, which is
+        # a real TTS-synthesis-latency window earlier; see docs/field-notes/
+        # 2026-07-25-player-is-playing-races-ahead-of-first-audio.md /
+        # UAT-checklist.md [G8]). Takes no arguments -- consumers that need
+        # the audio itself already have on_block_played for that; this is
+        # purely a timing signal, cheap enough to log unconditionally.
+        self.on_first_block_played: Callable[[], None] | None = None
         # Actual render latency reported by the host API once a stream is
         # open (None before first playback / when unreported). Consumers:
         # the AEC delay estimate.
@@ -159,12 +169,17 @@ class AudioPlayer:
         self._stream = stream
         stream.start()
         self.output_latency_s = getattr(stream, "latency", None)
+        first_block = True
         try:
             for start in range(0, len(samples), blocksize):
                 if self._stop.is_set():
                     break
                 block = samples[start : start + blocksize]
                 stream.write(block)
+                if first_block:
+                    first_block = False
+                    if self.on_first_block_played is not None:
+                        self.on_first_block_played()
                 if self.on_block_played is not None:
                     # Reference is what actually hits the speaker: the
                     # resampled block at the device rate.
@@ -207,6 +222,7 @@ class AudioPlayer:
         # reads as garbled static. See _StreamResampler.
         resampler = _StreamResampler(sample_rate, device_rate)
         stream = None
+        first_block = True
         try:
             while not self._stop.is_set():
                 try:
@@ -238,6 +254,10 @@ class AudioPlayer:
                         return
                     block = chunk[start : start + blocksize]
                     stream.write(block)
+                    if first_block:
+                        first_block = False
+                        if self.on_first_block_played is not None:
+                            self.on_first_block_played()
                     if self.on_block_played is not None:
                         # Reference is what actually hits the speaker: the
                         # resampled block at the device rate.

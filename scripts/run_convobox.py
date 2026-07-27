@@ -1525,6 +1525,14 @@ async def run(args: argparse.Namespace) -> None:
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
         device=config.audio.output_device
     )
+    # Timing-only diagnostic, unconditional (cheap, and useful with or
+    # without AEC/incident-capture on): marks exactly when a response's
+    # audio actually becomes audible, distinct from is_playing()'s
+    # thread-start signal -- see AudioPlayer.on_first_block_played's
+    # docstring and docs/UAT-checklist.md [G8]/[G9]. Lets post-hoc tools
+    # (scripts/analyze_incident.py) locate a response in a capture's
+    # timeline directly from the log instead of a blind correlation search.
+    player.on_first_block_played = lambda: log.info("playback: first audio block reached output device")
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
     transcript_corrector = TranscriptCorrector(config.stt.corrections)
     # --tui only applies to the live mic loop, not --text mode (which
