@@ -471,3 +471,43 @@ def test_on_block_played_reference_uses_device_rate(monkeypatch: pytest.MonkeyPa
     player.play(np.ones(2000, dtype=np.float32), sample_rate=22050)
     player.wait()
     assert seen_rates and all(r == 44100 for r in seen_rates)
+
+
+def test_on_first_block_played_fires_once_for_play(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Multiple blocks get written (2000 samples / 1024 blocksize = 2 blocks)
+    # but the audible-start signal must fire exactly once, on the first one.
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(22050.0))
+    player = AudioPlayer(device="pinned")
+    calls = 0
+
+    def on_first() -> None:
+        nonlocal calls
+        calls += 1
+
+    player.on_first_block_played = on_first
+    player.play(np.ones(2000, dtype=np.float32), sample_rate=22050)
+    player.wait()
+    assert calls == 1
+
+
+def test_on_first_block_played_fires_once_for_play_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(22050.0))
+    player = AudioPlayer(device="pinned")
+    calls = 0
+
+    def on_first() -> None:
+        nonlocal calls
+        calls += 1
+
+    player.on_first_block_played = on_first
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        # Several chunks, each spanning multiple 1024-sample blocks --
+        # on_first_block_played must still fire only once, on the very
+        # first block of the very first chunk.
+        yield np.ones(2000, dtype=np.float32)
+        yield np.ones(2000, dtype=np.float32)
+
+    asyncio.run(player.play_stream(chunks(), sample_rate=22050))
+    player.wait()
+    assert calls == 1
