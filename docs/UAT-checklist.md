@@ -639,6 +639,17 @@ did).
   Fix direction (not yet implemented): a `has_audible_output` flag set
   at the same point `on_block_played` first fires, distinct from raw
   thread liveness.
+- **[G9] Under-cancelled echo can be intelligible enough for STT to
+  transcribe real words out of the assistant's own voice.** Confirmed
+  live 2026-07-26 on an open-speaker (amplified desktop speakers) +
+  webcam-mic rig: two incidents (12.9dB and 4.7dB of unresolved AEC
+  headroom) both produced audible, by-ear-confirmed echo bleed-through,
+  and in the worse case Whisper transcribed the assistant's own list
+  ("1. Atom...") as `"one, and two, and open."`, which was accepted as
+  real speech and echoed back ("Heard: 'one, and two, and open.'").
+  Different mechanism from `[G8]` (that's silence being misread; this is
+  real, present, audible echo). Not yet tested on headphones. See
+  `docs/field-notes/2026-07-26-under-cancelled-echo-is-sometimes-transcribable.md`.
 
 ## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
 
