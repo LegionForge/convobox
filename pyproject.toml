@@ -77,6 +77,13 @@ cuda = [
 piper = [
     "piper-tts>=1.2",
 ]
+# Post-hoc plotting for scripts/analyze_incident.py (saved
+# --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
+# by the running product -- so kept out of dev/aec rather than pulling a
+# GUI-adjacent plotting stack into every install.
+analysis = [
+    "matplotlib>=3.8",
+]
 
 [project.scripts]
 convobox-spike = "scripts.spike:main"
