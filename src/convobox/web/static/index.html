@@ -8,84 +8,143 @@
   :root {
     color-scheme: light dark;
     --bg: #ffffff;
+    --ribbon-bg: #f7f7f8;
     --fg: #1a1a1a;
     --dim: #666666;
     --border: #dddddd;
-    --user-bg: #e8f0fe;
-    --assistant-bg: #f5f5f5;
+    --user-bg: #2e7dfb;
+    --user-fg: #ffffff;
+    --assistant-bg: #f0f0f2;
     --tool-bg: #fff8e1;
     --error-fg: #b00020;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #1a1a1a;
+      --ribbon-bg: #202225;
       --fg: #eaeaea;
       --dim: #999999;
       --border: #3a3a3a;
-      --user-bg: #1f3a5f;
+      --user-bg: #2b5fc7;
+      --user-fg: #ffffff;
       --assistant-bg: #2a2a2a;
       --tool-bg: #3a3220;
       --error-fg: #ff6b6b;
     }
   }
   * { box-sizing: border-box; }
-  body {
+  html, body {
     margin: 0;
+    height: 100%;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--bg);
     color: var(--fg);
   }
-  header {
+  body { display: flex; flex-direction: column; }
+
+  /* --- Top ribbon: branding, session nav, and controls. Buttons for
+     mutating actions (listening/settings/restart) ship disabled -- this
+     view is read-only today; wiring them up is a deliberately separate
+     follow-up, not silently bundled in with the rendering work. --- */
+  .ribbon {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem 1rem;
+    gap: 0.6rem;
+    padding: 0.5rem 0.85rem;
+    background: var(--ribbon-bg);
     border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
   }
-  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
-  #status { font-size: 0.8rem; color: var(--dim); }
-  #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.35rem; }
-  #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.35rem; }
-  select { margin-left: auto; font-size: 0.85rem; }
+  .ribbon img.logo { height: 20px; width: 20px; flex: 0 0 auto; }
+  .ribbon .brand { font-size: 0.95rem; font-weight: 600; white-space: nowrap; }
+  #status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
+  #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.3rem; }
+  #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.3rem; }
+  .ribbon .spacer { flex: 1 1 auto; }
+  .ribbon select {
+    font-size: 0.8rem;
+    max-width: 12rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.2rem 0.4rem;
+  }
+  .ribbon button {
+    font-size: 0.78rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ribbon button:hover:not(:disabled) { border-color: var(--dim); }
+  .ribbon button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* --- Chat: scrollable, mobile-texting-style bubbles. --- */
   main {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 1rem;
+    flex: 1 1 auto;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
   }
-  .event {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem 0.8rem;
+  #events {
+    max-width: 760px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 1rem 1rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .bubble-row { display: flex; }
+  .bubble-row.from-user { justify-content: flex-end; }
+  .bubble-row.from-other { justify-content: flex-start; }
+  .bubble {
+    max-width: 78%;
+    padding: 0.5rem 0.8rem;
+    border-radius: 16px;
     white-space: pre-wrap;
     word-break: break-word;
   }
-  .event .meta {
-    font-size: 0.7rem;
-    color: var(--dim);
-    margin-bottom: 0.25rem;
+  .bubble-row.from-user .bubble { border-bottom-right-radius: 4px; }
+  .bubble-row.from-other .bubble { border-bottom-left-radius: 4px; }
+  .bubble .meta {
+    font-size: 0.68rem;
+    opacity: 0.7;
+    margin-bottom: 0.2rem;
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
-  .event.response, .event.transcript { background: var(--assistant-bg); }
-  .event.transcript { background: var(--user-bg); }
-  .event.tool_call, .event.tool_result { background: var(--tool-bg); font-family: ui-monospace, monospace; font-size: 0.85rem; }
-  .event.approval_request { border-color: #e0a030; }
-  .event.error { color: var(--error-fg); }
-  .event.done { display: none; } /* a turn boundary marker, not shown as its own bubble */
+  .bubble.transcript { background: var(--user-bg); color: var(--user-fg); }
+  .bubble.response { background: var(--assistant-bg); }
+  .bubble.tool_call, .bubble.tool_result {
+    background: var(--tool-bg);
+    font-family: ui-monospace, monospace;
+    font-size: 0.85rem;
+  }
+  .bubble.approval_request { background: var(--assistant-bg); border: 1px solid #e0a030; }
+  .bubble.error { background: var(--assistant-bg); color: var(--error-fg); }
   #empty { color: var(--dim); text-align: center; padding: 2rem; }
 </style>
 </head>
 <body>
-<header>
-  <h1>ConvoBox</h1>
+<header class="ribbon">
+  <img class="logo" src="img/legionforge-logo.svg" alt="LegionForge">
+  <span class="brand">ConvoBox</span>
   <span id="status" class="disconnected">connecting&hellip;</span>
+  <span class="spacer"></span>
   <select id="session-select"></select>
+  <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
+  <button disabled title="Coming soon">Stop listening</button>
+  <button disabled title="Coming soon">Settings</button>
 </header>
-<main id="events">
-  <div id="empty">No events yet.</div>
+<main>
+  <div id="events">
+    <div id="empty">No events yet.</div>
+  </div>
 </main>
 <script>
 (function () {
@@ -95,16 +154,33 @@
   const emptyEl = document.getElementById("empty");
   const statusEl = document.getElementById("status");
   const sessionSelect = document.getElementById("session-select");
+  const clearHistoryBtn = document.getElementById("clear-history-btn");
+  let currentSessionId = null;
+
+  // transcript (the user's own speech) renders on the right, like an
+  // outgoing text message; everything else (assistant response, tool
+  // calls/results, approval requests, errors) renders on the left. "done"
+  // is a turn-boundary marker only, never its own bubble.
+  function side(kind) {
+    return kind === "transcript" ? "from-user" : "from-other";
+  }
 
   function renderEvent(ev) {
-    if (emptyEl.parentNode) emptyEl.remove();
-    const div = document.createElement("div");
     const kind = ev.event_type || ev.type || "event";
-    div.className = "event " + kind;
+    if (kind === "done") return;
+    if (emptyEl.parentNode) emptyEl.remove();
+
+    const row = document.createElement("div");
+    row.className = "bubble-row " + side(kind);
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble " + kind;
+
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = kind.replace(/_/g, " ");
-    div.appendChild(meta);
+    bubble.appendChild(meta);
+
     const body = document.createElement("div");
     // textContent, never innerHTML -- transcripts/tool output/backend
     // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
@@ -113,9 +189,11 @@
       ev.backend_response || ev.content || ev.user_transcript ||
       (ev.tool_name ? `${ev.tool_name}(${ev.tool_input || ""})` : "") ||
       (ev.tool_output || "");
-    div.appendChild(body);
-    eventsEl.appendChild(div);
-    div.scrollIntoView({ block: "end" });
+    bubble.appendChild(body);
+
+    row.appendChild(bubble);
+    eventsEl.appendChild(row);
+    row.scrollIntoView({ block: "end" });
   }
 
   async function loadSessions() {
@@ -132,6 +210,7 @@
   }
 
   async function loadHistory(sessionId) {
+    currentSessionId = sessionId || null;
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
     const data = await res.json();
@@ -164,6 +243,12 @@
   }
 
   sessionSelect.addEventListener("change", () => loadHistory(sessionSelect.value));
+
+  clearHistoryBtn.addEventListener("click", async () => {
+    if (!currentSessionId) return;
+    await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/clear`, { method: "POST" });
+    await loadHistory(currentSessionId);
+  });
 
   (async function init() {
     const latest = await loadSessions();
