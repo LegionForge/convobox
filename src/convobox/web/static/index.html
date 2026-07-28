@@ -168,6 +168,64 @@
   .approval-actions .approve-btn { border-color: #1a56db; }
   .approval-actions .deny-btn { border-color: #c2540a; }
   .approval-note { margin-top: 0.4rem; font-size: 0.75rem; opacity: 0.85; }
+
+  /* --- Settings: full-screen modal over the chat view, driven entirely
+     by /api/settings/schema -- no per-field markup is hardcoded here, so
+     a new FieldSpec on the Python side (src/convobox/config.py +
+     scripts/settings_tui.py's SECTION_SPECS) just works without a
+     matching frontend change. --- */
+  .settings-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 1rem; z-index: 100;
+  }
+  .settings-overlay[hidden] { display: none; }
+  .settings-modal {
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 10px;
+    width: min(720px, 100%); max-height: 88vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .settings-header {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+  }
+  .settings-header h2 { margin: 0; font-size: 1rem; flex: 1 1 auto; }
+  .settings-header button {
+    font-size: 1.1rem; line-height: 1; background: none; border: none;
+    color: var(--fg); cursor: pointer; padding: 0.2rem 0.5rem; border-radius: 6px;
+  }
+  .settings-header button:hover { background: var(--assistant-bg); }
+  .settings-tabs { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.5rem 1rem; border-bottom: 1px solid var(--border); }
+  .settings-tabs button {
+    font-size: 0.78rem; padding: 0.3rem 0.6rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  .settings-tabs button.active { background: var(--assistant-bg); font-weight: 600; }
+  .settings-errors { font-size: 0.78rem; color: var(--error-fg); padding: 0.5rem 1rem 0; }
+  .settings-body { flex: 1 1 auto; overflow-y: auto; padding: 0.8rem 1rem; }
+  .settings-field { margin-bottom: 0.9rem; }
+  .settings-field label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .settings-field .help { font-size: 0.72rem; color: var(--dim); margin-top: 0.25rem; }
+  .settings-field input[type="text"], .settings-field input[type="number"], .settings-field select {
+    width: 100%; font-size: 0.85rem; padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg);
+  }
+  .settings-field input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
+  .settings-footer {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.7rem 1rem; border-top: 1px solid var(--border);
+  }
+  .settings-footer .spacer { flex: 1 1 auto; }
+  .settings-status { font-size: 0.78rem; }
+  .settings-status.error { color: var(--error-fg); }
+  .settings-footer button {
+    font-size: 0.82rem; padding: 0.4rem 0.8rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  .settings-footer button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
+  .settings-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -179,7 +237,7 @@
   <select id="session-select"></select>
   <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
   <button disabled title="Coming soon">Stop listening</button>
-  <button disabled title="Coming soon">Settings</button>
+  <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
 <main>
@@ -187,6 +245,22 @@
     <div id="empty">No events yet.</div>
   </div>
 </main>
+<div id="settings-overlay" class="settings-overlay" hidden>
+  <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="settings-header">
+      <h2 id="settings-title">Settings</h2>
+      <button id="settings-close-btn" type="button" aria-label="Close settings">&times;</button>
+    </div>
+    <div id="settings-tabs" class="settings-tabs"></div>
+    <div id="settings-errors" class="settings-errors" hidden></div>
+    <div id="settings-body" class="settings-body"></div>
+    <div class="settings-footer">
+      <span id="settings-status" class="settings-status"></span>
+      <span class="spacer"></span>
+      <button id="settings-save-btn" type="button" class="primary">Save</button>
+    </div>
+  </div>
+</div>
 <script>
 (function () {
   "use strict";
@@ -448,6 +522,274 @@
     await loadHistory(latest);
     connectStream();
   })();
+})();
+</script>
+<script>
+(function () {
+  "use strict";
+
+  // Settings modal: a generic renderer driven by /api/settings/schema --
+  // full parity target is scripts/settings_tui.py's own edit/validate/save
+  // contract (docs/UAT-settings-tui.md), not a bespoke re-scoping of it.
+  // Deliberately separate from the chat script above (own IIFE, own DOM
+  // ids) so this file's two concerns -- live transcript vs. config editing
+  // -- don't share mutable state by accident.
+
+  const overlay = document.getElementById("settings-overlay");
+  const tabsEl = document.getElementById("settings-tabs");
+  const bodyEl = document.getElementById("settings-body");
+  const errorsEl = document.getElementById("settings-errors");
+  const statusEl = document.getElementById("settings-status");
+  const closeBtn = document.getElementById("settings-close-btn");
+  const saveBtn = document.getElementById("settings-save-btn");
+  const settingsBtn = document.getElementById("settings-btn");
+
+  let originalValues = null;
+  let draft = null;
+  let sections = [];
+  let activeKey = null;
+
+  function getPath(obj, path) {
+    return path.split(".").reduce((o, k) => (o == null ? o : o[k]), obj);
+  }
+  function setPath(obj, path, value) {
+    const keys = path.split(".");
+    let o = obj;
+    for (let i = 0; i < keys.length - 1; i++) o = o[keys[i]];
+    o[keys[keys.length - 1]] = value;
+  }
+
+  // Not full shlex: handles the common "quoted argument with spaces"
+  // case (matches backend.command's own help text example, e.g.
+  // `codex.cmd --model gpt-5.6-terra`) but not shlex's escape-sequence
+  // handling -- a documented, minor gap versus the TUI's real shlex.split.
+  function splitCommand(text) {
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    const out = [];
+    let m;
+    while ((m = re.exec(text))) {
+      out.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+    }
+    return out;
+  }
+
+  async function fetchSchema() {
+    const res = await fetch("/api/settings/schema", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values: draft }),
+    });
+    const data = await res.json();
+    sections = data.sections;
+    if (!sections.some((s) => s.key === activeKey)) activeKey = sections[0].key;
+    renderTabs();
+    renderBody();
+  }
+
+  function renderTabs() {
+    tabsEl.innerHTML = "";
+    for (const section of sections) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = section.label;
+      btn.className = section.key === activeKey ? "active" : "";
+      btn.addEventListener("click", () => {
+        activeKey = section.key;
+        renderTabs();
+        renderBody();
+      });
+      tabsEl.appendChild(btn);
+    }
+  }
+
+  // Kind -> control. Picker kinds (choice/device/kokoro_voice/piper_voice/
+  // piper_speaker) share one <select> path: field.unset_value/
+  // unavailable_value (from settings_api.py's _field_to_dict) are the
+  // TUI's own sentinel strings, never hardcoded here.
+  function buildInput(field, path) {
+    const value = getPath(draft, path);
+
+    if (field.kind === "bool") {
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = Boolean(value);
+      input.addEventListener("change", () => {
+        setPath(draft, path, input.checked);
+        fetchSchema();
+      });
+      return input;
+    }
+
+    if (["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"].includes(field.kind)) {
+      const select = document.createElement("select");
+      for (const choice of field.choices) {
+        const opt = document.createElement("option");
+        opt.value = choice;
+        opt.textContent = choice;
+        select.appendChild(opt);
+      }
+      const shown = value === null || value === undefined ? field.unset_value : value;
+      if (shown !== null && shown !== undefined) select.value = shown;
+      select.disabled = field.choices.length === 1 && field.choices[0] === field.unavailable_value;
+      select.addEventListener("change", () => {
+        const picked = select.value;
+        setPath(draft, path, picked === field.unset_value ? null : picked);
+        fetchSchema();
+      });
+      return select;
+    }
+
+    if (field.kind === "list_str") {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = (value || []).join(", ");
+      input.addEventListener("change", () => {
+        setPath(
+          draft, path,
+          input.value.split(",").map((s) => s.trim()).filter(Boolean)
+        );
+      });
+      return input;
+    }
+
+    if (field.kind === "command") {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = (value || []).join(" ");
+      input.addEventListener("change", () => {
+        setPath(draft, path, input.value.trim() ? splitCommand(input.value) : null);
+      });
+      return input;
+    }
+
+    if (["int", "optional_int", "float", "optional_float"].includes(field.kind)) {
+      const input = document.createElement("input");
+      input.type = "number";
+      if (field.kind === "float" || field.kind === "optional_float") input.step = "any";
+      input.value = value === null || value === undefined ? "" : String(value);
+      input.addEventListener("change", () => {
+        if (input.value === "") {
+          setPath(draft, path, field.kind.startsWith("optional") ? null : 0);
+          return;
+        }
+        const n = Number(input.value);
+        if (!Number.isNaN(n)) setPath(draft, path, n);
+      });
+      return input;
+    }
+
+    // str / optional_str
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = value === null || value === undefined ? "" : String(value);
+    input.addEventListener("change", () => {
+      setPath(draft, path, input.value === "" && field.kind === "optional_str" ? null : input.value);
+    });
+    return input;
+  }
+
+  function buildFieldRow(field) {
+    const path = `${field.section}.${field.key}`;
+    const wrap = document.createElement("div");
+    wrap.className = "settings-field";
+
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    wrap.appendChild(label);
+    wrap.appendChild(buildInput(field, path));
+
+    if (field.help_text) {
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = field.help_text;
+      wrap.appendChild(help);
+    }
+    return wrap;
+  }
+
+  function renderBody() {
+    bodyEl.innerHTML = "";
+    const section = sections.find((s) => s.key === activeKey);
+    if (!section) return;
+    for (const field of section.fields) bodyEl.appendChild(buildFieldRow(field));
+  }
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.className = "settings-status" + (isError ? " error" : "");
+  }
+
+  async function saveSettings() {
+    saveBtn.disabled = true;
+    errorsEl.hidden = true;
+    try {
+      const res = await fetch("/api/settings/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values: draft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data.detail || {};
+        errorsEl.textContent = (detail.errors || ["Save failed."]).join(" | ");
+        errorsEl.hidden = false;
+        return;
+      }
+      originalValues = JSON.parse(JSON.stringify(draft));
+      setStatus("Saved -- restart ConvoBox for changes to take effect.", false);
+    } catch (err) {
+      errorsEl.textContent = "Save failed: " + err;
+      errorsEl.hidden = false;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  }
+
+  // Same arm/confirm shape as the ribbon's Quit button: closing with
+  // unsaved changes needs a second click, not a native confirm() dialog
+  // (this file never uses alert/confirm/prompt anywhere else).
+  let closeArmed = false;
+  let closeArmTimer = null;
+
+  function isDirty() {
+    return JSON.stringify(draft) !== JSON.stringify(originalValues);
+  }
+
+  function doClose() {
+    overlay.hidden = true;
+    closeArmed = false;
+    clearTimeout(closeArmTimer);
+    closeBtn.textContent = "×";
+  }
+
+  closeBtn.addEventListener("click", () => {
+    if (!isDirty() || closeArmed) {
+      doClose();
+      return;
+    }
+    closeArmed = true;
+    closeBtn.textContent = "↩"; // discard-and-return arrow, armed state
+    closeBtn.title = "Unsaved changes -- click again to discard and close";
+    closeArmTimer = setTimeout(() => {
+      closeArmed = false;
+      closeBtn.textContent = "×";
+      closeBtn.title = "Close settings";
+    }, 4000);
+  });
+
+  saveBtn.addEventListener("click", saveSettings);
+
+  settingsBtn.addEventListener("click", async () => {
+    const res = await fetch("/api/settings");
+    const data = await res.json();
+    originalValues = data.values;
+    draft = JSON.parse(JSON.stringify(originalValues));
+    activeKey = null;
+    setStatus("", false);
+    errorsEl.hidden = true;
+    overlay.hidden = false;
+    await fetchSchema();
+  });
 })();
 </script>
 </body>
