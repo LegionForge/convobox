@@ -125,12 +125,13 @@ asyncio_mode = "auto"
 # src/convobox` (dev-rig's lint.yml invocation, no flags) pass, matching
 # what `mypy ... --ignore-missing-imports` already did for the whole tree.
 #
-# aec_audio_processing and piper/piper.* are a different reason for the
-# same fix: both are opt-in extras (`uv sync --extra aec`/`--extra piper`)
-# deliberately NOT installed by CI's default lint job (see
-# DEPENDENCY_LICENSE_AUDIT.md for why piper-tts specifically must stay
-# opt-in, not default -- it's GPL-3.0), so mypy can never resolve them
-# there regardless of whether stubs exist upstream.
+# aec_audio_processing, piper/piper.*, and fastapi/starlette/uvicorn are a
+# different reason for the same fix: all are opt-in extras (`uv sync
+# --extra aec`/`--extra piper`/`--extra web`) deliberately NOT installed by
+# CI's default lint job (see DEPENDENCY_LICENSE_AUDIT.md for why piper-tts
+# specifically must stay opt-in, not default -- it's GPL-3.0; web's own
+# reason is pyproject.toml's own comment on the `web` extra), so mypy can
+# never resolve them there regardless of whether stubs exist upstream.
 module = [
     "faster_whisper",
     "faster_whisper.*",
@@ -140,6 +141,12 @@ module = [
     "aec_audio_processing",
     "piper",
     "piper.*",
+    "fastapi",
+    "fastapi.*",
+    "starlette",
+    "starlette.*",
+    "uvicorn",
+    "uvicorn.*",
 ]
 ignore_missing_imports = true
 
