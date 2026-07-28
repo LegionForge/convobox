@@ -213,6 +213,13 @@
     background: var(--bg); color: var(--fg);
   }
   .settings-field input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
+  .settings-field-row { display: flex; align-items: center; gap: 0.4rem; }
+  .settings-field-row select, .settings-field-row input { flex: 1 1 auto; }
+  .settings-test-btn {
+    flex: 0 0 auto; font-size: 0.72rem; padding: 0.32rem 0.55rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  .settings-test-btn:hover:not(:disabled) { border-color: var(--dim); }
   .settings-footer {
     display: flex; align-items: center; gap: 0.6rem;
     padding: 0.7rem 1rem; border-top: 1px solid var(--border);
@@ -255,6 +262,7 @@
     <div id="settings-errors" class="settings-errors" hidden></div>
     <div id="settings-body" class="settings-body"></div>
     <div class="settings-footer">
+      <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden>Test this section</button>
       <span id="settings-status" class="settings-status"></span>
       <span class="spacer"></span>
       <button id="settings-save-btn" type="button" class="primary">Save</button>
@@ -542,7 +550,13 @@
   const statusEl = document.getElementById("settings-status");
   const closeBtn = document.getElementById("settings-close-btn");
   const saveBtn = document.getElementById("settings-save-btn");
+  const testSectionBtn = document.getElementById("settings-test-section-btn");
   const settingsBtn = document.getElementById("settings-btn");
+
+  // Sections with a real probe_* hook in scripts/settings_tui.py (see
+  // settings_api.py's /api/settings/test) -- everything else just gets
+  // "<section> configuration validated", not worth a button for.
+  const TESTABLE_SECTIONS = ["tts", "stt", "backend", "audio"];
 
   let originalValues = null;
   let draft = null;
@@ -696,7 +710,25 @@
     const label = document.createElement("label");
     label.textContent = field.label;
     wrap.appendChild(label);
-    wrap.appendChild(buildInput(field, path));
+
+    // Input device/output device get their own [Test] button, same
+    // per-field granularity as the TUI's own [t] on those two fields
+    // (probe_audio tests only the relevant direction when a field_key is
+    // given -- see settings_tui.py's probe_audio docstring).
+    if (field.kind === "device") {
+      const row = document.createElement("div");
+      row.className = "settings-field-row";
+      row.appendChild(buildInput(field, path));
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "settings-test-btn";
+      btn.textContent = "Test";
+      btn.addEventListener("click", () => runTest(field.section, field.key));
+      row.appendChild(btn);
+      wrap.appendChild(row);
+    } else {
+      wrap.appendChild(buildInput(field, path));
+    }
 
     if (field.help_text) {
       const help = document.createElement("div");
@@ -712,11 +744,31 @@
     const section = sections.find((s) => s.key === activeKey);
     if (!section) return;
     for (const field of section.fields) bodyEl.appendChild(buildFieldRow(field));
+    testSectionBtn.hidden = !TESTABLE_SECTIONS.includes(activeKey);
   }
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
     statusEl.className = "settings-status" + (isError ? " error" : "");
+  }
+
+  async function runTest(section, field) {
+    setStatus("Testing…", false);
+    try {
+      const res = await fetch("/api/settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ section, field: field || null, values: draft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus(data.detail || "Test failed.", true);
+        return;
+      }
+      setStatus(data.status, false);
+    } catch (err) {
+      setStatus("Test failed: " + err, true);
+    }
   }
 
   async function saveSettings() {
@@ -778,6 +830,7 @@
   });
 
   saveBtn.addEventListener("click", saveSettings);
+  testSectionBtn.addEventListener("click", () => runTest(activeKey, null));
 
   settingsBtn.addEventListener("click", async () => {
     const res = await fetch("/api/settings");
