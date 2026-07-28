@@ -394,7 +394,9 @@ class WebConfig(BaseModel):
     @field_validator("bind_address")
     @classmethod
     def _validate_bind_address(cls, v: str) -> str:
-        if v in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+        # nosec B104 -- 0.0.0.0 is a deliberate, explicit opt-in; every other
+        # non-loopback address is rejected below.
+        if v in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):  # nosec B104
             return v
         if v.startswith("127."):  # rest of the IPv4 loopback block
             return v
