@@ -57,12 +57,26 @@ with a clear error telling you to install the extra if you forgot.
 - **A Quit button** ends the whole session (mic loop, backend, and the web
   server itself), not just one pending decision — arms on first click,
   fires on a second click within a few seconds, auto-disarms otherwise.
+- **A Stop/Resume listening button** does exactly what saying the pause
+  phrase does — hard-stops in-flight playback and backend work, then
+  gates future transcripts until resumed (by button or by voice; either
+  can answer, same as approve/deny). Not just a display toggle.
+- **A live activity-status indicator** next to the connection dot, showing
+  the mic loop's own `listening`/`capturing`/`speaking`/`working`/
+  `waiting`/`paused` state, over the same SSE stream, updated only when it
+  actually changes.
 - **Editing `convobox.yaml` settings** from the browser (`GET /api/settings`,
   `POST /api/settings/schema`/`/validate`/`/save`/`/test`): the same
   edit/validate/save/test contract as `scripts/settings_tui.py`, reusing
   that file's validation and save logic directly rather than a second copy.
   Like the TUI, there is no hot-reload — a save writes `convobox.yaml`
   (with a timestamped backup) but only takes effect on the next restart.
+- **An artifact pane** opens on the right when a tool call writes something
+  worth looking at — an image or an HTML page. Today this only fires for
+  the Claude Code backend (a confirmed successful `Write`/`Edit` tool
+  call); opencode/codex don't emit it yet. The file itself is served from
+  `backend.working_dir` only — nothing outside it is ever reachable this
+  way, regardless of what path a tool call names.
 
 Multiple simultaneous browser tabs do all correctly receive the same live
 stream, though (each gets its own server-side subscription).
@@ -98,14 +112,25 @@ reach it. That is the whole security boundary.
 
 This used to be a read-only guarantee (anyone who could reach the port got
 the same *view* you do, but couldn't act). That's no longer true: approving
-a pending tool call, quitting the whole session, and editing
-`convobox.yaml` settings are all real mutations reachable over this same
-no-auth loopback trust model. Each was a deliberate, discussed decision to
-extend that trust model from view-only to a real control surface — not a
-silent scope creep — but the practical upshot is the same: anything that
-can reach `127.0.0.1:<port>` on this machine can now approve/deny tool
-calls, end your session, or rewrite your config, with no login screen.
-Don't widen `bind_address` beyond loopback without accounting for that.
+a pending tool call, quitting the whole session, pausing/resuming
+listening, and editing `convobox.yaml` settings are all real mutations
+reachable over this same no-auth loopback trust model. Each was a
+deliberate, discussed decision to extend that trust model from view-only
+to a real control surface — not a silent scope creep — but the practical
+upshot is the same: anything that can reach `127.0.0.1:<port>` on this
+machine can now approve/deny tool calls, end or pause your session, or
+rewrite your config, with no login screen. Don't widen `bind_address`
+beyond loopback without accounting for that.
+
+The artifact pane adds a different kind of exposure on top: an open-ended
+local file *read* (`GET /api/artifacts/{path}`), not a bounded API call.
+It's fenced to `backend.working_dir` — nothing outside that directory is
+servable, checked by resolving the real path and confirming it's actually
+nested inside `working_dir`, not a string-prefix match a sibling directory
+could defeat — and only a fixed extension allowlist (images, HTML, PDF,
+CSV, plain text) is ever returned. Same rule as the rest of this section:
+that fence is only as good as `working_dir` actually being set to an
+isolated workspace, per `backend.working_dir`'s own security note.
 
 - `web.bind_address` defaults to `127.0.0.1` and is validated: a specific
   non-loopback address (a real LAN IP, say) is rejected outright, since

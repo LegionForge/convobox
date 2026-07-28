@@ -12,14 +12,21 @@ it" version for someone about to touch `src/convobox/web/`.
 src/convobox/web/
 ├── history.py       HistoryDB -- SQLite storage, no fastapi import at all
 ├── stream.py        EventBroadcaster -- in-memory SSE fan-out, stdlib only
-├── bridge.py        WebEventForwarder + WebApprovalBridge -- Orchestrator
-│                    on_event hook and the approval-gate glue (see below)
+├── bridge.py        WebEventForwarder + WebApprovalBridge + WebListeningBridge
+│                    -- Orchestrator on_event hook and the approval-gate /
+│                    listening-gate glue (see below)
 ├── settings_api.py  add_settings_routes() -- GET/POST /api/settings/* ,
 │                    reusing scripts/settings_tui.py's own validate/save/
 │                    test contract directly, not a second copy of it
+├── artifacts.py     add_artifact_routes() -- GET /api/artifacts/{path},
+│                    fenced to backend.working_dir (see "Artifact pane"
+│                    below)
 ├── app.py           create_app() -- the FastAPI app, routes, SSE endpoint
 └── static/
-    └── index.html   the whole frontend: one file, inline CSS/JS, no build step
+    ├── index.html     the whole frontend: one file, inline CSS/JS, no build step
+    ├── manifest.json  PWA install metadata
+    ├── sw.js          app-shell-only service worker (never caches /api/*)
+    └── img/           vendored LegionForge logo (no external requests)
 ```
 
 `history.py`/`stream.py`/`bridge.py` deliberately have **no dependency on
@@ -33,10 +40,12 @@ config.web.enabled:` branch), rather than failing to import the whole
 
 ## How a real event gets from the mic to the browser
 
-Backend events (responses, tool calls) and the user's OWN transcripts are
-two genuinely separate paths in — `Orchestrator.on_event` only ever sees
-the former (a transcript is what PROMPTS a backend event, not one itself),
-so there are two entry points into `WebEventForwarder`:
+Backend events (responses, tool calls, artifacts), the user's OWN
+transcripts, and the mic loop's own activity status are three genuinely
+separate paths in — `Orchestrator.on_event` only ever sees the first (a
+transcript PROMPTS a backend event, not one itself; status is the mic
+loop's own state, not a backend event at all), so there are three entry
+points into `WebEventForwarder`:
 
 ```
 Orchestrator._on_event(event)                        run_convobox.py's 3 call sites for
@@ -55,10 +64,37 @@ Orchestrator._on_event(event)                        run_convobox.py's 3 call si
 ```
 
 `EventBroadcaster` carries plain JSON-able dicts, not `BackendEvent`
-objects — a transcript has no `BackendEvent` representation (no backend
-adapter ever emits one), so whoever is broadcasting (`WebEventForwarder`)
-shapes the payload before handing it to the broadcaster, which stays
-opaque to what it's carrying.
+objects — a transcript (and the mic loop's status string) has no
+`BackendEvent` representation (no backend adapter ever emits one), so
+whoever is broadcasting (`WebEventForwarder`) shapes the payload before
+handing it to the broadcaster, which stays opaque to what it's carrying.
+`forward_status()` (called from `_working_watchdog` in
+`run_convobox.py`, only when the status actually CHANGES) is the third
+entry point, alongside `__call__`/`forward_transcript` above — same
+shape, `{"type": "status", "status": "listening" | "capturing" |
+"speaking" | "working" | "waiting" | "paused"}`, never persisted to
+history (ephemeral, not a conversation event).
+
+### Artifact pane
+
+A fourth `BackendEventType` value, `ARTIFACT`, carries `artifact_path`
+when a tool call produces something worth looking at (an image, a
+rendered HTML page — see `docs/ARTIFACT-PANE-SCOPE.md` for the full
+design). Unlike transcript/status, this DOES flow through the normal
+`WebEventForwarder.__call__` path (it's a real `BackendEvent`) — the
+adapter-side work is deciding WHEN to emit one. Only `ClaudeCodeAdapter`
+does today (`_stage_artifact_write`/`_resolve_artifact_write`: a
+`Write`/`Edit` tool_use is staged by its `tool_use_id`, then resolved
+into an `ARTIFACT` event only once the matching `tool_result` confirms
+success — never optimistically on the call). `artifacts.py`'s
+`GET /api/artifacts/{path}` route serves the actual file, fenced to
+`backend.working_dir` — a materially different kind of exposure than any
+mutation this web UI ships elsewhere (open-ended local file reads, not a
+bounded API call), so that fence is real security boundary, not a
+formality: only paths that resolve inside `working_dir` (checked via
+`Path.parents`, not a string-prefix match) and only a fixed extension
+allowlist (`ARTIFACT_MEDIA_TYPES` in `adapters/base.py`, shared with the
+serving route so they can't drift apart) are ever servable.
 
 Found live while building a demo of this feature (2026-07-26): the
 original wiring only ever called `WebEventForwarder.__call__`
@@ -156,3 +192,20 @@ adding a new event type to render, or a new pane, the pattern to follow:
   `settings_api.py`'s module docstring); a frontend built against it needs
   its own "restart needed" messaging rather than implying the change is
   live.
+- Artifact detection only exists for `ClaudeCodeAdapter` — opencode and
+  codex don't emit `ARTIFACT` events yet. opencode has a real, better
+  hook available (a dedicated `file.edited` event, confirmed via its own
+  live OpenAPI spec) but confirming its exact path format needs one real
+  prompt through a live opencode session; see
+  `docs/ARTIFACT-PANE-SCOPE.md`'s "Progress" section for exactly where
+  that was left.
+- No control-plane restart (settings save + a "restart now" button) —
+  stop/resume-listening and Quit both shipped, but restart-on-demand is
+  a separate, larger security-posture decision not yet made.
+- Replaying a persisted (historical) `ARTIFACT` event on a page reload
+  doesn't re-open the pane — `artifact_path` isn't a dedicated
+  `HistoryDB` column (only inside `backend_event_json`, unparsed by
+  `GET /api/sessions/{id}/events`), so `index.html`'s `renderEvent()`
+  silently no-ops for a historical artifact row instead of crashing.
+  Fine for the live-session case the pane was built for; a real gap for
+  "reopen a browser tab hours later and see the last artifact again."
