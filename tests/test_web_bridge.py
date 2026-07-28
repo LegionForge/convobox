@@ -9,7 +9,7 @@ import pytest
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
-from convobox.web.bridge import WebApprovalBridge, WebEventForwarder
+from convobox.web.bridge import WebApprovalBridge, WebEventForwarder, WebListeningBridge
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
 
@@ -325,3 +325,122 @@ def test_bridge_extend_returns_none_when_nothing_pending() -> None:
     bridge.set_targets(_FakeOrchestrator(), gate)  # type: ignore[arg-type]
 
     assert bridge.extend() is None
+
+
+# --- WebListeningBridge: lets the web UI's Stop/Resume listening button do
+# exactly what a spoken pause/resume phrase does (ListeningGate.observe()'s
+# "pause"/"resume" branches) -- fakes stand in for the real ListeningGate/
+# player/tts/adapter, same reasoning as the approval-bridge fakes above:
+# this tests the bridge's own side-effect-triggering logic, not the real
+# voice-path machinery (covered elsewhere). ---
+
+
+class _FakeListeningGate:
+    def __init__(self, is_paused: bool = False) -> None:
+        self.is_paused = is_paused
+
+
+class _FakePlayer:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class _FakeTTS:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class _FakeAdapterForListening:
+    def __init__(self) -> None:
+        self.hard_stop_calls = 0
+
+    async def send_hard_stop(self) -> None:
+        self.hard_stop_calls += 1
+
+
+def test_listening_bridge_with_no_targets_reports_not_ready_and_not_paused() -> None:
+    bridge = WebListeningBridge()
+    assert bridge.is_ready is False
+    assert bridge.is_paused is False
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_with_no_targets_pause_is_a_harmless_false() -> None:
+    bridge = WebListeningBridge()
+    assert await bridge.pause() is False
+
+
+def test_listening_bridge_with_no_targets_resume_is_a_harmless_false() -> None:
+    bridge = WebListeningBridge()
+    assert bridge.resume() is False
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_hard_stops_playback_and_backend() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    player = _FakePlayer()
+    tts = _FakeTTS()
+    adapter = _FakeAdapterForListening()
+    bridge = WebListeningBridge()
+    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+
+    changed = await bridge.pause()
+
+    assert changed is True
+    assert gate.is_paused is True
+    assert bridge.is_paused is True
+    assert player.stop_calls == 1
+    assert tts.stop_calls == 1
+    assert adapter.hard_stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_while_already_paused_is_a_noop() -> None:
+    # Matches ListeningGate.observe()'s own behavior: once is_paused is
+    # true, it never re-enters the "pause" branch, so a second pause
+    # phrase (or a second button click) must not re-hard-stop anything.
+    gate = _FakeListeningGate(is_paused=True)
+    player = _FakePlayer()
+    tts = _FakeTTS()
+    adapter = _FakeAdapterForListening()
+    bridge = WebListeningBridge()
+    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+
+    changed = await bridge.pause()
+
+    assert changed is False
+    assert player.stop_calls == 0
+    assert tts.stop_calls == 0
+    assert adapter.hard_stop_calls == 0
+
+
+def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    player = _FakePlayer()
+    tts = _FakeTTS()
+    adapter = _FakeAdapterForListening()
+    bridge = WebListeningBridge()
+    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+
+    changed = bridge.resume()
+
+    assert changed is True
+    assert gate.is_paused is False
+    assert bridge.is_paused is False
+    assert player.stop_calls == 0
+    assert tts.stop_calls == 0
+    assert adapter.hard_stop_calls == 0
+
+
+def test_listening_bridge_resume_while_not_paused_is_a_noop() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    bridge = WebListeningBridge()
+    bridge.set_targets(gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening())  # type: ignore[arg-type]
+
+    assert bridge.resume() is False

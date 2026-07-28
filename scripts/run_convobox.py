@@ -1660,6 +1660,11 @@ async def run(args: argparse.Namespace) -> None:
     # own condition below) -- the /api/sessions/{id}/approval endpoint
     # reports "nothing pending" via approval_bridge itself in that case.
     approval_bridge = None
+    # Populated below once the real ListeningGate/player/tts/adapter exist
+    # (WebListeningBridge.set_targets), same staging reasoning as
+    # approval_bridge above -- create_app() needs something to hand its
+    # route closures before any of those are built.
+    listening_bridge = None
     if config.web.enabled:
         # Lazy, opt-in import: fastapi/uvicorn are the "web" extra (`uv sync
         # --extra web`), not a main dependency -- most CLI/TUI-only users
@@ -1669,7 +1674,7 @@ async def run(args: argparse.Namespace) -> None:
             import uvicorn
 
             from convobox.web.app import create_app
-            from convobox.web.bridge import WebApprovalBridge
+            from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
         except ImportError as e:
             raise ImportError(
                 "web.enabled is set but the 'web' extra isn't installed. "
@@ -1688,11 +1693,13 @@ async def run(args: argparse.Namespace) -> None:
             broadcaster=web_broadcaster,
         )
         approval_bridge = WebApprovalBridge()
+        listening_bridge = WebListeningBridge()
         web_app = create_app(
             db=web_app_history,
             broadcaster=web_broadcaster,
             display=config.display,
             approval_bridge=approval_bridge,
+            listening_bridge=listening_bridge,
             quit_handler=_self_signal_interrupt,
             config_path=config_path,
         )
@@ -1928,6 +1935,8 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.pause_listening_phrases[0],
         config.interaction.resume_word,
     )
+    if listening_bridge is not None:
+        listening_bridge.set_targets(listening_gate, player, tts, adapter)
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending, next_overlap_grace_s

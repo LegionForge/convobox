@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
 
 from convobox.config import DisplayConfig, resolve_config_path
-from convobox.web.bridge import WebApprovalBridge
+from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
 from convobox.web.history import HistoryDB
 from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
@@ -28,6 +28,10 @@ from convobox.web.stream import EventBroadcaster
 
 class ApprovalDecision(BaseModel):
     action: Literal["approve", "deny", "explain"]
+
+
+class ListeningDecision(BaseModel):
+    action: Literal["pause", "resume"]
 
 
 # Loopback-only, any port -- CORSMiddleware's allow_origins does an exact
@@ -77,6 +81,7 @@ def create_app(
     broadcaster: EventBroadcaster | None = None,
     display: DisplayConfig | None = None,
     approval_bridge: WebApprovalBridge | None = None,
+    listening_bridge: WebListeningBridge | None = None,
     quit_handler: Callable[[], None] | None = None,
     config_path: Path | None = None,
 ) -> FastAPI:
@@ -118,6 +123,28 @@ def create_app(
             )
         quit_handler()
         return {"status": "quitting"}
+
+    @app.get("/api/listening")
+    async def get_listening_state() -> dict[str, bool]:
+        return {"is_paused": listening_bridge is not None and listening_bridge.is_paused}
+
+    @app.post("/api/listening")
+    async def set_listening_state(decision: ListeningDecision) -> dict[str, bool]:
+        # Same trust boundary as every other mutating route here (no auth,
+        # loopback-only). pause() does exactly what a spoken pause phrase
+        # does -- hard-stops in-flight playback/backend work, not just a
+        # future-transcript gate -- see WebListeningBridge's own docstring.
+        if listening_bridge is None or not listening_bridge.is_ready:
+            raise HTTPException(
+                503,
+                "no live session to pause/resume -- this only works during a "
+                "real run_convobox.py --web session, not a disconnected preview",
+            )
+        if decision.action == "pause":
+            await listening_bridge.pause()
+        else:
+            listening_bridge.resume()
+        return {"is_paused": listening_bridge.is_paused}
 
     @app.get("/api/config")
     async def get_display_config() -> dict[str, str | None]:

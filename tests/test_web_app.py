@@ -375,3 +375,90 @@ def test_quit_calls_the_handler_and_returns_quitting() -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "quitting"}
     handler.assert_called_once_with()
+
+
+# --- GET/POST /api/listening: the web UI's Stop/Resume listening button.
+# listening_bridge's own pause/resume side-effect logic is covered by
+# tests/test_web_bridge.py -- this only tests that the route wires
+# actions/status codes to the bridge correctly, same shape as the approval
+# route tests above. ---
+
+
+class _FakeListeningBridge:
+    def __init__(self, ready: bool = True, paused: bool = False) -> None:
+        self.ready = ready
+        self.paused = paused
+        self.pause_calls = 0
+        self.resume_calls = 0
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ready
+
+    @property
+    def is_paused(self) -> bool:
+        return self.paused
+
+    async def pause(self) -> bool:
+        self.pause_calls += 1
+        if not self.paused:
+            self.paused = True
+            return True
+        return False
+
+    def resume(self) -> bool:
+        self.resume_calls += 1
+        if self.paused:
+            self.paused = False
+            return True
+        return False
+
+
+def test_get_listening_with_no_bridge_reports_not_paused(client: TestClient) -> None:
+    response = client.get("/api/listening")
+    assert response.status_code == 200
+    assert response.json() == {"is_paused": False}
+
+
+def test_get_listening_reflects_the_bridge_state() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(paused=True))
+    with TestClient(app) as client:
+        response = client.get("/api/listening")
+    assert response.json() == {"is_paused": True}
+
+
+def test_set_listening_with_no_bridge_returns_503(client: TestClient) -> None:
+    response = client.post("/api/listening", json={"action": "pause"})
+    assert response.status_code == 503
+
+
+def test_set_listening_with_a_not_ready_bridge_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(ready=False))
+    with TestClient(app) as client:
+        response = client.post("/api/listening", json={"action": "pause"})
+    assert response.status_code == 503
+
+
+def test_set_listening_pause_calls_the_bridge_and_returns_paused() -> None:
+    bridge = _FakeListeningBridge(paused=False)
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/listening", json={"action": "pause"})
+    assert response.status_code == 200
+    assert response.json() == {"is_paused": True}
+    assert bridge.pause_calls == 1
+
+
+def test_set_listening_resume_calls_the_bridge_and_returns_listening() -> None:
+    bridge = _FakeListeningBridge(paused=True)
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/listening", json={"action": "resume"})
+    assert response.status_code == 200
+    assert response.json() == {"is_paused": False}
+    assert bridge.resume_calls == 1
+
+
+def test_set_listening_rejects_an_unknown_action(client: TestClient) -> None:
+    response = client.post("/api/listening", json={"action": "yolo"})
+    assert response.status_code == 422
