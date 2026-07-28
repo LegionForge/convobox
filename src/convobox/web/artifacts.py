@@ -8,9 +8,10 @@ any mutation this web UI ships elsewhere (approve/deny/quit/settings-save
 are all bounded API calls; this is an open-ended file read unless fenced)
 -- see the scope doc's own "Security" section for the reasoning.
 
-No adapter emits BackendEventType.ARTIFACT yet (that's each adapter's own
-later, separate opt-in) -- this route exists ahead of any adapter using
-it, same as the event type itself.
+ClaudeCodeAdapter is the first adapter to emit BackendEventType.ARTIFACT
+(see claude_code.py); opencode/codex remain unwired -- each adapter's
+detection is its own separate opt-in, per the scope doc's slice-by-slice
+plan.
 """
 
 from __future__ import annotations
@@ -20,22 +21,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-# Deliberately narrow (docs/ARTIFACT-PANE-SCOPE.md's "Rendering" section)
-# -- never serve arbitrary file types as application/octet-stream just
-# because a tool happened to write one.
-_ALLOWED_MEDIA_TYPES: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".svg": "image/svg+xml",
-    ".webp": "image/webp",
-    ".html": "text/html",
-    ".htm": "text/html",
-    ".pdf": "application/pdf",
-    ".csv": "text/csv",
-    ".txt": "text/plain",
-}
+from convobox.adapters.base import ARTIFACT_MEDIA_TYPES
 
 
 def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
@@ -63,7 +49,7 @@ def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
             raise HTTPException(403, "path escapes the configured working_dir")
         if not candidate.is_file():
             raise HTTPException(404, "no such artifact")
-        media_type = _ALLOWED_MEDIA_TYPES.get(candidate.suffix.lower())
+        media_type = ARTIFACT_MEDIA_TYPES.get(candidate.suffix.lower())
         if media_type is None:
             raise HTTPException(
                 415, f"{candidate.suffix!r} is not a servable artifact type"

@@ -29,6 +29,31 @@ class BackendEventType(str, Enum):
     ARTIFACT = "artifact"
 
 
+# Shared between adapters that detect an artifact-shaped tool call
+# (currently ClaudeCodeAdapter) and convobox.web.artifacts' serving route
+# -- kept in this module specifically (core, no fastapi dependency) so
+# adapters/*.py never has to import from web/*.py (which pulls in the
+# optional "web" extra) just to share this list; web/artifacts.py imports
+# it FROM here instead, the correct direction (web depends on adapters,
+# adapters never depend on web). Deliberately narrow
+# (docs/ARTIFACT-PANE-SCOPE.md's "Rendering" section) -- never treat an
+# arbitrary file type as a servable/renderable artifact just because a
+# tool happened to write one.
+ARTIFACT_MEDIA_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".pdf": "application/pdf",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+}
+
+
 class BackendEvent:
     def __init__(
         self,

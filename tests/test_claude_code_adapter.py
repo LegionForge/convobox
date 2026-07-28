@@ -95,6 +95,107 @@ async def test_tool_turn_yields_tool_call_and_tool_result() -> None:
         await _shutdown(adapter)
 
 
+# --- BackendEventType.ARTIFACT: a successful Write/Edit tool call whose
+# file_path has a renderable extension gets a matching ARTIFACT event,
+# emitted only once the tool_result confirms the write actually
+# succeeded (docs/ARTIFACT-PANE-SCOPE.md). ---
+
+
+@pytest.mark.asyncio
+async def test_successful_write_of_a_renderable_file_yields_an_artifact_event(
+    tmp_path: Path,
+) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("write image please")
+        events = await _collect(adapter, 5)
+
+        assert [e.type for e in events] == [
+            BackendEventType.TOOL_CALL,
+            BackendEventType.TOOL_RESULT,
+            BackendEventType.ARTIFACT,
+            BackendEventType.TEXT,
+            BackendEventType.DONE,
+        ]
+        assert events[2].artifact_path == "chart.png"
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_failed_write_yields_no_artifact_event(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("write broken image please")
+        events = await _collect(adapter, 4)
+
+        assert [e.type for e in events] == [
+            BackendEventType.TOOL_CALL,
+            BackendEventType.TOOL_RESULT,
+            BackendEventType.TEXT,
+            BackendEventType.DONE,
+        ]
+        assert not any(e.type == BackendEventType.ARTIFACT for e in events)
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_successful_write_with_no_working_dir_configured_yields_no_artifact() -> None:
+    # No working_dir means "no base to resolve/fence a path against" --
+    # same policy convobox.web.artifacts' serving route follows (503, no
+    # fallback to ConvoBox's own directory), applied here at the source.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI)  # working_dir defaults to None
+    try:
+        await adapter.send_text("write image please")
+        events = await _collect(adapter, 4)
+
+        assert [e.type for e in events] == [
+            BackendEventType.TOOL_CALL,
+            BackendEventType.TOOL_RESULT,
+            BackendEventType.TEXT,
+            BackendEventType.DONE,
+        ]
+    finally:
+        await _shutdown(adapter)
+
+
+def test_stage_artifact_write_ignores_a_non_renderable_extension(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._stage_artifact_write(
+        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "script.py"}}
+    )
+    assert adapter._pending_artifact_writes == {}
+
+
+def test_stage_artifact_write_ignores_non_write_edit_tools(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._stage_artifact_write(
+        {"type": "tool_use", "id": "tu_x", "name": "Bash", "input": {"command": "ls"}}
+    )
+    assert adapter._pending_artifact_writes == {}
+
+
+def test_resolve_artifact_path_rejects_a_path_outside_working_dir(tmp_path: Path) -> None:
+    # Defense in depth: even if a tool somehow reported a path outside
+    # working_dir, this must not surface it as a servable artifact_path
+    # -- the serving route would reject it too, but this shouldn't even
+    # try.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path / "workspace"))
+    outside = str(tmp_path / "outside.png")
+    assert adapter._resolve_artifact_path(outside) is None
+
+
+def test_resolve_artifact_path_accepts_an_absolute_path_inside_working_dir(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    absolute = str(working_dir / "plots" / "chart.png")
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(working_dir))
+    assert adapter._resolve_artifact_path(absolute) == str(Path("plots") / "chart.png")
+
+
 @pytest.mark.asyncio
 async def test_error_result_yields_error_event_and_clears_busy() -> None:
     adapter = _adapter()

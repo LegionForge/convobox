@@ -159,7 +159,12 @@ from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any
 
-from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.adapters.base import (
+    ARTIFACT_MEDIA_TYPES,
+    BackendAdapter,
+    BackendEvent,
+    BackendEventType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +189,13 @@ _APPROVAL_DECISION_TIMEOUT_S = 120.0
 # module docstring, finding 2: plan suppresses tool attempts, so the hook
 # never fires). The hook itself is the real gate here, not this flag.
 _INTERACTIVE_APPROVAL_PERMISSION_MODE = "acceptEdits"
+
+# Claude's own built-in tool names (Anthropic's public tool-use format,
+# not something this project invented or had to guess at) whose `input`
+# always carries a `file_path` key -- the only two tools whose output is
+# "a file that changed", the signal docs/ARTIFACT-PANE-SCOPE.md's
+# BackendEventType.ARTIFACT exists for.
+_ARTIFACT_TOOL_NAMES = frozenset({"Write", "Edit"})
 
 # Flags this adapter's protocol handling depends on; appended to whatever
 # base command the config supplies, so a user command like
@@ -314,6 +326,12 @@ class ClaudeCodeAdapter(BackendAdapter):
         # at a time (see module docstring, point 4 of the mechanism
         # paragraph).
         self._pending_approval_writer: asyncio.StreamWriter | None = None
+        # tool_use id -> file_path, staged when a Write/Edit tool_use block
+        # names a renderable file, consumed when the MATCHING tool_result
+        # arrives (see _to_backend_events) -- an ARTIFACT event only fires
+        # once the write is confirmed to have actually succeeded, not
+        # optimistically on the call itself.
+        self._pending_artifact_writes: dict[str, str] = {}
 
     async def _ensure_proc(self) -> asyncio.subprocess.Process:
         # Locked for the same reason OpenCodeAdapter._ensure_session is:
@@ -718,20 +736,27 @@ class ClaudeCodeAdapter(BackendAdapter):
                             tool_input=json.dumps(tool_input) if tool_input is not None else None,
                         )
                     )
+                    self._stage_artifact_write(block)
                 # thinking blocks are deliberately not surfaced: internal
                 # deliberation is not something a voice UI should speak.
             return events
 
         if msg_type == "user":
             # The CLI echoes tool results back as user messages.
-            return [
-                BackendEvent(
-                    type=BackendEventType.TOOL_RESULT,
-                    tool_output=json.dumps(block.get("content")),
+            events = []
+            for block in _content_blocks(outer):
+                if block.get("type") != "tool_result":
+                    continue
+                events.append(
+                    BackendEvent(
+                        type=BackendEventType.TOOL_RESULT,
+                        tool_output=json.dumps(block.get("content")),
+                    )
                 )
-                for block in _content_blocks(outer)
-                if block.get("type") == "tool_result"
-            ]
+                artifact = self._resolve_artifact_write(block)
+                if artifact is not None:
+                    events.append(artifact)
+            return events
 
         if msg_type == "result":
             # One result per turn -- including the interrupted turn's
@@ -752,6 +777,62 @@ class ClaudeCodeAdapter(BackendAdapter):
         # (partial chunks), ...: protocol plumbing with no slot in our
         # 5-value model. Narrow on purpose, like OpenCode's mapping.
         return []
+
+    def _stage_artifact_write(self, tool_use_block: dict[str, Any]) -> None:
+        """Called for every tool_use block, not just Write/Edit -- narrows
+        down to the two whose `input.file_path` is a real file path this
+        route can serve, then remembers it by the block's own `id` (the
+        SAME id the matching tool_result block references via
+        `tool_use_id` -- Anthropic's own tool-use correlation, not
+        anything this adapter invented) so the artifact only fires once
+        the write is confirmed to have actually happened, not
+        optimistically on the call before it's even run.
+        """
+        if tool_use_block.get("name") not in _ARTIFACT_TOOL_NAMES:
+            return
+        tool_use_id = tool_use_block.get("id")
+        file_path = (tool_use_block.get("input") or {}).get("file_path")
+        if not tool_use_id or not isinstance(file_path, str):
+            return
+        if Path(file_path).suffix.lower() not in ARTIFACT_MEDIA_TYPES:
+            return
+        self._pending_artifact_writes[tool_use_id] = file_path
+
+    def _resolve_artifact_write(self, tool_result_block: dict[str, Any]) -> BackendEvent | None:
+        """The other half of _stage_artifact_write: called for every
+        tool_result block. Pops the matching pending write (if any) --
+        succeed or fail, it's resolved either way, so a failed write is
+        never left staged forever waiting for a tool_use_id that will
+        never come back around. `is_error` is Anthropic's own optional
+        field on a tool_result block (absent/false means success) --
+        checked defensively since this project's own fake CLI fixture
+        doesn't model it, but the real wire format can carry it."""
+        tool_use_id = tool_result_block.get("tool_use_id")
+        file_path = self._pending_artifact_writes.pop(tool_use_id, None) if tool_use_id else None
+        if file_path is None or tool_result_block.get("is_error"):
+            return None
+        artifact_path = self._resolve_artifact_path(file_path)
+        if artifact_path is None:
+            return None
+        return BackendEvent(type=BackendEventType.ARTIFACT, artifact_path=artifact_path)
+
+    def _resolve_artifact_path(self, file_path: str) -> str | None:
+        """file_path -> a path relative to working_dir, the same base
+        convobox.web.artifacts' serving route resolves against -- or None
+        if working_dir isn't configured, or file_path (whether the tool
+        reported it absolute or relative) doesn't actually resolve inside
+        it. This is independent, redundant fencing on top of that route's
+        own check (defense in depth: a bug here must not be the only
+        thing standing between an untrusted path and being served)."""
+        if self._working_dir is None:
+            return None
+        base = Path(self._working_dir).resolve()
+        raw = Path(file_path)
+        absolute = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
+        try:
+            return str(absolute.relative_to(base))
+        except ValueError:
+            return None
 
 
 def _content_blocks(outer: dict[str, Any]) -> list[dict[str, Any]]:
