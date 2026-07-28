@@ -44,10 +44,11 @@
   }
   body { display: flex; flex-direction: column; }
 
-  /* --- Top ribbon: branding, session nav, and controls. Buttons for
-     mutating actions (listening/settings/restart) ship disabled -- this
-     view is read-only today; wiring them up is a deliberately separate
-     follow-up, not silently bundled in with the rendering work. --- */
+  /* --- Top ribbon: branding, session nav, and controls. Stop/Resume
+     listening, Settings, and Quit are all real control-plane actions now
+     (each a deliberate, separately-confirmed extension of the no-auth
+     loopback trust model -- see docs/WEB-UI-USAGE.md's security
+     section). Only restart-on-demand remains unbuilt. --- */
   .ribbon {
     display: flex;
     align-items: center;
@@ -62,6 +63,14 @@
   #status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
   #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.3rem; }
   #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.3rem; }
+  /* The mic loop's own activity (listening/capturing/speaking/working/
+     waiting/paused) -- same vocabulary the TUI's status line already
+     used, now also broadcast to the web UI (see forward_status in
+     src/convobox/web/bridge.py). Text-only, no color coding -- these
+     aren't states that need an alarm color, just an at-a-glance label. */
+  #activity-status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
+  #activity-status:empty { display: none; }
+  #activity-status.paused { color: #e0a030; font-weight: 600; }
   .ribbon .spacer { flex: 1 1 auto; }
   .ribbon select {
     font-size: 0.8rem;
@@ -242,10 +251,11 @@
   <img class="logo" src="img/legionforge-logo.svg" alt="LegionForge">
   <span class="brand">ConvoBox</span>
   <span id="status" class="disconnected">connecting&hellip;</span>
+  <span id="activity-status"></span>
   <span class="spacer"></span>
   <select id="session-select"></select>
   <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
-  <button disabled title="Coming soon">Stop listening</button>
+  <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead">Stop listening</button>
   <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
@@ -278,6 +288,8 @@
   const eventsEl = document.getElementById("events");
   const emptyEl = document.getElementById("empty");
   const statusEl = document.getElementById("status");
+  const activityStatusEl = document.getElementById("activity-status");
+  const listeningBtn = document.getElementById("listening-btn");
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
   const quitBtn = document.getElementById("quit-btn");
@@ -469,6 +481,28 @@
     for (const ev of data.events) renderEvent(ev);
   }
 
+  // The mic loop's own activity (listening/capturing/speaking/working/
+  // waiting/paused -- forward_status in src/convobox/web/bridge.py),
+  // broadcast on the SAME SSE stream as transcript/tool events, tagged
+  // {type: "status", ...} to tell them apart. Also keeps the Stop/Resume
+  // listening button's label truthful even when a PAUSE happens by voice
+  // instead of the button (both act on the same ListeningGate).
+  let isPaused = false;
+
+  function setListeningButton(paused) {
+    isPaused = paused;
+    listeningBtn.textContent = paused ? "Resume listening" : "Stop listening";
+    listeningBtn.title = paused
+      ? "Resume listening -- say the resume word to do this by voice instead"
+      : "Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead";
+  }
+
+  function renderActivityStatus(status) {
+    activityStatusEl.textContent = status;
+    activityStatusEl.className = status === "paused" ? "paused" : "";
+    setListeningButton(status === "paused");
+  }
+
   function connectStream() {
     const source = new EventSource("/api/events/stream");
     source.onopen = () => {
@@ -481,7 +515,12 @@
     };
     source.onmessage = (e) => {
       try {
-        renderEvent(JSON.parse(e.data));
+        const payload = JSON.parse(e.data);
+        if (payload.type === "status") {
+          renderActivityStatus(payload.status);
+        } else {
+          renderEvent(payload);
+        }
       } catch (err) {
         console.error("bad SSE payload", err);
       }
@@ -490,6 +529,25 @@
   }
 
   sessionSelect.addEventListener("change", () => loadHistory(sessionSelect.value));
+
+  listeningBtn.addEventListener("click", async () => {
+    listeningBtn.disabled = true;
+    try {
+      const res = await fetch("/api/listening", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: isPaused ? "resume" : "pause" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setListeningButton(data.is_paused);
+      }
+    } catch (err) {
+      console.error("listening toggle failed", err);
+    } finally {
+      listeningBtn.disabled = false;
+    }
+  });
 
   clearHistoryBtn.addEventListener("click", async () => {
     if (!currentSessionId) return;
@@ -538,6 +596,12 @@
     await loadDisplayConfig();
     const latest = await loadSessions();
     await loadHistory(latest);
+    try {
+      const res = await fetch("/api/listening");
+      if (res.ok) setListeningButton((await res.json()).is_paused);
+    } catch (err) {
+      console.error("failed to load listening state", err);
+    }
     connectStream();
   })();
 })();
