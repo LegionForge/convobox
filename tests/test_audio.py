@@ -125,6 +125,42 @@ def test_close_is_idempotent() -> None:
     mic.close()  # must not raise
 
 
+def test_read_after_close_raises_and_lets_a_second_waiter_observe_it_too() -> None:
+    # close() puts one sentinel on the queue, but read() re-puts it after
+    # consuming it -- otherwise only the FIRST of several concurrent
+    # readers (a real shape: e.g. the main capture loop and a diagnostic
+    # tap both calling read()) would ever see the stream closed; every
+    # later caller would just block forever on an empty queue.
+    mic = MicrophoneStream()
+    mic.start()
+    mic.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        mic.read(timeout=1)
+    with pytest.raises(RuntimeError, match="closed"):
+        mic.read(timeout=1)  # a second waiter must see it too, not block
+
+
+@pytest.mark.asyncio
+async def test_stream_close_wakes_all_concurrent_waiters_via_requeue() -> None:
+    # Async counterpart of the read() re-queue behavior above. close() only
+    # puts ONE sentinel, so if two consumers are already blocked inside
+    # stream()'s queue.get() when it lands, only the first can dequeue it
+    # directly -- the requeue at the "if chunk is _CLOSE_SENTINEL" branch
+    # is what lets the second one see it too, instead of blocking forever.
+    mic = MicrophoneStream()
+    mic.start()
+    task_a = asyncio.ensure_future(mic.stream().__anext__())
+    task_b = asyncio.ensure_future(mic.stream().__anext__())
+    await asyncio.sleep(0.05)  # let both reach queue.get() in their worker threads
+    mic.close()
+
+    with pytest.raises(StopAsyncIteration):
+        await task_a
+    with pytest.raises(StopAsyncIteration):
+        await task_b
+
+
 def test_context_manager_starts_and_closes() -> None:
     with MicrophoneStream() as mic:
         assert isinstance(mic, MicrophoneStream)
@@ -257,6 +293,28 @@ def test_is_playing_reflects_state() -> None:
     assert player.is_playing() is False
 
 
+def test_on_first_block_played_fires_again_on_a_new_play_call() -> None:
+    # first_block is a local reset at the top of _run() each call, so this
+    # is structurally guaranteed rather than needing its own instance-state
+    # reset (unlike the superseded has_played_audio flag this replaced) --
+    # still worth pinning as a regression test for the actual behavior.
+    player = AudioPlayer()
+    calls = 0
+
+    def on_first() -> None:
+        nonlocal calls
+        calls += 1
+
+    player.on_first_block_played = on_first
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
+    player.wait()
+    assert calls == 1
+
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
+    player.wait()
+    assert calls == 2
+
+
 # --- streaming playback (play_stream) ---
 
 
@@ -305,6 +363,42 @@ def test_play_stream_starts_audio_before_the_source_finishes() -> None:
     asyncio.run(scenario())
     player.wait()
     assert FakeOutputStream.instances[0].total_written() == 3072
+
+
+def test_play_stream_on_first_block_played_has_not_fired_before_the_first_chunk_arrives() -> None:
+    # The streaming path's version of [G8]'s gap is even wider than play()'s:
+    # is_playing() goes True the instant play_stream() starts the playback
+    # thread, before the source has yielded even ONE chunk -- the device
+    # stream isn't opened at all yet (it's lazy, on the first real chunk).
+    player = AudioPlayer()
+    became_audible = False
+
+    def on_first() -> None:
+        nonlocal became_audible
+        became_audible = True
+
+    player.on_first_block_played = on_first
+    release = asyncio.Event()
+
+    async def slow_source():  # type: ignore[no-untyped-def]
+        await release.wait()
+        yield np.zeros(256, dtype=np.float32)
+
+    async def scenario() -> None:
+        feed_task = asyncio.ensure_future(player.play_stream(slow_source(), 16000))
+        for _ in range(200):
+            if player.is_playing():
+                break
+            await asyncio.sleep(0.01)
+        assert player.is_playing() is True
+        assert became_audible is False
+        assert FakeOutputStream.instances == []  # device never even opened yet
+        release.set()
+        await asyncio.wait_for(feed_task, timeout=5)
+
+    asyncio.run(scenario())
+    player.wait()
+    assert became_audible is True
 
 
 def test_play_stream_stop_aborts_playback_and_pull() -> None:
@@ -473,6 +567,25 @@ def test_on_block_played_reference_uses_device_rate(monkeypatch: pytest.MonkeyPa
     assert seen_rates and all(r == 44100 for r in seen_rates)
 
 
+def test_play_stream_on_block_played_reference_uses_device_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # play() has its own on_block_played call site (_run); play_stream has a
+    # separate one (_run_stream) that was previously untested in isolation --
+    # same AEC-reference contract applies to both.
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(44100.0))
+    player = AudioPlayer(device="pinned")
+    seen_rates: list[int] = []
+    player.on_block_played = lambda block, rate: seen_rates.append(rate)
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.ones(2000, dtype=np.float32)
+
+    asyncio.run(player.play_stream(chunks(), sample_rate=22050))
+    player.wait()
+    assert seen_rates and all(r == 44100 for r in seen_rates)
+
+
 def test_on_first_block_played_fires_once_for_play(monkeypatch: pytest.MonkeyPatch) -> None:
     # Multiple blocks get written (2000 samples / 1024 blocksize = 2 blocks)
     # but the audible-start signal must fire exactly once, on the first one.
@@ -511,3 +624,71 @@ def test_on_first_block_played_fires_once_for_play_stream(monkeypatch: pytest.Mo
     asyncio.run(player.play_stream(chunks(), sample_rate=22050))
     player.wait()
     assert calls == 1
+
+
+def test_play_stream_resampler_buffering_chunk_produces_no_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # _StreamResampler needs >=2 buffered source samples before it can
+    # interpolate anything; a first chunk too small to clear that bar makes
+    # play_stream's per-chunk resample come back empty, which must be
+    # skipped (no device write, no stream opened) rather than treated as
+    # real silence -- distinct from test_play_stream_with_no_chunks_never_
+    # touches_the_device, which covers zero chunks total, not "one chunk,
+    # still buffering."
+    monkeypatch.setattr("convobox.audio.playback.import_sounddevice", lambda: _resampling_sd(48000.0))
+    player = AudioPlayer(device="pinned")
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.ones(1, dtype=np.float32)  # too short to interpolate yet
+        yield np.ones(2204, dtype=np.float32)  # completes the buffer
+
+    asyncio.run(player.play_stream(chunks(), sample_rate=22050))
+    player.wait()
+    stream = FakeOutputStream.instances[0]
+    # Only one device stream opened (on the second, non-empty chunk) and
+    # 0.1s worth of audio at 48000 (+/- rounding) -- not two streams, and
+    # not silence spliced in for the buffering chunk.
+    assert len(FakeOutputStream.instances) == 1
+    assert abs(stream.total_written() - 4800) <= 2
+
+
+def test_play_stream_stop_aborts_mid_block_loop() -> None:
+    # A single chunk longer than blocksize (1024) is written across several
+    # inner-loop iterations; stop() setting _stop between those writes must
+    # abort that inner loop too, not just the outer per-chunk queue.get()
+    # loop (already covered by test_play_stream_stop_aborts_playback_and_pull).
+    player = AudioPlayer()
+    wrote_first_block = threading.Event()
+    release = threading.Event()
+    original_write = FakeOutputStream.write
+
+    def gated_write(self: FakeOutputStream, block: np.ndarray) -> None:
+        original_write(self, block)
+        wrote_first_block.set()
+        release.wait(timeout=1)
+
+    FakeOutputStream.write = gated_write  # type: ignore[method-assign]
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        yield np.zeros(3000, dtype=np.float32)  # 1024 + 1024 + 952 across 3 blocks
+
+    async def scenario() -> None:
+        feed_task = asyncio.ensure_future(player.play_stream(chunks(), 16000))
+        for _ in range(200):  # up to 2s for the writer thread to reach the gate
+            if wrote_first_block.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert wrote_first_block.is_set()
+        player._stop.set()  # arm stop while the thread is parked mid-block-loop
+        release.set()
+        await asyncio.wait_for(feed_task, timeout=5)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        FakeOutputStream.write = original_write  # type: ignore[method-assign]
+    player.wait()
+
+    stream = FakeOutputStream.instances[0]
+    assert stream.total_written() == 1024  # aborted before the 2nd/3rd block

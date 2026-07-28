@@ -88,6 +88,9 @@ from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, render_conversation_frame
 from convobox.resumeword import ResumeWordDetector
+from convobox.web.bridge import WebEventForwarder
+from convobox.web.history import HistoryDB, new_session_id
+from convobox.web.stream import EventBroadcaster
 
 log = logging.getLogger("convobox.run")
 
@@ -893,12 +896,35 @@ class EchoAwarePlayer(AudioPlayer):
     def __init__(self, device: str | int | None = None) -> None:
         super().__init__(device)
         self.playback_ended_at = 0.0  # time.monotonic() scale; 0 = never played
+        # True once the CURRENT response's audio has actually reached the
+        # output device -- distinct from is_playing() (thread liveness),
+        # which goes True the instant the playback thread starts, before
+        # the device is even opened. docs/UAT-checklist.md [G8]:
+        # BargeInMonitor firing off is_playing() alone could fire against
+        # a response that produced no audible output yet, reading in the
+        # log exactly like a real interruption even though nothing was
+        # ever audible. Reset synchronously in play()/play_stream() below
+        # (the CALLING thread), not inside AudioPlayer's own _run()/
+        # _run_stream() (the playback thread), so a caller checking it
+        # immediately after starting new playback never sees a stale True
+        # from the previous response. Set via on_first_block_played,
+        # which this class owns exclusively -- see _mark_audible.
+        self.audible = False
+        self.on_first_block_played = self._mark_audible
+
+    def _mark_audible(self) -> None:
+        self.audible = True
+        # Lets post-hoc tools (scripts/analyze_incident.py) locate a
+        # response in a capture's timeline directly from the log instead
+        # of a blind correlation search.
+        log.info("playback: first audio block reached output device")
 
     def play(self, samples, sample_rate) -> None:  # type: ignore[no-untyped-def]
         # Estimate set AFTER super().play(): AudioPlayer.play() begins by
         # calling self.stop() to replace any current playback, and that
         # lands in our stop() override, which would clamp a
         # freshly-written estimate straight back down to "now".
+        self.audible = False
         super().play(samples, sample_rate)
         self.playback_ended_at = time.monotonic() + len(samples) / sample_rate
 
@@ -907,6 +933,8 @@ class EchoAwarePlayer(AudioPlayer):
         # extends the estimate. max(estimate, now) restarts the clock after
         # a synthesis stall (playback caught up and went silent, so the
         # next chunk plays from "now", not from the stale estimate).
+        self.audible = False
+
         async def tracked():  # type: ignore[no-untyped-def]
             async for chunk in chunks:
                 base = max(self.playback_ended_at, time.monotonic())
@@ -1011,6 +1039,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     segmenter=None, listening_gate=None, tui_state: ConversationTuiState | None = None,
     continue_gate: ContinuePromptGate | None = None,
     approval_gate: ApprovalPromptGate | None = None,
+    web_forwarder: WebEventForwarder | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
@@ -1068,6 +1097,8 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         queued_text = interject_queue.flush_if_idle(busy, playing)
         if queued_text is not None:
             log.info("delivering queued interjection now that the turn is idle: %r", queued_text)
+            if web_forwarder is not None:
+                web_forwarder.forward_transcript(queued_text)
             try:
                 await orchestrator.handle_transcript(queued_text)
             except Exception as exc:  # noqa: BLE001
@@ -1500,6 +1531,8 @@ async def run(args: argparse.Namespace) -> None:
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
+    if args.web:
+        config.web.enabled = True
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
     # a phrase to recognize, and does nothing if the active backend never
@@ -1525,14 +1558,6 @@ async def run(args: argparse.Namespace) -> None:
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
         device=config.audio.output_device
     )
-    # Timing-only diagnostic, unconditional (cheap, and useful with or
-    # without AEC/incident-capture on): marks exactly when a response's
-    # audio actually becomes audible, distinct from is_playing()'s
-    # thread-start signal -- see AudioPlayer.on_first_block_played's
-    # docstring and docs/UAT-checklist.md [G8]/[G9]. Lets post-hoc tools
-    # (scripts/analyze_incident.py) locate a response in a capture's
-    # timeline directly from the log instead of a blind correlation search.
-    player.on_first_block_played = lambda: log.info("playback: first audio block reached output device")
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
     transcript_corrector = TranscriptCorrector(config.stt.corrections)
     # --tui only applies to the live mic loop, not --text mode (which
@@ -1550,16 +1575,80 @@ async def run(args: argparse.Namespace) -> None:
         tui_state.backend_name = config.backend.name
         tui_state.aec_enabled = config.audio.echo_cancellation
         tui_state.aec_dump_active = args.aec_dump is not None and config.audio.echo_cancellation
+    # Web UI (docs/WEB-UI-ARCHITECTURE.md): off by default (web_forwarder is
+    # None, on_event's dispatch below skips it entirely -- zero behavior
+    # change from before this existed). web.enabled alone gets a real local
+    # server with live SSE broadcast and no persistence; web.history_tracking_
+    # enabled on top of that adds SQLite storage -- WebEventForwarder's own
+    # two independently-optional halves.
+    #
+    # web_app_history is ALWAYS constructed when web.enabled (real file when
+    # tracking is on, otherwise a throwaway in-memory DB) -- create_app's
+    # REST endpoints (/api/sessions etc.) need *some* HistoryDB to query
+    # regardless. It is only ever passed to WebEventForwarder's own
+    # `history` kwarg when tracking is actually on, though -- with tracking
+    # off, nothing ever gets written to it (by design: no persistence means
+    # no persistence, not "persisted somewhere you didn't ask for"), so the
+    # REST endpoints just honestly report empty; the live SSE tap still
+    # works either way, since that's the other, always-on half.
+    web_forwarder = None
+    web_server = None
+    web_server_task: asyncio.Task[None] | None = None
+    if config.web.enabled:
+        # Lazy, opt-in import: fastapi/uvicorn are the "web" extra (`uv sync
+        # --extra web`), not a main dependency -- most CLI/TUI-only users
+        # never need a web server or its dependency footprint, same
+        # reasoning as aec/piper/cuda's own extras.
+        try:
+            import uvicorn
+
+            from convobox.web.app import create_app
+        except ImportError as e:
+            raise ImportError(
+                "web.enabled is set but the 'web' extra isn't installed. "
+                "Install it with `uv sync --extra web` (or "
+                "`pip install -e '.[web]'`) to use the web UI."
+            ) from e
+        web_broadcaster = EventBroadcaster()
+        web_app_history = (
+            HistoryDB(Path(config.web.history_dir) / "events.db")
+            if config.web.history_tracking_enabled
+            else HistoryDB(Path(":memory:"))
+        )
+        web_forwarder = WebEventForwarder(
+            new_session_id(),
+            history=web_app_history if config.web.history_tracking_enabled else None,
+            broadcaster=web_broadcaster,
+        )
+        web_app = create_app(db=web_app_history, broadcaster=web_broadcaster)
+        web_uvicorn_config = uvicorn.Config(
+            web_app,
+            host=config.web.bind_address,
+            port=config.web.port,
+            log_level="warning",
+        )
+        web_server = uvicorn.Server(web_uvicorn_config)
+        web_server_task = asyncio.ensure_future(web_server.serve())
+        log.info(
+            "web UI listening on http://%s:%d (history_tracking=%s)",
+            config.web.bind_address, config.web.port, config.web.history_tracking_enabled,
+        )
+
+    def _dispatch_event(event: BackendEvent) -> None:
+        _on_backend_event(
+            tui_state, last_spoken_response, event,
+            config.interaction.approval_phrase, approval_gate,
+            config.interaction.approval_explanation_mode,
+        )
+        if web_forwarder is not None:
+            web_forwarder(event)
+
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
         tts=tts,
         player=player,
-        on_event=lambda e: _on_backend_event(
-            tui_state, last_spoken_response, e,
-            config.interaction.approval_phrase, approval_gate,
-            config.interaction.approval_explanation_mode,
-        ),
+        on_event=_dispatch_event,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
     )
@@ -1589,11 +1678,14 @@ async def run(args: argparse.Namespace) -> None:
         text = transcript_corrector.correct(args.text)
         if text != args.text:
             log.info("corrected transcript before command routing: %r -> %r", args.text, text)
+        if web_forwarder is not None:
+            web_forwarder.forward_transcript(text)
         await orchestrator.handle_transcript(text)
         await _drain_until_idle(adapter, timeout_s=args.timeout)
         player.wait()
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        await _stop_web_server(web_server, web_server_task)
         return
 
     # Imported lazily so --text mode works on hosts without PortAudio.
@@ -1848,7 +1940,19 @@ async def run(args: argparse.Namespace) -> None:
             # chunk (this one hasn't been fed yet) -- one chunk (~32ms) of
             # lag, irrelevant against the sustained-speech threshold.
             chunk_ms = 1000 * len(chunk) / config.audio.sample_rate
-            if monitor.observe(segmenter.in_speech, playing, chunk_ms):
+            # [G8] fix: gate BargeInMonitor on audibility, not thread
+            # liveness. `playing` (is_playing()) goes True the instant the
+            # playback thread starts, before the device is even opened --
+            # `player.audible` (set via on_first_block_played) only goes
+            # True once a real block has actually reached the speaker, so
+            # sustained user speech during that TTS-synthesis-latency
+            # window no longer reads as a barge-in against audio that was
+            # never audible. Every OTHER use of `playing` above (the
+            # AEC-stats edge detection, was_playing, the tail guard) keeps
+            # thread-liveness semantics deliberately -- those care whether
+            # a response is still in progress at all, not whether it's
+            # currently audible.
+            if monitor.observe(segmenter.in_speech, player.audible, chunk_ms):
                 log.info("barge-in: sustained speech during playback -- stopping audio")
                 if incident_capture is not None:
                     captured = incident_capture.trigger("barge-in", {
@@ -1891,6 +1995,7 @@ async def run(args: argparse.Namespace) -> None:
         _working_watchdog(
             adapter, player, WorkingIndicator(), orchestrator, interject_queue,
             segmenter, listening_gate, tui_state, continue_gate, approval_gate,
+            web_forwarder,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
@@ -2257,6 +2362,8 @@ async def run(args: argparse.Namespace) -> None:
                     # before this point, correctly: neither delivers a fresh
                     # response right now.
                     tui_state.full_detail = ""
+                if web_forwarder is not None:
+                    web_forwarder.forward_transcript(text)
                 try:
                     await orchestrator.handle_transcript(text)
                 except Exception as exc:  # noqa: BLE001
@@ -2310,6 +2417,7 @@ async def run(args: argparse.Namespace) -> None:
             await watchdog_task
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        await _stop_web_server(web_server, web_server_task)
         # aclose() above already closes stdin/terminates/awaits the
         # subprocess, but on Windows ProactorEventLoop, closing a pipe
         # transport schedules the actual OS-handle teardown via
@@ -2338,6 +2446,20 @@ async def _drain_until_idle(adapter, timeout_s: float) -> None:  # type: ignore[
             await asyncio.sleep(0.5)
             return
     log.warning("backend still busy after %.0fs; giving up the wait", timeout_s)
+
+
+async def _stop_web_server(server: object | None, task: "asyncio.Task[None] | None") -> None:
+    """Shut down the web UI's uvicorn server (if one was started), used from
+    every exit path (--text mode's early return, the mic loop's `finally`).
+    Setting should_exit=True is uvicorn's own documented graceful-shutdown
+    signal -- server.serve()'s own loop notices it and returns on its next
+    iteration, which is what task then awaits."""
+    if server is None:
+        return
+    server.should_exit = True  # type: ignore[attr-defined]
+    if task is not None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def main() -> None:
@@ -2397,6 +2519,15 @@ def main() -> None:
             "Only affects the mic loop, not --text mode. Log output moves to "
             f"{_TUI_LOG_FILE} -- interleaving ordinary log lines with the "
             "alt-screen redraw would garble the display."
+        ),
+    )
+    parser.add_argument(
+        "--web", action="store_true",
+        help=(
+            "start the local web UI server alongside this session; overrides "
+            "web.enabled. See docs/WEB-UI-ARCHITECTURE.md. Requires the "
+            "'web' extra (`uv sync --extra web`). Bind address/port/history "
+            "settings still come from convobox.yaml's web.* fields."
         ),
     )
     parser.add_argument(

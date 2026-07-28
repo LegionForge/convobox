@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ConvoBox</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --dim: #666666;
+    --border: #dddddd;
+    --user-bg: #e8f0fe;
+    --assistant-bg: #f5f5f5;
+    --tool-bg: #fff8e1;
+    --error-fg: #b00020;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1a;
+      --fg: #eaeaea;
+      --dim: #999999;
+      --border: #3a3a3a;
+      --user-bg: #1f3a5f;
+      --assistant-bg: #2a2a2a;
+      --tool-bg: #3a3220;
+      --error-fg: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  #status { font-size: 0.8rem; color: var(--dim); }
+  #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.35rem; }
+  #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.35rem; }
+  select { margin-left: auto; font-size: 0.85rem; }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .event {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .event .meta {
+    font-size: 0.7rem;
+    color: var(--dim);
+    margin-bottom: 0.25rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .event.response, .event.transcript { background: var(--assistant-bg); }
+  .event.transcript { background: var(--user-bg); }
+  .event.tool_call, .event.tool_result { background: var(--tool-bg); font-family: ui-monospace, monospace; font-size: 0.85rem; }
+  .event.approval_request { border-color: #e0a030; }
+  .event.error { color: var(--error-fg); }
+  .event.done { display: none; } /* a turn boundary marker, not shown as its own bubble */
+  #empty { color: var(--dim); text-align: center; padding: 2rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ConvoBox</h1>
+  <span id="status" class="disconnected">connecting&hellip;</span>
+  <select id="session-select"></select>
+</header>
+<main id="events">
+  <div id="empty">No events yet.</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  const eventsEl = document.getElementById("events");
+  const emptyEl = document.getElementById("empty");
+  const statusEl = document.getElementById("status");
+  const sessionSelect = document.getElementById("session-select");
+
+  function renderEvent(ev) {
+    if (emptyEl.parentNode) emptyEl.remove();
+    const div = document.createElement("div");
+    const kind = ev.event_type || ev.type || "event";
+    div.className = "event " + kind;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = kind.replace(/_/g, " ");
+    div.appendChild(meta);
+    const body = document.createElement("div");
+    // textContent, never innerHTML -- transcripts/tool output/backend
+    // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
+    // XSS-prevention note), so no HTML in them is ever interpreted.
+    body.textContent =
+      ev.backend_response || ev.content || ev.user_transcript ||
+      (ev.tool_name ? `${ev.tool_name}(${ev.tool_input || ""})` : "") ||
+      (ev.tool_output || "");
+    div.appendChild(body);
+    eventsEl.appendChild(div);
+    div.scrollIntoView({ block: "end" });
+  }
+
+  async function loadSessions() {
+    const res = await fetch("/api/sessions");
+    const data = await res.json();
+    sessionSelect.innerHTML = "";
+    for (const s of data.sessions) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = `${s.id} (${s.last_activity})`;
+      sessionSelect.appendChild(opt);
+    }
+    return data.sessions[0] ? data.sessions[0].id : null;
+  }
+
+  async function loadHistory(sessionId) {
+    if (!sessionId) return;
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
+    const data = await res.json();
+    eventsEl.innerHTML = "";
+    if (data.events.length === 0) {
+      eventsEl.appendChild(emptyEl);
+      return;
+    }
+    for (const ev of data.events) renderEvent(ev);
+  }
+
+  function connectStream() {
+    const source = new EventSource("/api/events/stream");
+    source.onopen = () => {
+      statusEl.textContent = "live";
+      statusEl.className = "connected";
+    };
+    source.onerror = () => {
+      statusEl.textContent = "reconnecting…";
+      statusEl.className = "disconnected";
+    };
+    source.onmessage = (e) => {
+      try {
+        renderEvent(JSON.parse(e.data));
+      } catch (err) {
+        console.error("bad SSE payload", err);
+      }
+    };
+    return source;
+  }
+
+  sessionSelect.addEventListener("change", () => loadHistory(sessionSelect.value));
+
+  (async function init() {
+    const latest = await loadSessions();
+    await loadHistory(latest);
+    connectStream();
+  })();
+})();
+</script>
+</body>
+</html>

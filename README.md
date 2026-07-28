@@ -4,8 +4,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
-💛 [Donate to LegionForge](https://legionforge.org/donations) — LegionForge is open-source and independently maintained.
-
 A local, backend-agnostic voice frontend for CLI coding agents. It sits
 between you and whichever coding agent CLI you're driving — Claude Code,
 Codex, OpenCode, and eventually others — and lets you work by voice
@@ -78,6 +76,7 @@ Optional extras, installed only if you want them:
 ```bash
 uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wheels)
 uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB, CUDA-only
+uv sync --extra web        # local browser UI for a live session (--web), see below
 uv sync --extra dev        # test/lint tooling
 ```
 
@@ -85,6 +84,12 @@ ConvoBox never bundles a speech engine you didn't ask for — the default
 STT model (faster-whisper) and TTS engine (Kokoro, Apache 2.0 — Piper is
 available as an opt-in `--extra piper`, see below) download the first
 time you actually use them, not at install time.
+
+**Optional web UI:** `python scripts/run_convobox.py --web` starts a
+local-only browser view of the live session (transcript, tool calls,
+optional persisted history) alongside the voice loop — off by default,
+no effect on anything else when unused. See
+[docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md).
 
 **Supported today:**
 
@@ -247,9 +252,10 @@ MIT — see [LICENSE](LICENSE). Free for everyone, personal and commercial
 use alike, in the spirit of the mostly MIT/BSD/Apache-2.0 dependencies
 this project is built on. A split free/paid licensing model was
 researched and considered, then decided against in favor of staying a
-single, simple, unencumbered open-source project; ongoing development is
-optionally supported via Patreon/Ko-fi rather than a commercial license
-(links TBD).
+single, simple, unencumbered open-source project.
+
+If you find ConvoBox useful, [donations to LegionForge](https://legionforge.org/donations)
+help support ongoing development — entirely optional, never required.
 
 The technical item this decision depended on is now fixed (2026-07-24):
 the default TTS engine is Kokoro (Apache 2.0, code and model weights),

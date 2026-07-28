@@ -57,6 +57,51 @@ async def test_aclose_without_a_process_is_a_safe_noop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_aclose_force_kills_a_process_that_ignores_terminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.codex as mod
+
+    class _StubbornProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.terminate_called = False
+            self.kill_called = False
+
+        def terminate(self) -> None:
+            self.terminate_called = True
+
+        def kill(self) -> None:
+            self.kill_called = True
+            self.returncode = -9
+
+        async def wait(self) -> int | None:
+            return self.returncode
+
+    async def _fake_wait_for(coro: object, timeout: float) -> None:
+        # Simulates the outer asyncio.wait_for(proc.wait(), timeout=5.0)
+        # genuinely timing out -- no real 5s sleep needed for the test to
+        # exercise the force-kill path (mirrors the same fixture in
+        # test_claude_code_adapter.py for ClaudeCodeAdapter's identical
+        # terminate-then-kill-on-timeout shutdown path).
+        coro.close()  # type: ignore[attr-defined]
+        raise TimeoutError
+
+    monkeypatch.setattr(mod.asyncio, "wait_for", _fake_wait_for)
+
+    adapter = _adapter()
+    proc = _StubbornProcess()
+    adapter._proc = proc  # type: ignore[assignment]
+
+    await adapter.aclose()
+
+    assert proc.terminate_called is True
+    assert proc.kill_called is True
+    assert adapter._proc is None
+
+
+@pytest.mark.asyncio
 async def test_send_text_yields_text_then_done_and_busy_lifecycle() -> None:
     adapter = _adapter()
     try:

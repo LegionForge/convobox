@@ -169,8 +169,52 @@ minor versions carry feature and behavior changes.
   UAT: agent replies were previously forwarded straight to TTS and captured
   nowhere, leaving the most useful lines of an audio test invisible in the
   log. See `docs/UAT-checklist.md` **[L1]**.
+- **Local web UI** (`--web` / `web.enabled` in `convobox.yaml`, opt-in and
+  off by default): a browser view of a live session -- transcripts,
+  backend responses, tool calls, and pending approvals streamed over
+  Server-Sent Events, plus optional SQLite history
+  (`web.history_tracking_enabled`, a separate opt-in from `enabled`
+  since viewing a live session and persisting it to disk are different
+  privacy decisions). `Attribution: Claude Code; Provider: Anthropic;
+  Model: claude-sonnet-5; Scope: src/convobox/web/, scripts/run_convobox.py's
+  web wiring, docs/WEB-UI-*.md.` Built across several independently
+  committed and live-verified slices: `WebConfig` (loopback-only by
+  default, `bind_address` rejects a specific non-loopback address since
+  this server has no authentication); `HistoryDB`
+  (`src/convobox/web/history.py`); a FastAPI app
+  (`src/convobox/web/app.py`) serving `/api/sessions`,
+  `/api/sessions/{id}/events`, `/clear`, `/export`, and the SSE stream,
+  with `EventBroadcaster` (`stream.py`) fanning events out to every
+  connected browser tab rather than just one; `WebEventForwarder`
+  (`bridge.py`) plugging into `Orchestrator`'s existing `on_event` hook
+  (no change to `Orchestrator` itself needed) and into every
+  `handle_transcript()` call site, so both backend events and the
+  user's own recognized speech reach the browser; a real `uvicorn`
+  server started as a background task alongside the voice loop; and a
+  minimal, dependency-free HTML/JS frontend
+  (`src/convobox/web/static/index.html`), mounted last so it can never
+  shadow the API routes. `fastapi`/`uvicorn` are the new `web` extra
+  (`uv sync --extra web`), lazily imported only when actually enabled --
+  zero added dependency weight for CLI/TUI-only use. See
+  `docs/WEB-UI-USAGE.md` (end users) and `docs/WEB-UI-DEV.md`
+  (contributors).
 
 ### Fixed
+- **`BargeInMonitor` could fire against a response that produced no
+  audible output yet** (`src/convobox/audio/playback.py`). `Attribution:
+  Claude Code; Provider: Anthropic; Model: claude-sonnet-5; Scope: this
+  entry.` `AudioPlayer.is_playing()` reports `True` the instant the
+  playback thread starts and the device stream opens, before a single
+  sample has actually reached it -- a real TTS-synthesis-latency window
+  during which a live session showed a barge-in log line ("stopping
+  audio") for a response that was never audible. Confirmed live:
+  matching AEC reference frame counts immediately before/after proved
+  zero audio was ever output. Functionally harmless (routing was already
+  correct) -- diagnostic/UX only. Added `AudioPlayer.has_played_audio`,
+  a flag set the first time a real block reaches the device, distinct
+  from thread liveness; not yet wired into the barge-in log message
+  itself (deliberately left for a live mic session to confirm the
+  corrected wording reads right -- see `docs/UAT-checklist.md` **[G8]**).
 - **Backend event stream could die silently mid-session, losing the LLM's
   response from the log for over a minute** (`src/convobox/orchestrator/orchestrator.py`,
   `src/convobox/adapters/opencode.py`). `Attribution: Claude Code; Provider:

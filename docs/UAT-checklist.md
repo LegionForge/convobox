@@ -607,6 +607,18 @@ did).
   cause first (see
   `docs/field-notes/2026-07-25-timing-coincidence-is-not-echo-correlation.md`)
   before landing back on this already-known gap -- still not built.
+  **Decision (JP, 2026-07-26): assume no for now** on building a resume
+  mechanism -- see `docs/DESIGN-barge-in.md`'s "Open questions" for the
+  full note, including JP's observation that these backchannel-shaped
+  utterances have tended to read as affirmative in content, worth
+  rechecking before this gets revisited for real. **Also 2026-07-26:**
+  the "cross-correlation ruled out AEC echo" claim just above is now
+  in question -- JP was not the speaker in the quoted utterance, and
+  the correlation method had a real blind spot (time-compressed
+  reference vs. wall-clock mic capture). See
+  `docs/field-notes/2026-07-26-reference-capture-is-time-compressed-not-wall-clock.md`.
+  This entry may turn out to be a G8/echo-adjacent incident, not a real
+  G7 backchannel one -- unresolved until re-verified against real audio.
 - **[G8] `BargeInMonitor` can fire against a response that produced NO
   audio yet.** `AudioPlayer.is_playing()`
   (`src/convobox/audio/playback.py:257-258`) returns `True` as soon as
@@ -624,9 +636,18 @@ did).
   under `on_new_words: now` (the new words are still taken correctly) --
   the defect is diagnostic/UX, not correctness. See
   `docs/field-notes/2026-07-25-player-is-playing-races-ahead-of-first-audio.md`.
-  Fix direction (not yet implemented): a `has_audible_output` flag set
-  at the same point `on_block_played` first fires, distinct from raw
-  thread liveness.
+  **Fixed 2026-07-27**: `EchoAwarePlayer.audible` (`scripts/run_convobox.py`)
+  is set via `AudioPlayer.on_first_block_played` and reset synchronously in
+  `play()`/`play_stream()`, distinct from `is_playing()`'s raw thread
+  liveness. `BargeInMonitor.observe()`'s call site now passes
+  `player.audible` instead of `player.is_playing()` -- every OTHER
+  `is_playing()` use (the AEC-stats edge detection, the overlap gate, the
+  echo-tail guard, `QueuedInterjection.flush_if_idle`, `_working_watchdog`)
+  deliberately keeps thread-liveness semantics, since those care whether a
+  response is still in progress at all, not whether it's currently audible.
+  Verified with unit tests (`tests/test_run_convobox_echo.py`) mirroring
+  the same gated-stream technique used to confirm the original gap; not
+  live-mic verified (no mic access on this machine this session).
 - **[G9] Under-cancelled echo can be intelligible enough for STT to
   transcribe real words out of the assistant's own voice.** Confirmed
   live 2026-07-26 on an open-speaker (amplified desktop speakers) +

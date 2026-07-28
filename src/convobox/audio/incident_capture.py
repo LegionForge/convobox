@@ -21,6 +21,19 @@ import numpy as np
 
 _SAMPLE_RATE = 16000
 
+# observe_reference() is only ever called per real block WRITTEN to the
+# output device (AudioPlayer.on_block_played's contract, not queue time --
+# see aec.py's module docstring for why). If synthesis stalls between
+# blocks, nothing calls this method for that real duration -- the reference
+# channel would otherwise become time-compressed relative to mic-raw's
+# continuous wall-clock recording, which is exactly the blind spot
+# docs/field-notes/2026-07-26-reference-capture-is-time-compressed-not-wall-clock.md
+# found: a cross-correlation between a time-compressed reference and a
+# wall-clock-continuous mic signal can miss real echo entirely. A small
+# tolerance (normal scheduling jitter between back-to-back blocks) avoids
+# padding for noise; only a genuine gap gets silence inserted.
+_REFERENCE_GAP_TOLERANCE_S = 0.05
+
 
 def _pcm(audio: np.ndarray) -> bytes:
     return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
@@ -43,6 +56,10 @@ class IncidentCapture:
         self._events: list[dict[str, Any]] = []
         self._ends_at = 0.0
         self._lock = threading.RLock()
+        # Wall-clock time (time.monotonic() scale) the NEXT observe_reference
+        # call is expected at if playback continues gap-free -- None before
+        # the first call. See _REFERENCE_GAP_TOLERANCE_S above.
+        self._reference_next_expected_at: float | None = None
 
     @property
     def active(self) -> bool:
@@ -57,7 +74,14 @@ class IncidentCapture:
         if sample_rate != _SAMPLE_RATE:
             positions = np.linspace(0, len(audio), round(len(audio) * _SAMPLE_RATE / sample_rate), endpoint=False)
             audio = np.interp(positions, np.arange(len(audio)), audio).astype(np.float32)
+        now = time.monotonic()
+        if self._reference_next_expected_at is not None:
+            gap_s = now - self._reference_next_expected_at
+            if gap_s > _REFERENCE_GAP_TOLERANCE_S:
+                silence = np.zeros(round(gap_s * _SAMPLE_RATE), dtype=np.float32)
+                self._observe("reference", silence)
         self._observe("reference", audio)
+        self._reference_next_expected_at = now + len(audio) / _SAMPLE_RATE
 
     def trigger(self, event: str, metadata: dict[str, Any] | None = None) -> Path | None:
         """Persist an incident; related events share the same bounded capture."""

@@ -155,6 +155,36 @@ def test_attenuation_db_none_without_enough_signal() -> None:
     assert canceller.attenuation_db() is None  # no reverse activity -> no samples
 
 
+def test_attenuation_db_none_when_capture_is_effectively_silent() -> None:
+    # Distinct from test_attenuation_db_none_without_enough_signal (which
+    # covers "not enough frames yet"): here there ARE enough frames, but
+    # the mic itself is silent while reverse is active -- e.g. a muted
+    # mic or a dead-air response. rms_in ~0 would make the ratio pure
+    # noise, so this must read None rather than a meaningless number.
+    canceller = EchoCanceller(delay_ms=50)
+    farend = _farend(1.0)
+    silence = np.zeros(512, dtype=np.float32)
+    for start in range(0, len(farend) - 512, 512):
+        canceller.feed_reverse(farend[start : start + 512], _SR)
+        canceller.process(silence)
+    assert canceller.attenuation_db() is None
+
+
+def test_ceiling_none_when_ambient_is_effectively_silent() -> None:
+    # Mirrors test_attenuation_db_none_when_capture_is_effectively_silent,
+    # but for the ambient-floor guard in measurable_ceiling_db: enough
+    # ambient frames sampled, but they're pure digital silence (a
+    # perfectly quiet room/mic), so the ratio would be noise.
+    canceller = EchoCanceller(delay_ms=50)
+    for _ in range(40):
+        canceller.process(np.zeros(512, dtype=np.float32))
+    farend = _farend(1.0)
+    for start in range(0, len(farend) - 512, 512):
+        canceller.feed_reverse(farend[start : start + 512], _SR)
+        canceller.process(farend[start : start + 512])
+    assert canceller.measurable_ceiling_db() is None
+
+
 def test_reset_stats_clears_the_window() -> None:
     canceller = EchoCanceller(delay_ms=50)
     farend = _farend(1.0)

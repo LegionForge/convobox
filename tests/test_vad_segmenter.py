@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, AsyncIterator
 
 import numpy as np
 import pytest
@@ -421,3 +421,76 @@ def test_in_speech_reflects_run_state(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seg.in_speech
     seg.feed(_windows(_MIN_SILENCE_WINDOWS))
     assert not seg.in_speech
+
+
+async def _achunks(chunks: list[np.ndarray]) -> AsyncIterator[np.ndarray]:
+    for chunk in chunks:
+        yield chunk
+
+
+@pytest.mark.asyncio
+async def test_segment_yields_utterances_from_async_chunk_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    speech_windows = 10
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    total_windows = speech_windows + _MIN_SILENCE_WINDOWS
+    utterances = [u async for u in seg.segment(_achunks([_windows(total_windows)]))]
+
+    assert len(utterances) == 1
+    assert utterances[0].shape[0] == total_windows * _WINDOW
+
+
+@pytest.mark.asyncio
+async def test_segment_splits_across_multiple_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # feed() is normally called once per audio block; segment() must behave
+    # identically when the same windows arrive split across several chunks
+    # from the async stream, since that's exactly how a live mic feed calls it.
+    speech_windows = 10
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    total_windows = speech_windows + _MIN_SILENCE_WINDOWS
+    all_windows = _windows(total_windows)
+    chunk_size = _WINDOW * 3
+    chunks = [
+        all_windows[i : i + chunk_size] for i in range(0, len(all_windows), chunk_size)
+    ]
+
+    utterances = [u async for u in seg.segment(_achunks(chunks))]
+
+    assert len(utterances) == 1
+    assert utterances[0].shape[0] == total_windows * _WINDOW
+
+
+@pytest.mark.asyncio
+async def test_segment_flushes_in_progress_run_at_stream_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Speech never accumulates min_silence_windows of trailing silence before
+    # the chunk stream ends -- segment() must flush() the in-progress run
+    # rather than silently dropping it, exactly like a live mic stream
+    # closing mid-utterance.
+    speech_windows = _MIN_SPEECH_WINDOWS + 2
+    probs = [0.9] * speech_windows
+    seg, _ = _make_segmenter(monkeypatch, probs)
+
+    utterances = [u async for u in seg.segment(_achunks([_windows(speech_windows)]))]
+
+    assert len(utterances) == 1
+    assert utterances[0].shape[0] == speech_windows * _WINDOW
+
+
+@pytest.mark.asyncio
+async def test_segment_yields_nothing_for_empty_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seg, _ = _make_segmenter(monkeypatch, [])
+
+    utterances = [u async for u in seg.segment(_achunks([]))]
+
+    assert utterances == []

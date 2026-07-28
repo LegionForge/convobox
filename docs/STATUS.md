@@ -93,6 +93,32 @@ substantially more than that is now on `main`:
   programmatically against the real model so far, per the README
   support matrix), and individual Kokoro voice files' own licenses
   haven't been independently re-checked the way Piper's were.
+- **A local web UI, 2026-07-25/26** (`--web` / `web.enabled`, opt-in,
+  off by default) — see `docs/WEB-UI-ARCHITECTURE.md` for the full
+  design and build history, `docs/WEB-UI-USAGE.md`/`WEB-UI-DEV.md` for
+  the user/contributor-facing versions. A browser view of a live
+  session (transcripts, backend responses, tool calls, pending
+  approvals) streamed over SSE to every connected tab, plus optional
+  SQLite-persisted history (`web.history_tracking_enabled`, a
+  deliberately separate opt-in from `enabled` — viewing a live session
+  and writing it to disk are different privacy decisions). Built and
+  live-verified across six independent slices: config schema, SQLite
+  storage, a FastAPI app (REST + SSE), wiring into `Orchestrator`'s
+  existing `on_event` hook (found and fixed a real gap here: the first
+  wiring pass only forwarded backend events, not the user's own
+  transcripts — a captured demo session showed replies with no visible
+  prompt until that was fixed), a real `uvicorn` server started
+  alongside the voice loop, and a dependency-free HTML/JS frontend
+  (no React/Vite — deliberately minimal per the design doc's own
+  guidance). `fastapi`/`uvicorn` are the new `web` extra, lazily
+  imported only when `web.enabled` — no dependency cost for anyone who
+  doesn't use it. Not yet built: approving/denying a tool call from the
+  browser (voice/TUI remain the only channels — this needs a real
+  design decision about how a browser decision should interact with a
+  simultaneous voice answer, not just an endpoint) and any
+  remote-access/authentication story (loopback-only by design; a
+  `bind_address` validator rejects a specific non-loopback address,
+  though `0.0.0.0` is still allowed as an explicit choice).
 
 Fully wired and config-driven, all with real-pipeline verification where
 a live microphone session was possible; several items (the TUI's full
