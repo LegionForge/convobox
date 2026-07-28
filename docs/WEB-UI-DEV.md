@@ -10,12 +10,16 @@ it" version for someone about to touch `src/convobox/web/`.
 
 ```
 src/convobox/web/
-├── history.py     HistoryDB -- SQLite storage, no fastapi import at all
-├── stream.py      EventBroadcaster -- in-memory SSE fan-out, stdlib only
-├── bridge.py      WebEventForwarder -- Orchestrator on_event hook
-├── app.py         create_app() -- the FastAPI app, routes, SSE endpoint
+├── history.py       HistoryDB -- SQLite storage, no fastapi import at all
+├── stream.py        EventBroadcaster -- in-memory SSE fan-out, stdlib only
+├── bridge.py        WebEventForwarder + WebApprovalBridge -- Orchestrator
+│                    on_event hook and the approval-gate glue (see below)
+├── settings_api.py  add_settings_routes() -- GET/POST /api/settings/* ,
+│                    reusing scripts/settings_tui.py's own validate/save/
+│                    test contract directly, not a second copy of it
+├── app.py           create_app() -- the FastAPI app, routes, SSE endpoint
 └── static/
-    └── index.html the whole frontend: one file, inline CSS/JS, no build step
+    └── index.html   the whole frontend: one file, inline CSS/JS, no build step
 ```
 
 `history.py`/`stream.py`/`bridge.py` deliberately have **no dependency on
@@ -142,13 +146,13 @@ adding a new event type to render, or a new pane, the pattern to follow:
 
 ## Known gaps (as of this writing)
 
-- No approve/deny UI — a pending `APPROVAL_REQUEST` renders in the
-  transcript like any other event, but there's no way to answer it from the
-  browser. Voice/TUI remain the only channels. Deliberately deferred (see
-  WEB-UI-ARCHITECTURE.md's "Out of scope") — wiring a browser decision back
-  into `Orchestrator`'s approval gate is a real design question (race with
-  a simultaneous voice answer? how does a stale/expired prompt look in two
-  places at once?), not just an endpoint to add.
 - No remote-access story (auth, TLS) — see WEB-UI-USAGE.md's security
   section. Out of scope until there's an actual threat model calling for
   it.
+- Settings edits (`/api/settings/save`) always target whatever
+  `config_path` the running server was started with — there is no
+  hot-reload, so a save only takes effect on the next `run_convobox.py`
+  restart. The API surfaces this the same way the TUI does (see
+  `settings_api.py`'s module docstring); a frontend built against it needs
+  its own "restart needed" messaging rather than implying the change is
+  live.

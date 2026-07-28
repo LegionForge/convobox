@@ -454,7 +454,51 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 - Session comparison
 - Export to PDF/CSV
 - Remote access (requires encryption, auth)
-- Approval UI wiring (approve/deny from browser)
+
+(Approval UI wiring shipped in Phase 2 — see below — it's no longer out of
+scope.)
+
+---
+
+## Phase 2 (Web UI v2)
+
+Built on `feat/web-ui-v2`, several independently-committed slices, after
+Phase 1's viewing-only scope above:
+
+- **Bubble-chat layout + branded top ribbon** — scrollable, mobile-texting-
+  style transcript (user right-aligned, everything else left-aligned),
+  replacing the old flat bordered-box list. Ribbon: LegionForge logo +
+  wordmark, session picker, working "Clear history" button.
+- **Configurable per-role bubble colors** — `display.user_color` /
+  `display.assistant_color` (hex, `#RGB`/`#RRGGBB`), applied as inline CSS
+  custom properties so they override the theme default in both light and
+  dark mode.
+- **Real Approve/Deny/Explain buttons** on a pending `APPROVAL_REQUEST`
+  bubble (`POST /api/sessions/{id}/approval`) — the first web UI capability
+  that *mutates* a live session rather than observing it. `WebApprovalBridge`
+  (`bridge.py`) answers the same `ApprovalPromptGate`/
+  `Orchestrator.resolve_pending_approval` path a spoken approval phrase
+  does; a race with a simultaneous voice answer fails closed (409, "already
+  resolved") rather than double-deciding.
+- **Quit button** (`POST /api/quit`) — ends the whole process (mic loop,
+  backend, web server), not just one decision. Client-side arm/confirm
+  (first click arms, second click within ~4s fires). Signals the real OS
+  process (`os.kill`) the same way a terminal Ctrl+C does, rather than
+  raising anything locally.
+- **Settings-editing REST API** (`settings_api.py`: `GET /api/settings`,
+  `POST /api/settings/schema` / `/validate` / `/save` / `/test`) — full
+  parity target with `scripts/settings_tui.py`'s own edit/validate/save/test
+  contract, reusing that file's `SECTION_SPECS`, `validate_config`,
+  `save_with_backup`, and `probe_*` test hooks directly so the TUI and web
+  UI can never silently drift on what counts as valid. Like the TUI, saves
+  write `convobox.yaml` (backup + atomic replace) but need a restart to
+  take effect — there is no hot-reload.
+
+Each of the above extends the no-auth, loopback-only trust model from
+view-only to a real control surface — see WEB-UI-USAGE.md's security
+section for what that means in practice. Full session-by-session build
+history: `docs/field-notes/` and the project's Obsidian session notes, not
+duplicated here.
 
 ---
 
@@ -554,11 +598,13 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 
 ---
 
-**Status:** Phase 1 viewing scope complete and live-verified end to end --
-history storage, FastAPI app, SSE fan-out, orchestrator wiring, `--web`
-flag, and a minimal HTML/JS frontend all in place -- built across several
-small, independently-committed slices per this project's one-work-set-
-at-a-time convention, not the single ~3-4 day push this doc originally
-estimated. What's left for a fuller Phase 1: approve/deny from the
-browser (deliberately out of scope so far, see "Out of scope" above),
-and docs/WEB-UI-USAGE.md / docs/WEB-UI-DEV.md (Next Steps #6).
+**Status:** Phase 1 (viewing) and Phase 2 (bubble UI, ribbon, per-role
+colors, approve/deny, quit, settings API) both complete and live-verified
+end to end -- built across many small, independently-committed slices per
+this project's one-work-set-at-a-time convention, not the single ~3-4 day
+push this doc originally estimated. What's left: the settings-editing
+*frontend* (the API above exists; the in-browser UI consuming it is later
+Phase 2 scope), configurable user/assistant display names, a live artifact
+pane, and the remaining control-plane ribbon buttons (stop/resume
+listening, restart-on-demand) — see the project's own quickref/session
+notes for current status of each.
