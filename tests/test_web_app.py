@@ -46,18 +46,33 @@ def test_health_check() -> None:
 def test_get_display_config_defaults_to_no_overrides(client: TestClient) -> None:
     response = client.get("/api/config")
     assert response.status_code == 200
-    assert response.json() == {"user_color": None, "assistant_color": None}
+    assert response.json() == {
+        "user_color": None,
+        "assistant_color": None,
+        "user_name": None,
+        "assistant_name": None,
+    }
 
 
-def test_get_display_config_returns_configured_colors() -> None:
+def test_get_display_config_returns_configured_colors_and_names() -> None:
     app = create_app(
         db=HistoryDB(Path(":memory:")),
-        display=DisplayConfig(user_color="#2e7dfb", assistant_color="#f0f0f2"),
+        display=DisplayConfig(
+            user_color="#2e7dfb",
+            assistant_color="#f0f0f2",
+            user_name="JP",
+            assistant_name="Athena",
+        ),
     )
     with TestClient(app) as client:
         response = client.get("/api/config")
     assert response.status_code == 200
-    assert response.json() == {"user_color": "#2e7dfb", "assistant_color": "#f0f0f2"}
+    assert response.json() == {
+        "user_color": "#2e7dfb",
+        "assistant_color": "#f0f0f2",
+        "user_name": "JP",
+        "assistant_name": "Athena",
+    }
 
 
 def test_list_sessions_empty(client: TestClient) -> None:

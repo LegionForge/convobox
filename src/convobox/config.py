@@ -439,6 +439,14 @@ class DisplayConfig(BaseModel):
     # light/dark pair per role.
     user_color: str | None = None
     assistant_color: str | None = None
+    # Display labels for the web UI's bubble "meta" line (e.g. "AI" ->
+    # "Athena"). None (default) keeps index.html's current behavior of
+    # showing the raw event_type ("transcript"/"response"). Only affects
+    # transcript/response bubbles -- tool_call/tool_result/error/
+    # approval_request keep showing their literal event type, since a
+    # custom name there would obscure what kind of event it actually is.
+    user_name: str | None = None
+    assistant_name: str | None = None
 
     @field_validator("user_color", "assistant_color")
     @classmethod

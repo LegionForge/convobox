@@ -129,6 +129,8 @@ def create_app(
         return {
             "user_color": display.user_color,
             "assistant_color": display.assistant_color,
+            "user_name": display.user_name,
+            "assistant_name": display.assistant_name,
         }
 
     @app.get("/api/sessions")

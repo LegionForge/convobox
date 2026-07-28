@@ -390,7 +390,7 @@
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = kind.replace(/_/g, " ");
+    meta.textContent = displayNames[kind] || kind.replace(/_/g, " ");
     bubble.appendChild(meta);
 
     const body = document.createElement("div");
@@ -423,12 +423,20 @@
   // (prefers-color-scheme: dark) block's :root rule regardless of the
   // system theme, so an operator-chosen color applies consistently in
   // both light and dark mode rather than needing a pair per theme.
+  // Populated by loadDisplayConfig() before the first renderEvent() call
+  // (init() awaits it first) -- display.user_name/assistant_name
+  // (convobox.yaml, set via scripts/settings_tui.py or the web Settings
+  // modal's Display tab). null means "show the raw event type", the
+  // existing behavior.
+  let displayNames = { transcript: null, response: null };
+
   async function loadDisplayConfig() {
     try {
       const res = await fetch("/api/config");
       const data = await res.json();
       if (data.user_color) document.documentElement.style.setProperty("--user-bg", data.user_color);
       if (data.assistant_color) document.documentElement.style.setProperty("--assistant-bg", data.assistant_color);
+      displayNames = { transcript: data.user_name || null, response: data.assistant_name || null };
     } catch (err) {
       console.error("failed to load display config", err);
     }

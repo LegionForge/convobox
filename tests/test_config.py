@@ -202,13 +202,25 @@ def test_app_config_wires_a_default_web_config() -> None:
     assert AppConfig().web.enabled is False
 
 
-# --- DisplayConfig: per-role web UI bubble color overrides ------------------
+# --- DisplayConfig: per-role web UI bubble color/name overrides -------------
 
 
 def test_display_config_colors_default_to_none() -> None:
     display = DisplayConfig()
     assert display.user_color is None
     assert display.assistant_color is None
+
+
+def test_display_config_names_default_to_none() -> None:
+    display = DisplayConfig()
+    assert display.user_name is None
+    assert display.assistant_name is None
+
+
+def test_display_config_accepts_arbitrary_names() -> None:
+    display = DisplayConfig(user_name="JP", assistant_name="Athena")
+    assert display.user_name == "JP"
+    assert display.assistant_name == "Athena"
 
 
 def test_display_config_accepts_3_and_6_digit_hex_colors() -> None:

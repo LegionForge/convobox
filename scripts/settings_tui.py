@@ -313,6 +313,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("display", "user_color", "User bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #2e7dfb) for your own speech bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
             FieldSpec("display", "assistant_color", "Assistant bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #f0f0f2) for the AI's response bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
+            FieldSpec("display", "user_name", "User display name", "optional_str", help_text="Label shown on your own speech bubbles in the web UI, e.g. your own name. Leave unset to show the raw event type ('transcript'). Only affects transcript/response bubbles -- tool calls/results/errors/approvals always show their literal event type."),
+            FieldSpec("display", "assistant_name", "Assistant display name", "optional_str", help_text="Label shown on the AI's response bubbles in the web UI, e.g. 'Athena'. Leave unset to show the raw event type ('response')."),
         ),
     ),
 )
