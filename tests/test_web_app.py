@@ -6,11 +6,18 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from convobox.web.app import create_app, sse_lines
-from convobox.web.history import HistoryDB, new_session_id
-from convobox.web.stream import EventBroadcaster
+pytest.importorskip(
+    "fastapi",
+    reason="web UI extra not installed (uv sync --extra web) -- fastapi/uvicorn "
+    "are opt-in, not part of dev, so most CLI/TUI-only installs never pull them in",
+)
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from convobox.web.app import create_app, sse_lines  # noqa: E402
+from convobox.web.history import HistoryDB, new_session_id  # noqa: E402
+from convobox.web.stream import EventBroadcaster  # noqa: E402
 
 
 @pytest.fixture
