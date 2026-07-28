@@ -29,6 +29,7 @@ _EVENT_TYPE_NAMES: dict[BackendEventType, str] = {
     BackendEventType.ERROR: "error",
     BackendEventType.DONE: "done",
     BackendEventType.APPROVAL_REQUEST: "approval_request",
+    BackendEventType.ARTIFACT: "artifact",
 }
 
 

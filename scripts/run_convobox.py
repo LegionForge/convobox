@@ -1709,6 +1709,9 @@ async def run(args: argparse.Namespace) -> None:
             listening_bridge=listening_bridge,
             quit_handler=_self_signal_interrupt,
             config_path=config_path,
+            working_dir=(
+                Path(config.backend.working_dir) if config.backend.working_dir else None
+            ),
         )
         web_uvicorn_config = uvicorn.Config(
             web_app,

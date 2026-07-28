@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
 
 from convobox.config import DisplayConfig, resolve_config_path
+from convobox.web.artifacts import add_artifact_routes
 from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
 from convobox.web.history import HistoryDB
 from convobox.web.settings_api import add_settings_routes
@@ -84,6 +85,7 @@ def create_app(
     listening_bridge: WebListeningBridge | None = None,
     quit_handler: Callable[[], None] | None = None,
     config_path: Path | None = None,
+    working_dir: Path | None = None,
 ) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
     display = display if display is not None else DisplayConfig()
@@ -100,6 +102,7 @@ def create_app(
     )
 
     add_settings_routes(app, config_path if config_path is not None else resolve_config_path())
+    add_artifact_routes(app, working_dir)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

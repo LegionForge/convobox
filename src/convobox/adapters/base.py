@@ -18,6 +18,15 @@ class BackendEventType(str, Enum):
     # adapters never do. `tool`/`tool_input` carry what's pending, the same
     # fields TOOL_CALL uses.
     APPROVAL_REQUEST = "approval_request"
+    # A tool call produced a file worth looking at -- an image, a plot, a
+    # rendered HTML page (docs/ARTIFACT-PANE-SCOPE.md). Deliberately NOT a
+    # heuristic over TOOL_RESULT's tool_output text: no adapter emits this
+    # yet (that's each adapter's own opt-in, one at a time, per the scope
+    # doc's "First Implementation Slice") -- this is just the primitive
+    # existing ahead of any adapter using it. `artifact_path` carries the
+    # path an adapter identified; `tool`/`tool_input` reuse the same
+    # fields TOOL_CALL/TOOL_RESULT use for which call produced it.
+    ARTIFACT = "artifact"
 
 
 class BackendEvent:
@@ -28,12 +37,14 @@ class BackendEvent:
         tool: str | None = None,
         tool_input: str | None = None,
         tool_output: str | None = None,
+        artifact_path: str | None = None,
     ) -> None:
         self.type = type
         self.content = content
         self.tool = tool
         self.tool_input = tool_input
         self.tool_output = tool_output
+        self.artifact_path = artifact_path
 
 
 class BackendAdapter(ABC):
