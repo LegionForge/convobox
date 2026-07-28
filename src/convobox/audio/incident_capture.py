@@ -78,7 +78,7 @@ class IncidentCapture:
         if self._reference_next_expected_at is not None:
             gap_s = now - self._reference_next_expected_at
             if gap_s > _REFERENCE_GAP_TOLERANCE_S:
-                silence = np.zeros(int(round(gap_s * _SAMPLE_RATE)), dtype=np.float32)
+                silence = np.zeros(round(gap_s * _SAMPLE_RATE), dtype=np.float32)
                 self._observe("reference", silence)
         self._observe("reference", audio)
         self._reference_next_expected_at = now + len(audio) / _SAMPLE_RATE
