@@ -657,8 +657,22 @@ did).
   ("1. Atom...") as `"one, and two, and open."`, which was accepted as
   real speech and echoed back ("Heard: 'one, and two, and open.'").
   Different mechanism from `[G8]` (that's silence being misread; this is
-  real, present, audible echo). Not yet tested on headphones. See
+  real, present, audible echo). Tested on headphones -- see `[G10]`. See
   `docs/field-notes/2026-07-26-under-cancelled-echo-is-sometimes-transcribable.md`.
+- **[G10] Headphones reduce but do not eliminate `[G9]`'s under-cancelled
+  echo, and headphone type doesn't materially change the residual rate.**
+  Two back-to-back UAT sessions, same room/mic, only the headset changed:
+  Shokz OpenComm (bone-conduction) logged `UNDER-CANCELLING` on 4.4% of
+  160 AEC windows and a real (STT-transcribed) echo-match on 11.5% of 61
+  barge-ins; MPow H12 (sealed over-ear) logged 3.0% of 66 windows and
+  12.5% of 16 barge-ins -- statistically indistinguishable despite the
+  two headsets sitting at opposite ends of the passive-isolation
+  spectrum. The safety net caught 100% of real matches in both sessions
+  (0 forwarded as real speech). Room acoustics (reflective walls/ceiling,
+  measured -45.9dBFS ambient noise floor from fans/AC) is the more
+  likely lever than headset choice, not yet confirmed against a second
+  room. See
+  `docs/field-notes/2026-07-27-headphone-choice-does-not-eliminate-under-cancelled-echo.md`.
 
 ## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
 
