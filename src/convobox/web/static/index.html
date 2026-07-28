@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ConvoBox</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1a1a1a">
 <style>
   :root {
     color-scheme: light dark;
@@ -844,6 +846,19 @@
     await fetchSchema();
   });
 })();
+</script>
+<script>
+// PWA install-ability (docs/field-notes/2026-07-28-other-claude-code-web-
+// uis-dont-transfer-much.md): app-shell-only caching, sw.js never touches
+// /api/ or the SSE stream -- see that file's own comments. Optional
+// (older browsers without serviceWorker support just skip this).
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch((err) => {
+      console.error("service worker registration failed", err);
+    });
+  });
+}
 </script>
 </body>
 </html>
