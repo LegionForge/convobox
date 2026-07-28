@@ -48,6 +48,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import socket
 import sys
 import time
@@ -1421,6 +1422,35 @@ def _read_pending_key() -> str | None:
         if not msvcrt.kbhit():
             return None
         ch = msvcrt.getwch()
+        if ch == "\x03":
+            # Confirmed live (JP, 2026-07-28): Ctrl+C did nothing during a
+            # --tui session. Root cause traced here -- msvcrt.getwch()
+            # reads Ctrl+C as a literal 0x03 byte from the raw console
+            # input buffer rather than letting it generate the normal
+            # Ctrl+C console event Python's default SIGINT handler would
+            # otherwise turn into a KeyboardInterrupt (a well-known
+            # msvcrt.getch()/getwch() gotcha on Windows -- it bypasses the
+            # console's normal processed-input path). Raising
+            # KeyboardInterrupt directly here would only kill this
+            # background render task (asyncio.create_task'd and never
+            # awaited during normal operation, only cancelled in the main
+            # loop's cleanup) -- the main mic loop would never even
+            # notice. Re-emitting it as a real console event instead
+            # reaches Python's actual signal handler, which delivers a
+            # genuine KeyboardInterrupt to wherever the MAIN task is
+            # awaiting, exactly like an unswallowed Ctrl+C would.
+            #
+            # pid=0, not os.getpid(): Win32's GenerateConsoleCtrlEvent
+            # (what os.kill(..., CTRL_C_EVENT) calls under the hood on
+            # Windows) takes a PROCESS GROUP id, not an arbitrary pid --
+            # 0 means "every process sharing this console," which
+            # reliably includes us. This process's own pid only happens
+            # to equal its process group id if it's the group's leader,
+            # which a python.exe launched as a shell's child normally is
+            # NOT -- passing os.getpid() here would silently fail to
+            # deliver the event in the common case.
+            os.kill(0, signal.CTRL_C_EVENT)
+            return None
         if ch in ("\x00", "\xe0"):
             code = msvcrt.getwch()
             return _WIN_EXTENDED_KEYS.get(code)
