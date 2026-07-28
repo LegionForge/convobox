@@ -8,8 +8,11 @@ unit-testable without spinning up the whole voice loop.
 from __future__ import annotations
 
 import asyncio
+import time
+from typing import Protocol
 
 from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.web.history import HistoryDB, event_to_dict
 from convobox.web.stream import EventBroadcaster
 
@@ -77,3 +80,80 @@ class WebEventForwarder:
             # rather than awaited, same reasoning as _events.put_nowait()
             # elsewhere in the adapters.
             asyncio.ensure_future(self._broadcaster.broadcast(payload))
+
+
+class ApprovalGateLike(Protocol):
+    """The slice of run_convobox.py's ApprovalPromptGate that
+    WebApprovalBridge needs. A Protocol (structural typing) rather than a
+    real import: ApprovalPromptGate lives in scripts/run_convobox.py, which
+    is a script, not part of the installed convobox package -- src/ code
+    must not import from scripts/ (that dependency direction only ever
+    runs the other way, scripts importing from src)."""
+
+    @property
+    def is_waiting(self) -> bool: ...
+
+    @property
+    def pending_explanation(self) -> str | None: ...
+
+    def start_waiting(self, now: float, explanation: str | None = None) -> None: ...
+
+    def cancel_wait(self) -> None: ...
+
+
+class WebApprovalBridge:
+    """Lets the web UI's approve/deny/explain buttons
+    (POST /api/sessions/{id}/approval) answer the same pending backend
+    approval a spoken phrase would.
+
+    Constructed with no targets (create_app() needs something to hand
+    FastAPI's route closures at server-startup time, before the real
+    Orchestrator/ApprovalPromptGate exist yet), then wired via
+    set_targets() a few lines later in run_convobox.py's run(), once both
+    are built. Every method degrades to "nothing pending" if called before
+    set_targets() runs (a request landing in that startup gap), rather
+    than raising.
+    """
+
+    def __init__(self) -> None:
+        self._orchestrator: Orchestrator | None = None
+        self._gate: ApprovalGateLike | None = None
+
+    def set_targets(self, orchestrator: Orchestrator, gate: ApprovalGateLike | None) -> None:
+        self._orchestrator = orchestrator
+        self._gate = gate
+
+    @property
+    def is_pending(self) -> bool:
+        return self._gate is not None and self._gate.is_waiting
+
+    @property
+    def pending_explanation(self) -> str | None:
+        return self._gate.pending_explanation if self._gate is not None else None
+
+    async def decide(self, approved: bool) -> bool:
+        """Approve or deny the pending request. Returns False (nothing
+        changed) if there was no pending request, or the backend no longer
+        had the expected one (same fail-closed case
+        run_convobox.py's own voice path handles) -- either way the caller
+        should surface that as "nothing to decide" rather than a decision
+        having been made."""
+        if self._orchestrator is None or self._gate is None or not self._gate.is_waiting:
+            return False
+        resolved = await self._orchestrator.resolve_pending_approval(approved)
+        if resolved:
+            self._gate.cancel_wait()
+        return resolved
+
+    def extend(self) -> str | None:
+        """Keep the pending request open without deciding it -- the button
+        equivalent of the voice path's "explain"/"discuss" outcomes, which
+        both reset the timeout clock so a request stays answerable while
+        the operator reads it instead of auto-denying out from under them.
+        Returns the explanation text (if any), or None if nothing is
+        pending."""
+        if self._gate is None or not self._gate.is_waiting:
+            return None
+        explanation = self._gate.pending_explanation
+        self._gate.start_waiting(time.monotonic(), explanation)
+        return explanation

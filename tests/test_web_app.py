@@ -249,3 +249,92 @@ async def test_stream_events_broadcasts_a_live_event_over_a_real_socket(
                 pytest.fail("stream closed before a data event arrived")
         finally:
             await broadcast_task
+
+
+# --- POST /api/sessions/{session_id}/approval: the web UI's approve/deny/
+# explain buttons, a non-voice equivalent of the same
+# ApprovalPromptGate/Orchestrator.resolve_pending_approval path a spoken
+# phrase answers. A fake bridge stands in for the real
+# convobox.web.bridge.WebApprovalBridge (whose own decision-forwarding
+# logic is covered by tests/test_web_bridge.py) -- this only tests that
+# the route wires actions/status codes to the bridge correctly. ---
+
+
+class _FakeApprovalBridge:
+    def __init__(self, pending: bool = True, explanation: str | None = None) -> None:
+        self.pending = pending
+        self.explanation = explanation
+        self.decisions: list[bool] = []
+        self.decide_result = True
+        self.extended = False
+
+    @property
+    def is_pending(self) -> bool:
+        return self.pending
+
+    async def decide(self, approved: bool) -> bool:
+        self.decisions.append(approved)
+        if self.decide_result:
+            self.pending = False
+        return self.decide_result
+
+    def extend(self) -> str | None:
+        self.extended = True
+        return self.explanation
+
+
+def test_resolve_approval_with_no_bridge_returns_409(client: TestClient) -> None:
+    response = client.post("/api/sessions/some-session/approval", json={"action": "approve"})
+    assert response.status_code == 409
+
+
+def test_resolve_approval_with_nothing_pending_returns_409() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=_FakeApprovalBridge(pending=False))
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 409
+
+
+def test_resolve_approval_approve_calls_the_bridge_and_returns_approved() -> None:
+    bridge = _FakeApprovalBridge(pending=True)
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "approved", "explanation": None}
+    assert bridge.decisions == [True]
+
+
+def test_resolve_approval_deny_calls_the_bridge_and_returns_denied() -> None:
+    bridge = _FakeApprovalBridge(pending=True)
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "deny"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "denied", "explanation": None}
+    assert bridge.decisions == [False]
+
+
+def test_resolve_approval_explain_extends_and_returns_the_explanation() -> None:
+    bridge = _FakeApprovalBridge(pending=True, explanation="rm -rf .incident-captures/*.wav")
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "explain"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "pending", "explanation": "rm -rf .incident-captures/*.wav"}
+    assert bridge.extended is True
+    assert bridge.decisions == []  # explain never decides anything
+
+
+def test_resolve_approval_when_bridge_reports_it_could_not_deliver_returns_409() -> None:
+    bridge = _FakeApprovalBridge(pending=True)
+    bridge.decide_result = False  # e.g. resolved by voice in the same instant
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 409
+
+
+def test_resolve_approval_rejects_an_unknown_action(client: TestClient) -> None:
+    response = client.post("/api/sessions/s/approval", json={"action": "yolo"})
+    assert response.status_code == 422

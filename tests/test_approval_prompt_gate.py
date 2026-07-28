@@ -49,6 +49,23 @@ def test_observe_transcript_discuss_does_not_end_the_wait() -> None:
     assert gate.is_waiting is True
 
 
+def test_cancel_wait_ends_the_wait_without_a_transcript() -> None:
+    # WebApprovalBridge's path: a decision arrives from the web UI, not a
+    # transcript -- the gate still needs to stop waiting so the mic loop's
+    # own observe_timeout() doesn't later fire "deny" against an
+    # already-resolved (or since-superseded) request.
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    gate.cancel_wait()
+    assert gate.is_waiting is False
+
+
+def test_cancel_wait_when_not_waiting_is_a_harmless_noop() -> None:
+    gate = _gate()
+    gate.cancel_wait()  # must not raise
+    assert gate.is_waiting is False
+
+
 def test_observe_transcript_discuss_resets_the_waiting_clock() -> None:
     gate = _gate(timeout_s=2.5)
     gate.start_waiting(now=10.0)

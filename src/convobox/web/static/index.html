@@ -128,6 +128,35 @@
   .bubble.approval_request { background: var(--assistant-bg); border: 1px solid #e0a030; }
   .bubble.error { background: var(--assistant-bg); color: var(--error-fg); }
   #empty { color: var(--dim); text-align: center; padding: 2rem; }
+
+  /* --- Approval actions: a non-voice equivalent of saying the approval
+     phrase / "no" / "explain" out loud. Text labels carry the meaning
+     (never color alone -- WCAG 1.4.1); the accent border colors below are
+     an extra cue only, and deliberately blue/orange rather than
+     green/red, the collision pair most likely to look identical to
+     red-green colorblind users. --- */
+  .approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+  }
+  .approval-actions button {
+    font-size: 0.8rem;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.3rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .approval-actions button:hover:not(:disabled) { border-color: var(--dim); }
+  .approval-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .approval-actions .approve-btn { border-color: #1a56db; }
+  .approval-actions .deny-btn { border-color: #c2540a; }
+  .approval-note { margin-top: 0.4rem; font-size: 0.75rem; opacity: 0.85; }
 </style>
 </head>
 <body>
@@ -165,6 +194,92 @@
     return kind === "transcript" ? "from-user" : "from-other";
   }
 
+  // The button-row for whichever approval_request is currently the live
+  // one to answer, or null if none. Only one approval can be pending on
+  // the backend at a time (a single process-wide ApprovalPromptGate), but
+  // bubbles are append-only and never removed -- without this, an OLDER
+  // approval's still-enabled buttons would stay clickable in the DOM
+  // after a NEWER request replaced it, and clicking them would wrongly
+  // act on the newer, unrelated request (the backend endpoint has no way
+  // to tell "this click meant the old one").
+  let pendingApprovalActions = null;
+
+  function disableApprovalActions(row, message) {
+    if (!row) return;
+    row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    let note = row.querySelector(".approval-note");
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "approval-note";
+      note.setAttribute("role", "status");
+      row.appendChild(note);
+    }
+    note.textContent = message;
+  }
+
+  function buildApprovalActions() {
+    const row = document.createElement("div");
+    row.className = "approval-actions";
+
+    async function send(action) {
+      row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      let res, data;
+      try {
+        res = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/approval`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        data = await res.json().catch(() => ({}));
+      } catch (err) {
+        console.error("approval action failed", err);
+        row.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+        return;
+      }
+      if (!res.ok) {
+        // Most likely: already resolved by voice, or it timed out, between
+        // this bubble rendering and the click landing -- surface that
+        // plainly and lock the stale controls rather than leaving them
+        // clickable with no explanation (lessons-ui-ux.md: a failed action
+        // must say what happened, not fail silently).
+        disableApprovalActions(row, data.detail || "Could not resolve -- it may have already been answered another way.");
+        if (pendingApprovalActions === row) pendingApprovalActions = null;
+        return;
+      }
+      if (action === "explain") {
+        row.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+        let note = row.querySelector(".approval-note");
+        if (!note) {
+          note = document.createElement("div");
+          note.className = "approval-note";
+          note.setAttribute("role", "status");
+          row.appendChild(note);
+        }
+        note.textContent = data.explanation ? `Kept open: ${data.explanation}` : "Kept open -- timeout reset.";
+        return;
+      }
+      disableApprovalActions(row, action === "approve" ? "Approved." : "Denied.");
+      if (pendingApprovalActions === row) pendingApprovalActions = null;
+    }
+
+    const specs = [
+      ["approve-btn", "Approve", "Runs the pending command now — the same effect as saying the approval phrase out loud.", "Approve the pending command"],
+      ["deny-btn", "Deny", "Blocks the pending command — the same effect as saying “no” out loud.", "Deny the pending command"],
+      ["explain-btn", "Explain", "Keeps this request open and resets its timeout, so it won’t auto-deny while you read the detail above.", "Keep this request open and show its full detail"],
+    ];
+    for (const [cls, label, title, ariaLabel] of specs) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = cls;
+      btn.textContent = label;
+      btn.title = title;
+      btn.setAttribute("aria-label", ariaLabel);
+      btn.addEventListener("click", () => send(label.toLowerCase()));
+      row.appendChild(btn);
+    }
+    return row;
+  }
+
   function renderEvent(ev) {
     const kind = ev.event_type || ev.type || "event";
     if (kind === "done") return;
@@ -190,6 +305,15 @@
       (ev.tool_name ? `${ev.tool_name}(${ev.tool_input || ""})` : "") ||
       (ev.tool_output || "");
     bubble.appendChild(body);
+
+    if (kind === "approval_request") {
+      if (pendingApprovalActions) {
+        disableApprovalActions(pendingApprovalActions, "Superseded by a newer request.");
+      }
+      const actions = buildApprovalActions();
+      bubble.appendChild(actions);
+      pendingApprovalActions = actions;
+    }
 
     row.appendChild(bubble);
     eventsEl.appendChild(row);
@@ -228,6 +352,7 @@
 
   async function loadHistory(sessionId) {
     currentSessionId = sessionId || null;
+    pendingApprovalActions = null;
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
     const data = await res.json();

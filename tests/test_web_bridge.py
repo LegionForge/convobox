@@ -9,7 +9,7 @@ import pytest
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
-from convobox.web.bridge import WebEventForwarder
+from convobox.web.bridge import WebApprovalBridge, WebEventForwarder
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
 
@@ -186,3 +186,142 @@ async def test_forward_transcript_broadcasts_to_a_subscriber() -> None:
 
     payload = queue.get_nowait()
     assert payload == {"type": "transcript", "content": "hello"}
+
+
+# --- WebApprovalBridge: lets the web UI's approve/deny/explain buttons
+# answer the same pending approval a spoken phrase would
+# (ApprovalPromptGate/Orchestrator.resolve_pending_approval). A fake gate
+# (matching ApprovalGateLike's shape) and a fake orchestrator stand in for
+# the real run_convobox.py objects -- this tests the bridge's own
+# decision-forwarding/state-sync logic, not the real approval machinery
+# (covered by tests/test_approval_prompt_gate.py and the orchestrator's
+# own tests). ---
+
+
+class _FakeGate:
+    def __init__(self, waiting: bool = True, explanation: str | None = None) -> None:
+        self._waiting = waiting
+        self._explanation = explanation
+        self.start_waiting_calls: list[tuple[float, str | None]] = []
+        self.cancelled = False
+
+    @property
+    def is_waiting(self) -> bool:
+        return self._waiting
+
+    @property
+    def pending_explanation(self) -> str | None:
+        return self._explanation
+
+    def start_waiting(self, now: float, explanation: str | None = None) -> None:
+        self._waiting = True
+        self._explanation = explanation
+        self.start_waiting_calls.append((now, explanation))
+
+    def cancel_wait(self) -> None:
+        self.cancelled = True
+        self._waiting = False
+
+
+class _FakeOrchestrator:
+    def __init__(self, resolves: bool = True) -> None:
+        self.resolves = resolves
+        self.calls: list[bool] = []
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        self.calls.append(approved)
+        return self.resolves
+
+
+def test_bridge_with_no_targets_reports_nothing_pending() -> None:
+    bridge = WebApprovalBridge()
+    assert bridge.is_pending is False
+    assert bridge.pending_explanation is None
+    assert bridge.extend() is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_with_no_targets_decide_is_a_harmless_false() -> None:
+    bridge = WebApprovalBridge()
+    assert await bridge.decide(True) is False
+
+
+@pytest.mark.asyncio
+async def test_bridge_decide_approve_calls_orchestrator_and_cancels_gate() -> None:
+    gate = _FakeGate(waiting=True)
+    orch = _FakeOrchestrator(resolves=True)
+    bridge = WebApprovalBridge()
+    bridge.set_targets(orch, gate)  # type: ignore[arg-type]
+
+    assert bridge.is_pending is True
+    resolved = await bridge.decide(True)
+
+    assert resolved is True
+    assert orch.calls == [True]
+    assert gate.cancelled is True
+    assert bridge.is_pending is False
+
+
+@pytest.mark.asyncio
+async def test_bridge_decide_deny_passes_false_through() -> None:
+    gate = _FakeGate(waiting=True)
+    orch = _FakeOrchestrator(resolves=True)
+    bridge = WebApprovalBridge()
+    bridge.set_targets(orch, gate)  # type: ignore[arg-type]
+
+    resolved = await bridge.decide(False)
+
+    assert resolved is True
+    assert orch.calls == [False]
+    assert gate.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_bridge_decide_when_gate_not_waiting_skips_the_orchestrator() -> None:
+    gate = _FakeGate(waiting=False)
+    orch = _FakeOrchestrator(resolves=True)
+    bridge = WebApprovalBridge()
+    bridge.set_targets(orch, gate)  # type: ignore[arg-type]
+
+    resolved = await bridge.decide(True)
+
+    assert resolved is False
+    assert orch.calls == []  # never asked -- nothing was pending
+
+
+@pytest.mark.asyncio
+async def test_bridge_decide_leaves_gate_waiting_when_orchestrator_had_nothing_pending() -> None:
+    # Fail-closed race case: the gate thinks a request is pending but the
+    # backend disagrees (already resolved another way). The gate must NOT
+    # be cancelled here -- same "re-open, don't silently treat as decided"
+    # rule run_convobox.py's own voice path follows.
+    gate = _FakeGate(waiting=True)
+    orch = _FakeOrchestrator(resolves=False)
+    bridge = WebApprovalBridge()
+    bridge.set_targets(orch, gate)  # type: ignore[arg-type]
+
+    resolved = await bridge.decide(True)
+
+    assert resolved is False
+    assert gate.cancelled is False
+    assert gate.is_waiting is True
+
+
+def test_bridge_extend_resets_the_wait_and_returns_the_explanation() -> None:
+    gate = _FakeGate(waiting=True, explanation="rm -rf .incident-captures/*.wav")
+    bridge = WebApprovalBridge()
+    bridge.set_targets(_FakeOrchestrator(), gate)  # type: ignore[arg-type]
+
+    explanation = bridge.extend()
+
+    assert explanation == "rm -rf .incident-captures/*.wav"
+    assert gate.is_waiting is True
+    assert len(gate.start_waiting_calls) == 1
+
+
+def test_bridge_extend_returns_none_when_nothing_pending() -> None:
+    gate = _FakeGate(waiting=False)
+    bridge = WebApprovalBridge()
+    bridge.set_targets(_FakeOrchestrator(), gate)  # type: ignore[arg-type]
+
+    assert bridge.extend() is None

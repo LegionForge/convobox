@@ -686,6 +686,19 @@ class ApprovalPromptGate:
         self._waiting_since = now
         self._pending_explanation = explanation
 
+    def cancel_wait(self) -> None:
+        """Clear the wait without going through observe_transcript/
+        observe_timeout -- for a decision delivered through a channel other
+        than the mic (the web UI's approve/deny buttons, see
+        WebApprovalBridge). Without this, the gate would still be
+        `is_waiting` after the web UI resolves a request, and the mic
+        loop's own observe_timeout() would eventually fire "deny" against a
+        request that no longer exists -- resolve_pending_approval's
+        fail-closed handling makes that harmless (it just re-logs an
+        error), but it's still stale state worth clearing explicitly
+        rather than relying on that safety net."""
+        self._waiting_since = None
+
     def observe_timeout(self, now: float) -> Literal["deny"] | None:
         """Call once per watchdog tick. Returns "deny" exactly once, the
         tick the wait silently expires -- the caller must forward an
@@ -1594,6 +1607,14 @@ async def run(args: argparse.Namespace) -> None:
     web_forwarder = None
     web_server = None
     web_server_task: asyncio.Task[None] | None = None
+    # Populated below once the real Orchestrator/ApprovalPromptGate exist
+    # (WebApprovalBridge.set_targets) -- create_app() needs something to
+    # hand its route closures at server-startup time, which happens here,
+    # before either of those is built. None until config.web.enabled AND
+    # a real approval_phrase are both configured (matches approval_gate's
+    # own condition below) -- the /api/sessions/{id}/approval endpoint
+    # reports "nothing pending" via approval_bridge itself in that case.
+    approval_bridge = None
     if config.web.enabled:
         # Lazy, opt-in import: fastapi/uvicorn are the "web" extra (`uv sync
         # --extra web`), not a main dependency -- most CLI/TUI-only users
@@ -1603,6 +1624,7 @@ async def run(args: argparse.Namespace) -> None:
             import uvicorn
 
             from convobox.web.app import create_app
+            from convobox.web.bridge import WebApprovalBridge
         except ImportError as e:
             raise ImportError(
                 "web.enabled is set but the 'web' extra isn't installed. "
@@ -1620,7 +1642,13 @@ async def run(args: argparse.Namespace) -> None:
             history=web_app_history if config.web.history_tracking_enabled else None,
             broadcaster=web_broadcaster,
         )
-        web_app = create_app(db=web_app_history, broadcaster=web_broadcaster, display=config.display)
+        approval_bridge = WebApprovalBridge()
+        web_app = create_app(
+            db=web_app_history,
+            broadcaster=web_broadcaster,
+            display=config.display,
+            approval_bridge=approval_bridge,
+        )
         web_uvicorn_config = uvicorn.Config(
             web_app,
             host=config.web.bind_address,
@@ -1662,6 +1690,8 @@ async def run(args: argparse.Namespace) -> None:
         else None
     )
     adapter.set_interactive_approvals(approval_gate is not None)
+    if approval_bridge is not None:
+        approval_bridge.set_targets(orchestrator, approval_gate)
     error_ladder = RecognitionErrorLadder()
 
     log.info(
