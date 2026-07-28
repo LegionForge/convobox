@@ -82,6 +82,17 @@
   }
   .ribbon button:hover:not(:disabled) { border-color: var(--dim); }
   .ribbon button:disabled { opacity: 0.45; cursor: not-allowed; }
+  /* Armed = primed to actually quit on the next click. A distinct fill
+     color plus the text itself changing ("Click again to quit") -- never
+     color alone (WCAG 1.4.1), same rule as everywhere else in this file.
+     A fixed #b00020 in both themes, not --error-fg (dark mode's #ff6b6b
+     is tuned as TEXT on a dark background, not as a fill under WHITE
+     text -- that pairing falls well short of the 4.5:1 minimum). */
+  .ribbon button.quit-btn.armed {
+    background: #b00020;
+    border-color: #b00020;
+    color: #ffffff;
+  }
 
   /* --- Chat: scrollable, mobile-texting-style bubbles. --- */
   main {
@@ -169,6 +180,7 @@
   <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
   <button disabled title="Coming soon">Stop listening</button>
   <button disabled title="Coming soon">Settings</button>
+  <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
 <main>
   <div id="events">
@@ -184,6 +196,7 @@
   const statusEl = document.getElementById("status");
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
+  const quitBtn = document.getElementById("quit-btn");
   let currentSessionId = null;
 
   // transcript (the user's own speech) renders on the right, like an
@@ -390,6 +403,43 @@
     if (!currentSessionId) return;
     await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/clear`, { method: "POST" });
     await loadHistory(currentSessionId);
+  });
+
+  // Two clicks required: the first "arms" it (button restyles + relabels
+  // to make the primed state unmistakable -- never color alone), the
+  // second actually quits. Auto-disarms after a few seconds so an
+  // accidental first click doesn't leave a live-fire button sitting
+  // around. Ends the WHOLE ConvoBox process (mic, backend, and this
+  // page's own connection) -- the fetch erroring out afterward is the
+  // expected shape of that, not a bug.
+  let quitArmed = false;
+  let quitArmTimer = null;
+
+  quitBtn.addEventListener("click", async () => {
+    if (!quitArmed) {
+      quitArmed = true;
+      quitBtn.classList.add("armed");
+      quitBtn.textContent = "Click again to quit";
+      quitBtn.title = "This will actually end the session. Click elsewhere or wait a few seconds to cancel.";
+      quitArmTimer = setTimeout(() => {
+        quitArmed = false;
+        quitBtn.classList.remove("armed");
+        quitBtn.textContent = "Quit";
+        quitBtn.title = "Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.";
+      }, 4000);
+      return;
+    }
+    clearTimeout(quitArmTimer);
+    quitBtn.disabled = true;
+    quitBtn.textContent = "Quitting…";
+    try {
+      await fetch("/api/quit", { method: "POST" });
+    } catch (err) {
+      // The connection dying mid-request is the expected shape of a
+      // process actually quitting, not a real error.
+    }
+    statusEl.textContent = "session ended";
+    statusEl.className = "disconnected";
   });
 
   (async function init() {

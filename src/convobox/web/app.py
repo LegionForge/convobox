@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
-
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +27,7 @@ from convobox.web.stream import EventBroadcaster
 
 class ApprovalDecision(BaseModel):
     action: Literal["approve", "deny", "explain"]
+
 
 # Loopback-only, any port -- CORSMiddleware's allow_origins does an exact
 # string match (no mid-string "*" wildcard support despite what a plain
@@ -77,6 +76,7 @@ def create_app(
     broadcaster: EventBroadcaster | None = None,
     display: DisplayConfig | None = None,
     approval_bridge: WebApprovalBridge | None = None,
+    quit_handler: Callable[[], None] | None = None,
 ) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
     display = display if display is not None else DisplayConfig()
@@ -95,6 +95,25 @@ def create_app(
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/api/quit")
+    async def quit_convobox() -> dict[str, str]:
+        # Confirmation lives client-side (the button arms on the first
+        # click, fires on the second) -- this endpoint just does what
+        # it's told the moment it's called, same
+        # trust boundary as every other mutating route here (no auth,
+        # loopback-only). quit_handler signals the real OS process
+        # (WebApprovalBridge's sibling primitive, run_convobox.py's
+        # _self_signal_interrupt) rather than doing anything itself here --
+        # this request's own task is not the one that needs to unwind.
+        if quit_handler is None:
+            raise HTTPException(
+                503,
+                "no live session to quit -- this only works during a real "
+                "run_convobox.py --web session, not a disconnected preview",
+            )
+        quit_handler()
+        return {"status": "quitting"}
 
     @app.get("/api/config")
     async def get_display_config() -> dict[str, str | None]:

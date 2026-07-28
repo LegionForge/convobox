@@ -1402,6 +1402,39 @@ _POSIX_CSI_FINAL = {"A": "UP", "B": "DOWN", "H": "HOME", "F": "END"}
 _POSIX_CSI_TILDE = {"5": "PGUP", "6": "PGDN"}
 
 
+def _self_signal_interrupt() -> None:
+    """Deliver a real interrupt to this process, reaching the MAIN task's
+    own try/finally shutdown path -- not a plain `raise KeyboardInterrupt`,
+    which would only unwind whichever task happens to be running at the
+    call site. Two call sites need exactly this: _read_pending_key's
+    Windows Ctrl+C workaround (below -- msvcrt.getwch() reads Ctrl+C as a
+    literal byte rather than letting it generate the console event
+    Python's SIGINT handler would otherwise catch) and the web UI's Quit
+    button (POST /api/quit, src/convobox/web/app.py) -- both run inside a
+    task that is never awaited during normal operation (the TUI's render
+    task; the web server's own request-handling task), so raising there
+    directly would die unnoticed instead of reaching the shutdown code.
+    Re-emitting a real OS-level interrupt instead reaches Python's actual
+    signal handler, which delivers KeyboardInterrupt to wherever the MAIN
+    task is awaiting -- exactly like an unswallowed terminal Ctrl+C.
+    """
+    if sys.platform == "win32":
+        # pid=0, not os.getpid(): Win32's GenerateConsoleCtrlEvent (what
+        # os.kill(..., CTRL_C_EVENT) calls under the hood on Windows)
+        # takes a PROCESS GROUP id, not an arbitrary pid -- 0 means
+        # "every process sharing this console," which reliably includes
+        # us. This process's own pid only happens to equal its process
+        # group id if it's the group's leader, which a python.exe
+        # launched as a shell's child normally is NOT -- passing
+        # os.getpid() here would silently fail to deliver the event in
+        # the common case.
+        os.kill(0, signal.CTRL_C_EVENT)
+    else:
+        # POSIX has no such process-group subtlety for SIGINT -- signaling
+        # your own pid is the standard, reliable form.
+        os.kill(os.getpid(), signal.SIGINT)
+
+
 def _read_pending_key() -> str | None:
     """Non-blocking single-keypress read for the conversation TUI's scroll
     controls. Returns None immediately when no key is waiting -- safe to
@@ -1430,26 +1463,8 @@ def _read_pending_key() -> str | None:
             # Ctrl+C console event Python's default SIGINT handler would
             # otherwise turn into a KeyboardInterrupt (a well-known
             # msvcrt.getch()/getwch() gotcha on Windows -- it bypasses the
-            # console's normal processed-input path). Raising
-            # KeyboardInterrupt directly here would only kill this
-            # background render task (asyncio.create_task'd and never
-            # awaited during normal operation, only cancelled in the main
-            # loop's cleanup) -- the main mic loop would never even
-            # notice. Re-emitting it as a real console event instead
-            # reaches Python's actual signal handler, which delivers a
-            # genuine KeyboardInterrupt to wherever the MAIN task is
-            # awaiting, exactly like an unswallowed Ctrl+C would.
-            #
-            # pid=0, not os.getpid(): Win32's GenerateConsoleCtrlEvent
-            # (what os.kill(..., CTRL_C_EVENT) calls under the hood on
-            # Windows) takes a PROCESS GROUP id, not an arbitrary pid --
-            # 0 means "every process sharing this console," which
-            # reliably includes us. This process's own pid only happens
-            # to equal its process group id if it's the group's leader,
-            # which a python.exe launched as a shell's child normally is
-            # NOT -- passing os.getpid() here would silently fail to
-            # deliver the event in the common case.
-            os.kill(0, signal.CTRL_C_EVENT)
+            # console's normal processed-input path).
+            _self_signal_interrupt()
             return None
         if ch in ("\x00", "\xe0"):
             code = msvcrt.getwch()
@@ -1678,6 +1693,7 @@ async def run(args: argparse.Namespace) -> None:
             broadcaster=web_broadcaster,
             display=config.display,
             approval_bridge=approval_bridge,
+            quit_handler=_self_signal_interrupt,
         )
         web_uvicorn_config = uvicorn.Config(
             web_app,

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from convobox.tui.state import ConversationTuiState
-from scripts.run_convobox import _handle_tui_key, _read_pending_key
+from scripts.run_convobox import _handle_tui_key, _read_pending_key, _self_signal_interrupt
 
 
 def test_tab_switches_focus_pane() -> None:
@@ -122,3 +122,33 @@ def test_read_pending_key_returns_none_without_reading_when_no_key_pending(
 
     assert result is None
     fake.getwch.assert_not_called()
+
+
+# --- _self_signal_interrupt: the shared primitive behind both the Ctrl+C
+# fix above and the web UI's Quit button (POST /api/quit) -- a real OS
+# signal, not a plain raised exception, is what actually reaches the main
+# task from a call site that isn't it (see the function's own docstring). ---
+
+
+def test_self_signal_interrupt_uses_ctrl_c_event_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("signal.CTRL_C_EVENT", 0, raising=False)
+    kill = MagicMock()
+    monkeypatch.setattr("os.kill", kill)
+
+    _self_signal_interrupt()
+
+    kill.assert_called_once_with(0, 0)  # pid=0 (process group), not os.getpid()
+
+
+def test_self_signal_interrupt_uses_sigint_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    kill = MagicMock()
+    monkeypatch.setattr("os.kill", kill)
+    monkeypatch.setattr("os.getpid", lambda: 4242)
+
+    _self_signal_interrupt()
+
+    kill.assert_called_once_with(4242, signal.SIGINT)

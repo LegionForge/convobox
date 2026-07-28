@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -338,3 +339,24 @@ def test_resolve_approval_when_bridge_reports_it_could_not_deliver_returns_409()
 def test_resolve_approval_rejects_an_unknown_action(client: TestClient) -> None:
     response = client.post("/api/sessions/s/approval", json={"action": "yolo"})
     assert response.status_code == 422
+
+
+# --- POST /api/quit: the web UI's Quit button. quit_handler is a plain
+# callable (run_convobox.py passes its own _self_signal_interrupt) --
+# unlike approval_bridge there's no per-request state to inspect, so a
+# bare MagicMock is enough to prove the route calls it. ---
+
+
+def test_quit_with_no_handler_returns_503(client: TestClient) -> None:
+    response = client.post("/api/quit")
+    assert response.status_code == 503
+
+
+def test_quit_calls_the_handler_and_returns_quitting() -> None:
+    handler = MagicMock()
+    app = create_app(db=HistoryDB(Path(":memory:")), quit_handler=handler)
+    with TestClient(app) as client:
+        response = client.post("/api/quit")
+    assert response.status_code == 200
+    assert response.json() == {"status": "quitting"}
+    handler.assert_called_once_with()
