@@ -59,6 +59,15 @@ def test_schema_swaps_to_piper_fields_when_engine_is_piper(client: TestClient) -
     assert "model_path" not in keys
 
 
+def test_schema_exposes_unset_sentinel_for_device_fields(client: TestClient) -> None:
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    audio_section = next(s for s in response.json()["sections"] if s["key"] == "audio")
+    input_device = next(f for f in audio_section["fields"] if f["key"] == "input_device")
+    assert input_device["unset_value"] == "(system default)"
+    assert input_device["choices"][0] == input_device["unset_value"]
+
+
 def test_validate_reports_error_for_unsupported_backend(client: TestClient) -> None:
     values = client.get("/api/settings").json()["values"]
     values["backend"]["name"] = "not-a-real-backend"

@@ -54,15 +54,35 @@ def _draft_config(values: dict[str, Any]) -> AppConfig:
         raise HTTPException(422, f"invalid settings payload: {exc}") from None
 
 
-def _field_to_dict(spec: Any, config: AppConfig, choices_for: Any) -> dict[str, Any]:
-    return {
+def _field_to_dict(spec: Any, config: AppConfig, settings_tui: Any) -> dict[str, Any]:
+    """`choices` come straight from the TUI's own live enumeration
+    (real connected devices, real downloaded voices, ...). `unset_value`/
+    `unavailable_value` surface the TUI's own sentinel strings (e.g.
+    "(system default)" for a None device) so the frontend can map a
+    picked sentinel back to null/disabled instead of hardcoding those
+    literal strings itself and silently drifting if settings_tui.py's
+    constants ever change.
+    """
+    d: dict[str, Any] = {
         "section": spec.section,
         "key": spec.key,
         "label": spec.label,
         "kind": spec.kind,
         "help_text": spec.help_text,
-        "choices": list(choices_for(spec, config)),
+        "choices": list(settings_tui._choices_for(spec, config)),
+        "unset_value": None,
+        "unavailable_value": None,
     }
+    if spec.kind == "device":
+        d["unset_value"] = settings_tui._SYSTEM_DEFAULT
+    elif spec.kind == "piper_speaker":
+        d["unset_value"] = settings_tui._PIPER_SPEAKER_DEFAULT
+        d["unavailable_value"] = settings_tui._PIPER_SPEAKER_UNAVAILABLE
+    elif spec.kind == "kokoro_voice":
+        d["unavailable_value"] = settings_tui._KOKORO_VOICE_UNAVAILABLE
+    elif spec.kind == "piper_voice":
+        d["unavailable_value"] = settings_tui._PIPER_VOICE_UNAVAILABLE
+    return d
 
 
 def add_settings_routes(app: FastAPI, config_path: Path) -> None:
@@ -91,10 +111,7 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
                 {
                     "key": section.key,
                     "label": section.label,
-                    "fields": [
-                        _field_to_dict(spec, config, settings_tui._choices_for)
-                        for spec in fields
-                    ],
+                    "fields": [_field_to_dict(spec, config, settings_tui) for spec in fields],
                 }
             )
         return {"sections": sections}
