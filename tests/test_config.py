@@ -186,7 +186,7 @@ def test_web_config_allows_0_0_0_0_as_an_explicit_choice() -> None:
 
 def test_web_config_rejects_a_specific_non_loopback_address() -> None:
     with pytest.raises(ValueError, match="non-loopback"):
-        WebConfig(bind_address="192.168.1.50")
+        WebConfig(bind_address="203.0.113.50")
 
 
 def test_web_config_rejects_an_out_of_range_port() -> None:
