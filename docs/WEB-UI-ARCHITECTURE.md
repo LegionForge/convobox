@@ -599,12 +599,18 @@ duplicated here.
 ---
 
 **Status:** Phase 1 (viewing) and Phase 2 (bubble UI, ribbon, per-role
-colors, approve/deny, quit, settings API) both complete and live-verified
-end to end -- built across many small, independently-committed slices per
-this project's one-work-set-at-a-time convention, not the single ~3-4 day
-push this doc originally estimated. What's left: the settings-editing
-*frontend* (the API above exists; the in-browser UI consuming it is later
-Phase 2 scope), configurable user/assistant display names, a live artifact
-pane, and the remaining control-plane ribbon buttons (stop/resume
+colors, approve/deny, quit, settings API + a full settings-editing
+frontend) both complete and live-verified end to end -- built across many
+small, independently-committed slices per this project's one-work-set-
+at-a-time convention, not the single ~3-4 day push this doc originally
+estimated. The Settings modal (enabled ribbon button, generic renderer
+driven entirely by `/api/settings/schema`) was live-verified via
+BrowserOS against a scratch copy of a real `convobox.yaml`: live
+hardware/voice enumeration, the TTS engine kokoro/piper conditional
+field swap, save-writes-only-changed-fields with a backup, and the
+close-with-unsaved-changes arm/confirm/discard path all confirmed
+working end to end. What's left: configurable user/assistant display
+names, a live artifact pane, per-field/per-section Settings Test-probe
+wiring, and the remaining control-plane ribbon buttons (stop/resume
 listening, restart-on-demand) — see the project's own quickref/session
 notes for current status of each.
