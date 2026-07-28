@@ -175,6 +175,37 @@ def test_forward_transcript_with_no_history_does_not_raise() -> None:
     forwarder.forward_transcript("hello")  # must not raise
 
 
+# --- forward_status: the mic loop's own listening/capturing/speaking/
+# working/waiting/paused activity state, broadcast live but never
+# persisted (it's ephemeral, not a conversation event). ---
+
+
+@pytest.mark.asyncio
+async def test_forward_status_broadcasts_to_a_subscriber() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder.forward_status("paused")
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait() == {"type": "status", "status": "paused"}
+
+
+def test_forward_status_never_touches_history(db: HistoryDB) -> None:
+    session_id = new_session_id()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
+
+    forwarder.forward_status("listening")  # must not raise or persist
+
+    assert db.get_session_events(session_id) == []
+
+
+def test_forward_status_with_no_broadcaster_does_not_raise() -> None:
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=None)
+    forwarder.forward_status("working")  # must not raise
+
+
 @pytest.mark.asyncio
 async def test_forward_transcript_broadcasts_to_a_subscriber() -> None:
     broadcaster = EventBroadcaster()

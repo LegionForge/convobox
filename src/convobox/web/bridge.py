@@ -73,6 +73,15 @@ class WebEventForwarder:
             self._history.append_event(self._session_id, "transcript", user_transcript=text)
         self._broadcast({"type": "transcript", "content": text})
 
+    def forward_status(self, status: str) -> None:
+        """The mic loop's own activity state (listening/capturing/speaking/
+        working/waiting/paused -- the same vocabulary _working_watchdog
+        already computes for a TUI's status line), broadcast to the web UI
+        too. Never persisted to history -- this is live/ephemeral, not a
+        conversation event; a page reload gets it fresh from the next
+        broadcast, not from replayed history."""
+        self._broadcast({"type": "status", "status": status})
+
     def _broadcast(self, payload: dict[str, object]) -> None:
         if self._broadcaster is not None:
             # Orchestrator._on_event calls its hook synchronously from

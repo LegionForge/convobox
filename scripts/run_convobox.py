@@ -1091,6 +1091,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         os.system("")  # nosec B605 B607
     interval = 1.0
     was_playing = False
+    last_broadcast_status: str | None = None
     while True:
         await asyncio.sleep(interval)
         busy, playing = adapter.is_busy(), player.is_playing()
@@ -1158,36 +1159,42 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                     "approval timeout fired but no pending backend request could be declined"
                 )
         was_playing = playing
+        # Computed unconditionally (not just when a TUI is active) so the
+        # web UI's status indicator has the same live signal the TUI
+        # always had -- broadcast below only on CHANGE, not every 1s tick,
+        # to keep this a handful of small SSE frames per session rather
+        # than a poll.
+        waiting_hint: str | None = None
+        if listening_gate is not None and listening_gate.is_paused:
+            status = "paused"
+        elif approval_gate is not None and approval_gate.is_waiting:
+            status = "waiting"
+            waiting_hint = "approval needed — say your approval phrase or 'no'"
+        elif continue_gate is not None and continue_gate.is_waiting:
+            # A tiered response just finished speaking and we're holding
+            # back more, waiting for the user to say "continue" (or just
+            # carry on). This is NOT the same as idle LISTENING -- the
+            # ball is in the user's court and the session is blocked on
+            # their reply. Surface it as a distinct WAITING state so the
+            # user can tell "are you still thinking?" from "are you
+            # waiting on me?" (UAT finding during the AEC/barge-in test:
+            # the old code fell through to LISTENING here).
+            status = "waiting"
+            waiting_hint = "say 'continue' for more"
+        elif playing:
+            status = "speaking"
+        elif busy:
+            status = "working"
+        elif segmenter is not None and segmenter.in_speech:
+            status = "capturing"
+        else:
+            status = "listening"
         if tui_state is not None:
-            if listening_gate is not None and listening_gate.is_paused:
-                tui_state.status = "paused"
-                tui_state.waiting_hint = None
-            elif approval_gate is not None and approval_gate.is_waiting:
-                tui_state.status = "waiting"
-                tui_state.waiting_hint = "approval needed — say your approval phrase or 'no'"
-            elif continue_gate is not None and continue_gate.is_waiting:
-                # A tiered response just finished speaking and we're holding
-                # back more, waiting for the user to say "continue" (or just
-                # carry on). This is NOT the same as idle LISTENING -- the
-                # ball is in the user's court and the session is blocked on
-                # their reply. Surface it as a distinct WAITING state so the
-                # user can tell "are you still thinking?" from "are you
-                # waiting on me?" (UAT finding during the AEC/barge-in test:
-                # the old code fell through to LISTENING here).
-                tui_state.status = "waiting"
-                tui_state.waiting_hint = "say 'continue' for more"
-            elif playing:
-                tui_state.status = "speaking"
-                tui_state.waiting_hint = None
-            elif busy:
-                tui_state.status = "working"
-                tui_state.waiting_hint = None
-            elif segmenter is not None and segmenter.in_speech:
-                tui_state.status = "capturing"
-                tui_state.waiting_hint = None
-            else:
-                tui_state.status = "listening"
-                tui_state.waiting_hint = None
+            tui_state.status = status
+            tui_state.waiting_hint = waiting_hint
+        if web_forwarder is not None and status != last_broadcast_status:
+            web_forwarder.forward_status(status)
+            last_broadcast_status = status
 
 
 def _render_approval_explanation_verbose(
