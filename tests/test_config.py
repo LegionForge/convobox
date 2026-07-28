@@ -7,6 +7,7 @@ import pytest
 from convobox.config import (
     AppConfig,
     AudioConfig,
+    DisplayConfig,
     InteractionConfig,
     WebConfig,
     aec_estimate_path,
@@ -199,3 +200,30 @@ def test_web_config_rejects_an_out_of_range_port() -> None:
 def test_app_config_wires_a_default_web_config() -> None:
     assert isinstance(AppConfig().web, WebConfig)
     assert AppConfig().web.enabled is False
+
+
+# --- DisplayConfig: per-role web UI bubble color overrides ------------------
+
+
+def test_display_config_colors_default_to_none() -> None:
+    display = DisplayConfig()
+    assert display.user_color is None
+    assert display.assistant_color is None
+
+
+def test_display_config_accepts_3_and_6_digit_hex_colors() -> None:
+    assert DisplayConfig(user_color="#fff").user_color == "#fff"
+    assert DisplayConfig(user_color="#2e7dfb").user_color == "#2e7dfb"
+    assert DisplayConfig(assistant_color="#F0F0F2").assistant_color == "#F0F0F2"
+
+
+def test_display_config_rejects_a_non_hex_color() -> None:
+    with pytest.raises(ValueError, match="not a valid hex color"):
+        DisplayConfig(user_color="blue")
+    with pytest.raises(ValueError, match="not a valid hex color"):
+        DisplayConfig(assistant_color="#12345")
+
+
+def test_app_config_wires_a_default_display_config() -> None:
+    assert isinstance(AppConfig().display, DisplayConfig)
+    assert AppConfig().display.user_color is None

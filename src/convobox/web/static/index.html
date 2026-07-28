@@ -196,6 +196,23 @@
     row.scrollIntoView({ block: "end" });
   }
 
+  // Per-role bubble color overrides (convobox.yaml's display.user_color /
+  // display.assistant_color, set via scripts/settings_tui.py). Setting
+  // these as inline styles on the root element outranks the @media
+  // (prefers-color-scheme: dark) block's :root rule regardless of the
+  // system theme, so an operator-chosen color applies consistently in
+  // both light and dark mode rather than needing a pair per theme.
+  async function loadDisplayConfig() {
+    try {
+      const res = await fetch("/api/config");
+      const data = await res.json();
+      if (data.user_color) document.documentElement.style.setProperty("--user-bg", data.user_color);
+      if (data.assistant_color) document.documentElement.style.setProperty("--assistant-bg", data.assistant_color);
+    } catch (err) {
+      console.error("failed to load display config", err);
+    }
+  }
+
   async function loadSessions() {
     const res = await fetch("/api/sessions");
     const data = await res.json();
@@ -251,6 +268,7 @@
   });
 
   (async function init() {
+    await loadDisplayConfig();
     const latest = await loadSessions();
     await loadHistory(latest);
     connectStream();

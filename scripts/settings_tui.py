@@ -307,6 +307,14 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
         ),
     ),
+    SectionSpec(
+        key="display",
+        label="Display",
+        fields=(
+            FieldSpec("display", "user_color", "User bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #2e7dfb) for your own speech bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
+            FieldSpec("display", "assistant_color", "Assistant bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #f0f0f2) for the AI's response bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
+        ),
+    ),
 )
 
 

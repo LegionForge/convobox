@@ -1620,7 +1620,7 @@ async def run(args: argparse.Namespace) -> None:
             history=web_app_history if config.web.history_tracking_enabled else None,
             broadcaster=web_broadcaster,
         )
-        web_app = create_app(db=web_app_history, broadcaster=web_broadcaster)
+        web_app = create_app(db=web_app_history, broadcaster=web_broadcaster, display=config.display)
         web_uvicorn_config = uvicorn.Config(
             web_app,
             host=config.web.bind_address,

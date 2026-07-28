@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -424,6 +425,32 @@ class BackendProfileConfig(BaseModel):
     model: str | None = None
 
 
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+class DisplayConfig(BaseModel):
+    # Per-role bubble background color overrides for the web UI
+    # (docs/WEB-UI-ARCHITECTURE.md). None (default) keeps
+    # web/static/index.html's own built-in light/dark theme colors
+    # untouched. When set, the color applies in BOTH light and dark mode
+    # alike -- the frontend sets it as an inline CSS custom property on
+    # the root element, which outranks the @media-scoped :root defaults
+    # regardless of the system theme, rather than needing a separate
+    # light/dark pair per role.
+    user_color: str | None = None
+    assistant_color: str | None = None
+
+    @field_validator("user_color", "assistant_color")
+    @classmethod
+    def _validate_hex_color(cls, v: str | None) -> str | None:
+        if v is not None and not _HEX_COLOR_RE.match(v):
+            raise ValueError(
+                f"{v!r} is not a valid hex color -- use #RGB or #RRGGBB, "
+                "e.g. #2e7dfb"
+            )
+        return v
+
+
 class AppConfig(BaseModel):
     audio: AudioConfig = Field(default_factory=AudioConfig)
     vad: VADConfig = Field(default_factory=VADConfig)
@@ -435,6 +462,7 @@ class AppConfig(BaseModel):
     backend_profiles: dict[str, BackendProfileConfig] = Field(default_factory=dict)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    display: DisplayConfig = Field(default_factory=DisplayConfig)
 
 
 def resolve_config_path(path: str | Path | None = None) -> Path:

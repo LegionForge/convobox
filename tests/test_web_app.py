@@ -15,6 +15,7 @@ pytest.importorskip(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from convobox.config import DisplayConfig  # noqa: E402
 from convobox.web.app import create_app, sse_lines  # noqa: E402
 from convobox.web.history import HistoryDB, new_session_id  # noqa: E402
 from convobox.web.stream import EventBroadcaster  # noqa: E402
@@ -39,6 +40,23 @@ def test_health_check() -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_get_display_config_defaults_to_no_overrides(client: TestClient) -> None:
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json() == {"user_color": None, "assistant_color": None}
+
+
+def test_get_display_config_returns_configured_colors() -> None:
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        display=DisplayConfig(user_color="#2e7dfb", assistant_color="#f0f0f2"),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json() == {"user_color": "#2e7dfb", "assistant_color": "#f0f0f2"}
 
 
 def test_list_sessions_empty(client: TestClient) -> None:

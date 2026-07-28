@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
+from convobox.config import DisplayConfig
 from convobox.web.history import HistoryDB
 from convobox.web.stream import EventBroadcaster
 
@@ -62,8 +63,14 @@ async def sse_lines(
             yield ": heartbeat\n\n"
 
 
-def create_app(*, db: HistoryDB, broadcaster: EventBroadcaster | None = None) -> FastAPI:
+def create_app(
+    *,
+    db: HistoryDB,
+    broadcaster: EventBroadcaster | None = None,
+    display: DisplayConfig | None = None,
+) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
+    display = display if display is not None else DisplayConfig()
     app = FastAPI(title="ConvoBox Web UI")
     app.state.db = db
     app.state.broadcaster = broadcaster
@@ -79,6 +86,18 @@ def create_app(*, db: HistoryDB, broadcaster: EventBroadcaster | None = None) ->
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/config")
+    async def get_display_config() -> dict[str, str | None]:
+        # Deliberately scoped to display-only fields, not the whole
+        # AppConfig -- this endpoint has no auth (same loopback-only trust
+        # model as everything else here), and AppConfig carries fields
+        # (backend.working_dir, backend.command, ...) that shouldn't be
+        # handed to any page this browser happens to load.
+        return {
+            "user_color": display.user_color,
+            "assistant_color": display.assistant_color,
+        }
 
     @app.get("/api/sessions")
     async def list_sessions() -> dict[str, list[dict[str, str]]]:
