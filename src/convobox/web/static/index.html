@@ -105,9 +105,22 @@
     color: #ffffff;
   }
 
+  /* --- Row below the ribbon: chat on the left, the artifact pane (when
+     open) on the right. min-height: 0 on both the row and its scrolling
+     children is required for a flex child to actually scroll instead of
+     stretching its parent -- a well-known flexbox gotcha, not optional
+     here since both panes independently scroll their own content. --- */
+  .body-row {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+  }
+
   /* --- Chat: scrollable, mobile-texting-style bubbles. --- */
   main {
     flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -179,6 +192,54 @@
   .approval-actions .approve-btn { border-color: #1a56db; }
   .approval-actions .deny-btn { border-color: #c2540a; }
   .approval-note { margin-top: 0.4rem; font-size: 0.75rem; opacity: 0.85; }
+
+  /* --- Artifact pane: opens on the right when a tool call produces
+     something worth looking at (docs/ARTIFACT-PANE-SCOPE.md). Closed by
+     default (hidden), v1 scope: one pane, latest artifact only -- a
+     later ARTIFACT event (same path or a different one) replaces this
+     pane's content rather than opening a second pane or keeping a
+     history/gallery. Image/HTML rendering only; everything else in the
+     serving route's own allowlist (pdf/csv/txt) falls back to a plain
+     download link, not a bespoke viewer. --- */
+  #artifact-pane {
+    flex: 0 0 min(420px, 40vw);
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: var(--ribbon-bg);
+  }
+  #artifact-pane[hidden] { display: none; }
+  .artifact-pane-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+  }
+  .artifact-pane-header span {
+    font-size: 0.8rem; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;
+  }
+  .artifact-pane-header button {
+    font-size: 1.1rem; line-height: 1; background: none; border: none;
+    color: var(--fg); cursor: pointer; padding: 0.2rem 0.5rem; border-radius: 6px;
+    flex: 0 0 auto;
+  }
+  .artifact-pane-header button:hover { background: var(--assistant-bg); }
+  #artifact-pane-body {
+    flex: 1 1 auto; min-height: 0; overflow: auto;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0.8rem;
+  }
+  #artifact-pane-body img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+  }
+  #artifact-pane-body iframe {
+    width: 100%; height: 100%; border: 1px solid var(--border);
+    border-radius: 6px; background: #fff;
+  }
+  #artifact-pane-body a.artifact-fallback-link {
+    color: var(--fg); font-size: 0.85rem;
+  }
 
   /* --- Settings: full-screen modal over the chat view, driven entirely
      by /api/settings/schema -- no per-field markup is hardcoded here, so
@@ -259,11 +320,20 @@
   <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
+<div class="body-row">
 <main>
   <div id="events">
     <div id="empty">No events yet.</div>
   </div>
 </main>
+<aside id="artifact-pane" hidden>
+  <div class="artifact-pane-header">
+    <span id="artifact-pane-title"></span>
+    <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane">&times;</button>
+  </div>
+  <div id="artifact-pane-body"></div>
+</aside>
+</div>
 <div id="settings-overlay" class="settings-overlay" hidden>
   <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="settings-header">
@@ -293,7 +363,62 @@
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
   const quitBtn = document.getElementById("quit-btn");
+  const artifactPaneEl = document.getElementById("artifact-pane");
+  const artifactTitleEl = document.getElementById("artifact-pane-title");
+  const artifactBodyEl = document.getElementById("artifact-pane-body");
+  const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
   let currentSessionId = null;
+
+  // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
+  // directly, HTML renders sandboxed (agent-generated content, not this
+  // page's own trusted UI -- never drop the sandbox attribute without a
+  // real reason), everything else in the serving route's own allowlist
+  // (pdf/csv/txt) falls back to a plain download link.
+  const _ARTIFACT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp"]);
+  const _ARTIFACT_HTML_EXTENSIONS = new Set(["html", "htm"]);
+  let artifactLoadCounter = 0;
+
+  function renderArtifact(path) {
+    // Cache-bust on EVERY render, same path or not -- "a later ARTIFACT
+    // event for the same path is a refresh, not a new pane" (scope doc)
+    // means the underlying file changed, so a stale cached image/iframe
+    // must never be what's shown.
+    artifactLoadCounter += 1;
+    const url = `/api/artifacts/${path.split("/").map(encodeURIComponent).join("/")}` +
+      `?t=${Date.now()}_${artifactLoadCounter}`;
+    const filename = path.split("/").pop() || path;
+    const dot = filename.lastIndexOf(".");
+    const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
+
+    artifactTitleEl.textContent = filename;
+    artifactTitleEl.title = path;
+    artifactBodyEl.innerHTML = "";
+
+    if (_ARTIFACT_IMAGE_EXTENSIONS.has(ext)) {
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = filename;
+      artifactBodyEl.appendChild(img);
+    } else if (_ARTIFACT_HTML_EXTENSIONS.has(ext)) {
+      const iframe = document.createElement("iframe");
+      iframe.src = url;
+      iframe.title = filename;
+      iframe.sandbox = "allow-scripts";
+      artifactBodyEl.appendChild(iframe);
+    } else {
+      const link = document.createElement("a");
+      link.className = "artifact-fallback-link";
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = `Download ${filename}`;
+      artifactBodyEl.appendChild(link);
+    }
+
+    artifactPaneEl.hidden = false;
+  }
+
+  artifactCloseBtn.addEventListener("click", () => { artifactPaneEl.hidden = true; });
 
   // transcript (the user's own speech) renders on the right, like an
   // outgoing text message; everything else (assistant response, tool
@@ -392,6 +517,17 @@
   function renderEvent(ev) {
     const kind = ev.event_type || ev.type || "event";
     if (kind === "done") return;
+    if (kind === "artifact") {
+      // No chat bubble for this one -- the pane IS the rendering, a
+      // bubble would just be empty (nothing in the backend_response/
+      // content/tool_output chain below applies to an artifact_path).
+      // artifact_path is only ever present on the live SSE shape
+      // (event_to_dict) -- a page reload replaying persisted history
+      // rows doesn't carry it today (a known gap, not a crash: this
+      // silently no-ops rather than throwing).
+      if (ev.artifact_path) renderArtifact(ev.artifact_path);
+      return;
+    }
     if (emptyEl.parentNode) emptyEl.remove();
 
     const row = document.createElement("div");
