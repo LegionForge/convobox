@@ -100,12 +100,12 @@ Start with the minimum useful thing, same philosophy as
 `SETTINGS-TUI-SCOPE.md`'s own "first slice" section:
 
 1. `BackendEventType.ARTIFACT` + `BackendEvent.artifact_path` (base.py).
+   **Done** — see "Progress" below.
 2. Wire ONE adapter first (opencode — the default backend, most complete
-   adapter today) to emit it when a Write/Edit-shaped tool call's target
-   path has a renderable extension. Do not attempt claude-code/codex in
-   the same pass.
+   adapter today). Do not attempt claude-code/codex in the same pass.
 3. `GET /api/artifacts/{path}` with the working_dir fence above,
-   including a real test asserting path-traversal is rejected.
+   including a real test asserting path-traversal is rejected. **Done**
+   — see "Progress" below.
 4. Frontend: a collapsible right-hand pane, closed by default, opens on
    the first ARTIFACT event, image + HTML rendering only.
 5. Live-verify: a real tool call that writes a real image or HTML file
@@ -113,6 +113,48 @@ Start with the minimum useful thing, same philosophy as
    crafted `../../` path attempt against `/api/artifacts/` is actually
    rejected — both need to be checked against the real running app, not
    assumed from the code.
+
+### Progress (2026-07-28)
+
+Steps 1 and 3 above shipped (`78df8aa`) with real path-traversal and
+`Path`-join-gotcha regression tests, plus live verification via BrowserOS
+against a real running server (a real PNG and a real HTML file both
+served and rendered correctly).
+
+**Step 2's own sub-investigation, not yet finished:** originally assumed
+detecting a "Write/Edit-shaped tool call" meant parsing
+`session.next.tool.called`'s generic `{tool: string, input: object}`
+payload. Checked a real local `opencode serve` instance's own live
+OpenAPI spec (`GET /doc`, zero LLM cost — this is a static schema
+endpoint, no completion involved) and found `input` is untyped per-tool
+(opencode's tool system is dynamically pluggable, not statically
+described in the spec), so that approach would mean guessing at a tool
+name string and an input key with no verified source for either.
+
+**Better find in the same spec:** opencode emits a SEPARATE, dedicated
+event — `type: "file.edited"`, `data: {file: string}` — specifically
+when a file changes, independent of which tool caused it. This is a much
+more reliable hook than parsing tool-call input would ever be, IF it
+fires for every real file-write tool the AI uses (needs confirming) and
+IF `file` is a path resolvable against `backend.working_dir` (needs
+confirming whether it's absolute or relative to the session's project
+root — the spec's `type: string` gives no format hint either way).
+
+Tried to confirm the format for free: subscribed to the server's global
+`/event` SSE stream and manually wrote a scratch file via the shell
+while the server was up. No `file.edited` event fired — meaning this
+event is very likely tied to the ACTUAL tool-execution pipeline (a real
+AI tool call doing the edit), not a generic filesystem watcher, so a
+plain shell write was never going to trigger it. **Confirming the real
+shape needs one real prompt through a real opencode session (e.g. "write
+'hello' to test.txt") to observe the actual event on the wire** — a
+small, genuine LLM completion cost, not free like the spec-reading
+above. Not spent autonomously this pass (this project's own convention
+for spending real API budget on verification is to do it, but not
+without it being the deliberate point of the session) — whoever
+continues this should either get an explicit go-ahead to run that one
+prompt, or already knows the answer from other live opencode experience,
+before wiring `file.edited` → `BackendEventType.ARTIFACT`.
 
 ## Deferred For Later
 
