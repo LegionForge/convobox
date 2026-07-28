@@ -1694,6 +1694,7 @@ async def run(args: argparse.Namespace) -> None:
             display=config.display,
             approval_bridge=approval_bridge,
             quit_handler=_self_signal_interrupt,
+            config_path=config_path,
         )
         web_uvicorn_config = uvicorn.Config(
             web_app,

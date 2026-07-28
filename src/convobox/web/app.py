@@ -19,9 +19,10 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
 
-from convobox.config import DisplayConfig
+from convobox.config import DisplayConfig, resolve_config_path
 from convobox.web.bridge import WebApprovalBridge
 from convobox.web.history import HistoryDB
+from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
 
 
@@ -77,6 +78,7 @@ def create_app(
     display: DisplayConfig | None = None,
     approval_bridge: WebApprovalBridge | None = None,
     quit_handler: Callable[[], None] | None = None,
+    config_path: Path | None = None,
 ) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
     display = display if display is not None else DisplayConfig()
@@ -91,6 +93,8 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    add_settings_routes(app, config_path if config_path is not None else resolve_config_path())
 
     @app.get("/health")
     async def health() -> dict[str, str]:
