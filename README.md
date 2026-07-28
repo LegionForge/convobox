@@ -86,10 +86,19 @@ available as an opt-in `--extra piper`, see below) download the first
 time you actually use them, not at install time.
 
 **Optional web UI:** `python scripts/run_convobox.py --web` starts a
-local-only browser view of the live session (transcript, tool calls,
-optional persisted history) alongside the voice loop — off by default,
-no effect on anything else when unused. See
-[docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md).
+local-only browser companion view of the live session — bubble-chat
+transcript, tool calls/results, and pending approvals — alongside the
+voice loop, off by default with no effect on anything else when unused.
+Approve/deny/explain a pending tool call from the browser as an
+alternative to speaking it, edit `convobox.yaml` settings from a full
+in-browser editor (same validate/save/backup contract as
+`scripts/settings_tui.py`), or end the whole session with a two-click
+Quit button. See [docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md) for the
+full picture, including its no-auth loopback-only security model.
+
+<img src="docs/media/webui-chat.png" alt="ConvoBox web UI: a bubble-chat transcript showing a user asking why login tests are failing, the assistant running pytest via a tool call, diagnosing a stale test fixture from the tool result, and a pending approval request with Approve/Deny/Explain buttons for the fix.">
+
+<img src="docs/media/webui-settings.png" alt="ConvoBox web UI's Settings modal, Interaction tab: interrupt preset, barge-in timing, resume word, pause phrases, and approval phrase fields, each with inline help text -- the same fields scripts/settings_tui.py exposes, edited from the browser instead of a terminal.">
 
 **Supported today:**
 
