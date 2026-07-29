@@ -9,13 +9,11 @@ section; for the formal per-release changelog, see
 
 ## Since 0.2.0
 
-The interaction/safety bundle (`DESIGN-0.3.0-interaction-and-safety.md`) is
-landing. Phase 1 (barge-in + a live conversation TUI) and Phase 2 (response
-tiering) are both implemented and merged/merging into `main`; a version
-bump to reflect this as a real release is a separate, deliberate step
-(not yet done — package version tracks releases, not individual PRs),
-so `pyproject.toml` still says `0.2.0` as of this writing even though
-substantially more than that is now on `main`:
+The interaction/safety bundle (`DESIGN-0.3.0-interaction-and-safety.md`) --
+Phase 1 (barge-in + a live conversation TUI) and Phase 2 (response
+tiering) -- plus web UI v2 (Settings editor, control-plane trio, artifact
+pane) shipped together as `0.3.0` (2026-07-28, see
+[../CHANGELOG.md](../CHANGELOG.md)):
 
 - **Barge-in, migrated to a two-axis preset system**
   (`interaction.interrupt_preset`): `conversational`/`patient`/
