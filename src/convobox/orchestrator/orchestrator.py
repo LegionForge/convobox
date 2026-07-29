@@ -465,7 +465,7 @@ class Orchestrator:
             await self._player.play_stream(
                 self._tts.synthesize_stream(text), self._tts.sample_rate
             )
-        except Exception as exc:  # noqa: BLE001 -- surfaced below, not swallowed
+        except Exception as exc:
             # _speak_task is a bare asyncio.create_task() with nothing ever
             # awaiting or checking it (fire-and-forget, so a slow/failed
             # synthesis never blocks the mic loop) -- which means an
@@ -479,7 +479,7 @@ class Orchestrator:
             # it until now). Log it AND surface it as a real event so
             # both the TUI and the web UI show something failed, instead
             # of an unexplained gap in what was spoken.
-            logger.error("TTS synthesis/playback failed mid-response: %s", exc, exc_info=True)
+            logger.exception("TTS synthesis/playback failed mid-response: %s", exc)
             self._on_event(
                 BackendEvent(
                     type=BackendEventType.ERROR,
