@@ -373,37 +373,24 @@ also ignored for API sessions (always Zen `hy3-free`).
 
 ---
 
-## Web UI: a short CancelledError traceback can appear on quit/Ctrl+C
+## Web UI: artifact pane gaps (0.3.0)
 
-**Status:** mostly mitigated (2026-07-29), one small residual known and
-accepted. `EventBroadcaster.close_all()` (`src/convobox/web/stream.py`)
-eliminated the larger, more common source of this -- an open browser
-tab's live-events SSE connection being force-cancelled at shutdown --
-live-verified: zero "Exception in ASGI application" lines with a real
-open SSE connection, versus several before.
+**Status:** diagnosed/scoped, deferred. The web UI (docs/WEB-UI-USAGE.md)
+is new in 0.3.0 -- these are known rough edges, not silently-missed bugs.
 
-**What's still possible.** uvicorn's own internal lifespan-handling task
-(`starlette/routing.py`'s `lifespan()` -> `uvicorn/lifespan/on.py`'s
-`receive()`) can still log a short `asyncio.exceptions.CancelledError`
-traceback when the web server is torn down via `should_exit=True`
-(`_stop_web_server`) rather than uvicorn's own normal signal-triggered
-shutdown sequence. `run_convobox.py` has to drive shutdown this way
-because it owns SIGINT/SIGTERM/SIGBREAK itself
-(`_install_web_sigint_override` -- see that function's docstring for
-why: `uvicorn.Server.serve()` steals those signals from Python's
-default handler for as long as it's running, so ConvoBox has to
-register its own handler after uvicorn's to reliably quit at all).
+**PDF doesn't render in the artifact pane.** Live-confirmed 2026-07-28: a
+PDF renders correctly in a standalone browser tab (BrowserOS's own
+PDFium, no plugin needed) but shows nothing when opened through
+`GET /api/artifacts/{path}` inside the pane's frame. Root cause not yet
+inspected (frontend content-type dispatch most likely assumes HTML/
+image and gives `.pdf` no `<iframe>`/`<embed>` treatment, or the
+artifacts route isn't setting `Content-Type: application/pdf`) --
+`docs/ARTIFACT-PANE-SCOPE.md` only documents image/plot/HTML as in-scope
+today, so this may end up a documented exclusion rather than a fix; JP's
+call, not yet made.
 
-**Why not chased further.** This appears to be an inherent
-characteristic of driving uvicorn's shutdown from outside its own
-signal-handling flow, not a ConvoBox bug with an obvious fix --
-resolving it fully would mean real surgery on uvicorn's own internal
-lifespan-protocol driver, disproportionate to a cosmetic log line. The
-process genuinely exits cleanly either way (live-confirmed: no
-orphaned processes after either symptom).
-
-**Mitigation:** `run_convobox.py`'s `main()` prints a plain console
-reassurance ("ConvoBox exited cleanly...") right after a clean
---web quit/Ctrl+C, printed directly (not via `log.info`, which --tui
-redirects to a file -- exactly where this wouldn't help) so it's visible
-in the same place the traceback, if any, appeared.
+**opencode/codex backends don't trigger the artifact pane at all.** Only
+the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
+(`src/convobox/adapters/claude_code.py`). opencode's `file.edited` event
+path format hasn't been live-verified yet (blocks wiring it up); codex
+hasn't been looked at. See `docs/ARTIFACT-PANE-SCOPE.md`.
