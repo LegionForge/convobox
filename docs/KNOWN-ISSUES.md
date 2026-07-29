@@ -370,3 +370,27 @@ reach ChatGPT-Plus-OAuth models in 1.18.3 at all; it CAN pin any model
 in `GET /api/model` (the Zen catalog: grok-code, kimi-k2.5-free,
 minimax-m3-free, qwen3.6-plus-free, ...). Config default `"model"` is
 also ignored for API sessions (always Zen `hy3-free`).
+
+---
+
+## Web UI: artifact pane gaps (0.3.0)
+
+**Status:** diagnosed/scoped, deferred. The web UI (docs/WEB-UI-USAGE.md)
+is new in 0.3.0 -- these are known rough edges, not silently-missed bugs.
+
+**PDF doesn't render in the artifact pane.** Live-confirmed 2026-07-28: a
+PDF renders correctly in a standalone browser tab (BrowserOS's own
+PDFium, no plugin needed) but shows nothing when opened through
+`GET /api/artifacts/{path}` inside the pane's frame. Root cause not yet
+inspected (frontend content-type dispatch most likely assumes HTML/
+image and gives `.pdf` no `<iframe>`/`<embed>` treatment, or the
+artifacts route isn't setting `Content-Type: application/pdf`) --
+`docs/ARTIFACT-PANE-SCOPE.md` only documents image/plot/HTML as in-scope
+today, so this may end up a documented exclusion rather than a fix; JP's
+call, not yet made.
+
+**opencode/codex backends don't trigger the artifact pane at all.** Only
+the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
+(`src/convobox/adapters/claude_code.py`). opencode's `file.edited` event
+path format hasn't been live-verified yet (blocks wiring it up); codex
+hasn't been looked at. See `docs/ARTIFACT-PANE-SCOPE.md`.

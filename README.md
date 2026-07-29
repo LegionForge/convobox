@@ -96,6 +96,13 @@ in-browser editor (same validate/save/backup contract as
 Quit button. See [docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md) for the
 full picture, including its no-auth loopback-only security model.
 
+**Still under construction as of 0.3.0.** The core flows above are
+live-verified and working, but this is the newest, least-hardened part
+of ConvoBox — expect rough edges (e.g. the artifact pane's opencode/codex
+support isn't wired up yet) while it gets the same live-UAT scrutiny the
+voice pipeline has already been through. See
+[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the current list.
+
 <img src="docs/media/webui-chat.png" alt="ConvoBox web UI: a bubble-chat transcript showing a user asking why login tests are failing, the assistant running pytest via a tool call, diagnosing a stale test fixture from the tool result, and a pending approval request with Approve/Deny/Explain buttons for the fix.">
 
 <img src="docs/media/webui-settings.png" alt="ConvoBox web UI's Settings modal, Interaction tab: interrupt preset, barge-in timing, resume word, pause phrases, and approval phrase fields, each with inline help text -- the same fields scripts/settings_tui.py exposes, edited from the browser instead of a terminal.">

@@ -53,12 +53,14 @@ _HEARTBEAT_INTERVAL_S = 15.0
 
 
 async def sse_lines(
-    queue: asyncio.Queue[dict[str, Any]], heartbeat_interval: float = _HEARTBEAT_INTERVAL_S
+    queue: asyncio.Queue[dict[str, Any] | None], heartbeat_interval: float = _HEARTBEAT_INTERVAL_S
 ) -> AsyncIterator[str]:
     """The wire format for one SSE connection: a queued JSON-able payload
     (already shaped by whoever broadcast it -- see WebEventForwarder)
     becomes a `data: ...` line, an idle gap becomes a `: heartbeat` comment
-    line.
+    line, and a queued `None` (EventBroadcaster.close_all(), server
+    shutdown only) ends the generator with a plain `return` instead of
+    needing uvicorn to force-cancel this connection.
 
     Split out from stream_events()'s route body so it's testable as a plain
     async generator over a queue -- exercising the *route* end-to-end would
@@ -71,9 +73,12 @@ async def sse_lines(
     while True:
         try:
             payload = await asyncio.wait_for(queue.get(), timeout=heartbeat_interval)
-            yield f"data: {json.dumps(payload)}\n\n"
         except TimeoutError:
             yield ": heartbeat\n\n"
+            continue
+        if payload is None:
+            return
+        yield f"data: {json.dumps(payload)}\n\n"
 
 
 def create_app(

@@ -1587,7 +1587,92 @@ def _check_backend_working_dir(backend: object) -> None:
         )
 
 
+async def _cancel_main_on_web_server_exit(
+    web_server_task: "asyncio.Task[None]", main_task: "asyncio.Task[None]"
+) -> None:
+    """uvicorn.Server.serve() installs its OWN signal.signal(SIGINT/SIGTERM/
+    SIGBREAK, ...) handler for as long as it's running (uvicorn.server.
+    Server.capture_signals, unconditional -- no opt-out in 0.51.0), which
+    REPLACES Python's default handler process-wide. Confirmed live,
+    2026-07-28: with --web active, neither a real terminal Ctrl+C nor the
+    web UI's own Quit button (_self_signal_interrupt's re-emitted
+    CTRL_C_EVENT/SIGINT) ever reaches the mic loop -- uvicorn's handler
+    intercepts the signal first, sets its own `should_exit`, and gracefully
+    stops JUST the web server; the rest of the session (mic loop, backend
+    adapter) runs on completely unaffected, which is what actually produced
+    "quit doesn't quit, and the browser's reconnect makes it look like a
+    new session started while the old one keeps going."
+
+    This task watches for the web server ending on its own -- the only way
+    that can happen before the mic loop's own `finally` deliberately calls
+    _stop_web_server -- and cancels the main task in response, so a signal
+    uvicorn intercepted still reaches the same shutdown path a signal
+    delivered directly to the main task would have.
+    """
+    with contextlib.suppress(asyncio.CancelledError):
+        await web_server_task
+    if not main_task.done():
+        main_task.cancel()
+
+
+def _install_web_sigint_override(main_task: "asyncio.Task[None]") -> None:
+    """Directly takes ownership of SIGINT/SIGTERM/SIGBREAK away from
+    uvicorn.Server.serve() (see _cancel_main_on_web_server_exit's docstring
+    for why it steals them in the first place), instead of depending on
+    should_exit eventually propagating through that watchdog.
+
+    Confirmed live, 2026-07-29: with the watchdog alone, JP's real
+    terminal Ctrl+C during a --tui --web session still did nothing --
+    the watchdog's correctness had only been verified against directly
+    setting server.should_exit=True, never against a REAL OS-level
+    Ctrl+C (Windows console signal delivery is notoriously unreliable to
+    reproduce in a sandboxed/automated test, confirmed while chasing this
+    same bug earlier). Owning the handler directly removes that whole
+    dependency chain -- verified for real this time: `signal.signal`
+    always dispatches to whichever handler was registered MOST
+    RECENTLY, so calling this AFTER yielding to the event loop once
+    (letting uvicorn's own capture_signals() install its handler first)
+    guarantees this one wins; confirmed by reading back
+    signal.getsignal(SIGINT) before/after, and by using signal.
+    raise_signal(SIGINT) to exercise Python's actual signal-dispatch
+    machinery end-to-end (not a synthetic call), which correctly invoked
+    this handler and not uvicorn's.
+
+    The watchdog above is left in place as a harmless backup (it will
+    simply never fire first now, since main_task.cancel() from here
+    reaches _stop_web_server's own deliberate should_exit=True before
+    the web server could ever end "on its own" again).
+    """
+
+    def _handler(signum: int, frame: object) -> None:
+        _cancel_main_task(main_task)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+        if sig is not None:
+            signal.signal(sig, _handler)
+
+
+def _cancel_main_task(main_task: "asyncio.Task[None]") -> None:
+    """The web UI's Quit button deliberately does NOT reuse
+    _self_signal_interrupt's OS signal round-trip: this closure and the
+    route handler that calls it both already run on the SAME event loop
+    as the main task, so a direct, ordinary asyncio cancellation reaches
+    it deterministically -- no dependency on whether a real SIGINT/
+    CTRL_C_EVENT actually gets delivered by the OS (Windows console signal
+    delivery is its own can of worms -- see _read_pending_key's Ctrl+C
+    comment), and no fight with uvicorn.Server.serve()'s own signal
+    handler stealing SIGINT away while the web server is up (see
+    _cancel_main_on_web_server_exit's docstring for that mechanism, which
+    covers the OTHER way this same failure mode can appear: a real
+    terminal Ctrl+C while --web is active, which has no route handler to
+    call this from directly).
+    """
+    if not main_task.done():
+        main_task.cancel()
+
+
 async def run(args: argparse.Namespace) -> None:
+    main_task = asyncio.current_task()
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
     if args.permission_mode is not None:
@@ -1657,8 +1742,10 @@ async def run(args: argparse.Namespace) -> None:
     # REST endpoints just honestly report empty; the live SSE tap still
     # works either way, since that's the other, always-on half.
     web_forwarder = None
+    web_broadcaster = None
     web_server = None
     web_server_task: asyncio.Task[None] | None = None
+    web_server_watchdog: asyncio.Task[None] | None = None
     # Populated below once the real Orchestrator/ApprovalPromptGate exist
     # (WebApprovalBridge.set_targets) -- create_app() needs something to
     # hand its route closures at server-startup time, which happens here,
@@ -1673,6 +1760,10 @@ async def run(args: argparse.Namespace) -> None:
     # route closures before any of those are built.
     listening_bridge = None
     if config.web.enabled:
+        # Type-narrowing only, not a real runtime check: this branch only
+        # ever executes inside run(), which only ever executes as
+        # asyncio.run()'s own task, so main_task is never actually None.
+        assert main_task is not None  # nosec B101
         # Lazy, opt-in import: fastapi/uvicorn are the "web" extra (`uv sync
         # --extra web`), not a main dependency -- most CLI/TUI-only users
         # never need a web server or its dependency footprint, same
@@ -1707,7 +1798,7 @@ async def run(args: argparse.Namespace) -> None:
             display=config.display,
             approval_bridge=approval_bridge,
             listening_bridge=listening_bridge,
-            quit_handler=_self_signal_interrupt,
+            quit_handler=lambda: _cancel_main_task(main_task),
             config_path=config_path,
             working_dir=(
                 Path(config.backend.working_dir) if config.backend.working_dir else None
@@ -1721,6 +1812,16 @@ async def run(args: argparse.Namespace) -> None:
         )
         web_server = uvicorn.Server(web_uvicorn_config)
         web_server_task = asyncio.ensure_future(web_server.serve())
+        # Give web_server_task an actual turn to run before installing our
+        # own SIGINT/SIGTERM/SIGBREAK override -- uvicorn.Server.serve()
+        # installs ITS handler as literally the first thing it does once
+        # scheduled, so this guarantees ours is registered after (and
+        # therefore wins). See _install_web_sigint_override's docstring.
+        await asyncio.sleep(0.05)
+        _install_web_sigint_override(main_task)
+        web_server_watchdog = asyncio.ensure_future(
+            _cancel_main_on_web_server_exit(web_server_task, main_task)
+        )
         log.info(
             "web UI listening on http://%s:%d (history_tracking=%s)",
             config.web.bind_address, config.web.port, config.web.history_tracking_enabled,
@@ -1779,6 +1880,8 @@ async def run(args: argparse.Namespace) -> None:
         player.wait()
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        if web_broadcaster is not None:
+            await web_broadcaster.close_all()
         await _stop_web_server(web_server, web_server_task)
         return
 
@@ -2513,6 +2616,23 @@ async def run(args: argparse.Namespace) -> None:
             await watchdog_task
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        # Cancel the web-server-exit watchdog BEFORE _stop_web_server's own
+        # deliberate shutdown below -- otherwise that shutdown would also
+        # complete web_server_task, and the watchdog would try to cancel
+        # main_task a second time (main_task is this exact coroutine, mid-
+        # finally at that point; harmless since Task.cancel() on a task
+        # that's already finishing is a no-op, but needless).
+        if web_server_watchdog is not None:
+            web_server_watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await web_server_watchdog
+        # Let every open SSE connection (browser tabs on the live events
+        # stream) end itself cleanly before should_exit -- otherwise
+        # uvicorn has to force-cancel them mid-flight, which it logs as a
+        # noisy (if harmless) "Exception in ASGI application" on every
+        # quit. See EventBroadcaster.close_all()'s own docstring.
+        if web_broadcaster is not None:
+            await web_broadcaster.close_all()
         await _stop_web_server(web_server, web_server_task)
         # aclose() above already closes stdin/terminates/awaits the
         # subprocess, but on Windows ProactorEventLoop, closing a pipe
@@ -2556,6 +2676,36 @@ async def _stop_web_server(server: object | None, task: "asyncio.Task[None] | No
     if task is not None:
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+def _print_clean_exit_note(web_active: bool) -> None:
+    """Reassures the operator a quit/Ctrl+C actually succeeded, printed
+    straight to the console (NOT via `log.info` -- --tui mode redirects
+    the `logging` module's output to a file, which would bury this
+    exactly where it's least useful: right where uvicorn's own shutdown
+    noise, described below, actually appears).
+
+    Only relevant when --web was active: uvicorn.Server.serve()'s own
+    internal lifespan-handling task can still log a raw CancelledError
+    traceback when torn down via should_exit=True (the mechanism this
+    file has to drive it with, since it also needs to own SIGINT itself
+    -- see _install_web_sigint_override's docstring) rather than uvicorn's
+    own normal signal-triggered shutdown path. Confirmed live, 2026-07-29:
+    this is now MUCH smaller than before EventBroadcaster.close_all()
+    (which eliminated the noisier, more common case -- an open browser
+    tab's SSE connection), but this specific remaining one appears to be
+    an inherent characteristic of driving uvicorn's shutdown from outside
+    its own signal-handling flow, not something fixable without real
+    uvicorn-internals surgery. See docs/KNOWN-ISSUES.md.
+    """
+    if web_active:
+        print(
+            "ConvoBox exited cleanly. (A short 'CancelledError' traceback from "
+            "uvicorn's own internal lifespan task just above, if you saw one, is "
+            "known-harmless shutdown noise -- not a crash. See docs/KNOWN-ISSUES.md.)",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def main() -> None:
@@ -2655,6 +2805,14 @@ def main() -> None:
         asyncio.run(run(args))
     except KeyboardInterrupt:
         log.info("exiting")
+        _print_clean_exit_note(args.web)
+    except asyncio.CancelledError:
+        # _cancel_main_on_web_server_exit's main_task.cancel() (--web's
+        # workaround for uvicorn stealing SIGINT, see that function's
+        # docstring) surfaces here the same way a real KeyboardInterrupt
+        # would from asyncio.run() -- same quiet exit, not a crash.
+        log.info("exiting")
+        _print_clean_exit_note(args.web)
 
 
 if __name__ == "__main__":
