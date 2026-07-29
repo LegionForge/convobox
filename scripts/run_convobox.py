@@ -1905,6 +1905,21 @@ async def run(args: argparse.Namespace) -> None:
             "ParentProcessId, see docs/UAT-checklist.md [O1].",
             SINGLE_INSTANCE_PORT,
         )
+        # The adapter (real subprocess/HTTP client) and web server (if
+        # --web) were already started above, before this check ever runs
+        # (deliberately AFTER the lightweight setup but BEFORE the
+        # heavyweight STT/mic init, per the comment above) -- a bare
+        # `raise SystemExit(2)` here left both dangling, surfacing as the
+        # same noisy uvicorn lifespan-task "Exception in ASGI application"
+        # traceback _stop_web_server's callers elsewhere already avoid
+        # (see EventBroadcaster.close_all()'s docstring and
+        # docs/KNOWN-ISSUES.md). Same graceful-shutdown sequence as every
+        # other exit path, not a new mechanism.
+        await orchestrator.stop_event_loop()
+        await adapter.aclose()
+        if web_broadcaster is not None:
+            await web_broadcaster.close_all()
+        await _stop_web_server(web_server, web_server_task)
         raise SystemExit(2)
     log.info("single-instance lock acquired (pid=%d)", os.getpid())
 
