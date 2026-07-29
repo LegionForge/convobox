@@ -73,6 +73,31 @@ def test_playback_starting_mid_speech_requires_fresh_sustain() -> None:
     assert results.index(True) == 7  # full 250ms counted from playback start
 
 
+def test_fires_even_if_playback_ends_naturally_mid_sustain() -> None:
+    # Live-confirmed 2026-07-29: a real interruption starting a few chunks
+    # before the response naturally finishes must not lose its accumulated
+    # run just because `playing` (fed from player.audible) flips False
+    # mid-episode -- otherwise a short-but-real interruption near the tail
+    # is silently dropped by the overlap gate as presumed echo: no
+    # barge-in tag, no reply, nothing spoken.
+    monitor = BargeInMonitor("mute", min_speech_ms=250)
+    results = _feed(monitor, in_speech=True, playing=True, chunks=3)  # 96ms, still playing
+    assert not any(results)
+    results += _feed(monitor, in_speech=True, playing=False, chunks=5)  # playback ends, speech continues
+    assert results.count(True) == 1
+    assert results.index(True) == 7  # 8th chunk total crosses 250ms (8*32=256)
+
+
+def test_new_episode_after_playback_ends_does_not_inherit_overlap_credit() -> None:
+    # A brief overlap followed by a real silence gap must not let a later,
+    # genuinely separate utterance (spoken well after the response is long
+    # done) inherit the earlier episode's overlap credit.
+    monitor = BargeInMonitor("mute", min_speech_ms=250)
+    _feed(monitor, in_speech=True, playing=True, chunks=3)  # brief overlap
+    _feed(monitor, in_speech=False, playing=False, chunks=2)  # episode ends
+    assert not any(_feed(monitor, in_speech=True, playing=False, chunks=100))
+
+
 def test_abort_mode_also_fires() -> None:
     monitor = BargeInMonitor("abort", min_speech_ms=250)
     assert any(_feed(monitor, in_speech=True, playing=True, chunks=10))

@@ -322,6 +322,7 @@ class BargeInMonitor:
         self._min_speech_ms = min_speech_ms
         self._run_ms = 0.0
         self._fired = False
+        self._overlapped_playback = False
 
     def observe(self, in_speech: bool, playing: bool, chunk_ms: float) -> bool:
         if self.on_current_turn == "let-finish":
@@ -330,13 +331,26 @@ class BargeInMonitor:
             # Speech episode ended: reset for the next one.
             self._run_ms = 0.0
             self._fired = False
+            self._overlapped_playback = False
             return False
-        if not playing:
-            # Speech with nothing playing is just... talking. Track
-            # nothing; there is no response to interrupt. (Speech that
-            # STARTED during playback and outlives it already fired.)
+        if playing:
+            self._overlapped_playback = True
+        elif not self._overlapped_playback:
+            # Speech with nothing playing, and this episode never touched
+            # playback: just talking, nothing to interrupt.
             self._run_ms = 0.0
             return False
+        # Once this episode has overlapped playback at all, keep
+        # accumulating sustained-speech time even after playback ends
+        # naturally -- live-confirmed 2026-07-29: a real interruption
+        # starting near the tail of a response (e.g. ~1s of playback
+        # left) previously lost all its accumulated run the instant
+        # `playing` flipped False, so the threshold was never reached and
+        # the utterance was silently dropped by the overlap gate as
+        # presumed echo -- no barge-in tag, no reply, nothing spoken. An
+        # episode that starts mid-playback and keeps going is still a
+        # real interruption of that turn even if the response happens to
+        # finish a moment later.
         self._run_ms += chunk_ms
         if self._run_ms >= self._min_speech_ms and not self._fired:
             self._fired = True
