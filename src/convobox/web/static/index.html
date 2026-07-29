@@ -202,12 +202,33 @@
      serving route's own allowlist (pdf/csv/txt) falls back to a plain
      download link, not a bespoke viewer. --- */
   #artifact-pane {
-    flex: 0 0 min(420px, 40vw);
+    /* flex-basis is deliberately "auto" (via "0 0 auto", NOT a fixed
+       value like the old "0 0 min(420px, 40vw)") -- a flex item's
+       explicit flex-basis overrides `width` entirely on the main axis,
+       which would make the native resize handle's own inline `width` it
+       sets on drag silently do nothing. With flex-basis: auto, `width`
+       below supplies the initial size AND stays live as the resize
+       handle overwrites it via inline style (inline always wins over
+       this stylesheet rule). Confirmed live: the "0 0 min(...)" version
+       accepted a manual style.width write with zero visible effect. */
+    flex: 0 0 auto;
+    width: min(420px, 40vw);
     min-height: 0;
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--border);
     background: var(--ribbon-bg);
+    /* Native browser resize handle (bottom-right corner) -- dragging it
+       sets an explicit inline width on this element. `main`'s own
+       `flex: 1 1 auto` (unchanged) already shrinks/grows to fill
+       whatever's left in `.body-row`, so both panes adjust together
+       with no JS needed. overflow: auto is required for `resize` to
+       apply at all -- browsers silently ignore it on `overflow: visible`
+       (the default). */
+    resize: horizontal;
+    overflow: auto;
+    min-width: 240px;
+    max-width: 85vw;
   }
   #artifact-pane[hidden] { display: none; }
   .artifact-pane-header {
