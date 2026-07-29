@@ -479,7 +479,7 @@ class Orchestrator:
             # it until now). Log it AND surface it as a real event so
             # both the TUI and the web UI show something failed, instead
             # of an unexplained gap in what was spoken.
-            logger.exception("TTS synthesis/playback failed mid-response: %s", exc)
+            logger.exception("TTS synthesis/playback failed mid-response")
             self._on_event(
                 BackendEvent(
                     type=BackendEventType.ERROR,
