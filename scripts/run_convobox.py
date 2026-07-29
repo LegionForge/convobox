@@ -1615,6 +1615,43 @@ async def _cancel_main_on_web_server_exit(
         main_task.cancel()
 
 
+def _install_web_sigint_override(main_task: "asyncio.Task[None]") -> None:
+    """Directly takes ownership of SIGINT/SIGTERM/SIGBREAK away from
+    uvicorn.Server.serve() (see _cancel_main_on_web_server_exit's docstring
+    for why it steals them in the first place), instead of depending on
+    should_exit eventually propagating through that watchdog.
+
+    Confirmed live, 2026-07-29: with the watchdog alone, JP's real
+    terminal Ctrl+C during a --tui --web session still did nothing --
+    the watchdog's correctness had only been verified against directly
+    setting server.should_exit=True, never against a REAL OS-level
+    Ctrl+C (Windows console signal delivery is notoriously unreliable to
+    reproduce in a sandboxed/automated test, confirmed while chasing this
+    same bug earlier). Owning the handler directly removes that whole
+    dependency chain -- verified for real this time: `signal.signal`
+    always dispatches to whichever handler was registered MOST
+    RECENTLY, so calling this AFTER yielding to the event loop once
+    (letting uvicorn's own capture_signals() install its handler first)
+    guarantees this one wins; confirmed by reading back
+    signal.getsignal(SIGINT) before/after, and by using signal.
+    raise_signal(SIGINT) to exercise Python's actual signal-dispatch
+    machinery end-to-end (not a synthetic call), which correctly invoked
+    this handler and not uvicorn's.
+
+    The watchdog above is left in place as a harmless backup (it will
+    simply never fire first now, since main_task.cancel() from here
+    reaches _stop_web_server's own deliberate should_exit=True before
+    the web server could ever end "on its own" again).
+    """
+
+    def _handler(signum: int, frame: object) -> None:
+        _cancel_main_task(main_task)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+        if sig is not None:
+            signal.signal(sig, _handler)
+
+
 def _cancel_main_task(main_task: "asyncio.Task[None]") -> None:
     """The web UI's Quit button deliberately does NOT reuse
     _self_signal_interrupt's OS signal round-trip: this closure and the
@@ -1774,6 +1811,13 @@ async def run(args: argparse.Namespace) -> None:
         )
         web_server = uvicorn.Server(web_uvicorn_config)
         web_server_task = asyncio.ensure_future(web_server.serve())
+        # Give web_server_task an actual turn to run before installing our
+        # own SIGINT/SIGTERM/SIGBREAK override -- uvicorn.Server.serve()
+        # installs ITS handler as literally the first thing it does once
+        # scheduled, so this guarantees ours is registered after (and
+        # therefore wins). See _install_web_sigint_override's docstring.
+        await asyncio.sleep(0.05)
+        _install_web_sigint_override(main_task)
         web_server_watchdog = asyncio.ensure_future(
             _cancel_main_on_web_server_exit(web_server_task, main_task)
         )

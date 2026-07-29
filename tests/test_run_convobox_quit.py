@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 
 import pytest
 
-from scripts.run_convobox import _cancel_main_on_web_server_exit, _cancel_main_task
+from scripts.run_convobox import (
+    _cancel_main_on_web_server_exit,
+    _cancel_main_task,
+    _install_web_sigint_override,
+)
 
 
 # --- _cancel_main_task: the web UI's Quit button, wired as run()'s
@@ -78,3 +83,68 @@ async def test_watchdog_is_a_no_op_if_main_task_already_finished() -> None:
         _cancel_main_on_web_server_exit(web_server_task, main_task)
     )
     assert not main_task.cancelled()
+
+
+# --- _install_web_sigint_override: the real fix for terminal Ctrl+C while
+# --web is active. The watchdog above assumes uvicorn.Server.serve()'s
+# should_exit reliably propagates to web_server_task ending -- confirmed
+# live, 2026-07-29, that this alone was NOT enough (a real terminal Ctrl+C
+# during a --tui --web session still did nothing). This installs ConvoBox's
+# own handler directly, so it owns the signal instead of depending on
+# uvicorn's internal shutdown timing. signal.signal always dispatches to
+# whichever handler was registered MOST RECENTLY -- these tests exercise
+# that real dispatch via signal.raise_signal, not a mock. ---
+
+
+@pytest.fixture(autouse=True)
+def _restore_signal_handlers():
+    """Every test in this file mutates process-wide SIGINT/SIGTERM state --
+    restore whatever was registered before, so this file can't leak a
+    handler into unrelated tests or pytest's own Ctrl+C handling."""
+    saved = {
+        sig: signal.getsignal(sig)
+        for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None))
+        if sig is not None
+    }
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+@pytest.mark.asyncio
+async def test_install_web_sigint_override_wins_over_a_prior_handler() -> None:
+    def someone_elses_handler(signum: object, frame: object) -> None:
+        raise AssertionError("uvicorn's handler fired instead of ConvoBox's override")
+
+    signal.signal(signal.SIGINT, someone_elses_handler)
+
+    async def main_body() -> None:
+        await asyncio.sleep(10)
+
+    main_task = asyncio.ensure_future(main_body())
+    await asyncio.sleep(0)
+    _install_web_sigint_override(main_task)
+
+    assert signal.getsignal(signal.SIGINT) is not someone_elses_handler
+
+    # Exercises the REAL signal-dispatch machinery (not a direct function
+    # call) -- this is what a real terminal Ctrl+C ultimately triggers.
+    signal.raise_signal(signal.SIGINT)
+    with pytest.raises(asyncio.CancelledError):
+        await main_task
+    assert main_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_install_web_sigint_override_also_handles_sigterm() -> None:
+    async def main_body() -> None:
+        await asyncio.sleep(10)
+
+    main_task = asyncio.ensure_future(main_body())
+    await asyncio.sleep(0)
+    _install_web_sigint_override(main_task)
+
+    signal.raise_signal(signal.SIGTERM)
+    with pytest.raises(asyncio.CancelledError):
+        await main_task
+    assert main_task.cancelled()
