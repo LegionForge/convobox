@@ -357,9 +357,10 @@ def test_resolve_approval_rejects_an_unknown_action(client: TestClient) -> None:
 
 
 # --- POST /api/quit: the web UI's Quit button. quit_handler is a plain
-# callable (run_convobox.py passes its own _self_signal_interrupt) --
-# unlike approval_bridge there's no per-request state to inspect, so a
-# bare MagicMock is enough to prove the route calls it. ---
+# callable (run_convobox.py passes a closure around its own
+# _cancel_main_task -- see tests/test_run_convobox_quit.py) -- unlike
+# approval_bridge there's no per-request state to inspect, so a bare
+# MagicMock is enough to prove the route calls it. ---
 
 
 def test_quit_with_no_handler_returns_503(client: TestClient) -> None:
