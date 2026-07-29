@@ -2678,6 +2678,36 @@ async def _stop_web_server(server: object | None, task: "asyncio.Task[None] | No
             await task
 
 
+def _print_clean_exit_note(web_active: bool) -> None:
+    """Reassures the operator a quit/Ctrl+C actually succeeded, printed
+    straight to the console (NOT via `log.info` -- --tui mode redirects
+    the `logging` module's output to a file, which would bury this
+    exactly where it's least useful: right where uvicorn's own shutdown
+    noise, described below, actually appears).
+
+    Only relevant when --web was active: uvicorn.Server.serve()'s own
+    internal lifespan-handling task can still log a raw CancelledError
+    traceback when torn down via should_exit=True (the mechanism this
+    file has to drive it with, since it also needs to own SIGINT itself
+    -- see _install_web_sigint_override's docstring) rather than uvicorn's
+    own normal signal-triggered shutdown path. Confirmed live, 2026-07-29:
+    this is now MUCH smaller than before EventBroadcaster.close_all()
+    (which eliminated the noisier, more common case -- an open browser
+    tab's SSE connection), but this specific remaining one appears to be
+    an inherent characteristic of driving uvicorn's shutdown from outside
+    its own signal-handling flow, not something fixable without real
+    uvicorn-internals surgery. See docs/KNOWN-ISSUES.md.
+    """
+    if web_active:
+        print(
+            "ConvoBox exited cleanly. (A short 'CancelledError' traceback from "
+            "uvicorn's own internal lifespan task just above, if you saw one, is "
+            "known-harmless shutdown noise -- not a crash. See docs/KNOWN-ISSUES.md.)",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def main() -> None:
     use_utf8_console()
     parser = argparse.ArgumentParser(
@@ -2775,12 +2805,14 @@ def main() -> None:
         asyncio.run(run(args))
     except KeyboardInterrupt:
         log.info("exiting")
+        _print_clean_exit_note(args.web)
     except asyncio.CancelledError:
         # _cancel_main_on_web_server_exit's main_task.cancel() (--web's
         # workaround for uvicorn stealing SIGINT, see that function's
         # docstring) surfaces here the same way a real KeyboardInterrupt
         # would from asyncio.run() -- same quiet exit, not a crash.
         log.info("exiting")
+        _print_clean_exit_note(args.web)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from scripts.run_convobox import (
     _cancel_main_on_web_server_exit,
     _cancel_main_task,
     _install_web_sigint_override,
+    _print_clean_exit_note,
 )
 
 
@@ -148,3 +149,23 @@ async def test_install_web_sigint_override_also_handles_sigterm() -> None:
     with pytest.raises(asyncio.CancelledError):
         await main_task
     assert main_task.cancelled()
+
+
+# --- _print_clean_exit_note: console-only reassurance (not log.info --
+# --tui redirects that to a file, exactly where this wouldn't help) that
+# a quit/Ctrl+C genuinely succeeded, printed only when --web was active
+# (the only case uvicorn's own lifespan-task noise can appear). ---
+
+
+def test_print_clean_exit_note_prints_when_web_was_active(capsys) -> None:
+    _print_clean_exit_note(web_active=True)
+    captured = capsys.readouterr()
+    assert "ConvoBox exited cleanly" in captured.err
+    assert captured.out == ""
+
+
+def test_print_clean_exit_note_is_silent_when_web_was_not_active(capsys) -> None:
+    _print_clean_exit_note(web_active=False)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == ""
