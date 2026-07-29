@@ -1742,6 +1742,7 @@ async def run(args: argparse.Namespace) -> None:
     # REST endpoints just honestly report empty; the live SSE tap still
     # works either way, since that's the other, always-on half.
     web_forwarder = None
+    web_broadcaster = None
     web_server = None
     web_server_task: asyncio.Task[None] | None = None
     web_server_watchdog: asyncio.Task[None] | None = None
@@ -1879,6 +1880,8 @@ async def run(args: argparse.Namespace) -> None:
         player.wait()
         await orchestrator.stop_event_loop()
         await adapter.aclose()
+        if web_broadcaster is not None:
+            await web_broadcaster.close_all()
         await _stop_web_server(web_server, web_server_task)
         return
 
@@ -2623,6 +2626,13 @@ async def run(args: argparse.Namespace) -> None:
             web_server_watchdog.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await web_server_watchdog
+        # Let every open SSE connection (browser tabs on the live events
+        # stream) end itself cleanly before should_exit -- otherwise
+        # uvicorn has to force-cancel them mid-flight, which it logs as a
+        # noisy (if harmless) "Exception in ASGI application" on every
+        # quit. See EventBroadcaster.close_all()'s own docstring.
+        if web_broadcaster is not None:
+            await web_broadcaster.close_all()
         await _stop_web_server(web_server, web_server_task)
         # aclose() above already closes stdin/terminates/awaits the
         # subprocess, but on Windows ProactorEventLoop, closing a pipe

@@ -213,6 +213,68 @@ async def test_sse_lines_yields_a_heartbeat_comment_on_idle_timeout() -> None:
     assert line == ": heartbeat\n\n"
 
 
+@pytest.mark.asyncio
+async def test_sse_lines_ends_cleanly_on_a_queued_none() -> None:
+    # EventBroadcaster.close_all()'s sentinel -- lets an open SSE
+    # connection end itself with a plain `return` on shutdown instead of
+    # needing uvicorn to force-cancel it.
+    queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+    await queue.put(None)
+
+    gen = sse_lines(queue)
+
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_sse_lines_still_yields_queued_events_before_a_later_none() -> None:
+    queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+    await queue.put({"type": "response", "content": "before close"})
+    await queue.put(None)
+
+    gen = sse_lines(queue)
+    line = await gen.__anext__()
+    assert json.loads(line[len("data: ") :])["content"] == "before close"
+
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()
+
+
+# --- EventBroadcaster.close_all(): the shutdown-quieting half of the same
+# fix -- puts the sse_lines() None sentinel into every subscriber's queue,
+# nothing more. Doesn't touch subscribe/unsubscribe/broadcast. ---
+
+
+@pytest.mark.asyncio
+async def test_close_all_puts_none_in_every_subscriber_queue() -> None:
+    broadcaster = EventBroadcaster()
+    q1 = broadcaster.subscribe()
+    q2 = broadcaster.subscribe()
+
+    await broadcaster.close_all()
+
+    assert await q1.get() is None
+    assert await q2.get() is None
+
+
+@pytest.mark.asyncio
+async def test_close_all_is_a_no_op_with_no_subscribers() -> None:
+    broadcaster = EventBroadcaster()
+    await broadcaster.close_all()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_broadcast_still_delivers_real_events_unaffected_by_close_all() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "still works"})
+
+    event = await queue.get()
+    assert event == {"type": "response", "content": "still works"}
+
+
 # --- /api/events/stream: a real uvicorn server + a real socket, since
 # ASGITransport can't drive an infinite streaming response (see above). ---
 
