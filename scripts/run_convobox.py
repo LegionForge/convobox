@@ -925,6 +925,15 @@ class EchoAwarePlayer(AudioPlayer):
         # which this class owns exclusively -- see _mark_audible.
         self.audible = False
         self.on_first_block_played = self._mark_audible
+        # Confirmed live, 2026-07-28/29: without this, `audible` stayed
+        # True for the entire gap between one response finishing and the
+        # next one starting (it only ever got reset at the START of the
+        # next play() call) -- every utterance spoken into that gap read
+        # as "the user is talking during playback" to BargeInMonitor and
+        # got tagged with BARGE_IN_MARKER even though playback had long
+        # since finished naturally. See AudioPlayer.on_playback_complete's
+        # own docstring for the mechanism.
+        self.on_playback_complete = self._mark_not_audible
 
     def _mark_audible(self) -> None:
         self.audible = True
@@ -932,6 +941,9 @@ class EchoAwarePlayer(AudioPlayer):
         # response in a capture's timeline directly from the log instead
         # of a blind correlation search.
         log.info("playback: first audio block reached output device")
+
+    def _mark_not_audible(self) -> None:
+        self.audible = False
 
     def play(self, samples, sample_rate) -> None:  # type: ignore[no-untyped-def]
         # Estimate set AFTER super().play(): AudioPlayer.play() begins by
