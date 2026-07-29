@@ -611,6 +611,24 @@
     }
   }
 
+  // Populated by loadResumeWord() before the first renderActivityStatus()
+  // call -- used only to make the "paused" status readable (which word
+  // actually resumes listening), not for validation or anything security-
+  // relevant, so a plain fetch of the same /api/settings the Settings
+  // modal already uses is fine (no need to widen /api/config's
+  // deliberately-scoped display-only response for this).
+  let resumeWord = null;
+
+  async function loadResumeWord() {
+    try {
+      const res = await fetch("/api/settings");
+      const data = await res.json();
+      resumeWord = data.values?.interaction?.resume_word || null;
+    } catch (err) {
+      console.error("failed to load resume word", err);
+    }
+  }
+
   async function loadSessions() {
     const res = await fetch("/api/sessions");
     const data = await res.json();
@@ -655,7 +673,8 @@
   }
 
   function renderActivityStatus(status) {
-    activityStatusEl.textContent = status;
+    activityStatusEl.textContent =
+      status === "paused" && resumeWord ? `paused (say "${resumeWord}" to resume)` : status;
     activityStatusEl.className = status === "paused" ? "paused" : "";
     setListeningButton(status === "paused");
   }
@@ -751,6 +770,7 @@
 
   (async function init() {
     await loadDisplayConfig();
+    await loadResumeWord();
     const latest = await loadSessions();
     await loadHistory(latest);
     try {
