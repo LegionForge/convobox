@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ pytest.importorskip(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from convobox.config import DisplayConfig  # noqa: E402
 from convobox.web.app import create_app, sse_lines  # noqa: E402
 from convobox.web.history import HistoryDB, new_session_id  # noqa: E402
 from convobox.web.stream import EventBroadcaster  # noqa: E402
@@ -39,6 +41,38 @@ def test_health_check() -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_get_display_config_defaults_to_no_overrides(client: TestClient) -> None:
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_color": None,
+        "assistant_color": None,
+        "user_name": None,
+        "assistant_name": None,
+    }
+
+
+def test_get_display_config_returns_configured_colors_and_names() -> None:
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        display=DisplayConfig(
+            user_color="#2e7dfb",
+            assistant_color="#f0f0f2",
+            user_name="JP",
+            assistant_name="Athena",
+        ),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_color": "#2e7dfb",
+        "assistant_color": "#f0f0f2",
+        "user_name": "JP",
+        "assistant_name": "Athena",
+    }
 
 
 def test_list_sessions_empty(client: TestClient) -> None:
@@ -231,3 +265,200 @@ async def test_stream_events_broadcasts_a_live_event_over_a_real_socket(
                 pytest.fail("stream closed before a data event arrived")
         finally:
             await broadcast_task
+
+
+# --- POST /api/sessions/{session_id}/approval: the web UI's approve/deny/
+# explain buttons, a non-voice equivalent of the same
+# ApprovalPromptGate/Orchestrator.resolve_pending_approval path a spoken
+# phrase answers. A fake bridge stands in for the real
+# convobox.web.bridge.WebApprovalBridge (whose own decision-forwarding
+# logic is covered by tests/test_web_bridge.py) -- this only tests that
+# the route wires actions/status codes to the bridge correctly. ---
+
+
+class _FakeApprovalBridge:
+    def __init__(self, pending: bool = True, explanation: str | None = None) -> None:
+        self.pending = pending
+        self.explanation = explanation
+        self.decisions: list[bool] = []
+        self.decide_result = True
+        self.extended = False
+
+    @property
+    def is_pending(self) -> bool:
+        return self.pending
+
+    async def decide(self, approved: bool) -> bool:
+        self.decisions.append(approved)
+        if self.decide_result:
+            self.pending = False
+        return self.decide_result
+
+    def extend(self) -> str | None:
+        self.extended = True
+        return self.explanation
+
+
+def test_resolve_approval_with_no_bridge_returns_409(client: TestClient) -> None:
+    response = client.post("/api/sessions/some-session/approval", json={"action": "approve"})
+    assert response.status_code == 409
+
+
+def test_resolve_approval_with_nothing_pending_returns_409() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=_FakeApprovalBridge(pending=False))
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 409
+
+
+def test_resolve_approval_approve_calls_the_bridge_and_returns_approved() -> None:
+    bridge = _FakeApprovalBridge(pending=True)
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "approved", "explanation": None}
+    assert bridge.decisions == [True]
+
+
+def test_resolve_approval_deny_calls_the_bridge_and_returns_denied() -> None:
+    bridge = _FakeApprovalBridge(pending=True)
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "deny"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "denied", "explanation": None}
+    assert bridge.decisions == [False]
+
+
+def test_resolve_approval_explain_extends_and_returns_the_explanation() -> None:
+    bridge = _FakeApprovalBridge(pending=True, explanation="rm -rf .incident-captures/*.wav")
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "explain"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "pending", "explanation": "rm -rf .incident-captures/*.wav"}
+    assert bridge.extended is True
+    assert bridge.decisions == []  # explain never decides anything
+
+
+def test_resolve_approval_when_bridge_reports_it_could_not_deliver_returns_409() -> None:
+    bridge = _FakeApprovalBridge(pending=True)
+    bridge.decide_result = False  # e.g. resolved by voice in the same instant
+    app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 409
+
+
+def test_resolve_approval_rejects_an_unknown_action(client: TestClient) -> None:
+    response = client.post("/api/sessions/s/approval", json={"action": "yolo"})
+    assert response.status_code == 422
+
+
+# --- POST /api/quit: the web UI's Quit button. quit_handler is a plain
+# callable (run_convobox.py passes its own _self_signal_interrupt) --
+# unlike approval_bridge there's no per-request state to inspect, so a
+# bare MagicMock is enough to prove the route calls it. ---
+
+
+def test_quit_with_no_handler_returns_503(client: TestClient) -> None:
+    response = client.post("/api/quit")
+    assert response.status_code == 503
+
+
+def test_quit_calls_the_handler_and_returns_quitting() -> None:
+    handler = MagicMock()
+    app = create_app(db=HistoryDB(Path(":memory:")), quit_handler=handler)
+    with TestClient(app) as client:
+        response = client.post("/api/quit")
+    assert response.status_code == 200
+    assert response.json() == {"status": "quitting"}
+    handler.assert_called_once_with()
+
+
+# --- GET/POST /api/listening: the web UI's Stop/Resume listening button.
+# listening_bridge's own pause/resume side-effect logic is covered by
+# tests/test_web_bridge.py -- this only tests that the route wires
+# actions/status codes to the bridge correctly, same shape as the approval
+# route tests above. ---
+
+
+class _FakeListeningBridge:
+    def __init__(self, ready: bool = True, paused: bool = False) -> None:
+        self.ready = ready
+        self.paused = paused
+        self.pause_calls = 0
+        self.resume_calls = 0
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ready
+
+    @property
+    def is_paused(self) -> bool:
+        return self.paused
+
+    async def pause(self) -> bool:
+        self.pause_calls += 1
+        if not self.paused:
+            self.paused = True
+            return True
+        return False
+
+    def resume(self) -> bool:
+        self.resume_calls += 1
+        if self.paused:
+            self.paused = False
+            return True
+        return False
+
+
+def test_get_listening_with_no_bridge_reports_not_paused(client: TestClient) -> None:
+    response = client.get("/api/listening")
+    assert response.status_code == 200
+    assert response.json() == {"is_paused": False}
+
+
+def test_get_listening_reflects_the_bridge_state() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(paused=True))
+    with TestClient(app) as client:
+        response = client.get("/api/listening")
+    assert response.json() == {"is_paused": True}
+
+
+def test_set_listening_with_no_bridge_returns_503(client: TestClient) -> None:
+    response = client.post("/api/listening", json={"action": "pause"})
+    assert response.status_code == 503
+
+
+def test_set_listening_with_a_not_ready_bridge_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(ready=False))
+    with TestClient(app) as client:
+        response = client.post("/api/listening", json={"action": "pause"})
+    assert response.status_code == 503
+
+
+def test_set_listening_pause_calls_the_bridge_and_returns_paused() -> None:
+    bridge = _FakeListeningBridge(paused=False)
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/listening", json={"action": "pause"})
+    assert response.status_code == 200
+    assert response.json() == {"is_paused": True}
+    assert bridge.pause_calls == 1
+
+
+def test_set_listening_resume_calls_the_bridge_and_returns_listening() -> None:
+    bridge = _FakeListeningBridge(paused=True)
+    app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/listening", json={"action": "resume"})
+    assert response.status_code == 200
+    assert response.json() == {"is_paused": False}
+    assert bridge.resume_calls == 1
+
+
+def test_set_listening_rejects_an_unknown_action(client: TestClient) -> None:
+    response = client.post("/api/listening", json={"action": "yolo"})
+    assert response.status_code == 422

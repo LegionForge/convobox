@@ -4,89 +4,374 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ConvoBox</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1a1a1a">
 <style>
   :root {
     color-scheme: light dark;
     --bg: #ffffff;
+    --ribbon-bg: #f7f7f8;
     --fg: #1a1a1a;
     --dim: #666666;
     --border: #dddddd;
-    --user-bg: #e8f0fe;
-    --assistant-bg: #f5f5f5;
+    --user-bg: #2e7dfb;
+    --user-fg: #ffffff;
+    --assistant-bg: #f0f0f2;
     --tool-bg: #fff8e1;
     --error-fg: #b00020;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #1a1a1a;
+      --ribbon-bg: #202225;
       --fg: #eaeaea;
       --dim: #999999;
       --border: #3a3a3a;
-      --user-bg: #1f3a5f;
+      --user-bg: #2b5fc7;
+      --user-fg: #ffffff;
       --assistant-bg: #2a2a2a;
       --tool-bg: #3a3220;
       --error-fg: #ff6b6b;
     }
   }
   * { box-sizing: border-box; }
-  body {
+  html, body {
     margin: 0;
+    height: 100%;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--bg);
     color: var(--fg);
   }
-  header {
+  body { display: flex; flex-direction: column; }
+
+  /* --- Top ribbon: branding, session nav, and controls. Stop/Resume
+     listening, Settings, and Quit are all real control-plane actions now
+     (each a deliberate, separately-confirmed extension of the no-auth
+     loopback trust model -- see docs/WEB-UI-USAGE.md's security
+     section). Only restart-on-demand remains unbuilt. --- */
+  .ribbon {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem 1rem;
+    gap: 0.6rem;
+    padding: 0.5rem 0.85rem;
+    background: var(--ribbon-bg);
     border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
   }
-  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
-  #status { font-size: 0.8rem; color: var(--dim); }
-  #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.35rem; }
-  #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.35rem; }
-  select { margin-left: auto; font-size: 0.85rem; }
+  .ribbon img.logo { height: 20px; width: 20px; flex: 0 0 auto; }
+  .ribbon .brand { font-size: 0.95rem; font-weight: 600; white-space: nowrap; }
+  #status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
+  #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.3rem; }
+  #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.3rem; }
+  /* The mic loop's own activity (listening/capturing/speaking/working/
+     waiting/paused) -- same vocabulary the TUI's status line already
+     used, now also broadcast to the web UI (see forward_status in
+     src/convobox/web/bridge.py). Text-only, no color coding -- these
+     aren't states that need an alarm color, just an at-a-glance label. */
+  #activity-status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
+  #activity-status:empty { display: none; }
+  #activity-status.paused { color: #e0a030; font-weight: 600; }
+  .ribbon .spacer { flex: 1 1 auto; }
+  .ribbon select {
+    font-size: 0.8rem;
+    max-width: 12rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.2rem 0.4rem;
+  }
+  .ribbon button {
+    font-size: 0.78rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ribbon button:hover:not(:disabled) { border-color: var(--dim); }
+  .ribbon button:disabled { opacity: 0.45; cursor: not-allowed; }
+  /* Armed = primed to actually quit on the next click. A distinct fill
+     color plus the text itself changing ("Click again to quit") -- never
+     color alone (WCAG 1.4.1), same rule as everywhere else in this file.
+     A fixed #b00020 in both themes, not --error-fg (dark mode's #ff6b6b
+     is tuned as TEXT on a dark background, not as a fill under WHITE
+     text -- that pairing falls well short of the 4.5:1 minimum). */
+  .ribbon button.quit-btn.armed {
+    background: #b00020;
+    border-color: #b00020;
+    color: #ffffff;
+  }
+
+  /* --- Row below the ribbon: chat on the left, the artifact pane (when
+     open) on the right. min-height: 0 on both the row and its scrolling
+     children is required for a flex child to actually scroll instead of
+     stretching its parent -- a well-known flexbox gotcha, not optional
+     here since both panes independently scroll their own content. --- */
+  .body-row {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+  }
+
+  /* --- Chat: scrollable, mobile-texting-style bubbles. --- */
   main {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 1rem;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
   }
-  .event {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem 0.8rem;
+  #events {
+    max-width: 760px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 1rem 1rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .bubble-row { display: flex; }
+  .bubble-row.from-user { justify-content: flex-end; }
+  .bubble-row.from-other { justify-content: flex-start; }
+  .bubble {
+    max-width: 78%;
+    padding: 0.5rem 0.8rem;
+    border-radius: 16px;
     white-space: pre-wrap;
     word-break: break-word;
   }
-  .event .meta {
-    font-size: 0.7rem;
-    color: var(--dim);
-    margin-bottom: 0.25rem;
+  .bubble-row.from-user .bubble { border-bottom-right-radius: 4px; }
+  .bubble-row.from-other .bubble { border-bottom-left-radius: 4px; }
+  .bubble .meta {
+    font-size: 0.68rem;
+    opacity: 0.7;
+    margin-bottom: 0.2rem;
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
-  .event.response, .event.transcript { background: var(--assistant-bg); }
-  .event.transcript { background: var(--user-bg); }
-  .event.tool_call, .event.tool_result { background: var(--tool-bg); font-family: ui-monospace, monospace; font-size: 0.85rem; }
-  .event.approval_request { border-color: #e0a030; }
-  .event.error { color: var(--error-fg); }
-  .event.done { display: none; } /* a turn boundary marker, not shown as its own bubble */
+  .bubble.transcript { background: var(--user-bg); color: var(--user-fg); }
+  .bubble.response { background: var(--assistant-bg); }
+  .bubble.tool_call, .bubble.tool_result {
+    background: var(--tool-bg);
+    font-family: ui-monospace, monospace;
+    font-size: 0.85rem;
+  }
+  .bubble.approval_request { background: var(--assistant-bg); border: 1px solid #e0a030; }
+  .bubble.error { background: var(--assistant-bg); color: var(--error-fg); }
   #empty { color: var(--dim); text-align: center; padding: 2rem; }
+
+  /* --- Approval actions: a non-voice equivalent of saying the approval
+     phrase / "no" / "explain" out loud. Text labels carry the meaning
+     (never color alone -- WCAG 1.4.1); the accent border colors below are
+     an extra cue only, and deliberately blue/orange rather than
+     green/red, the collision pair most likely to look identical to
+     red-green colorblind users. --- */
+  .approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+  }
+  .approval-actions button {
+    font-size: 0.8rem;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.3rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .approval-actions button:hover:not(:disabled) { border-color: var(--dim); }
+  .approval-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .approval-actions .approve-btn { border-color: #1a56db; }
+  .approval-actions .deny-btn { border-color: #c2540a; }
+  .approval-note { margin-top: 0.4rem; font-size: 0.75rem; opacity: 0.85; }
+
+  /* --- Artifact pane: opens on the right when a tool call produces
+     something worth looking at (docs/ARTIFACT-PANE-SCOPE.md). Closed by
+     default (hidden), v1 scope: one pane, latest artifact only -- a
+     later ARTIFACT event (same path or a different one) replaces this
+     pane's content rather than opening a second pane or keeping a
+     history/gallery. Image/HTML rendering only; everything else in the
+     serving route's own allowlist (pdf/csv/txt) falls back to a plain
+     download link, not a bespoke viewer. --- */
+  #artifact-pane {
+    /* flex-basis is deliberately "auto" (via "0 0 auto", NOT a fixed
+       value like the old "0 0 min(420px, 40vw)") -- a flex item's
+       explicit flex-basis overrides `width` entirely on the main axis,
+       which would make the native resize handle's own inline `width` it
+       sets on drag silently do nothing. With flex-basis: auto, `width`
+       below supplies the initial size AND stays live as the resize
+       handle overwrites it via inline style (inline always wins over
+       this stylesheet rule). Confirmed live: the "0 0 min(...)" version
+       accepted a manual style.width write with zero visible effect. */
+    flex: 0 0 auto;
+    width: min(420px, 40vw);
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: var(--ribbon-bg);
+    /* Native browser resize handle (bottom-right corner) -- dragging it
+       sets an explicit inline width on this element. `main`'s own
+       `flex: 1 1 auto` (unchanged) already shrinks/grows to fill
+       whatever's left in `.body-row`, so both panes adjust together
+       with no JS needed. overflow: auto is required for `resize` to
+       apply at all -- browsers silently ignore it on `overflow: visible`
+       (the default). */
+    resize: horizontal;
+    overflow: auto;
+    min-width: 240px;
+    max-width: 85vw;
+  }
+  #artifact-pane[hidden] { display: none; }
+  .artifact-pane-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+  }
+  .artifact-pane-header span {
+    font-size: 0.8rem; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;
+  }
+  .artifact-pane-header button {
+    font-size: 1.1rem; line-height: 1; background: none; border: none;
+    color: var(--fg); cursor: pointer; padding: 0.2rem 0.5rem; border-radius: 6px;
+    flex: 0 0 auto;
+  }
+  .artifact-pane-header button:hover { background: var(--assistant-bg); }
+  #artifact-pane-body {
+    flex: 1 1 auto; min-height: 0; overflow: auto;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0.8rem;
+  }
+  #artifact-pane-body img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+  }
+  #artifact-pane-body iframe {
+    width: 100%; height: 100%; border: 1px solid var(--border);
+    border-radius: 6px; background: #fff;
+  }
+  #artifact-pane-body a.artifact-fallback-link {
+    color: var(--fg); font-size: 0.85rem;
+  }
+
+  /* --- Settings: full-screen modal over the chat view, driven entirely
+     by /api/settings/schema -- no per-field markup is hardcoded here, so
+     a new FieldSpec on the Python side (src/convobox/config.py +
+     scripts/settings_tui.py's SECTION_SPECS) just works without a
+     matching frontend change. --- */
+  .settings-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 1rem; z-index: 100;
+  }
+  .settings-overlay[hidden] { display: none; }
+  .settings-modal {
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 10px;
+    width: min(720px, 100%); max-height: 88vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .settings-header {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+  }
+  .settings-header h2 { margin: 0; font-size: 1rem; flex: 1 1 auto; }
+  .settings-header button {
+    font-size: 1.1rem; line-height: 1; background: none; border: none;
+    color: var(--fg); cursor: pointer; padding: 0.2rem 0.5rem; border-radius: 6px;
+  }
+  .settings-header button:hover { background: var(--assistant-bg); }
+  .settings-tabs { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.5rem 1rem; border-bottom: 1px solid var(--border); }
+  .settings-tabs button {
+    font-size: 0.78rem; padding: 0.3rem 0.6rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  .settings-tabs button.active { background: var(--assistant-bg); font-weight: 600; }
+  .settings-errors { font-size: 0.78rem; color: var(--error-fg); padding: 0.5rem 1rem 0; }
+  .settings-body { flex: 1 1 auto; overflow-y: auto; padding: 0.8rem 1rem; }
+  .settings-field { margin-bottom: 0.9rem; }
+  .settings-field label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .settings-field .help { font-size: 0.72rem; color: var(--dim); margin-top: 0.25rem; }
+  .settings-field input[type="text"], .settings-field input[type="number"], .settings-field select {
+    width: 100%; font-size: 0.85rem; padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg);
+  }
+  .settings-field input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
+  .settings-field-row { display: flex; align-items: center; gap: 0.4rem; }
+  .settings-field-row select, .settings-field-row input { flex: 1 1 auto; }
+  .settings-test-btn {
+    flex: 0 0 auto; font-size: 0.72rem; padding: 0.32rem 0.55rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  .settings-test-btn:hover:not(:disabled) { border-color: var(--dim); }
+  .settings-footer {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.7rem 1rem; border-top: 1px solid var(--border);
+  }
+  .settings-footer .spacer { flex: 1 1 auto; }
+  .settings-status { font-size: 0.78rem; }
+  .settings-status.error { color: var(--error-fg); }
+  .settings-footer button {
+    font-size: 0.82rem; padding: 0.4rem 0.8rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  .settings-footer button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
+  .settings-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
-<header>
-  <h1>ConvoBox</h1>
+<header class="ribbon">
+  <img class="logo" src="img/legionforge-logo.svg" alt="LegionForge">
+  <span class="brand">ConvoBox</span>
   <span id="status" class="disconnected">connecting&hellip;</span>
+  <span id="activity-status"></span>
+  <span class="spacer"></span>
   <select id="session-select"></select>
+  <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
+  <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead">Stop listening</button>
+  <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
+  <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
-<main id="events">
-  <div id="empty">No events yet.</div>
+<div class="body-row">
+<main>
+  <div id="events">
+    <div id="empty">No events yet.</div>
+  </div>
 </main>
+<aside id="artifact-pane" hidden>
+  <div class="artifact-pane-header">
+    <span id="artifact-pane-title"></span>
+    <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane">&times;</button>
+  </div>
+  <div id="artifact-pane-body"></div>
+</aside>
+</div>
+<div id="settings-overlay" class="settings-overlay" hidden>
+  <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="settings-header">
+      <h2 id="settings-title">Settings</h2>
+      <button id="settings-close-btn" type="button" aria-label="Close settings">&times;</button>
+    </div>
+    <div id="settings-tabs" class="settings-tabs"></div>
+    <div id="settings-errors" class="settings-errors" hidden></div>
+    <div id="settings-body" class="settings-body"></div>
+    <div class="settings-footer">
+      <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden>Test this section</button>
+      <span id="settings-status" class="settings-status"></span>
+      <span class="spacer"></span>
+      <button id="settings-save-btn" type="button" class="primary">Save</button>
+    </div>
+  </div>
+</div>
 <script>
 (function () {
   "use strict";
@@ -94,17 +379,189 @@
   const eventsEl = document.getElementById("events");
   const emptyEl = document.getElementById("empty");
   const statusEl = document.getElementById("status");
+  const activityStatusEl = document.getElementById("activity-status");
+  const listeningBtn = document.getElementById("listening-btn");
   const sessionSelect = document.getElementById("session-select");
+  const clearHistoryBtn = document.getElementById("clear-history-btn");
+  const quitBtn = document.getElementById("quit-btn");
+  const artifactPaneEl = document.getElementById("artifact-pane");
+  const artifactTitleEl = document.getElementById("artifact-pane-title");
+  const artifactBodyEl = document.getElementById("artifact-pane-body");
+  const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
+  let currentSessionId = null;
+
+  // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
+  // directly, HTML renders sandboxed (agent-generated content, not this
+  // page's own trusted UI -- never drop the sandbox attribute without a
+  // real reason), everything else in the serving route's own allowlist
+  // (pdf/csv/txt) falls back to a plain download link.
+  const _ARTIFACT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp"]);
+  const _ARTIFACT_HTML_EXTENSIONS = new Set(["html", "htm"]);
+  let artifactLoadCounter = 0;
+
+  function renderArtifact(path) {
+    // Cache-bust on EVERY render, same path or not -- "a later ARTIFACT
+    // event for the same path is a refresh, not a new pane" (scope doc)
+    // means the underlying file changed, so a stale cached image/iframe
+    // must never be what's shown.
+    artifactLoadCounter += 1;
+    const url = `/api/artifacts/${path.split("/").map(encodeURIComponent).join("/")}` +
+      `?t=${Date.now()}_${artifactLoadCounter}`;
+    const filename = path.split("/").pop() || path;
+    const dot = filename.lastIndexOf(".");
+    const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
+
+    artifactTitleEl.textContent = filename;
+    artifactTitleEl.title = path;
+    artifactBodyEl.innerHTML = "";
+
+    if (_ARTIFACT_IMAGE_EXTENSIONS.has(ext)) {
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = filename;
+      artifactBodyEl.appendChild(img);
+    } else if (_ARTIFACT_HTML_EXTENSIONS.has(ext)) {
+      const iframe = document.createElement("iframe");
+      iframe.src = url;
+      iframe.title = filename;
+      iframe.sandbox = "allow-scripts";
+      artifactBodyEl.appendChild(iframe);
+    } else {
+      const link = document.createElement("a");
+      link.className = "artifact-fallback-link";
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = `Download ${filename}`;
+      artifactBodyEl.appendChild(link);
+    }
+
+    artifactPaneEl.hidden = false;
+  }
+
+  artifactCloseBtn.addEventListener("click", () => { artifactPaneEl.hidden = true; });
+
+  // transcript (the user's own speech) renders on the right, like an
+  // outgoing text message; everything else (assistant response, tool
+  // calls/results, approval requests, errors) renders on the left. "done"
+  // is a turn-boundary marker only, never its own bubble.
+  function side(kind) {
+    return kind === "transcript" ? "from-user" : "from-other";
+  }
+
+  // The button-row for whichever approval_request is currently the live
+  // one to answer, or null if none. Only one approval can be pending on
+  // the backend at a time (a single process-wide ApprovalPromptGate), but
+  // bubbles are append-only and never removed -- without this, an OLDER
+  // approval's still-enabled buttons would stay clickable in the DOM
+  // after a NEWER request replaced it, and clicking them would wrongly
+  // act on the newer, unrelated request (the backend endpoint has no way
+  // to tell "this click meant the old one").
+  let pendingApprovalActions = null;
+
+  function disableApprovalActions(row, message) {
+    if (!row) return;
+    row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    let note = row.querySelector(".approval-note");
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "approval-note";
+      note.setAttribute("role", "status");
+      row.appendChild(note);
+    }
+    note.textContent = message;
+  }
+
+  function buildApprovalActions() {
+    const row = document.createElement("div");
+    row.className = "approval-actions";
+
+    async function send(action) {
+      row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      let res, data;
+      try {
+        res = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/approval`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        data = await res.json().catch(() => ({}));
+      } catch (err) {
+        console.error("approval action failed", err);
+        row.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+        return;
+      }
+      if (!res.ok) {
+        // Most likely: already resolved by voice, or it timed out, between
+        // this bubble rendering and the click landing -- surface that
+        // plainly and lock the stale controls rather than leaving them
+        // clickable with no explanation (lessons-ui-ux.md: a failed action
+        // must say what happened, not fail silently).
+        disableApprovalActions(row, data.detail || "Could not resolve -- it may have already been answered another way.");
+        if (pendingApprovalActions === row) pendingApprovalActions = null;
+        return;
+      }
+      if (action === "explain") {
+        row.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+        let note = row.querySelector(".approval-note");
+        if (!note) {
+          note = document.createElement("div");
+          note.className = "approval-note";
+          note.setAttribute("role", "status");
+          row.appendChild(note);
+        }
+        note.textContent = data.explanation ? `Kept open: ${data.explanation}` : "Kept open -- timeout reset.";
+        return;
+      }
+      disableApprovalActions(row, action === "approve" ? "Approved." : "Denied.");
+      if (pendingApprovalActions === row) pendingApprovalActions = null;
+    }
+
+    const specs = [
+      ["approve-btn", "Approve", "Runs the pending command now — the same effect as saying the approval phrase out loud.", "Approve the pending command"],
+      ["deny-btn", "Deny", "Blocks the pending command — the same effect as saying “no” out loud.", "Deny the pending command"],
+      ["explain-btn", "Explain", "Keeps this request open and resets its timeout, so it won’t auto-deny while you read the detail above.", "Keep this request open and show its full detail"],
+    ];
+    for (const [cls, label, title, ariaLabel] of specs) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = cls;
+      btn.textContent = label;
+      btn.title = title;
+      btn.setAttribute("aria-label", ariaLabel);
+      btn.addEventListener("click", () => send(label.toLowerCase()));
+      row.appendChild(btn);
+    }
+    return row;
+  }
 
   function renderEvent(ev) {
-    if (emptyEl.parentNode) emptyEl.remove();
-    const div = document.createElement("div");
     const kind = ev.event_type || ev.type || "event";
-    div.className = "event " + kind;
+    if (kind === "done") return;
+    if (kind === "artifact") {
+      // No chat bubble for this one -- the pane IS the rendering, a
+      // bubble would just be empty (nothing in the backend_response/
+      // content/tool_output chain below applies to an artifact_path).
+      // artifact_path is only ever present on the live SSE shape
+      // (event_to_dict) -- a page reload replaying persisted history
+      // rows doesn't carry it today (a known gap, not a crash: this
+      // silently no-ops rather than throwing).
+      if (ev.artifact_path) renderArtifact(ev.artifact_path);
+      return;
+    }
+    if (emptyEl.parentNode) emptyEl.remove();
+
+    const row = document.createElement("div");
+    row.className = "bubble-row " + side(kind);
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble " + kind;
+
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = kind.replace(/_/g, " ");
-    div.appendChild(meta);
+    meta.textContent = displayNames[kind] || kind.replace(/_/g, " ");
+    bubble.appendChild(meta);
+
     const body = document.createElement("div");
     // textContent, never innerHTML -- transcripts/tool output/backend
     // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
@@ -113,9 +570,45 @@
       ev.backend_response || ev.content || ev.user_transcript ||
       (ev.tool_name ? `${ev.tool_name}(${ev.tool_input || ""})` : "") ||
       (ev.tool_output || "");
-    div.appendChild(body);
-    eventsEl.appendChild(div);
-    div.scrollIntoView({ block: "end" });
+    bubble.appendChild(body);
+
+    if (kind === "approval_request") {
+      if (pendingApprovalActions) {
+        disableApprovalActions(pendingApprovalActions, "Superseded by a newer request.");
+      }
+      const actions = buildApprovalActions();
+      bubble.appendChild(actions);
+      pendingApprovalActions = actions;
+    }
+
+    row.appendChild(bubble);
+    eventsEl.appendChild(row);
+    row.scrollIntoView({ block: "end" });
+  }
+
+  // Per-role bubble color overrides (convobox.yaml's display.user_color /
+  // display.assistant_color, set via scripts/settings_tui.py). Setting
+  // these as inline styles on the root element outranks the @media
+  // (prefers-color-scheme: dark) block's :root rule regardless of the
+  // system theme, so an operator-chosen color applies consistently in
+  // both light and dark mode rather than needing a pair per theme.
+  // Populated by loadDisplayConfig() before the first renderEvent() call
+  // (init() awaits it first) -- display.user_name/assistant_name
+  // (convobox.yaml, set via scripts/settings_tui.py or the web Settings
+  // modal's Display tab). null means "show the raw event type", the
+  // existing behavior.
+  let displayNames = { transcript: null, response: null };
+
+  async function loadDisplayConfig() {
+    try {
+      const res = await fetch("/api/config");
+      const data = await res.json();
+      if (data.user_color) document.documentElement.style.setProperty("--user-bg", data.user_color);
+      if (data.assistant_color) document.documentElement.style.setProperty("--assistant-bg", data.assistant_color);
+      displayNames = { transcript: data.user_name || null, response: data.assistant_name || null };
+    } catch (err) {
+      console.error("failed to load display config", err);
+    }
   }
 
   async function loadSessions() {
@@ -132,6 +625,8 @@
   }
 
   async function loadHistory(sessionId) {
+    currentSessionId = sessionId || null;
+    pendingApprovalActions = null;
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
     const data = await res.json();
@@ -141,6 +636,28 @@
       return;
     }
     for (const ev of data.events) renderEvent(ev);
+  }
+
+  // The mic loop's own activity (listening/capturing/speaking/working/
+  // waiting/paused -- forward_status in src/convobox/web/bridge.py),
+  // broadcast on the SAME SSE stream as transcript/tool events, tagged
+  // {type: "status", ...} to tell them apart. Also keeps the Stop/Resume
+  // listening button's label truthful even when a PAUSE happens by voice
+  // instead of the button (both act on the same ListeningGate).
+  let isPaused = false;
+
+  function setListeningButton(paused) {
+    isPaused = paused;
+    listeningBtn.textContent = paused ? "Resume listening" : "Stop listening";
+    listeningBtn.title = paused
+      ? "Resume listening -- say the resume word to do this by voice instead"
+      : "Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead";
+  }
+
+  function renderActivityStatus(status) {
+    activityStatusEl.textContent = status;
+    activityStatusEl.className = status === "paused" ? "paused" : "";
+    setListeningButton(status === "paused");
   }
 
   function connectStream() {
@@ -155,7 +672,12 @@
     };
     source.onmessage = (e) => {
       try {
-        renderEvent(JSON.parse(e.data));
+        const payload = JSON.parse(e.data);
+        if (payload.type === "status") {
+          renderActivityStatus(payload.status);
+        } else {
+          renderEvent(payload);
+        }
       } catch (err) {
         console.error("bad SSE payload", err);
       }
@@ -165,12 +687,407 @@
 
   sessionSelect.addEventListener("change", () => loadHistory(sessionSelect.value));
 
+  listeningBtn.addEventListener("click", async () => {
+    listeningBtn.disabled = true;
+    try {
+      const res = await fetch("/api/listening", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: isPaused ? "resume" : "pause" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setListeningButton(data.is_paused);
+      }
+    } catch (err) {
+      console.error("listening toggle failed", err);
+    } finally {
+      listeningBtn.disabled = false;
+    }
+  });
+
+  clearHistoryBtn.addEventListener("click", async () => {
+    if (!currentSessionId) return;
+    await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/clear`, { method: "POST" });
+    await loadHistory(currentSessionId);
+  });
+
+  // Two clicks required: the first "arms" it (button restyles + relabels
+  // to make the primed state unmistakable -- never color alone), the
+  // second actually quits. Auto-disarms after a few seconds so an
+  // accidental first click doesn't leave a live-fire button sitting
+  // around. Ends the WHOLE ConvoBox process (mic, backend, and this
+  // page's own connection) -- the fetch erroring out afterward is the
+  // expected shape of that, not a bug.
+  let quitArmed = false;
+  let quitArmTimer = null;
+
+  quitBtn.addEventListener("click", async () => {
+    if (!quitArmed) {
+      quitArmed = true;
+      quitBtn.classList.add("armed");
+      quitBtn.textContent = "Click again to quit";
+      quitBtn.title = "This will actually end the session. Click elsewhere or wait a few seconds to cancel.";
+      quitArmTimer = setTimeout(() => {
+        quitArmed = false;
+        quitBtn.classList.remove("armed");
+        quitBtn.textContent = "Quit";
+        quitBtn.title = "Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.";
+      }, 4000);
+      return;
+    }
+    clearTimeout(quitArmTimer);
+    quitBtn.disabled = true;
+    quitBtn.textContent = "Quitting…";
+    try {
+      await fetch("/api/quit", { method: "POST" });
+    } catch (err) {
+      // The connection dying mid-request is the expected shape of a
+      // process actually quitting, not a real error.
+    }
+    statusEl.textContent = "session ended";
+    statusEl.className = "disconnected";
+  });
+
   (async function init() {
+    await loadDisplayConfig();
     const latest = await loadSessions();
     await loadHistory(latest);
+    try {
+      const res = await fetch("/api/listening");
+      if (res.ok) setListeningButton((await res.json()).is_paused);
+    } catch (err) {
+      console.error("failed to load listening state", err);
+    }
     connectStream();
   })();
 })();
+</script>
+<script>
+(function () {
+  "use strict";
+
+  // Settings modal: a generic renderer driven by /api/settings/schema --
+  // full parity target is scripts/settings_tui.py's own edit/validate/save
+  // contract (docs/UAT-settings-tui.md), not a bespoke re-scoping of it.
+  // Deliberately separate from the chat script above (own IIFE, own DOM
+  // ids) so this file's two concerns -- live transcript vs. config editing
+  // -- don't share mutable state by accident.
+
+  const overlay = document.getElementById("settings-overlay");
+  const tabsEl = document.getElementById("settings-tabs");
+  const bodyEl = document.getElementById("settings-body");
+  const errorsEl = document.getElementById("settings-errors");
+  const statusEl = document.getElementById("settings-status");
+  const closeBtn = document.getElementById("settings-close-btn");
+  const saveBtn = document.getElementById("settings-save-btn");
+  const testSectionBtn = document.getElementById("settings-test-section-btn");
+  const settingsBtn = document.getElementById("settings-btn");
+
+  // Sections with a real probe_* hook in scripts/settings_tui.py (see
+  // settings_api.py's /api/settings/test) -- everything else just gets
+  // "<section> configuration validated", not worth a button for.
+  const TESTABLE_SECTIONS = ["tts", "stt", "backend", "audio"];
+
+  let originalValues = null;
+  let draft = null;
+  let sections = [];
+  let activeKey = null;
+
+  function getPath(obj, path) {
+    return path.split(".").reduce((o, k) => (o == null ? o : o[k]), obj);
+  }
+  function setPath(obj, path, value) {
+    const keys = path.split(".");
+    let o = obj;
+    for (let i = 0; i < keys.length - 1; i++) o = o[keys[i]];
+    o[keys[keys.length - 1]] = value;
+  }
+
+  // Not full shlex: handles the common "quoted argument with spaces"
+  // case (matches backend.command's own help text example, e.g.
+  // `codex.cmd --model gpt-5.6-terra`) but not shlex's escape-sequence
+  // handling -- a documented, minor gap versus the TUI's real shlex.split.
+  function splitCommand(text) {
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    const out = [];
+    let m;
+    while ((m = re.exec(text))) {
+      out.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+    }
+    return out;
+  }
+
+  async function fetchSchema() {
+    const res = await fetch("/api/settings/schema", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values: draft }),
+    });
+    const data = await res.json();
+    sections = data.sections;
+    if (!sections.some((s) => s.key === activeKey)) activeKey = sections[0].key;
+    renderTabs();
+    renderBody();
+  }
+
+  function renderTabs() {
+    tabsEl.innerHTML = "";
+    for (const section of sections) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = section.label;
+      btn.className = section.key === activeKey ? "active" : "";
+      btn.addEventListener("click", () => {
+        activeKey = section.key;
+        renderTabs();
+        renderBody();
+      });
+      tabsEl.appendChild(btn);
+    }
+  }
+
+  // Kind -> control. Picker kinds (choice/device/kokoro_voice/piper_voice/
+  // piper_speaker) share one <select> path: field.unset_value/
+  // unavailable_value (from settings_api.py's _field_to_dict) are the
+  // TUI's own sentinel strings, never hardcoded here.
+  function buildInput(field, path) {
+    const value = getPath(draft, path);
+
+    if (field.kind === "bool") {
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = Boolean(value);
+      input.addEventListener("change", () => {
+        setPath(draft, path, input.checked);
+        fetchSchema();
+      });
+      return input;
+    }
+
+    if (["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"].includes(field.kind)) {
+      const select = document.createElement("select");
+      for (const choice of field.choices) {
+        const opt = document.createElement("option");
+        opt.value = choice;
+        opt.textContent = choice;
+        select.appendChild(opt);
+      }
+      const shown = value === null || value === undefined ? field.unset_value : value;
+      if (shown !== null && shown !== undefined) select.value = shown;
+      select.disabled = field.choices.length === 1 && field.choices[0] === field.unavailable_value;
+      select.addEventListener("change", () => {
+        const picked = select.value;
+        setPath(draft, path, picked === field.unset_value ? null : picked);
+        fetchSchema();
+      });
+      return select;
+    }
+
+    if (field.kind === "list_str") {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = (value || []).join(", ");
+      input.addEventListener("change", () => {
+        setPath(
+          draft, path,
+          input.value.split(",").map((s) => s.trim()).filter(Boolean)
+        );
+      });
+      return input;
+    }
+
+    if (field.kind === "command") {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = (value || []).join(" ");
+      input.addEventListener("change", () => {
+        setPath(draft, path, input.value.trim() ? splitCommand(input.value) : null);
+      });
+      return input;
+    }
+
+    if (["int", "optional_int", "float", "optional_float"].includes(field.kind)) {
+      const input = document.createElement("input");
+      input.type = "number";
+      if (field.kind === "float" || field.kind === "optional_float") input.step = "any";
+      input.value = value === null || value === undefined ? "" : String(value);
+      input.addEventListener("change", () => {
+        if (input.value === "") {
+          setPath(draft, path, field.kind.startsWith("optional") ? null : 0);
+          return;
+        }
+        const n = Number(input.value);
+        if (!Number.isNaN(n)) setPath(draft, path, n);
+      });
+      return input;
+    }
+
+    // str / optional_str
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = value === null || value === undefined ? "" : String(value);
+    input.addEventListener("change", () => {
+      setPath(draft, path, input.value === "" && field.kind === "optional_str" ? null : input.value);
+    });
+    return input;
+  }
+
+  function buildFieldRow(field) {
+    const path = `${field.section}.${field.key}`;
+    const wrap = document.createElement("div");
+    wrap.className = "settings-field";
+
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    wrap.appendChild(label);
+
+    // Input device/output device get their own [Test] button, same
+    // per-field granularity as the TUI's own [t] on those two fields
+    // (probe_audio tests only the relevant direction when a field_key is
+    // given -- see settings_tui.py's probe_audio docstring).
+    if (field.kind === "device") {
+      const row = document.createElement("div");
+      row.className = "settings-field-row";
+      row.appendChild(buildInput(field, path));
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "settings-test-btn";
+      btn.textContent = "Test";
+      btn.addEventListener("click", () => runTest(field.section, field.key));
+      row.appendChild(btn);
+      wrap.appendChild(row);
+    } else {
+      wrap.appendChild(buildInput(field, path));
+    }
+
+    if (field.help_text) {
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = field.help_text;
+      wrap.appendChild(help);
+    }
+    return wrap;
+  }
+
+  function renderBody() {
+    bodyEl.innerHTML = "";
+    const section = sections.find((s) => s.key === activeKey);
+    if (!section) return;
+    for (const field of section.fields) bodyEl.appendChild(buildFieldRow(field));
+    testSectionBtn.hidden = !TESTABLE_SECTIONS.includes(activeKey);
+  }
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.className = "settings-status" + (isError ? " error" : "");
+  }
+
+  async function runTest(section, field) {
+    setStatus("Testing…", false);
+    try {
+      const res = await fetch("/api/settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ section, field: field || null, values: draft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus(data.detail || "Test failed.", true);
+        return;
+      }
+      setStatus(data.status, false);
+    } catch (err) {
+      setStatus("Test failed: " + err, true);
+    }
+  }
+
+  async function saveSettings() {
+    saveBtn.disabled = true;
+    errorsEl.hidden = true;
+    try {
+      const res = await fetch("/api/settings/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values: draft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data.detail || {};
+        errorsEl.textContent = (detail.errors || ["Save failed."]).join(" | ");
+        errorsEl.hidden = false;
+        return;
+      }
+      originalValues = JSON.parse(JSON.stringify(draft));
+      setStatus("Saved -- restart ConvoBox for changes to take effect.", false);
+    } catch (err) {
+      errorsEl.textContent = "Save failed: " + err;
+      errorsEl.hidden = false;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  }
+
+  // Same arm/confirm shape as the ribbon's Quit button: closing with
+  // unsaved changes needs a second click, not a native confirm() dialog
+  // (this file never uses alert/confirm/prompt anywhere else).
+  let closeArmed = false;
+  let closeArmTimer = null;
+
+  function isDirty() {
+    return JSON.stringify(draft) !== JSON.stringify(originalValues);
+  }
+
+  function doClose() {
+    overlay.hidden = true;
+    closeArmed = false;
+    clearTimeout(closeArmTimer);
+    closeBtn.textContent = "×";
+  }
+
+  closeBtn.addEventListener("click", () => {
+    if (!isDirty() || closeArmed) {
+      doClose();
+      return;
+    }
+    closeArmed = true;
+    closeBtn.textContent = "↩"; // discard-and-return arrow, armed state
+    closeBtn.title = "Unsaved changes -- click again to discard and close";
+    closeArmTimer = setTimeout(() => {
+      closeArmed = false;
+      closeBtn.textContent = "×";
+      closeBtn.title = "Close settings";
+    }, 4000);
+  });
+
+  saveBtn.addEventListener("click", saveSettings);
+  testSectionBtn.addEventListener("click", () => runTest(activeKey, null));
+
+  settingsBtn.addEventListener("click", async () => {
+    const res = await fetch("/api/settings");
+    const data = await res.json();
+    originalValues = data.values;
+    draft = JSON.parse(JSON.stringify(originalValues));
+    activeKey = null;
+    setStatus("", false);
+    errorsEl.hidden = true;
+    overlay.hidden = false;
+    await fetchSchema();
+  });
+})();
+</script>
+<script>
+// PWA install-ability (docs/field-notes/2026-07-28-other-claude-code-web-
+// uis-dont-transfer-much.md): app-shell-only caching, sw.js never touches
+// /api/ or the SSE stream -- see that file's own comments. Optional
+// (older browsers without serviceWorker support just skip this).
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch((err) => {
+      console.error("service worker registration failed", err);
+    });
+  });
+}
 </script>
 </body>
 </html>

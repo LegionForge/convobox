@@ -48,6 +48,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import socket
 import sys
 import time
@@ -686,6 +687,19 @@ class ApprovalPromptGate:
         self._waiting_since = now
         self._pending_explanation = explanation
 
+    def cancel_wait(self) -> None:
+        """Clear the wait without going through observe_transcript/
+        observe_timeout -- for a decision delivered through a channel other
+        than the mic (the web UI's approve/deny buttons, see
+        WebApprovalBridge). Without this, the gate would still be
+        `is_waiting` after the web UI resolves a request, and the mic
+        loop's own observe_timeout() would eventually fire "deny" against a
+        request that no longer exists -- resolve_pending_approval's
+        fail-closed handling makes that harmless (it just re-logs an
+        error), but it's still stale state worth clearing explicitly
+        rather than relying on that safety net."""
+        self._waiting_since = None
+
     def observe_timeout(self, now: float) -> Literal["deny"] | None:
         """Call once per watchdog tick. Returns "deny" exactly once, the
         tick the wait silently expires -- the caller must forward an
@@ -1077,6 +1091,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         os.system("")  # nosec B605 B607
     interval = 1.0
     was_playing = False
+    last_broadcast_status: str | None = None
     while True:
         await asyncio.sleep(interval)
         busy, playing = adapter.is_busy(), player.is_playing()
@@ -1144,36 +1159,42 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                     "approval timeout fired but no pending backend request could be declined"
                 )
         was_playing = playing
+        # Computed unconditionally (not just when a TUI is active) so the
+        # web UI's status indicator has the same live signal the TUI
+        # always had -- broadcast below only on CHANGE, not every 1s tick,
+        # to keep this a handful of small SSE frames per session rather
+        # than a poll.
+        waiting_hint: str | None = None
+        if listening_gate is not None and listening_gate.is_paused:
+            status = "paused"
+        elif approval_gate is not None and approval_gate.is_waiting:
+            status = "waiting"
+            waiting_hint = "approval needed — say your approval phrase or 'no'"
+        elif continue_gate is not None and continue_gate.is_waiting:
+            # A tiered response just finished speaking and we're holding
+            # back more, waiting for the user to say "continue" (or just
+            # carry on). This is NOT the same as idle LISTENING -- the
+            # ball is in the user's court and the session is blocked on
+            # their reply. Surface it as a distinct WAITING state so the
+            # user can tell "are you still thinking?" from "are you
+            # waiting on me?" (UAT finding during the AEC/barge-in test:
+            # the old code fell through to LISTENING here).
+            status = "waiting"
+            waiting_hint = "say 'continue' for more"
+        elif playing:
+            status = "speaking"
+        elif busy:
+            status = "working"
+        elif segmenter is not None and segmenter.in_speech:
+            status = "capturing"
+        else:
+            status = "listening"
         if tui_state is not None:
-            if listening_gate is not None and listening_gate.is_paused:
-                tui_state.status = "paused"
-                tui_state.waiting_hint = None
-            elif approval_gate is not None and approval_gate.is_waiting:
-                tui_state.status = "waiting"
-                tui_state.waiting_hint = "approval needed — say your approval phrase or 'no'"
-            elif continue_gate is not None and continue_gate.is_waiting:
-                # A tiered response just finished speaking and we're holding
-                # back more, waiting for the user to say "continue" (or just
-                # carry on). This is NOT the same as idle LISTENING -- the
-                # ball is in the user's court and the session is blocked on
-                # their reply. Surface it as a distinct WAITING state so the
-                # user can tell "are you still thinking?" from "are you
-                # waiting on me?" (UAT finding during the AEC/barge-in test:
-                # the old code fell through to LISTENING here).
-                tui_state.status = "waiting"
-                tui_state.waiting_hint = "say 'continue' for more"
-            elif playing:
-                tui_state.status = "speaking"
-                tui_state.waiting_hint = None
-            elif busy:
-                tui_state.status = "working"
-                tui_state.waiting_hint = None
-            elif segmenter is not None and segmenter.in_speech:
-                tui_state.status = "capturing"
-                tui_state.waiting_hint = None
-            else:
-                tui_state.status = "listening"
-                tui_state.waiting_hint = None
+            tui_state.status = status
+            tui_state.waiting_hint = waiting_hint
+        if web_forwarder is not None and status != last_broadcast_status:
+            web_forwarder.forward_status(status)
+            last_broadcast_status = status
 
 
 def _render_approval_explanation_verbose(
@@ -1388,6 +1409,39 @@ _POSIX_CSI_FINAL = {"A": "UP", "B": "DOWN", "H": "HOME", "F": "END"}
 _POSIX_CSI_TILDE = {"5": "PGUP", "6": "PGDN"}
 
 
+def _self_signal_interrupt() -> None:
+    """Deliver a real interrupt to this process, reaching the MAIN task's
+    own try/finally shutdown path -- not a plain `raise KeyboardInterrupt`,
+    which would only unwind whichever task happens to be running at the
+    call site. Two call sites need exactly this: _read_pending_key's
+    Windows Ctrl+C workaround (below -- msvcrt.getwch() reads Ctrl+C as a
+    literal byte rather than letting it generate the console event
+    Python's SIGINT handler would otherwise catch) and the web UI's Quit
+    button (POST /api/quit, src/convobox/web/app.py) -- both run inside a
+    task that is never awaited during normal operation (the TUI's render
+    task; the web server's own request-handling task), so raising there
+    directly would die unnoticed instead of reaching the shutdown code.
+    Re-emitting a real OS-level interrupt instead reaches Python's actual
+    signal handler, which delivers KeyboardInterrupt to wherever the MAIN
+    task is awaiting -- exactly like an unswallowed terminal Ctrl+C.
+    """
+    if sys.platform == "win32":
+        # pid=0, not os.getpid(): Win32's GenerateConsoleCtrlEvent (what
+        # os.kill(..., CTRL_C_EVENT) calls under the hood on Windows)
+        # takes a PROCESS GROUP id, not an arbitrary pid -- 0 means
+        # "every process sharing this console," which reliably includes
+        # us. This process's own pid only happens to equal its process
+        # group id if it's the group's leader, which a python.exe
+        # launched as a shell's child normally is NOT -- passing
+        # os.getpid() here would silently fail to deliver the event in
+        # the common case.
+        os.kill(0, signal.CTRL_C_EVENT)
+    else:
+        # POSIX has no such process-group subtlety for SIGINT -- signaling
+        # your own pid is the standard, reliable form.
+        os.kill(os.getpid(), signal.SIGINT)
+
+
 def _read_pending_key() -> str | None:
     """Non-blocking single-keypress read for the conversation TUI's scroll
     controls. Returns None immediately when no key is waiting -- safe to
@@ -1408,6 +1462,17 @@ def _read_pending_key() -> str | None:
         if not msvcrt.kbhit():
             return None
         ch = msvcrt.getwch()
+        if ch == "\x03":
+            # Confirmed live (JP, 2026-07-28): Ctrl+C did nothing during a
+            # --tui session. Root cause traced here -- msvcrt.getwch()
+            # reads Ctrl+C as a literal 0x03 byte from the raw console
+            # input buffer rather than letting it generate the normal
+            # Ctrl+C console event Python's default SIGINT handler would
+            # otherwise turn into a KeyboardInterrupt (a well-known
+            # msvcrt.getch()/getwch() gotcha on Windows -- it bypasses the
+            # console's normal processed-input path).
+            _self_signal_interrupt()
+            return None
         if ch in ("\x00", "\xe0"):
             code = msvcrt.getwch()
             return _WIN_EXTENDED_KEYS.get(code)
@@ -1594,6 +1659,19 @@ async def run(args: argparse.Namespace) -> None:
     web_forwarder = None
     web_server = None
     web_server_task: asyncio.Task[None] | None = None
+    # Populated below once the real Orchestrator/ApprovalPromptGate exist
+    # (WebApprovalBridge.set_targets) -- create_app() needs something to
+    # hand its route closures at server-startup time, which happens here,
+    # before either of those is built. None until config.web.enabled AND
+    # a real approval_phrase are both configured (matches approval_gate's
+    # own condition below) -- the /api/sessions/{id}/approval endpoint
+    # reports "nothing pending" via approval_bridge itself in that case.
+    approval_bridge = None
+    # Populated below once the real ListeningGate/player/tts/adapter exist
+    # (WebListeningBridge.set_targets), same staging reasoning as
+    # approval_bridge above -- create_app() needs something to hand its
+    # route closures before any of those are built.
+    listening_bridge = None
     if config.web.enabled:
         # Lazy, opt-in import: fastapi/uvicorn are the "web" extra (`uv sync
         # --extra web`), not a main dependency -- most CLI/TUI-only users
@@ -1603,6 +1681,7 @@ async def run(args: argparse.Namespace) -> None:
             import uvicorn
 
             from convobox.web.app import create_app
+            from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
         except ImportError as e:
             raise ImportError(
                 "web.enabled is set but the 'web' extra isn't installed. "
@@ -1620,7 +1699,20 @@ async def run(args: argparse.Namespace) -> None:
             history=web_app_history if config.web.history_tracking_enabled else None,
             broadcaster=web_broadcaster,
         )
-        web_app = create_app(db=web_app_history, broadcaster=web_broadcaster)
+        approval_bridge = WebApprovalBridge()
+        listening_bridge = WebListeningBridge()
+        web_app = create_app(
+            db=web_app_history,
+            broadcaster=web_broadcaster,
+            display=config.display,
+            approval_bridge=approval_bridge,
+            listening_bridge=listening_bridge,
+            quit_handler=_self_signal_interrupt,
+            config_path=config_path,
+            working_dir=(
+                Path(config.backend.working_dir) if config.backend.working_dir else None
+            ),
+        )
         web_uvicorn_config = uvicorn.Config(
             web_app,
             host=config.web.bind_address,
@@ -1662,6 +1754,8 @@ async def run(args: argparse.Namespace) -> None:
         else None
     )
     adapter.set_interactive_approvals(approval_gate is not None)
+    if approval_bridge is not None:
+        approval_bridge.set_targets(orchestrator, approval_gate)
     error_ladder = RecognitionErrorLadder()
 
     log.info(
@@ -1851,6 +1945,8 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.pause_listening_phrases[0],
         config.interaction.resume_word,
     )
+    if listening_bridge is not None:
+        listening_bridge.set_targets(listening_gate, player, tts, adapter)
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending, next_overlap_grace_s

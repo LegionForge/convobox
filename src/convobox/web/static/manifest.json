@@ -1,0 +1,18 @@
+{
+  "name": "ConvoBox",
+  "short_name": "ConvoBox",
+  "description": "Local, voice-first companion view for a live ConvoBox session -- transcript, approvals, and settings, served by the same loopback-only process ConvoBox itself starts.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1a1a1a",
+  "icons": [
+    {
+      "src": "img/legionforge-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

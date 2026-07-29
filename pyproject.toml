@@ -132,6 +132,15 @@ asyncio_mode = "auto"
 # specifically must stay opt-in, not default -- it's GPL-3.0; web's own
 # reason is pyproject.toml's own comment on the `web` extra), so mypy can
 # never resolve them there regardless of whether stubs exist upstream.
+#
+# voice_picker/audio_devices are a third reason again: real first-party
+# modules (scripts/voice_picker.py, scripts/audio_devices.py), but
+# scripts/settings_tui.py imports them the same way it runs standalone --
+# a bare `import voice_picker` relying on a runtime sys.path insert, not
+# `from scripts import voice_picker` -- so plain `mypy src/convobox` (no
+# scripts/ on its search path) can't resolve them statically. Only surfaced
+# once something under src/convobox first imported settings_tui.py
+# (web/settings_api.py, web UI v2 slice 3) and mypy started following it.
 module = [
     "faster_whisper",
     "faster_whisper.*",
@@ -147,6 +156,8 @@ module = [
     "starlette.*",
     "uvicorn",
     "uvicorn.*",
+    "voice_picker",
+    "audio_devices",
 ]
 ignore_missing_imports = true
 

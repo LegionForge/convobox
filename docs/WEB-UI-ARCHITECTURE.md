@@ -454,7 +454,73 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 - Session comparison
 - Export to PDF/CSV
 - Remote access (requires encryption, auth)
-- Approval UI wiring (approve/deny from browser)
+
+(Approval UI wiring shipped in Phase 2 — see below — it's no longer out of
+scope.)
+
+---
+
+## Phase 2 (Web UI v2)
+
+Built on `feat/web-ui-v2`, several independently-committed slices, after
+Phase 1's viewing-only scope above:
+
+- **Bubble-chat layout + branded top ribbon** — scrollable, mobile-texting-
+  style transcript (user right-aligned, everything else left-aligned),
+  replacing the old flat bordered-box list. Ribbon: LegionForge logo +
+  wordmark, session picker, working "Clear history" button.
+- **Configurable per-role bubble colors** — `display.user_color` /
+  `display.assistant_color` (hex, `#RGB`/`#RRGGBB`), applied as inline CSS
+  custom properties so they override the theme default in both light and
+  dark mode.
+- **Real Approve/Deny/Explain buttons** on a pending `APPROVAL_REQUEST`
+  bubble (`POST /api/sessions/{id}/approval`) — the first web UI capability
+  that *mutates* a live session rather than observing it. `WebApprovalBridge`
+  (`bridge.py`) answers the same `ApprovalPromptGate`/
+  `Orchestrator.resolve_pending_approval` path a spoken approval phrase
+  does; a race with a simultaneous voice answer fails closed (409, "already
+  resolved") rather than double-deciding.
+- **Quit button** (`POST /api/quit`) — ends the whole process (mic loop,
+  backend, web server), not just one decision. Client-side arm/confirm
+  (first click arms, second click within ~4s fires). Signals the real OS
+  process (`os.kill`) the same way a terminal Ctrl+C does, rather than
+  raising anything locally.
+- **Settings-editing REST API + frontend** (`settings_api.py`: `GET
+  /api/settings`, `POST /api/settings/schema` / `/validate` / `/save` /
+  `/test`) — full parity target with `scripts/settings_tui.py`'s own
+  edit/validate/save/test contract, reusing that file's `SECTION_SPECS`,
+  `validate_config`, `save_with_backup`, and `probe_*` test hooks
+  directly so the TUI and web UI can never silently drift on what counts
+  as valid. Like the TUI, saves write `convobox.yaml` (backup + atomic
+  replace) but need a restart to take effect — there is no hot-reload.
+  The frontend Settings modal is a fully generic renderer driven by the
+  schema endpoint — no per-field markup, so a new `FieldSpec` on the
+  Python side just works.
+- **Configurable user/assistant display names** — `display.user_name` /
+  `display.assistant_name`, shown in a bubble's meta line instead of the
+  raw event type.
+- **Stop/Resume listening button** (`WebListeningBridge`, `bridge.py`) —
+  does exactly what a spoken pause phrase does (hard-stops in-flight
+  playback/backend work via `ListeningGate`), not just a future-transcript
+  gate. Shipped in its own commit per the safety-critical-rides-alone
+  rule.
+- **A live activity-status indicator** — `WebEventForwarder.
+  forward_status()`, broadcast only on change from `_working_watchdog`'s
+  now-unconditional status computation.
+- **PWA install support** — `static/manifest.json` + `sw.js`
+  (app-shell-only caching, never touches `/api/*`).
+- **An artifact pane** — `BackendEventType.ARTIFACT` +
+  `GET /api/artifacts/{path}` (fenced to `backend.working_dir`), wired
+  for the Claude Code adapter (`Write`/`Edit` tool calls, confirmed via
+  the matching `tool_result`), rendered as a collapsible right-hand pane.
+  See `docs/ARTIFACT-PANE-SCOPE.md` for the full design and current
+  adapter-coverage status.
+
+Each of the above extends the no-auth, loopback-only trust model from
+view-only to a real control surface — see WEB-UI-USAGE.md's security
+section for what that means in practice. Full session-by-session build
+history: `docs/field-notes/` and the project's Obsidian session notes, not
+duplicated here.
 
 ---
 
@@ -545,20 +611,43 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
    (this server has no auth) while still allowing `0.0.0.0` as an
    explicit choice, `port` validated to a real port range.
 
-6. **Documentation** -- partially done: this file is now kept current
-   as each slice landed (see the DONE notes above and CHANGELOG-worthy
-   detail in git history: `feat(config)`/`feat(web)` commits, 2026-07-25).
-   docs/WEB-UI-USAGE.md and docs/WEB-UI-DEV.md are still unwritten --
-   worth doing once the frontend exists, so usage docs describe the
-   real UI rather than a still-hypothetical one.
+6. **Documentation** -- DONE, and kept current as each slice lands: this
+   file (the running architecture/build account), `docs/WEB-UI-USAGE.md`
+   (end-user instructions), and `docs/WEB-UI-DEV.md` (contributor-facing
+   layout/testing/extension guide) all exist and are updated alongside
+   the code, not as an afterthought.
 
 ---
 
-**Status:** Phase 1 viewing scope complete and live-verified end to end --
-history storage, FastAPI app, SSE fan-out, orchestrator wiring, `--web`
-flag, and a minimal HTML/JS frontend all in place -- built across several
-small, independently-committed slices per this project's one-work-set-
-at-a-time convention, not the single ~3-4 day push this doc originally
-estimated. What's left for a fuller Phase 1: approve/deny from the
-browser (deliberately out of scope so far, see "Out of scope" above),
-and docs/WEB-UI-USAGE.md / docs/WEB-UI-DEV.md (Next Steps #6).
+**Status:** Phase 1 (viewing) and Phase 2 (bubble UI, ribbon, per-role
+colors/names, approve/deny, quit, stop/resume-listening, a live
+activity-status indicator, a full settings-editing UI with Test-probe
+wiring, PWA install support, and an artifact pane) are all complete and
+live-verified end to end -- built across many small, independently-
+committed slices per this project's one-work-set-at-a-time convention,
+not the single ~3-4 day push this doc originally estimated.
+
+Every one of the control-plane pieces above (approve/deny, quit, stop/
+resume-listening, settings-save) was a deliberate, individually-confirmed
+extension of the no-auth loopback trust model, not silent scope creep --
+see WEB-UI-USAGE.md's security section. The riskiest of them
+(stop/resume-listening, which hard-stops in-flight work the same way a
+spoken pause phrase does) shipped in its own commit with the
+re-verification stated, per this project's safety-critical-rides-alone
+rule -- live-verified in an isolated process group specifically because
+the real Quit mechanism's `os.kill(0, CTRL_C_EVENT)` targets the whole
+console process group on Windows, not just the target process.
+
+The artifact pane (`docs/ARTIFACT-PANE-SCOPE.md`) is built end to end
+for Claude Code (`Write`/`Edit` tool calls, confirmed via the matching
+`tool_result` before an `ARTIFACT` event fires) and live-verified by JP
+himself in a real voice session -- opencode/codex remain unwired,
+opencode blocked on one small live-verification step (confirming its
+`file.edited` event's path format), not guesswork.
+
+What's left: restart-on-demand (no go-ahead given yet -- a real
+security-posture decision, not assumed), opencode/codex artifact
+wiring, and replaying a historical `ARTIFACT` event on page reload
+(today only the live-session case is handled) -- see the project's own
+quickref/session notes and `docs/ARTIFACT-PANE-SCOPE.md` for current
+status of each.

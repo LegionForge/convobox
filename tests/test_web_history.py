@@ -125,6 +125,7 @@ def test_backend_event_is_stored_as_full_json_for_replay(tmp_path: Path) -> None
             "tool": "Bash",
             "tool_input": '{"command": "ls"}',
             "tool_output": None,
+            "artifact_path": None,
         }
     finally:
         db.close()

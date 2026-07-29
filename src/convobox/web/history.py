@@ -181,4 +181,5 @@ def event_to_dict(event: BackendEvent) -> dict[str, Any]:
         "tool": event.tool,
         "tool_input": event.tool_input,
         "tool_output": event.tool_output,
+        "artifact_path": event.artifact_path,
     }

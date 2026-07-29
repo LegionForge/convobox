@@ -14,6 +14,10 @@ scripted by the incoming prompt text:
   contains "fail"       -> result with is_error=true
   contains "die"        -> exits mid-turn without a result
   contains "bigline"    -> emits a >64KB system line first (stream-limit case)
+  contains "write image" -> Write tool_use (a .png path) + a successful
+                            tool_result, then text + result
+  contains "write broken image" -> Write tool_use (a .png path) + a FAILED
+                               (is_error) tool_result, then text + result
   anything else         -> echoes the prompt as assistant text + result
 """
 
@@ -57,6 +61,39 @@ def handle_prompt(text: str) -> None:
             },
         })
         emit(assistant([{"type": "text", "text": "the tool ran"}]))
+        emit_result()
+        return
+    if "write broken image" in text:
+        emit(assistant([{
+            "type": "tool_use", "id": "tu_write_fail", "name": "Write",
+            "input": {"file_path": "chart.png", "content": "binary-ish"},
+        }]))
+        emit({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result", "tool_use_id": "tu_write_fail",
+                    "content": "permission denied", "is_error": True,
+                }],
+            },
+        })
+        emit(assistant([{"type": "text", "text": "the write failed"}]))
+        emit_result()
+        return
+    if "write image" in text:
+        emit(assistant([{
+            "type": "tool_use", "id": "tu_write_1", "name": "Write",
+            "input": {"file_path": "chart.png", "content": "binary-ish"},
+        }]))
+        emit({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tu_write_1", "content": "File created"}],
+            },
+        })
+        emit(assistant([{"type": "text", "text": "wrote the chart"}]))
         emit_result()
         return
     emit(assistant([{"type": "text", "text": f"echo: {text}"}]))
