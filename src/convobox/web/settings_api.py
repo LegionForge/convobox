@@ -158,7 +158,7 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
                 status = await settings_tui.probe_audio(config, req.field)
             else:
                 status = f"{req.section} configuration validated"
-        except Exception as exc:  # noqa: BLE001 -- reported to the client, not raised bare
+        except Exception as exc:
             raise HTTPException(
                 500, f"{req.section} test failed: {type(exc).__name__}: {exc}"
             ) from exc
