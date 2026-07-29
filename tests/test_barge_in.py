@@ -203,8 +203,14 @@ def test_custom_pause_phrases_and_resume_word() -> None:
 
 
 def test_marker_is_nonempty_and_readable() -> None:
-    # The truncation-problem marker: prefixed to forwarded barge-in text.
-    assert BARGE_IN_MARKER.startswith("(")
+    # The truncation-problem marker: prefixed to forwarded barge-in text --
+    # unambiguous for both the transcript UI and the backend LLM reading it
+    # as conversational context (2026-07-29: the prior "(I interrupted your
+    # spoken response midway)" wording is fine, but JP asked for a terser
+    # bracket-tag style; "[AI Interrupted]" was considered and rejected as
+    # ambiguous -- reads like "the AI interrupted [something]" rather than
+    # "the AI's response got interrupted").
+    assert BARGE_IN_MARKER.startswith("[")
     assert "interrupt" in BARGE_IN_MARKER
 
 
