@@ -133,15 +133,60 @@ def test_mute_player_never_marks_playback(silent_output_stream: None) -> None:
 
 
 # --- [G8]: audible (BargeInMonitor's gate, not is_playing()'s thread liveness) ---
+#
+# These all gate the fake stream mid-flight (a second write() call, or
+# start() itself) rather than calling wait() for full natural completion,
+# because audible no longer stays True after playback genuinely finishes
+# (see the dedicated on_playback_complete tests below for that fix) --
+# checking post-wait() would now correctly see False, not True, for any
+# of these "is it audible right now" scenarios.
 
 
 def test_echo_aware_player_becomes_audible_once_a_block_is_written(
-    silent_output_stream: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    became_audible = threading.Event()
+    release = threading.Event()
+
+    class GatedStream:
+        def __init__(self, **kwargs: object) -> None:
+            self._writes = 0
+
+        def start(self) -> None:
+            pass
+
+        def write(self, samples: object) -> None:
+            self._writes += 1
+            if self._writes == 2:
+                # Held here (not on write #1) so on_first_block_played has
+                # already fired for block 1 by the time we check -- and the
+                # thread can't reach natural completion while we're looking.
+                release.wait(timeout=1)
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "convobox.audio.playback.import_sounddevice",
+        lambda: SimpleNamespace(OutputStream=GatedStream),
+    )
     player = EchoAwarePlayer()
-    player.play(np.zeros(22050, dtype=np.float32), sample_rate=22050)
-    player.wait()
+    original_callback = player.on_first_block_played
+    def on_first_block() -> None:
+        assert original_callback is not None
+        original_callback()
+        became_audible.set()
+    player.on_first_block_played = on_first_block
+
+    player.play(np.zeros(4096, dtype=np.float32), sample_rate=16000)
+    assert became_audible.wait(timeout=1)
     assert player.audible is True
+    assert player.is_playing() is True  # still mid-flight, not yet complete
+    release.set()
+    player.stop()
 
 
 def test_echo_aware_player_audible_is_false_until_the_first_block_writes(
@@ -152,18 +197,24 @@ def test_echo_aware_player_audible_is_false_until_the_first_block_writes(
     # actually reached the speaker. audible must stay False through that
     # window -- gate the fake stream's start() to pause there and check.
     stream_started = threading.Event()
-    release = threading.Event()
+    release_start = threading.Event()
+    became_audible = threading.Event()
+    release_write = threading.Event()
 
     class GatedStream:
         def __init__(self, **kwargs: object) -> None:
-            pass
+            self._writes = 0
 
         def start(self) -> None:
             stream_started.set()
-            release.wait(timeout=1)
+            release_start.wait(timeout=1)
 
         def write(self, samples: object) -> None:
-            pass
+            self._writes += 1
+            if self._writes == 2:
+                # Held after block 1 (which fires on_first_block_played),
+                # same reasoning as the test above.
+                release_write.wait(timeout=1)
 
         def stop(self) -> None:
             pass
@@ -176,36 +227,47 @@ def test_echo_aware_player_audible_is_false_until_the_first_block_writes(
         lambda: SimpleNamespace(OutputStream=GatedStream),
     )
     player = EchoAwarePlayer()
+    original_callback = player.on_first_block_played
+    def on_first_block() -> None:
+        assert original_callback is not None
+        original_callback()
+        became_audible.set()
+    player.on_first_block_played = on_first_block
+
     player.play(np.zeros(4096, dtype=np.float32), sample_rate=16000)
     assert stream_started.wait(timeout=1)
     assert player.is_playing() is True
     assert player.audible is False  # device open, but nothing written yet
-    release.set()
-    player.wait()
+    release_start.set()
+    assert became_audible.wait(timeout=1)
     assert player.audible is True
+    release_write.set()
+    player.stop()
 
 
 def test_echo_aware_player_audible_resets_on_a_new_play_call(
-    silent_output_stream: None, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    player = EchoAwarePlayer()
-    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
-    player.wait()
-    assert player.audible is True
-
-    stream_started = threading.Event()
+    # The explicit, synchronous reset at the top of play() (belt-and-
+    # suspenders alongside on_playback_complete's own reset, which by
+    # this point has already fired too -- play()'s internal stop() call
+    # joins the old thread, running its finally block, before this new
+    # one ever starts): a second play() call's audible must read False
+    # immediately, before its own first block has written anything.
+    became_audible = threading.Event()
     release = threading.Event()
 
     class GatedStream:
         def __init__(self, **kwargs: object) -> None:
-            pass
+            self._writes = 0
 
         def start(self) -> None:
-            stream_started.set()
-            release.wait(timeout=1)
+            pass
 
         def write(self, samples: object) -> None:
-            pass
+            self._writes += 1
+            if self._writes == 2:
+                release.wait(timeout=1)
 
         def stop(self) -> None:
             pass
@@ -217,14 +279,87 @@ def test_echo_aware_player_audible_resets_on_a_new_play_call(
         "convobox.audio.playback.import_sounddevice",
         lambda: SimpleNamespace(OutputStream=GatedStream),
     )
-    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
-    assert stream_started.wait(timeout=1)
-    # New playback's stream is open but hasn't written anything yet -- must
-    # not still read True from the PREVIOUS play() call.
-    assert player.audible is False
-    release.set()
-    player.wait()
+    player = EchoAwarePlayer()
+    original_callback = player.on_first_block_played
+    def on_first_block() -> None:
+        assert original_callback is not None
+        original_callback()
+        became_audible.set()
+    player.on_first_block_played = on_first_block
+
+    player.play(np.zeros(4096, dtype=np.float32), sample_rate=16000)
+    assert became_audible.wait(timeout=1)
     assert player.audible is True
+
+    release.set()  # let the first (blocked) thread finish so stop() can join it
+    player.on_first_block_played = original_callback
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
+    assert player.audible is False
+    player.stop()
+
+
+# --- on_playback_complete: the actual [G8] false-barge-in-tag fix,
+# 2026-07-29 -- audible must reset to False when playback ends NATURALLY,
+# not just at the start of the next play() call, or every utterance
+# spoken into the gap between one response finishing and the next
+# starting reads as "during playback" to BargeInMonitor. ---
+
+
+def test_echo_aware_player_audible_resets_after_natural_completion(
+    silent_output_stream: None,
+) -> None:
+    player = EchoAwarePlayer()
+    player.play(np.zeros(64, dtype=np.float32), sample_rate=16000)
+    player.wait()  # silent_output_stream's write() never blocks -- finishes fast
+    assert player.audible is False
+
+
+def test_echo_aware_player_audible_resets_after_a_hard_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    became_audible = threading.Event()
+    release = threading.Event()
+
+    class GatedStream:
+        def __init__(self, **kwargs: object) -> None:
+            self._writes = 0
+
+        def start(self) -> None:
+            pass
+
+        def write(self, samples: object) -> None:
+            self._writes += 1
+            if self._writes == 2:
+                # Held here so the thread can't race ahead to natural
+                # completion before stop() below gets a chance to
+                # interrupt it mid-flight -- that's the actual scenario
+                # this test needs (a HARD stop, not a natural end).
+                release.wait(timeout=1)
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "convobox.audio.playback.import_sounddevice",
+        lambda: SimpleNamespace(OutputStream=GatedStream),
+    )
+    player = EchoAwarePlayer()
+    original_callback = player.on_first_block_played
+    def on_first_block() -> None:
+        assert original_callback is not None
+        original_callback()
+        became_audible.set()
+    player.on_first_block_played = on_first_block
+
+    player.play(np.zeros(4096, dtype=np.float32), sample_rate=16000)
+    assert became_audible.wait(timeout=1)
+    assert player.audible is True
+    release.set()
+    player.stop()  # hard stop, mid-playback -- also reaches the finally block
+    assert player.audible is False
 
 
 # --- stage-1 text-level echo suppression ---

@@ -137,6 +137,18 @@ class AudioPlayer:
         # the audio itself already have on_block_played for that; this is
         # purely a timing signal, cheap enough to log unconditionally.
         self.on_first_block_played: Callable[[], None] | None = None
+        # Fires exactly once per play()/play_stream() call, when playback
+        # ends for ANY reason (ran out of samples, or stop() cut it short)
+        # -- from the PLAYBACK THREAD's own finally block, so it's not
+        # missed if the thread dies from an unexpected exception mid-loop
+        # either. Takes no arguments, same shape as on_first_block_played.
+        # Exists because EchoAwarePlayer.audible otherwise only ever gets
+        # reset at the START of the NEXT play() call, leaving it stuck
+        # True for the whole gap between one response ending and the next
+        # one starting -- see EchoAwarePlayer's own docstring for the live
+        # bug this caused (every post-response utterance read as "during
+        # playback" and got tagged as a barge-in that never happened).
+        self.on_playback_complete: Callable[[], None] | None = None
         # Actual render latency reported by the host API once a stream is
         # open (None before first playback / when unreported). Consumers:
         # the AEC delay estimate.
@@ -188,6 +200,8 @@ class AudioPlayer:
             stream.stop()
             stream.close()
             self._stream = None
+            if self.on_playback_complete is not None:
+                self.on_playback_complete()
 
     async def play_stream(self, chunks: AsyncIterator[np.ndarray], sample_rate: int) -> None:
         """Play chunks as they arrive; audio starts on the first chunk.
@@ -267,6 +281,8 @@ class AudioPlayer:
                 stream.stop()
                 stream.close()
             self._stream = None
+            if self.on_playback_complete is not None:
+                self.on_playback_complete()
 
     def stop(self) -> None:
         self._stop.set()
