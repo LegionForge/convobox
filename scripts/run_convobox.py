@@ -291,7 +291,7 @@ def grace_s_for_last_response(
 # response wasn't fully heard (we can't edit backend session history the
 # way realtime APIs truncate theirs -- see docs/DESIGN-echo-and-barge-in.md,
 # "the truncation problem"). Wording provisional pending barge-in UAT.
-BARGE_IN_MARKER = "(I interrupted your spoken response midway) "
+BARGE_IN_MARKER = "[User interrupted AI response] "
 
 
 class BargeInMonitor:
