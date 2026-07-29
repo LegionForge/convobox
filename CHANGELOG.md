@@ -6,7 +6,53 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
-> **Attribution:** Changes in this Unreleased section were authored by the
+## [0.3.0] — 2026-07-28
+
+### Added
+- **Web UI v2: full Settings editor, a real control-plane (approve/deny/
+  explain, stop/resume listening, quit), and a live artifact pane**
+  (`src/convobox/web/`, `src/convobox/web/static/index.html`).
+  `Attribution: Claude Code; Provider: Anthropic; Model: claude-sonnet-5;
+  Scope: src/convobox/web/, scripts/run_convobox.py's web wiring,
+  docs/WEB-UI-*.md.` Builds on Phase 1's read-only view (below) with real
+  mutating capability, each a deliberate, discussed extension of the
+  no-auth loopback trust model, not silent scope creep -- see
+  `docs/WEB-UI-USAGE.md`'s "Security posture" section.
+  - **Settings editor** (`web/settings_api.py`, `GET /api/settings`,
+    `POST /api/settings/schema`/`/validate`/`/save`/`/test`): full feature
+    parity with `scripts/settings_tui.py`, reusing that file's
+    `SECTION_SPECS`/`validate_config`/`save_with_backup`/`probe_*`
+    directly rather than a second copy, so the TUI and web UI can never
+    silently drift on what counts as valid or how a save is written.
+  - **Approve/Deny/Explain buttons** (`WebApprovalBridge`) answer the same
+    pending backend approval a spoken phrase would; **Stop/Resume
+    listening** (`WebListeningBridge`) drives the same hard-stop path
+    barge-in/the safeword use; **Quit** ends the whole session (mic loop,
+    backend, and the web server itself) -- arms on first click, fires on a
+    second within a few seconds. Voice and the browser can both answer a
+    pending approval or pause; whichever gets there first wins.
+  - **Live activity-status indicator**: the mic loop's own
+    `listening`/`capturing`/`speaking`/`working`/`waiting`/`paused` state,
+    over the same SSE stream, updated only when it actually changes.
+  - **Artifact pane** (`web/artifacts.py`, `GET /api/artifacts/{path}`):
+    opens when a tool call writes something worth looking at (image or
+    HTML page) -- Claude Code only today (a confirmed successful
+    `Write`/`Edit` tool call), opencode/codex not yet wired. Served only
+    from `backend.working_dir`, fenced by resolving the real path rather
+    than a string-prefix match; resizable, with the chat pane adjusting
+    alongside it.
+  - Bubble-chat layout with a branded top ribbon and configurable
+    per-role bubble colors; configurable user/assistant display names
+    (`DisplayConfig.user_name`/`assistant_name`); PWA installability
+    (`manifest.json`, `sw.js`).
+  - A field note on other Claude Code/coding-agent web UIs
+    (`docs/field-notes/2026-07-28-other-claude-code-web-uis-dont-transfer-
+    much.md`): most of their scope (file tree/Git/terminal/multi-session)
+    doesn't transfer, since ConvoBox's web UI is a voice-session
+    companion, not an IDE -- PWA install-ability was the one portable
+    idea, now built.
+
+> **Attribution:** Changes in the remainder of this section were authored by the
 > **ConvoBox** AI coding agent during live audio UAT on 2026-07-14/15
 > (submitted via the `jp-cruz` account, PR #78). ConvoBox is the product
 > under test; its own agent made these modifications. The agent was observed
