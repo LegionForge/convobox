@@ -67,6 +67,17 @@ they don't have to learn a new mental model:
 These are acknowledged as influences on *interaction design*; no code or
 assets from them are used.
 
+- **[OpenLive](https://github.com/katipally/openlive)** (katipally,
+  MIT) — a comparison JP requested 2026-07-29 (see
+  [`docs/field-notes/2026-07-29-openlive-comparison-and-acp-direction.md`](docs/field-notes/2026-07-29-openlive-comparison-and-acp-direction.md))
+  surfaced its use of the [Agent Client Protocol](https://agentclientprotocol.com)
+  to drive Claude Code/Codex/Cursor/OpenCode/Hermes through one client
+  implementation, which directly inspired ConvoBox's own decision to
+  pursue ACP as its standard backend-adapter protocol (see
+  `docs/ROADMAP.md`'s "Agent Client Protocol (ACP) support" entry). An
+  architectural influence, not a code dependency — no code from OpenLive
+  is used.
+
 ## Development
 
 Built by JP Cruz (LegionForge). Portions of the implementation, research

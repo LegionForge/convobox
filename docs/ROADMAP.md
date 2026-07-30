@@ -219,6 +219,35 @@ differs per person, so the bar is a setting, not a constant. Current
 bar is honest: "a feeling." Instrument first (AEC telemetry was the
 template), then set defaults from data.
 
+### Agent Client Protocol (ACP) support (decided: pursue; scoping not yet started)
+JP, 2026-07-29, after comparing ConvoBox to
+[katipally/openlive](https://github.com/katipally/openlive) (see
+[docs/field-notes/2026-07-29-openlive-comparison-and-acp-direction.md](field-notes/2026-07-29-openlive-comparison-and-acp-direction.md)):
+reaffirmed the 2026-07-12 mission (voice-operate coding agents, not a
+general voice-any-LLM product -- see this file's own intro), and decided
+to pursue [ACP](https://agentclientprotocol.com) (JSON-RPC over stdio)
+as the standard adapter protocol going forward, inspired by OpenLive's
+use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
+
+- Today each backend adapter (`src/convobox/adapters/*.py`) hand-speaks
+  that CLI's own native protocol (Claude Code's stream-json NDJSON,
+  OpenCode's HTTP/SSE, Codex's app-server JSON-RPC) -- real, empirically
+  live-verified engineering (see each adapter's own module docstring),
+  but bespoke per backend and not extensible to a new agent without a
+  new from-scratch adapter.
+- ACP would replace that per-backend protocol work with one client
+  implementation ConvoBox owns, at the cost of depending on each agent
+  CLI actually exposing an ACP server (not yet verified which of
+  Claude Code/Codex/OpenCode do today -- first scoping task).
+- Not yet scoped: which existing adapters ACP could actually replace
+  vs. where the current bespoke adapter still wins (e.g. Claude Code's
+  PreToolUse-hook-based voice-gated approval channel, built and
+  live-verified this project's own way -- confirm ACP's own permission
+  primitives cover that before dropping the hook mechanism).
+- This is the same mechanism the VS Code / VSCodium mid-term item below
+  would likely ride on, if ACP (or a comparable editor-side protocol)
+  turns out to cover that too.
+
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
   actions (agent can point at lines/files; user can ask to be taken
