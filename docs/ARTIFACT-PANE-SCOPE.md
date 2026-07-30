@@ -159,14 +159,103 @@ before wiring `file.edited` → `BackendEventType.ARTIFACT`.
 ## Deferred For Later
 
 - PDF/CSV/rich viewers beyond the simple fallback above.
-- claude-code/codex adapter support.
-- Multiple simultaneous artifacts / a history of past artifacts (v1: one
-  pane, latest artifact only, matching the "no artifact/image concept
-  today" starting point — don't build a gallery before the single-pane
-  case is even shipped).
+- codex adapter support (Claude Code shipped; opencode still blocked, see
+  "Progress" above).
+- Multiple simultaneous artifacts / a history of past artifacts — v1
+  shipped as "one pane, latest artifact only." Now being designed as the
+  Artifact Chooser below, per JP's request.
 - Any artifact *editing* (this pane is view-only; an editable artifact
   pane is a control-plane-shaped feature, same class of decision as the
   stop/resume-listening buttons — not assumed in scope here).
+
+## Artifact Chooser (2026-07-29, design pass before code)
+
+JP asked, after the single-pane version had been live-UAT'd for a while:
+should there be a way to see the latest artifact AND get back to earlier
+ones from the same session? A design pass first, same reasoning as the
+rest of this doc.
+
+### Explicitly rejected: a VSCode-style file explorer
+
+JP's own follow-up question, considered and rejected for the same reasons
+`docs/field-notes/2026-07-28-other-claude-code-web-uis-dont-transfer-
+much.md` already gives for file trees/terminals/Git explorers generally:
+ConvoBox never edits files itself (the backend agent does, in its own
+sandboxed `backend.working_dir`, deliberately kept separate from
+ConvoBox's own source — `docs/DESIGN-backend-sandboxing.md`), and a
+browsable directory listing would mean serving *any* file in
+`working_dir` from a second, no-auth surface, not just ones a tool call
+actually referenced — a materially bigger trust-boundary widening than
+today's `GET /api/artifacts/{path}`, which only ever serves paths this
+session's own ARTIFACT events named. **Decision: the chooser lists only
+artifacts the backend actually produced this session, never a live
+directory scan.**
+
+### Format: a tab strip, not a carousel or dropdown
+
+Three shapes considered:
+- **Carousel** (prev/next arrows) — rejected: hides how many artifacts
+  exist, no direct jump to a specific one, awkward once past 3-4 items.
+- **Dropdown** — matches the existing session-picker pattern already in
+  the ribbon, minimal footprint, but hides the list until opened and is
+  less scannable at a glance.
+- **Tab strip** (chosen) — a row of small filename-labeled tabs across
+  the top of the artifact pane itself, most-recent auto-selected/
+  highlighted, click any to switch. Most scannable (see count + jump
+  directly), reasonable vertical cost given artifact count per session is
+  usually small. If a session accumulates enough artifacts to overflow
+  the pane's width, horizontal scroll on the tab strip (not wrapping,
+  which would eat vertical space from the actual artifact) — revisit if
+  live UAT shows this getting unwieldy.
+
+### Data source: this session's own ARTIFACT events, live + replayed from history
+
+No `HistoryDB` schema change needed — corrected an earlier wrong
+assumption (this doc, prior draft) that `artifact_path` wasn't persisted;
+it already is, exactly like every other `BackendEvent` field
+(`WebEventForwarder.__call__` → `HistoryDB.append_event(backend_event=
+event)` → `event_to_dict()` → the `backend_event_json` column), gated
+only by the existing `web.history_tracking_enabled` opt-in like
+everything else. Plan:
+
+1. Frontend keeps an in-memory ordered list of `{path, label, timestamp}`
+   for the current page connection, appended to on every live SSE
+   `ARTIFACT` event — same source the single pane already reacts to.
+2. On page load/reconnect, seed that list from
+   `GET /api/sessions/{id}/events`: filter rows where `event_type ==
+   "artifact"`, `JSON.parse(row.backend_event_json).artifact_path` for
+   each. Only possible when `web.history_tracking_enabled` is on (same
+   as every other history-dependent feature) — with it off, the chooser
+   starts empty on a fresh page load and only fills in from live events
+   from that point on, matching this app's existing "live view always
+   works, history is a separate opt-in" rule rather than a special case.
+3. Identity key: the resolved artifact path, same as the existing
+   refresh-in-place logic. A later event for a path already in the list
+   updates that SAME tab's content/timestamp rather than appending a
+   duplicate — the tab strip and the existing "same path = refresh"
+   behavior are the same mechanism, not two.
+
+### Initial Slice
+
+1. Frontend-only: accumulate the live-event list (step 1 above), render
+   a tab strip, latest auto-selected. No backend changes.
+2. Add the history-replay seed (step 2) as a follow-up in the same slice
+   once step 1 is visually confirmed via BrowserOS.
+3. Live-verify: multiple real tool-call-produced artifacts in one
+   session actually populate multiple tabs, clicking an older tab shows
+   the right content, a repeated path updates its existing tab instead of
+   duplicating, and (if `history_tracking_enabled`) a page reload
+   restores the tab list.
+
+### Deferred out of this pass
+
+- Per-tab close/dismiss controls.
+- Cross-*session* gallery (artifacts from a DIFFERENT past session, not
+  just this one) — the existing session picker already covers switching
+  which session's transcript you're viewing; whether artifacts should
+  follow that same switch is a separate decision, not assumed here.
+- Thumbnails/previews rendered directly in the tab (text label only for
+  now).
 
 ## Open Questions (for JP, not decided here)
 
@@ -178,3 +267,6 @@ before wiring `file.edited` → `BackendEventType.ARTIFACT`.
 - Should `GET /api/artifacts/*` require `web.history_tracking_enabled` or
   any other existing opt-in gate, or is it unconditionally available
   whenever `web.enabled` is (matching every other route so far)?
+- Chooser tab labels: bare filename, or full path relative to
+  `working_dir` (clearer when two artifacts share a filename in
+  different subdirectories, at the cost of a longer label)?
