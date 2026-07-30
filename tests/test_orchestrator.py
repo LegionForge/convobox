@@ -70,10 +70,15 @@ class FakeBackendAdapter(BackendAdapter):
 
 
 class FakeTTSEngine(TTSEngine):
-    def __init__(self) -> None:
+    def __init__(self, fail_with: Exception | None = None) -> None:
+        # fail_with=None (the default) keeps every existing test's behavior
+        # unchanged -- a real exception here simulates a synthesis failure
+        # mid-response (e.g. kokoro-onnx's own ~510-phoneme batch-limit
+        # crash) for _speak()'s exception-handling tests.
         self.synthesized: list[str] = []
         self.stop_calls = 0
         self._speaking = False
+        self._fail_with = fail_with
 
     @property
     def sample_rate(self) -> int:
@@ -84,6 +89,8 @@ class FakeTTSEngine(TTSEngine):
         # the path Orchestrator._speak actually uses now; the inherited
         # synthesize() convenience still funnels through this.
         self.synthesized.append(text)
+        if self._fail_with is not None:
+            raise self._fail_with
         yield np.ones(4, dtype=np.float32)
 
     def stop(self) -> None:
@@ -592,6 +599,40 @@ async def test_tiering_single_paragraph_response_speaks_the_whole_thing() -> Non
 
     assert tts.synthesized == ["just one short reply."]
     assert orch.has_more_to_reveal() is False
+
+
+# --- _speak()'s TTS/playback failure handling, 2026-07-29 -- confirmed live
+# that a synthesis failure mid-response (kokoro-onnx's own ~510-phoneme
+# batch-limit crash, surfaced by KokoroTTSEngine as a RuntimeError after its
+# 30s timeout) previously vanished completely: _speak_task is a bare
+# fire-and-forget asyncio.create_task() with nothing ever awaiting or
+# checking it, so an uncaught exception there was silently lost -- no log,
+# no UI signal, just an unexplained gap where the rest of the response
+# should have been spoken. ---
+
+
+@pytest.mark.asyncio
+async def test_speak_failure_is_caught_and_surfaced_as_an_error_event() -> None:
+    events: list[BackendEvent] = []
+    adapter = FakeBackendAdapter(busy=False)
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine(fail_with=RuntimeError("Kokoro synthesis stalled"))
+    player = FakePlayer()
+    orch = Orchestrator(
+        adapter, safeword, tts=tts, player=player, on_event=events.append,
+    )
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first paragraph.\n\nsecond paragraph."))
+    # Must not raise -- this is the actual regression: the exception used
+    # to propagate nowhere (task never awaited) rather than raise here, but
+    # asserting a clean await is still the right proof the task itself
+    # completed instead of being left in a permanently-failed, unretrieved
+    # state.
+    await orch._speak_task
+
+    error_events = [e for e in events if e.type == BackendEventType.ERROR]
+    assert len(error_events) == 1
+    assert "Kokoro synthesis stalled" in (error_events[0].content or "")
 
 
 @pytest.mark.asyncio
