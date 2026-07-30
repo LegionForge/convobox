@@ -51,6 +51,7 @@ ARTIFACT_MEDIA_TYPES: dict[str, str] = {
     ".pdf": "application/pdf",
     ".csv": "text/csv",
     ".txt": "text/plain",
+    ".md": "text/markdown",
 }
 
 

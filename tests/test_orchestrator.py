@@ -315,6 +315,61 @@ async def test_consume_events_retries_after_an_exception_and_recovers(
 
 
 @pytest.mark.asyncio
+async def test_consume_events_backoff_doubles_on_consecutive_failures_and_resets_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Live-confirmed, 2026-07-29: a permanently unreachable backend.url
+    # (a real misconfiguration, not the 2026-07-15 transient-timeout
+    # incident this retry loop was originally built for) retried and
+    # logged an identical traceback every ~1s forever -- ~90 in under 5
+    # minutes. Backoff must grow across consecutive failures, and reset
+    # back to the fast interval the moment a real event gets through.
+    sleep_calls: list[float] = []
+
+    async def recording_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    # This module's own top-level `import asyncio` IS orchestrator.py's
+    # asyncio (same module object) -- no need for a second import of
+    # convobox.orchestrator.orchestrator just to reach it.
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+
+    events = [BackendEvent(type=BackendEventType.TEXT, content="recovered.")]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    adapter.fail_events_calls = 3  # three consecutive failures, then succeeds
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task
+
+    # patching asyncio.sleep globally also captures FakeBackendAdapter.
+    # events()'s own internal `await asyncio.sleep(0)` yield-point (a
+    # real yield, not a backoff) -- filter those 0s out, they're not
+    # what this test is checking.
+    backoff_calls = [s for s in sleep_calls if s != 0]
+    assert backoff_calls == [1.0, 2.0, 4.0]  # doubles each consecutive failure
+    assert tts.synthesized == ["recovered."]  # the event still got through
+    await orch.stop_event_loop()
+
+    # A second, later failure (simulating the backend dropping again after
+    # recovering) must start back at the fast interval, not continue from
+    # where the earlier streak left off.
+    sleep_calls.clear()
+    adapter2 = FakeBackendAdapter(busy=False, events_to_yield=events)
+    adapter2.fail_events_calls = 1
+    orch2 = Orchestrator(adapter2, safeword, tts=FakeTTSEngine(), player=FakePlayer())
+    orch2.start_event_loop()
+    assert orch2._events_task is not None
+    await orch2._events_task
+    assert [s for s in sleep_calls if s != 0] == [1.0]
+    await orch2.stop_event_loop()
+
+
+@pytest.mark.asyncio
 async def test_consume_events_does_not_retry_when_it_ends_without_an_error() -> None:
     # Preserves each adapter's own lazy-respawn contract (claude_code.py/
     # codex.py's events() call _ensure_proc()/_ensure_thread() and are
