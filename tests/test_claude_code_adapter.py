@@ -168,6 +168,20 @@ def test_stage_artifact_write_ignores_a_non_renderable_extension(tmp_path: Path)
     assert adapter._pending_artifact_writes == {}
 
 
+def test_stage_artifact_write_accepts_markdown(tmp_path: Path) -> None:
+    # Live UAT finding, 2026-07-29: a .md write produced no artifact pane
+    # AND no notification at all -- traced to .md being entirely absent
+    # from ARTIFACT_MEDIA_TYPES, so _stage_artifact_write rejected it here
+    # before an ARTIFACT event could ever be staged. Fixed by adding
+    # ".md": "text/markdown" to that allowlist (src/convobox/adapters/
+    # base.py) -- this is the regression guard.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._stage_artifact_write(
+        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "notes.md"}}
+    )
+    assert adapter._pending_artifact_writes == {"tu_x": "notes.md"}
+
+
 def test_stage_artifact_write_ignores_non_write_edit_tools(tmp_path: Path) -> None:
     adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
     adapter._stage_artifact_write(

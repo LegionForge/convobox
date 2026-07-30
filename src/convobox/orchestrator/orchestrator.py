@@ -53,6 +53,14 @@ def strip_code_for_speech(text: str) -> str:
     return _COLLAPSE_BLANK_RE.sub("\n\n", text).strip()
 
 
+# _consume_events()'s reconnect backoff (see that method's own docstring):
+# starts fast (matching the 2026-07-15 transient-timeout incident this
+# retry loop exists for) and doubles on each consecutive failure with no
+# event received in between, capped so a permanently unreachable backend
+# doesn't retry-and-log forever at a fixed fast interval.
+_RECONNECT_BACKOFF_INITIAL_S = 1.0
+_RECONNECT_BACKOFF_MAX_S = 30.0
+
 # opencode's interactive question tool (multiple-choice prompts back to the
 # user). Live UAT finding [L9]: when the backend calls it, the whole voice
 # session deadlocks unless the question is surfaced -- the tool blocks the
@@ -295,16 +303,34 @@ class Orchestrator:
         this incident has no evidence about. Only the exception case -- an
         unambiguous failure with no such contract, confirmed live for
         OpenCodeAdapter -- gets this treatment.
+
+        Backoff, added 2026-07-29 (live-confirmed while verifying against
+        a deliberately unreachable backend.url): the first retry stays at
+        _RECONNECT_BACKOFF_INITIAL_S (1s -- matching the 2026-07-15
+        incident's own "close the gap immediately" intent for a genuine
+        transient hiccup), but consecutive failures with no successful
+        event in between double the wait, capped at
+        _RECONNECT_BACKOFF_MAX_S -- a PERMANENTLY unreachable backend
+        (a real misconfigured backend.url, not a transient timeout)
+        otherwise retries and logs an identical traceback forever at a
+        fixed fast interval, confirmed live: ~90 tracebacks in under 5
+        minutes against a dead URL. Resets to the initial fast interval
+        the moment a real event actually arrives, so a genuinely
+        transient failure still recovers as quickly as before.
         """
+        backoff_s = _RECONNECT_BACKOFF_INITIAL_S
         while True:
             try:
                 async for event in self._adapter.events():
+                    backoff_s = _RECONNECT_BACKOFF_INITIAL_S
                     self._on_event(event)
             except Exception:
                 logger.warning(
-                    "backend event stream failed; resubscribing", exc_info=True
+                    "backend event stream failed; resubscribing in %.0fs",
+                    backoff_s, exc_info=True,
                 )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(backoff_s)
+                backoff_s = min(backoff_s * 2, _RECONNECT_BACKOFF_MAX_S)
                 continue
             return
 
@@ -461,6 +487,28 @@ class Orchestrator:
         # time-to-first-audio is proportional to one sentence instead of
         # the whole response. play_stream replaces any current playback,
         # same as play() did.
-        await self._player.play_stream(
-            self._tts.synthesize_stream(text), self._tts.sample_rate
-        )
+        try:
+            await self._player.play_stream(
+                self._tts.synthesize_stream(text), self._tts.sample_rate
+            )
+        except Exception as exc:
+            # _speak_task is a bare asyncio.create_task() with nothing ever
+            # awaiting or checking it (fire-and-forget, so a slow/failed
+            # synthesis never blocks the mic loop) -- which means an
+            # uncaught exception here previously vanished completely: no
+            # log line, no UI signal, just silence where the rest of the
+            # response should have been. Confirmed live, 2026-07-28/29:
+            # this is exactly what a text long enough to hit kokoro's
+            # ~510-phoneme batch limit produced (KokoroTTSEngine's own
+            # 30s-timeout-then-RuntimeError, added specifically to make
+            # this "a real, catchable error" -- but nothing was catching
+            # it until now). Log it AND surface it as a real event so
+            # both the TUI and the web UI show something failed, instead
+            # of an unexplained gap in what was spoken.
+            logger.exception("TTS synthesis/playback failed mid-response")
+            self._on_event(
+                BackendEvent(
+                    type=BackendEventType.ERROR,
+                    content=f"speech synthesis failed partway through this response: {exc}",
+                )
+            )

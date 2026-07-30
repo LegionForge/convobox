@@ -70,10 +70,15 @@ class FakeBackendAdapter(BackendAdapter):
 
 
 class FakeTTSEngine(TTSEngine):
-    def __init__(self) -> None:
+    def __init__(self, fail_with: Exception | None = None) -> None:
+        # fail_with=None (the default) keeps every existing test's behavior
+        # unchanged -- a real exception here simulates a synthesis failure
+        # mid-response (e.g. kokoro-onnx's own ~510-phoneme batch-limit
+        # crash) for _speak()'s exception-handling tests.
         self.synthesized: list[str] = []
         self.stop_calls = 0
         self._speaking = False
+        self._fail_with = fail_with
 
     @property
     def sample_rate(self) -> int:
@@ -84,6 +89,8 @@ class FakeTTSEngine(TTSEngine):
         # the path Orchestrator._speak actually uses now; the inherited
         # synthesize() convenience still funnels through this.
         self.synthesized.append(text)
+        if self._fail_with is not None:
+            raise self._fail_with
         yield np.ones(4, dtype=np.float32)
 
     def stop(self) -> None:
@@ -305,6 +312,61 @@ async def test_consume_events_retries_after_an_exception_and_recovers(
     assert adapter.events_call_count == 2  # failed once, retried once
     assert tts.synthesized == ["recovered."]
     await orch.stop_event_loop()
+
+
+@pytest.mark.asyncio
+async def test_consume_events_backoff_doubles_on_consecutive_failures_and_resets_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Live-confirmed, 2026-07-29: a permanently unreachable backend.url
+    # (a real misconfiguration, not the 2026-07-15 transient-timeout
+    # incident this retry loop was originally built for) retried and
+    # logged an identical traceback every ~1s forever -- ~90 in under 5
+    # minutes. Backoff must grow across consecutive failures, and reset
+    # back to the fast interval the moment a real event gets through.
+    sleep_calls: list[float] = []
+
+    async def recording_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    # This module's own top-level `import asyncio` IS orchestrator.py's
+    # asyncio (same module object) -- no need for a second import of
+    # convobox.orchestrator.orchestrator just to reach it.
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+
+    events = [BackendEvent(type=BackendEventType.TEXT, content="recovered.")]
+    adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
+    adapter.fail_events_calls = 3  # three consecutive failures, then succeeds
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch._events_task
+
+    # patching asyncio.sleep globally also captures FakeBackendAdapter.
+    # events()'s own internal `await asyncio.sleep(0)` yield-point (a
+    # real yield, not a backoff) -- filter those 0s out, they're not
+    # what this test is checking.
+    backoff_calls = [s for s in sleep_calls if s != 0]
+    assert backoff_calls == [1.0, 2.0, 4.0]  # doubles each consecutive failure
+    assert tts.synthesized == ["recovered."]  # the event still got through
+    await orch.stop_event_loop()
+
+    # A second, later failure (simulating the backend dropping again after
+    # recovering) must start back at the fast interval, not continue from
+    # where the earlier streak left off.
+    sleep_calls.clear()
+    adapter2 = FakeBackendAdapter(busy=False, events_to_yield=events)
+    adapter2.fail_events_calls = 1
+    orch2 = Orchestrator(adapter2, safeword, tts=FakeTTSEngine(), player=FakePlayer())
+    orch2.start_event_loop()
+    assert orch2._events_task is not None
+    await orch2._events_task
+    assert [s for s in sleep_calls if s != 0] == [1.0]
+    await orch2.stop_event_loop()
 
 
 @pytest.mark.asyncio
@@ -538,6 +600,40 @@ async def test_tiering_single_paragraph_response_speaks_the_whole_thing() -> Non
 
     assert tts.synthesized == ["just one short reply."]
     assert orch.has_more_to_reveal() is False
+
+
+# --- _speak()'s TTS/playback failure handling, 2026-07-29 -- confirmed live
+# that a synthesis failure mid-response (kokoro-onnx's own ~510-phoneme
+# batch-limit crash, surfaced by KokoroTTSEngine as a RuntimeError after its
+# 30s timeout) previously vanished completely: _speak_task is a bare
+# fire-and-forget asyncio.create_task() with nothing ever awaiting or
+# checking it, so an uncaught exception there was silently lost -- no log,
+# no UI signal, just an unexplained gap where the rest of the response
+# should have been spoken. ---
+
+
+@pytest.mark.asyncio
+async def test_speak_failure_is_caught_and_surfaced_as_an_error_event() -> None:
+    events: list[BackendEvent] = []
+    adapter = FakeBackendAdapter(busy=False)
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine(fail_with=RuntimeError("Kokoro synthesis stalled"))
+    player = FakePlayer()
+    orch = Orchestrator(
+        adapter, safeword, tts=tts, player=player, on_event=events.append,
+    )
+
+    orch._on_event(BackendEvent(type=BackendEventType.TEXT, content="first paragraph.\n\nsecond paragraph."))
+    # Must not raise -- this is the actual regression: the exception used
+    # to propagate nowhere (task never awaited) rather than raise here, but
+    # asserting a clean await is still the right proof the task itself
+    # completed instead of being left in a permanently-failed, unretrieved
+    # state.
+    await orch._speak_task
+
+    error_events = [e for e in events if e.type == BackendEventType.ERROR]
+    assert len(error_events) == 1
+    assert "Kokoro synthesis stalled" in (error_events[0].content or "")
 
 
 @pytest.mark.asyncio
