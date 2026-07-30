@@ -431,3 +431,58 @@ reassurance ("ConvoBox exited cleanly...") right after a clean
 --web quit/Ctrl+C, printed directly (not via `log.info`, which --tui
 redirects to a file -- exactly where this wouldn't help) so it's visible
 in the same place the traceback, if any, appeared.
+
+---
+
+## Kokoro can't synthesize past ~510 phonemes -- hard model limit, not a config/mode issue
+
+**Status:** diagnosed (root cause 2026-07-24; confirmed against upstream
+docs 2026-07-30), unfixed. Workaround: use Piper for long responses.
+
+**Symptom.** Live-confirmed 2026-07-30 (JP, manual A/B while testing
+Piper): Piper reads long text fine; Kokoro reliably fails at around
+~500 phonemes. This is the same mechanism already root-caused 2026-07-24
+in `KokoroTTSEngine.synthesize_stream` (`src/convobox/tts/kokoro.py`):
+kokoro-onnx's own `create_stream()` runs a detached background task with
+no exception handling; text producing more than the model's phoneme
+limit raises `IndexError` inside that task (`voice = voice[len(tokens)]`),
+the task dies silently, and the consumer's `await queue.get()` hangs
+forever at 0% CPU. ConvoBox bounds the hang with a 30s timeout
+(`_CHUNK_TIMEOUT_S`) that turns it into a catchable `RuntimeError`
+instead of an indefinite hang.
+
+**Root cause: a confirmed hard architectural limit, not a runtime mode.**
+Web-checked 2026-07-30 against Kokoro-82M's model card and the
+kokoro-onnx source: the model's context length is 512 tokens, and with
+mandatory pad tokens at the start and end, the effective max is **510
+phoneme tokens per synthesis call** -- consistent with the ~500 JP
+observed. This isn't a batching mode or config flag ConvoBox is missing;
+projects that give Kokoro long-text support (e.g. Kokoro-FastAPI) do it
+by pre-chunking text client-side into windows well under the limit (its
+own defaults: ~175-250 target tokens, 450 absolute max) and stitching
+the resulting audio, not by raising a limit on the model itself.
+
+**Not yet built:** that pre-chunking layer. PR #175 (merged 2026-07-30)
+makes the failure *visible* -- surfaces it as a logged error plus a
+`BackendEvent(ERROR)` instead of a silent gap in the transcript -- but
+its own scope note is explicit that it does not make Kokoro handle the
+long text; a real fix means splitting text into safe-sized chunks
+before each `synthesize_stream()` call, which needs a live mic session
+to verify audio quality across chunk boundaries (naturalness/pacing at
+the seam). Discussed and deliberately deferred (2026-07-30): a simpler,
+lower-risk alternative if this becomes worth revisiting is auto-routing
+by estimated phoneme/char count (Piper for long text, Kokoro for short)
+rather than chunking Kokoro itself -- same benefit, none of the
+audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
+later becomes a reason to keep everything on the permissively-licensed
+engine.
+
+**Current guidance (JP, 2026-07-30):** Piper for long responses; Kokoro
+is fine for short conversational replies where phoneme count won't
+approach the limit. No code change proposed by this entry -- documenting
+the finding so the ~500 number isn't re-diagnosed from scratch later.
+
+**Sources:** Kokoro-82M-v1.0-ONNX context length / 510-phoneme limit --
+[Hugging Face model card](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX);
+chunking workaround precedent --
+[Kokoro-FastAPI README](https://github.com/remsky/Kokoro-FastAPI/blob/master/README.md).
