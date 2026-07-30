@@ -324,14 +324,15 @@ async def test_consume_events_backoff_doubles_on_consecutive_failures_and_resets
     # logged an identical traceback every ~1s forever -- ~90 in under 5
     # minutes. Backoff must grow across consecutive failures, and reset
     # back to the fast interval the moment a real event gets through.
-    import convobox.orchestrator.orchestrator as orch_mod
-
     sleep_calls: list[float] = []
 
     async def recording_sleep(seconds: float) -> None:
         sleep_calls.append(seconds)
 
-    monkeypatch.setattr(orch_mod.asyncio, "sleep", recording_sleep)
+    # This module's own top-level `import asyncio` IS orchestrator.py's
+    # asyncio (same module object) -- no need for a second import of
+    # convobox.orchestrator.orchestrator just to reach it.
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
 
     events = [BackendEvent(type=BackendEventType.TEXT, content="recovered.")]
     adapter = FakeBackendAdapter(busy=False, events_to_yield=events)
