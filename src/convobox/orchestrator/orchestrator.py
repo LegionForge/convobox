@@ -461,6 +461,28 @@ class Orchestrator:
         # time-to-first-audio is proportional to one sentence instead of
         # the whole response. play_stream replaces any current playback,
         # same as play() did.
-        await self._player.play_stream(
-            self._tts.synthesize_stream(text), self._tts.sample_rate
-        )
+        try:
+            await self._player.play_stream(
+                self._tts.synthesize_stream(text), self._tts.sample_rate
+            )
+        except Exception as exc:
+            # _speak_task is a bare asyncio.create_task() with nothing ever
+            # awaiting or checking it (fire-and-forget, so a slow/failed
+            # synthesis never blocks the mic loop) -- which means an
+            # uncaught exception here previously vanished completely: no
+            # log line, no UI signal, just silence where the rest of the
+            # response should have been. Confirmed live, 2026-07-28/29:
+            # this is exactly what a text long enough to hit kokoro's
+            # ~510-phoneme batch limit produced (KokoroTTSEngine's own
+            # 30s-timeout-then-RuntimeError, added specifically to make
+            # this "a real, catchable error" -- but nothing was catching
+            # it until now). Log it AND surface it as a real event so
+            # both the TUI and the web UI show something failed, instead
+            # of an unexplained gap in what was spoken.
+            logger.exception("TTS synthesis/playback failed mid-response")
+            self._on_event(
+                BackendEvent(
+                    type=BackendEventType.ERROR,
+                    content=f"speech synthesis failed partway through this response: {exc}",
+                )
+            )

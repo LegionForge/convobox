@@ -291,7 +291,7 @@ def grace_s_for_last_response(
 # response wasn't fully heard (we can't edit backend session history the
 # way realtime APIs truncate theirs -- see docs/DESIGN-echo-and-barge-in.md,
 # "the truncation problem"). Wording provisional pending barge-in UAT.
-BARGE_IN_MARKER = "(I interrupted your spoken response midway) "
+BARGE_IN_MARKER = "[User interrupted AI response] "
 
 
 class BargeInMonitor:
@@ -925,6 +925,15 @@ class EchoAwarePlayer(AudioPlayer):
         # which this class owns exclusively -- see _mark_audible.
         self.audible = False
         self.on_first_block_played = self._mark_audible
+        # Confirmed live, 2026-07-28/29: without this, `audible` stayed
+        # True for the entire gap between one response finishing and the
+        # next one starting (it only ever got reset at the START of the
+        # next play() call) -- every utterance spoken into that gap read
+        # as "the user is talking during playback" to BargeInMonitor and
+        # got tagged with BARGE_IN_MARKER even though playback had long
+        # since finished naturally. See AudioPlayer.on_playback_complete's
+        # own docstring for the mechanism.
+        self.on_playback_complete = self._mark_not_audible
 
     def _mark_audible(self) -> None:
         self.audible = True
@@ -932,6 +941,9 @@ class EchoAwarePlayer(AudioPlayer):
         # response in a capture's timeline directly from the log instead
         # of a blind correlation search.
         log.info("playback: first audio block reached output device")
+
+    def _mark_not_audible(self) -> None:
+        self.audible = False
 
     def play(self, samples, sample_rate) -> None:  # type: ignore[no-untyped-def]
         # Estimate set AFTER super().play(): AudioPlayer.play() begins by
@@ -1905,6 +1917,21 @@ async def run(args: argparse.Namespace) -> None:
             "ParentProcessId, see docs/UAT-checklist.md [O1].",
             SINGLE_INSTANCE_PORT,
         )
+        # The adapter (real subprocess/HTTP client) and web server (if
+        # --web) were already started above, before this check ever runs
+        # (deliberately AFTER the lightweight setup but BEFORE the
+        # heavyweight STT/mic init, per the comment above) -- a bare
+        # `raise SystemExit(2)` here left both dangling, surfacing as the
+        # same noisy uvicorn lifespan-task "Exception in ASGI application"
+        # traceback _stop_web_server's callers elsewhere already avoid
+        # (see EventBroadcaster.close_all()'s docstring and
+        # docs/KNOWN-ISSUES.md). Same graceful-shutdown sequence as every
+        # other exit path, not a new mechanism.
+        await orchestrator.stop_event_loop()
+        await adapter.aclose()
+        if web_broadcaster is not None:
+            await web_broadcaster.close_all()
+        await _stop_web_server(web_server, web_server_task)
         raise SystemExit(2)
     log.info("single-instance lock acquired (pid=%d)", os.getpid())
 
