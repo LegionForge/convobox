@@ -221,23 +221,37 @@ _REQUIRED_FLAGS = [
 # codex.py's runtime decline).
 _DEFAULT_PERMISSION_MODE = "plan"
 
-# backend.permission_mode -> Claude Code's --permission-mode. "approve"
-# and "permissive" both resolve to the SAME underlying CLI flag
-# (acceptEdits -- the only thing that flag controls is whether Claude
-# ATTEMPTS tool calls at all; "plan" suppresses attempts entirely, see
-# finding 2 below). What actually differs between "approve" and
-# "permissive" is whether the PreToolUse hook gets wired up alongside it
-# (see ClaudeCodeAdapter.__init__'s interactive_approval derivation) --
-# "approve" gates every attempted call on a voice decision, "permissive"
-# lets them all through ungated. Not independently live-verified that
-# "permissive" (unwired, no hook) behaves identically to "approve" with
-# every request answered "allow" -- both SHOULD, since the hook is the
-# only thing that differs, but only "approve" has been driven through a
-# real spawned process end-to-end tonight (see the mechanism section).
+# backend.permission_mode -> Claude Code's --permission-mode.
+#
+# BUG, live-confirmed 2026-07-30 (cross-referenced against an independent
+# sandboxed UAT session's findings-20260729030010.md #16): "permissive"
+# used to resolve to the SAME "acceptEdits" flag as "approve". acceptEdits
+# only auto-approves file-EDIT tools (Write/Edit/NotebookEdit); it still
+# generates a real approval request for every other tool type (Bash,
+# WebFetch, WebSearch, Read, ...), which headless mode has no channel to
+# answer (see module docstring's "Permission gate" finding) -- so under
+# the old mapping, "permissive" (documented in config.py as "the agent
+# acts without asking") silently failed to act on exactly the tool
+# categories most likely to matter: three unrelated tools (WebFetch,
+# Read, a Bash python invocation) all hit "requested permissions...
+# haven't granted it yet" in the same session, the tell that acceptEdits'
+# edit-only scope, not a per-tool bug, was the real cause. This had been
+# flagged as an untested assumption in this exact comment before the fix
+# ("both SHOULD... but only 'approve' has been driven through a real
+# spawned process end-to-end") -- today's live evidence resolved it: they
+# don't behave the same, and "permissive" was the one falling short of
+# its own documented contract.
+#
+# Fix: "permissive" now maps to "bypassPermissions", which skips Claude
+# Code's permission system entirely (all tool types, not just edits) --
+# the mode that actually matches "acts without asking. Opt-in,
+# dangerous." "approve" is unaffected: it still pairs acceptEdits with
+# the PreToolUse hook below, which is the real gate for that mode either
+# way (see _INTERACTIVE_APPROVAL_PERMISSION_MODE).
 _PERMISSION_CLAUDE_MODE: dict[str, str] = {
     "plan": "plan",
     "approve": "acceptEdits",
-    "permissive": "acceptEdits",
+    "permissive": "bypassPermissions",
 }
 
 
@@ -361,7 +375,14 @@ class ClaudeCodeAdapter(BackendAdapter):
                     # _enumerate_mcp_server_names's docstring) -- without
                     # this, "permissive" (acts without asking) silently
                     # doesn't hold for any MCP server the user has
-                    # configured, live-confirmed 2026-07-22.
+                    # configured, live-confirmed 2026-07-22 against
+                    # acceptEdits. "permissive" now maps to bypassPermissions
+                    # (see _PERMISSION_CLAUDE_MODE), which likely makes this
+                    # explicit grant redundant -- bypassPermissions should
+                    # skip the MCP gate too -- but that has NOT been
+                    # live-reverified, so this stays in as a harmless
+                    # belt-and-suspenders grant rather than being removed on
+                    # an untested assumption.
                     mcp_settings_path = await self._ensure_mcp_permissions_settings_file()
                     extra_flags = ["--settings", str(mcp_settings_path)]
                 self._proc = await asyncio.create_subprocess_exec(

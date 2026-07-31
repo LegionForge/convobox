@@ -64,12 +64,16 @@ def test_resolve_flags_default_plan_when_unset() -> None:
     assert flags[flags.index("--permission-mode") + 1] == "plan"
 
 
-def test_resolve_flags_permissive_also_maps_to_accept_edits() -> None:
-    # "permissive" and "approve" share the same underlying CLI flag --
-    # only whether the hook gets wired up differs (see
-    # _PERMISSION_CLAUDE_MODE's own comment).
+def test_resolve_flags_permissive_maps_to_bypass_permissions() -> None:
+    # Fixed 2026-07-30: "permissive" used to share "approve"'s acceptEdits
+    # flag, which only auto-approves file-edit tools -- WebFetch/WebSearch/
+    # Bash/Read still generated a real approval request headless mode has
+    # no channel to answer. "permissive" now maps to bypassPermissions,
+    # which actually matches its documented contract ("acts without
+    # asking"). See _PERMISSION_CLAUDE_MODE's own comment for the full
+    # writeup. "approve" is unaffected -- still acceptEdits + the hook.
     flags = _resolve_flags(["claude"], "permissive")
-    assert flags[flags.index("--permission-mode") + 1] == "acceptEdits"
+    assert flags[flags.index("--permission-mode") + 1] == "bypassPermissions"
 
 
 # --- the --settings file: valid JSON wiring the hook via `-m`, no
