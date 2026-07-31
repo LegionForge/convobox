@@ -469,6 +469,31 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   `tts.speaker: nobody` (a name that doesn't exist) and confirm `[t]` on
   the TTS section reports a clear error naming the real available speakers
   for that voice, not a raw traceback.
+- **[T6] TTS synthesis/playback failures now surfaced, not silently
+  swallowed (fixed 2026-07-29, PR #175, commit `84a1122`).** `_speak_task`
+  (`Orchestrator._speak`, fire-and-forget via a bare
+  `asyncio.create_task()`) had no exception handling anywhere in its call
+  chain, and nothing ever awaits/checks it afterward (by design -- a
+  slow/failed synthesis must never block the mic loop). An uncaught
+  exception there previously vanished completely: no log line via this
+  project's own logging, no UI signal, nothing but an easy-to-miss
+  unretrieved-task-exception warning from asyncio at GC time. Live-reported
+  symptom: "response silently stops after the first paragraph, no error, no
+  indication anything went wrong." Root-caused 2026-07-28/29, cross-
+  referenced against an independent sandboxed UAT session's findings.
+  **Live-confirmed 2026-07-30**: 3/3 attempts at pushing a response past
+  Kokoro's ~510-phoneme cap produced the clean, expected signature (log:
+  `ERROR TTS synthesis/playback failed mid-response` with the real
+  RuntimeError text, no crash, mic loop kept working afterward). CLI and
+  web UI both show the failure correctly. **Gap found, not yet fixed**:
+  `--tui` mode shows nothing on-screen -- `_on_backend_event` in
+  `scripts/run_convobox.py` only special-cases `APPROVAL_REQUEST`/`TEXT`,
+  so an `ERROR` event is silently dropped by the TUI dispatcher and only
+  reaches `convobox-tui.log`, not the transcript/full-detail pane. This
+  contradicts the fix's own commit message ("so both the TUI and web UI
+  show something failed") for the TUI half specifically. Not yet decided
+  whether to fix (wire ERROR into the TUI transcript, matching web) or
+  accept log-only as sufficient for the TUI surface.
 
 ## 7. Scriptable / non-mic modes
 
@@ -500,11 +525,17 @@ document. Re-derived from the doc's own current section list rather than
 patched piecemeal, to catch anything else that had drifted (nothing else
 did).
 
+0. **Newest, not yet UAT'd (2026-07-29, PR #175/#178) -- run this first.**
+   `[T6]` (TTS synthesis/playback failures now surfaced, not swallowed)
+   is still live-unverified -- provoke a real synthesis failure and
+   confirm it logs clearly instead of silently truncating. `[G11]` (false
+   interruption marker on every waited-out turn) is now closed --
+   live-confirmed 2026-07-30, no false positives/negatives.
 1. Happy path: idle → speak → response spoken (N1-N4, T2).
 2. Hard stop safety: S1-S5.
 3. Echo / half-duplex: E1-E5 (speakers ON).
 4. Barge-in (`interrupt_preset` != `do-not-disturb`/`halt`, requires AEC
-   or headphones): G1-G7 -- barge-in itself is fully built now, this is
+   or headphones): G1-G11 -- barge-in itself is fully built now, this is
    no longer "document the gap," it's "verify the real behavior."
 5. Edge VAD: V1-V4.
 6. Pause/resume listening: P1-P8 (P5 is the one most likely to reveal a
@@ -673,6 +704,40 @@ did).
   likely lever than headset choice, not yet confirmed against a second
   room. See
   `docs/field-notes/2026-07-27-headphone-choice-does-not-eliminate-under-cancelled-echo.md`.
+- **[G11] Playback-end reset bug caused every waited-out turn to be
+  falsely tagged as an interruption (fixed 2026-07-29, PR #175, commit
+  `103df70`).** `EchoAwarePlayer.audible` (set True on the first real
+  audio block reached the device, per the `[G8]` fix) was only ever reset
+  back to False at the START of the NEXT `play()`/`play_stream()` call --
+  never on the CURRENT response's own natural completion. Any utterance
+  spoken into the gap between one response finishing and the next
+  starting read as "the user is talking during playback" to
+  `BargeInMonitor.observe()` -- the exact mechanism that sets
+  `barge_in_pending` -> the interrupt marker (now `[User interrupted AI
+  response]` per `[G5]`/PR #178/commit `92d866b`) -- even on turns where
+  the user explicitly waited out the full response before speaking.
+  Root-caused 2026-07-28/29 (same session as `[T6]`), cross-referenced
+  against an independent sandboxed UAT session's findings. Fix: `audible`
+  is now also reset on natural playback completion, not only at the start
+  of the next play() call. **Live-confirmed 2026-07-30**: waited-out turns
+  no longer carry the interrupt marker, and a genuine mid-playback
+  barge-in still tags correctly -- no false positives (marker on a
+  waited-out turn) or false negatives (marker missing on a real
+  interruption) across the test session. Closed.
+- **[G12] Barge-in speech detection correctly separates vocal from
+  non-vocal noise, including onomatopoeia (live-confirmed 2026-07-30,
+  same session as `[G11]`).** Ad-hoc sound-source test during the `[G11]`
+  pass, extending `[G2]`'s cough-test coverage from sub-threshold noise
+  bursts to a fuller taxonomy of full-volume non-speech sounds: Charlie
+  Brown "wah-wah" trombone mimicry and singing both correctly triggered a
+  barge-in (true positive -- these are vocalizations); whistling and
+  clapping did NOT trip it (true negative -- non-vocal sound, correctly
+  filtered); spoken onomatopoeia (e.g. "wah wah" as actual words, not the
+  trombone sound) DID trip it (true positive -- it's real spoken words,
+  same as any other utterance). No false positives or false negatives
+  across the set as tested. Not a code change -- documents `BargeInMonitor`
+  behaving correctly against a class of inputs not previously covered in
+  this checklist.
 
 ## Pause/resume listening (docs/DESIGN-barge-in.md, "Pause/resume listening")
 
