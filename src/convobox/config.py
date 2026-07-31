@@ -290,7 +290,10 @@ class BackendConfig(BaseModel):
     #                adapter builds one: a PreToolUse hook + a local IPC
     #                channel -- see claude_code.py's module docstring for
     #                the mechanism and its live verification).
-    #   permissive - the agent acts without asking. Opt-in, dangerous.
+    #   permissive - BYPASSES ALL PERMISSIONS: the agent acts without
+    #                asking on every tool call (Bash, WebFetch/WebSearch,
+    #                MCP tools, file edits, everything), not just writes.
+    #                Opt-in, dangerous.
     # opencode is unaffected (its permissions are fixed by wherever
     # `opencode serve` was launched) -- a warning is logged if this is set
     # for opencode. See docs/DESIGN-backend-sandboxing.md.
