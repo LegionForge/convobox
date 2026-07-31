@@ -376,6 +376,26 @@ def test_resolve_flags_respects_an_explicit_user_permission_mode() -> None:
     assert "acceptEdits" not in flags  # that's in the user's own command, not here
 
 
+def test_resolve_flags_permissive_mode_bypasses_all_permissions() -> None:
+    # Regression test for the 2026-07-30 fix: "permissive" used to map to
+    # the same "acceptEdits" flag as "approve", which only auto-approves
+    # file-edit tools -- WebFetch/WebSearch/Bash/Read still generated a
+    # real approval request that headless mode has no channel to answer,
+    # so "permissive" silently failed to act on exactly the tool
+    # categories its own docs promise ("acts without asking"). It must
+    # now resolve to "bypassPermissions", which skips every tool type.
+    flags = _resolve_flags(["claude"], permission_mode="permissive")
+    assert flags[flags.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_resolve_flags_approve_mode_still_uses_accept_edits() -> None:
+    # "approve" must be unaffected by the "permissive" fix above -- it
+    # pairs acceptEdits with the PreToolUse hook (the real gate for that
+    # mode), not a blanket bypass.
+    flags = _resolve_flags(["claude"], permission_mode="approve")
+    assert flags[flags.index("--permission-mode") + 1] == "acceptEdits"
+
+
 def test_resolve_flags_leaves_disallowed_tools_in_the_users_command_untouched() -> None:
     # docs/DESIGN-0.3.0-interaction-and-safety.md's Phase 3 --disallowedTools
     # question resolved to "command: already supports it, no new config
