@@ -219,7 +219,7 @@ differs per person, so the bar is a setting, not a constant. Current
 bar is honest: "a feeling." Instrument first (AEC telemetry was the
 template), then set defaults from data.
 
-### Agent Client Protocol (ACP) support (decided: pursue; scoping not yet started)
+### Agent Client Protocol (ACP) support (decided: pursue; scoping in progress)
 JP, 2026-07-29, after comparing ConvoBox to
 [katipally/openlive](https://github.com/katipally/openlive) (see
 [docs/field-notes/2026-07-29-openlive-comparison-and-acp-direction.md](field-notes/2026-07-29-openlive-comparison-and-acp-direction.md)):
@@ -235,15 +235,25 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
   live-verified engineering (see each adapter's own module docstring),
   but bespoke per backend and not extensible to a new agent without a
   new from-scratch adapter.
-- ACP would replace that per-backend protocol work with one client
-  implementation ConvoBox owns, at the cost of depending on each agent
-  CLI actually exposing an ACP server (not yet verified which of
-  Claude Code/Codex/OpenCode do today -- first scoping task).
-- Not yet scoped: which existing adapters ACP could actually replace
-  vs. where the current bespoke adapter still wins (e.g. Claude Code's
-  PreToolUse-hook-based voice-gated approval channel, built and
-  live-verified this project's own way -- confirm ACP's own permission
-  primitives cover that before dropping the hook mechanism).
+- **First scoping question answered, 2026-07-31** (see
+  [docs/field-notes/2026-07-31-acp-scoping-only-opencode-native.md](field-notes/2026-07-31-acp-scoping-only-opencode-native.md),
+  diagnosed from docs, not yet live-probed): only **OpenCode** exposes
+  ACP as a first-party protocol (`opencode acp`, same maintainer,
+  claimed permission parity with its terminal mode). **Claude Code**
+  and **Codex** each only have third-party bridge processes of
+  unverified maturity -- Claude Code's wraps the separate Claude Agent
+  SDK rather than the `claude` CLI itself; Codex's just re-wraps the
+  same app-server JSON-RPC protocol ConvoBox's own adapter already
+  speaks directly, adding a process hop for no clear gain. ACP adoption
+  is therefore at least three separate per-backend decisions, not one.
+- **Revised next step**: if ACP work continues, OpenCode is the
+  low-risk first candidate -- swap that one adapter, use it to verify
+  the permission-parity claim against a real running session, and
+  leave Claude Code/Codex on their bespoke adapters until a first-party
+  ACP server exists for them (or the Claude Code bridge's approval
+  semantics are confirmed equivalent to the PreToolUse-hook-based
+  voice-gated approval channel ConvoBox's adapter already has
+  live-verified -- still open, not yet scoped).
 - This is the same mechanism the VS Code / VSCodium mid-term item below
   would likely ride on, if ACP (or a comparable editor-side protocol)
   turns out to cover that too.
