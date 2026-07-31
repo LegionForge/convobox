@@ -74,17 +74,24 @@ def test_codex_permissive_writes_without_asking() -> None:
 
 def test_claude_plan_and_permissive_translate() -> None:
     assert "plan" in _resolve_flags(["claude"], "plan")
-    assert "acceptEdits" in _resolve_flags(["claude"], "permissive")
+    # Fixed 2026-07-30: "permissive" used to map to the same acceptEdits
+    # flag as "approve", which only auto-approves file-edit tools --
+    # WebFetch/WebSearch/Bash/Read still generated a real approval request
+    # headless mode has no channel to answer. bypassPermissions actually
+    # matches "permissive"'s documented contract ("acts without asking").
+    # See _PERMISSION_CLAUDE_MODE's own comment for the full writeup.
+    assert "bypassPermissions" in _resolve_flags(["claude"], "permissive")
 
 
 def test_claude_approve_now_has_a_real_per_call_channel() -> None:
     # Superseded 2026-07-2x: headless mode has no NATIVE per-call approval
     # channel, but ClaudeCodeAdapter now builds one (a PreToolUse hook --
     # see its module docstring), so "approve" no longer degrades to "plan"
-    # -- it resolves to the same CLI flag as "permissive" (acceptEdits,
-    # so Claude actually attempts tool calls), and the hook is what
-    # differs between the two (wired only for "approve"; see
-    # ClaudeCodeAdapter.__init__'s interactive_approval derivation).
+    # -- it resolves to acceptEdits (so Claude actually attempts tool
+    # calls) with the hook as the real gate on top (wired only for
+    # "approve"; see ClaudeCodeAdapter.__init__'s interactive_approval
+    # derivation). "permissive" no longer shares this flag -- it maps to
+    # bypassPermissions instead (see test_claude_plan_and_permissive_translate).
     assert "acceptEdits" in _resolve_flags(["claude"], "approve")
     assert "plan" not in _resolve_flags(["claude"], "approve")
 
