@@ -170,6 +170,40 @@ def test_codex_approval_event_starts_gate_and_sets_tui_warning() -> None:
     assert "cobalt night and gale" in state.warning
 
 
+def test_error_event_adds_a_system_turn_to_the_tui_transcript() -> None:
+    # docs/UAT-checklist.md [T6]: live-confirmed 2026-07-30 that ERROR
+    # events (e.g. a TTS synthesis failure) reached the log and the web
+    # UI but were silently dropped by this function in --tui mode, since
+    # it only ever handled APPROVAL_REQUEST/TEXT. A "system" turn matches
+    # [U10]'s existing convention for session-level events worth seeing
+    # inline (paused/resumed, forced cutoff).
+    state = ConversationTuiState()
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(BackendEventType.ERROR, content="speech synthesis failed partway through"),
+    )
+    assert len(state.turns) == 1
+    assert state.turns[0].speaker == "system"
+    assert "speech synthesis failed partway through" in state.turns[0].text
+
+
+def test_error_event_with_no_content_adds_no_turn() -> None:
+    state = ConversationTuiState()
+    _on_backend_event(
+        state, LastSpokenResponse(), BackendEvent(BackendEventType.ERROR, content=None)
+    )
+    assert state.turns == []
+
+
+def test_error_event_with_no_tui_state_does_not_raise() -> None:
+    # Plain (non-`--tui`) mode passes tui_state=None -- must be a safe
+    # no-op, same as every other branch in this function.
+    _on_backend_event(
+        None, LastSpokenResponse(), BackendEvent(BackendEventType.ERROR, content="boom")
+    )
+
+
 # --- pending_explanation wiring: JP, 2026-07-23 -- "explain" needs
 # something concrete to speak back, cross-backend. ---
 

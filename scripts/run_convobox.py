@@ -1367,6 +1367,19 @@ def _on_backend_event(
                 tui_state.warning = warning
                 tui_state.full_detail = event.content
         return
+    if event.type == BackendEventType.ERROR:
+        # docs/UAT-checklist.md [T6]: live-confirmed 2026-07-30 that an
+        # ERROR event (e.g. Orchestrator._speak's TTS synthesis/playback
+        # failure surfacing) reached the log and the web UI correctly, but
+        # was silently dropped here -- this function only ever handled
+        # APPROVAL_REQUEST/TEXT, so --tui showed nothing on-screen at all.
+        # A "system" turn matches [U10]'s existing convention for
+        # session-level events worth seeing inline (paused/resumed, forced
+        # cutoff) -- an ERROR is exactly that class of thing, not a real
+        # assistant reply.
+        if event.content and tui_state is not None:
+            tui_state.add_turn("system", f"error: {event.content}")
+        return
     if event.type != BackendEventType.TEXT or not event.content:
         return
     log.info("response: %s", event.content)
