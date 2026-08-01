@@ -80,6 +80,13 @@ class ConversationTuiState:
     - heartbeat_elapsed_s: continuous silent-busy seconds from
       WorkingIndicator.silent_busy_s, None when not silently busy (backend
       idle, or audio is already playing its own feedback).
+    - current_activity: WorkingIndicator.current_activity mirrored the same
+      way -- the tool name from the most recent TOOL_CALL event, None
+      either when not silently busy or when silently busy with no known
+      tool in flight (extended thinking, or a backend that doesn't report
+      tool names). Answers "what is it actually doing", not just "how
+      long" -- KNOWN-ISSUES.md's 2026-07-31 "Backend can go silently busy
+      for minutes" entry is the diagnostic gap this closes.
     - mic_level_db: live mic RMS in dBFS, smoothed (see update_mic_level)
       from the raw per-chunk reading (post-AEC if echo cancellation is
       on -- the signal VAD/STT actually sees). None until the first chunk
@@ -114,6 +121,7 @@ class ConversationTuiState:
     aec_enabled: bool = False
     aec_verdict: str = ""
     heartbeat_elapsed_s: float | None = None
+    current_activity: str | None = None
     mic_level_db: float | None = None
     # Short instruction paired with the WAITING status.  Continue prompts
     # and high-stakes approval prompts both block on the user, but need

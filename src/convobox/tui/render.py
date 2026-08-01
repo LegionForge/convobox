@@ -194,7 +194,17 @@ def _diagnostics_line(state: ConversationTuiState, width: int) -> str:
         parts.append(f"mic: {state.mic_level_db:.0f}dBFS")
     if state.heartbeat_elapsed_s is not None:
         color = _heartbeat_color(state.heartbeat_elapsed_s)
-        parts.append(f"{color}still working: {state.heartbeat_elapsed_s:.0f}s{_RESET}")
+        # Plain ASCII bracket tag, not an icon/emoji -- matches the
+        # existing [HARD STOP]/[BARGE-IN] log convention rather than
+        # inventing a new symbol language, and carries no terminal-font/
+        # code-page risk (this project's only tested platform is Windows,
+        # where Unicode glyph support varies by terminal/font). Answers
+        # "what is it doing", not just "how long" -- see KNOWN-ISSUES.md's
+        # 2026-07-31 "Backend can go silently busy for minutes" entry.
+        activity_tag = f"[TOOL {state.current_activity}]" if state.current_activity else "[THINKING]"
+        parts.append(
+            f"{color}still working: {state.heartbeat_elapsed_s:.0f}s {activity_tag}{_RESET}"
+        )
     if state.status == "waiting":
         # The header already says WAITING FOR YOU; this tells the user what
         # to actually DO about it (the UAT ask: "an indicator of what I
