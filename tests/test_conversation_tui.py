@@ -268,6 +268,34 @@ def test_diagnostics_line_shows_heartbeat_elapsed_seconds() -> None:
     assert "still working: 42s" in lines[1]
 
 
+def test_diagnostics_line_shows_thinking_tag_with_no_current_activity() -> None:
+    # KNOWN-ISSUES.md's 2026-07-31 "Backend can go silently busy for
+    # minutes" entry: the heartbeat needs to show what's running, not
+    # just how long. Plain ASCII bracket tag (matches the existing
+    # [HARD STOP]/[BARGE-IN] log convention), never an icon/emoji --
+    # this project's only tested platform is Windows, where terminal
+    # font/code-page glyph support varies.
+    state = ConversationTuiState(started=0.0, heartbeat_elapsed_s=12.0, current_activity=None)
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "[THINKING]" in lines[1]
+
+
+def test_diagnostics_line_shows_tool_tag_with_current_activity() -> None:
+    state = ConversationTuiState(started=0.0, heartbeat_elapsed_s=45.0, current_activity="bash")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "[TOOL bash]" in lines[1]
+
+
+def test_diagnostics_line_omits_activity_tag_when_not_silently_busy() -> None:
+    # current_activity set but heartbeat_elapsed_s is None (not silently
+    # busy) -- shouldn't happen in practice (run_convobox.py clears both
+    # together), but the renderer must not show a tag with no heartbeat.
+    state = ConversationTuiState(started=0.0, heartbeat_elapsed_s=None, current_activity="bash")
+    lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))
+    assert "[TOOL bash]" not in lines[1]
+    assert "[THINKING]" not in lines[1]
+
+
 def test_diagnostics_line_omits_mic_level_before_first_chunk() -> None:
     state = ConversationTuiState(started=0.0, mic_level_db=None)
     lines = _plain(render_conversation_frame(state, width=80, height=24, now=0.0))

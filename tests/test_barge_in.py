@@ -308,6 +308,35 @@ def test_silent_busy_s_resets_with_observe() -> None:
     assert ind.silent_busy_s == 0.0
 
 
+def test_current_activity_defaults_to_none() -> None:
+    assert WorkingIndicator().current_activity is None
+
+
+def test_current_activity_survives_across_silently_busy_observe_calls() -> None:
+    # observe() itself never sets current_activity (that's _on_backend_event's
+    # job, driven by the real TOOL_CALL event stream) -- it must only be
+    # cleared on the idle/playing reset paths, never touched while still
+    # silently busy, or a real in-flight tool name would flicker every tick.
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    ind.current_activity = "bash"
+    _feed_working(ind, busy=True, playing=False, n=5)
+    assert ind.current_activity == "bash"
+
+
+def test_current_activity_clears_when_playback_starts() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    ind.current_activity = "bash"
+    ind.observe(busy=True, playing=True, dt_s=1.0)
+    assert ind.current_activity is None
+
+
+def test_current_activity_clears_when_idle() -> None:
+    ind = WorkingIndicator(first_notice_s=3.0, repeat_s=5.0)
+    ind.current_activity = "bash"
+    ind.observe(busy=False, playing=False, dt_s=1.0)
+    assert ind.current_activity is None
+
+
 # --- heartbeat coloring (live-validated thresholds, JP's 2026-07-14/15
 # headset UAT: the heartbeat is the only feedback during a silent-busy
 # stretch, but is invisible when interacting through a backend's own chat
