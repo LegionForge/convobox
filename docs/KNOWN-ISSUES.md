@@ -477,6 +477,59 @@ audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
 later becomes a reason to keep everything on the permissively-licensed
 engine.
 
+---
+
+## Backend can go silently busy for minutes with zero output -- root cause unconfirmed
+
+**Status:** diagnosed live 2026-07-31 (claude-code backend), root cause
+**not** confirmed. Recorded now so it isn't lost, not because a fix is
+ready -- the concrete next step is re-running with `--verbose` next time
+this recurs (see below), not a code change.
+
+**Symptom.** Live UAT session, `convobox-UAT` checkout @ `20181be`,
+`backend.name: claude-code`, `--tui --aec-dump`, default (INFO) log
+level. Three silent-busy stretches in one session, each ending in real
+spoken output rather than a crash, error, or reconnect:
+- 18:47:52 -> 19:01:29 (**822s / ~13.7 minutes**), resolved with audio at
+  19:01:41.
+- 19:02:12 -> 19:03:37 (90s), resolved with a fresh turn at 19:04:01.
+- 19:04:01 -> 19:08:13 (270s), resolved with audio at 19:08:39.
+
+All three immediately followed a plain-text (no-tool-call) response --
+the live backend itself, mid-session, characterized its own stuck turn
+as "both following a plain-text response with no tool call." No file in
+the working tree changed timestamp during the worst stretch (checked via
+`find . -newermt "2026-07-31 18:47:00" ! -newermt "2026-07-31 19:02:00"`,
+zero matches outside the always-updating log/AEC-dump files) -- consistent
+with either genuine extended "thinking" with no tool use, or a stuck
+state producing nothing at all. Both are equally consistent with the
+evidence gathered so far.
+
+**Why root cause is unconfirmed.** `WorkingIndicator`
+(`scripts/run_convobox.py`) only observes `adapter.is_busy()` and
+`player.is_playing()` -- by design, it never times out or takes action
+itself (the safeword is the intended abort path), so a long heartbeat is
+not itself a bug, just a faithful report that `is_busy()` stayed `True`.
+At the default INFO log level, individual backend stream events (tool
+calls, thinking deltas) aren't logged, so a genuinely slow backend turn
+and a ConvoBox-side state bug (`is_busy()` failing to clear after the
+backend actually finished) look identical after the fact -- there's
+currently no way to tell them apart from `convobox-tui.log` alone. No
+native `claude` session transcript was found for this run either (the
+project's own `~/.claude/projects/` entry for this working dir has no
+`.jsonl` matching the session), so that avenue didn't help this time.
+
+**Next step, not yet done:** re-run with `--verbose` (DEBUG logging)
+next time a stall like this happens, so tool-call/thinking-level events
+are actually captured during the stall. If a future occurrence shows
+real backend events streaming the whole time, that confirms genuine
+long-running backend work (not a ConvoBox bug, just a UX/observability
+gap worth its own fix -- e.g. surfacing *what* the backend is doing, not
+just how long). If a future occurrence shows zero backend-side events
+for minutes at DEBUG level too, that would point at a real `is_busy()`
+staleness bug and justify a code investigation this entry didn't have
+enough evidence to start.
+
 **Current guidance (JP, 2026-07-30):** Piper for long responses; Kokoro
 is fine for short conversational replies where phoneme count won't
 approach the limit. No code change proposed by this entry -- documenting
