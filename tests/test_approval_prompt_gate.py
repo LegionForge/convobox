@@ -6,6 +6,7 @@ from convobox.tui import ConversationTuiState
 from scripts.run_convobox import (
     ApprovalPromptGate,
     LastSpokenResponse,
+    WorkingIndicator,
     _on_backend_event,
     _render_approval_explanation,
 )
@@ -201,6 +202,55 @@ def test_error_event_with_no_tui_state_does_not_raise() -> None:
     # no-op, same as every other branch in this function.
     _on_backend_event(
         None, LastSpokenResponse(), BackendEvent(BackendEventType.ERROR, content="boom")
+    )
+
+
+# --- indicator.current_activity wiring: KNOWN-ISSUES.md's 2026-07-31
+# "Backend can go silently busy for minutes" entry -- the heartbeat needs
+# to show what's running, not just how long. ---
+
+
+def test_tool_call_event_sets_indicator_current_activity() -> None:
+    indicator = WorkingIndicator()
+    _on_backend_event(
+        None, LastSpokenResponse(),
+        BackendEvent(BackendEventType.TOOL_CALL, tool="bash", tool_input='{"command": "ls"}'),
+        indicator=indicator,
+    )
+    assert indicator.current_activity == "bash"
+
+
+def test_tool_result_event_clears_indicator_current_activity() -> None:
+    # Tool finished -- back to "thinking" until the next TOOL_CALL/TEXT,
+    # not stuck showing the just-finished tool's name.
+    indicator = WorkingIndicator()
+    indicator.current_activity = "bash"
+    _on_backend_event(
+        None, LastSpokenResponse(),
+        BackendEvent(BackendEventType.TOOL_RESULT, tool="bash", tool_output="file1\nfile2"),
+        indicator=indicator,
+    )
+    assert indicator.current_activity is None
+
+
+def test_text_event_clears_indicator_current_activity() -> None:
+    # A final response means the turn is done "working" -- don't let a
+    # stale tool tag linger into the brief gap before playback resets it.
+    indicator = WorkingIndicator()
+    indicator.current_activity = "bash"
+    _on_backend_event(
+        None, LastSpokenResponse(),
+        BackendEvent(BackendEventType.TEXT, content="done"),
+        indicator=indicator,
+    )
+    assert indicator.current_activity is None
+
+
+def test_tool_call_event_with_no_indicator_does_not_raise() -> None:
+    # indicator is optional -- every pre-existing call site that doesn't
+    # pass one (all the tests above it in this file) must stay valid.
+    _on_backend_event(
+        None, LastSpokenResponse(), BackendEvent(BackendEventType.TOOL_CALL, tool="bash")
     )
 
 

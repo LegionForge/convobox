@@ -805,6 +805,17 @@ class WorkingIndicator:
         self._repeat_s = repeat_s
         self._silent_busy_s = 0.0
         self._next_notice_at = first_notice_s
+        # Set by _on_backend_event from a TOOL_CALL's event.tool, cleared on
+        # TOOL_RESULT/TEXT and whenever observe() sees the backend go idle
+        # or start playing -- unlike silent_busy_s this isn't driven purely
+        # by observe()'s own timer, it's written from outside (the event
+        # stream knows what's running, the poll loop doesn't). None means
+        # "silently busy with no known tool call in flight" (extended
+        # thinking, or a backend that doesn't report tool names), rendered
+        # as a generic tag rather than a specific one -- see KNOWN-ISSUES.md's
+        # "Backend can go silently busy for minutes" entry (2026-07-31),
+        # which this exists to make diagnosable without needing --verbose.
+        self.current_activity: str | None = None
 
     @property
     def silent_busy_s(self) -> float:
@@ -826,6 +837,7 @@ class WorkingIndicator:
         if not busy or playing:
             self._silent_busy_s = 0.0
             self._next_notice_at = self._first_notice_s
+            self.current_activity = None
             return None
         self._silent_busy_s += dt_s
         if self._silent_busy_s >= self._next_notice_at:
@@ -1126,14 +1138,19 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
             # Continuous, unlike observe()'s own sparse return value --
             # the TUI redraws every 0.1s (_tui_render_loop) and needs a
             # live number every frame, not just at first_notice_s/repeat_s.
-            tui_state.heartbeat_elapsed_s = indicator.silent_busy_s if (busy and not playing) else None
+            silently_busy = busy and not playing
+            tui_state.heartbeat_elapsed_s = indicator.silent_busy_s if silently_busy else None
+            tui_state.current_activity = indicator.current_activity if silently_busy else None
         if elapsed is not None:
+            activity_tag = (
+                f"[TOOL {indicator.current_activity}]" if indicator.current_activity else "[THINKING]"
+            )
             color = _heartbeat_color(elapsed) if use_color else ""
             reset = _ANSI_RESET if color else ""
             log.info(
-                "%sbackend still working (%.0fs, no audio yet) -- thinking or "
-                "running a tool; say the safeword to abort%s",
-                color, elapsed, reset,
+                "%sbackend still working (%.0fs, no audio yet) %s -- "
+                "say the safeword to abort%s",
+                color, elapsed, activity_tag, reset,
             )
         queued_text = interject_queue.flush_if_idle(busy, playing)
         if queued_text is not None:
@@ -1304,13 +1321,20 @@ def _on_backend_event(
     approval_phrase: str | None = None,
     approval_gate: ApprovalPromptGate | None = None,
     approval_explanation_mode: str = "plain",
+    indicator: WorkingIndicator | None = None,
 ) -> None:
     """Orchestrator's on_event hook (PR #55): feeds the TUI's transcript
     and full-detail panes from the real backend event stream, AND records
-    the assistant's response to the UAT/echo log. Only TEXT is handled --
-    TOOL_CALL/TOOL_RESULT visibility is future work, not dropped silently
-    forever, just out of this pass's scope (matches the design doc's
-    "deliberately minimal, built to be extended" phase-1 mandate).
+    the assistant's response to the UAT/echo log.
+
+    TOOL_CALL/TOOL_RESULT only update `indicator.current_activity` (the
+    heartbeat's "what's running right now" tag, KNOWN-ISSUES.md's
+    2026-07-31 "silently busy for minutes" finding) -- full TOOL_CALL/
+    TOOL_RESULT transcript-pane visibility is still future work, not
+    dropped silently forever, just out of this pass's scope (matches the
+    design doc's "deliberately minimal, built to be extended" phase-1
+    mandate). `indicator` is optional (None in tests that don't care about
+    the heartbeat tag) so every existing positional call site stays valid.
 
     full_detail accumulates WITHIN one turn (a backend can emit more than
     one agentMessage per turn -- e.g. reasoning-then-answer) and is reset
@@ -1380,8 +1404,21 @@ def _on_backend_event(
         if event.content and tui_state is not None:
             tui_state.add_turn("system", f"error: {event.content}")
         return
+    if event.type == BackendEventType.TOOL_CALL:
+        if indicator is not None:
+            indicator.current_activity = event.tool
+        return
+    if event.type == BackendEventType.TOOL_RESULT:
+        # Tool finished -- back to "thinking" (deciding the next step) until
+        # either another TOOL_CALL or the final TEXT arrives, so the
+        # heartbeat tag shouldn't keep showing the just-finished tool.
+        if indicator is not None:
+            indicator.current_activity = None
+        return
     if event.type != BackendEventType.TEXT or not event.content:
         return
+    if indicator is not None:
+        indicator.current_activity = None
     log.info("response: %s", event.content)
     spoken = strip_code_for_speech(event.content)
     last_spoken_response.text = spoken
@@ -1870,7 +1907,7 @@ async def run(args: argparse.Namespace) -> None:
         _on_backend_event(
             tui_state, last_spoken_response, event,
             config.interaction.approval_phrase, approval_gate,
-            config.interaction.approval_explanation_mode,
+            config.interaction.approval_explanation_mode, indicator,
         )
         if web_forwarder is not None:
             web_forwarder(event)
@@ -2243,10 +2280,16 @@ async def run(args: argparse.Namespace) -> None:
 
     # Heartbeat so a silently-busy backend (thinking, or grinding on a long
     # tool call) reads as "working", not "hung" -- the exact confusion a
-    # philosophy.md write caused in live UAT.
+    # philosophy.md write caused in live UAT. Named (not constructed inline)
+    # so _dispatch_event above can close over the SAME instance and update
+    # its current_activity from the real TOOL_CALL/TOOL_RESULT event stream
+    # -- resolved at call time, so it's fine that this assignment textually
+    # follows _dispatch_event's own definition (matches tui_state/
+    # approval_gate, which _dispatch_event already closes over the same way).
+    indicator = WorkingIndicator()
     watchdog_task = asyncio.create_task(
         _working_watchdog(
-            adapter, player, WorkingIndicator(), orchestrator, interject_queue,
+            adapter, player, indicator, orchestrator, interject_queue,
             segmenter, listening_gate, tui_state, continue_gate, approval_gate,
             web_forwarder,
         )
