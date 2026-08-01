@@ -88,6 +88,8 @@ from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, render_conversation_frame
+from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
+from convobox.audio.ack_tones import generate_ack_tone
 from convobox.resumeword import ResumeWordDetector
 from convobox.web.bridge import WebEventForwarder
 from convobox.web.history import HistoryDB, new_session_id
@@ -2390,13 +2392,13 @@ async def run(args: argparse.Namespace) -> None:
                     gate_action = listening_gate.observe(text)
                     if gate_action == "resume":
                         log.info("resumed listening (resume word matched): %r", text)
+                        # P8 (docs/DESIGN-barge-in.md): opt-in earcon, off by
+                        # default. Goes through the same AudioPlayer as TTS
+                        # (and so also feeds the AEC reference), unconditional
+                        # on tui_state since it's meant to be heard, not seen.
+                        if config.interaction.pause_resume_ack == "tone":
+                            player.play(generate_ack_tone("listening"), ACK_TONE_SAMPLE_RATE_HZ)
                         if tui_state is not None:
-                            # Resume is otherwise completely silent (docs/
-                            # DESIGN-barge-in.md's open question on this --
-                            # "leaning toward a short acknowledgment"). A
-                            # visual one only: an audio earcon would need to
-                            # go through AudioPlayer/the AEC reference feed,
-                            # which is out of scope here.
                             tui_state.add_turn("system", "resumed listening")
                         continue
                     if gate_action == "drop":
@@ -2426,6 +2428,13 @@ async def run(args: argparse.Namespace) -> None:
                         # utterance (its own first line calls start_event_loop()),
                         # so this is safe to call on every pause, not just once.
                         await orchestrator.stop_event_loop()
+                        # Safe to play now (not before): player.stop() at the
+                        # top of this branch already joined the previous
+                        # playback thread, so nothing else is touching
+                        # AudioPlayer's stream. See the resume branch above
+                        # for why this is unconditional on tui_state.
+                        if config.interaction.pause_resume_ack == "tone":
+                            player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
                         log.info(
                             "paused listening (matched %r) -- hard-stopped in-flight "
                             "work; say %r to resume",

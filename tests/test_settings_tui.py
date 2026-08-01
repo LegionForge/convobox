@@ -102,6 +102,26 @@ def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.Monke
     assert drawn == ["do-not-disturb", "conversational", "take-over"]
 
 
+def test_pause_resume_ack_is_registered_as_a_choice_field() -> None:
+    # P8 (docs/DESIGN-barge-in.md): must be pickable, not free-text, and
+    # must NOT offer "file" -- that value isn't implemented yet.
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    spec = next(f for f in interaction.fields if f.key == "pause_resume_ack")
+    assert spec.kind == "choice"
+    assert spec.choices == ("none", "tone")
+
+
+def test_pause_resume_ack_cycles_with_space_and_arrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = FieldSpec("interaction", "pause_resume_ack", "Pause/resume sound", "choice", ("none", "tone"))
+    keys = iter([" ", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    monkeypatch.setattr(settings_tui, "_draw_modal", lambda *a, **k: None)
+
+    accepted, value = settings_tui._edit_value_interactive(spec, "none", AppConfig())
+    assert accepted is True
+    assert value == "tone"
+
+
 def test_switching_backends_remembers_backend_specific_values() -> None:
     config = _make_config(
         **{

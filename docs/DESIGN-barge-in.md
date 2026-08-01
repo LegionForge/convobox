@@ -298,10 +298,26 @@ TV can't trip the resume word); `duck` mode; full-duplex generative direction.
   warn.
 - Per-backend behavior of `BARGE_IN_MARKER` (opencode, then Claude Code /
   Codex) — this is where the barge-in and backend-validation cycles overlap.
-- Should resuming from pause produce an audible/logged acknowledgment (a
-  short tone or "listening again"), or resume silently? Leaning toward a
-  short acknowledgment (matches Alexa/Google's wake confirmation), but
-  needs a live-UAT check against feeling naggy.
+- ~~Should resuming from pause produce an audible/logged acknowledgment~~
+  **Decided (JP, 2026-08-01): configurable, off by default.** New
+  `interaction.pause_resume_ack` field: `none` (default, matches every
+  release before this one) or `tone` — a short synthesized 3-note earcon
+  (`convobox.audio.ack_tones`, A-major triad A4/C#5/E5, 300ms/note),
+  ascending on resume and the same three notes descending on pause, so the
+  pair reads as opposites rather than two unrelated sounds. A spoken
+  confirmation ("listening again") was the original leaning here but was
+  dropped in favor of the tone — a synthesized earcon needs no TTS
+  round-trip and sidesteps this same open question's own "naggy" risk
+  entirely, since it carries no words to get old. A third value, `file` (a
+  user-supplied sound), is intentionally deferred — not offered as a choice
+  in either the TUI or web settings picker until it's actually built, so
+  there's no dead-end option that just errors. Not yet live-UAT'd: whether
+  the tone itself lands well in practice, and whether pause should default
+  to the tone too or start opt-in-only for resume. Picker in both
+  `scripts/settings_tui.py` and the web UI (`interaction` section,
+  "Pause/resume sound") — the web UI derives its schema straight from
+  `settings_tui.SECTION_SPECS` (same convention as every other setting),
+  so no separate web wiring was needed.
 - **False-interruption recovery (identified 2026-07-14, via LiveKit Agents
   research — see `docs/CONVERSATION-DESIGN-REFERENCES.md` §4).**
   `BargeInMonitor` fires purely from VAD-level sustained-speech timing,

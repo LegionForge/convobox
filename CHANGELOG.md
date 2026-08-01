@@ -6,6 +6,17 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+### Added
+- **Pause/resume acknowledgment tone** (`interaction.pause_resume_ack`,
+  `src/convobox/audio/ack_tones.py`). Resolves DESIGN-barge-in.md's [P8]
+  open question. `none` (default, silent, matches every prior release) or
+  `tone`: a short synthesized 3-note earcon, A-major triad A4/C#5/E5 at
+  300ms/note, ascending on resume and descending on pause -- no external
+  audio asset, generated on the fly. Pickable (not free-text) in both the
+  TUI settings editor and the web UI's Settings panel, interaction
+  section. A `file` (user-supplied sound) option is intentionally
+  deferred and not offered anywhere yet.
+
 ## [0.3.0] — 2026-07-28
 
 ### Added
