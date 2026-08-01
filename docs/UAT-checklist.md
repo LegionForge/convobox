@@ -808,6 +808,27 @@ did).
   normal command ("what time is it", "run the tests") -- NOT routed to the
   backend (no new HTTP/subprocess request; `is_busy()` never flips true),
   logged at debug as "dropped (paused, not the resume word)".
+  **Log-confirmed pass (3 rounds), 2026-07-31** (`convobox-tui.log`):
+  **Round 1**, paused 21:20:53 (`paused listening (matched 'Stop
+  listening.')`) -- 8 separate STT-processed utterances during the paused
+  window (21:20:56, 21:21:00, 21:21:03, 21:21:07, 21:21:10, 21:21:23,
+  21:21:26, 21:21:30), none producing a `backend still working` heartbeat
+  or a `response:` line, then a clean `resumed listening (resume word
+  matched): 'Athena'` at 21:21:31. **Round 2**, paused 21:23:52 -- 7 more
+  STT-processed utterances (21:23:59, 21:24:03, 21:24:30, 21:24:43,
+  21:24:46, 21:24:47, 21:24:52), again zero backend activity in between,
+  resumed cleanly at 21:24:59. **Round 3**, paused 21:27:05 (matched
+  "All right, let's continue testing P3, stop listening.") -- 9 more
+  STT-processed utterances (21:27:12 through 21:27:37, including a few
+  low-confidence `ru` language-detection misfires), again zero backend
+  activity in between, resumed cleanly at 21:27:43 on 'Athena.'. All
+  three rounds pass by absence of backend activity (no heartbeat/response
+  between pause and resume despite multiple spoken utterances reaching
+  STT) rather than a direct citation of the "dropped (paused, not the
+  resume word)" debug line itself -- the session was running at INFO
+  level, not `--verbose`, so that specific debug line isn't in this log
+  (same INFO/`--verbose` gap noted in the stuck-busy finding above). 3/3
+  clean passes.
 - **[P4] Resume word resumes.** While paused, say the configured resume word
   (default "ConvoBox") -- log shows "resumed listening (resume word
   matched)"; the NEXT ordinary utterance after that routes normally again.
@@ -826,18 +847,96 @@ did).
   Critically: verify ConvoBox is STILL paused afterward -- only the wake
   word should resume it, confirming pause/hard-stop are the orthogonal axes
   the design calls for, not the same thing.
+  **Log-confirmed pass (4 rounds), 2026-07-31** (`convobox-tui.log`,
+  21:29-21:34): across the four rounds, every configured safeword phrase
+  ("stop stop stop", "break break break", "eject eject eject", "mayday
+  mayday mayday") matched `hard stop matched safeword '...'` while paused,
+  including one match embedded mid-sentence ("Okay, it looks good. Stop,
+  stop, stop.") and matches down to 0.45-0.55 language confidence --
+  confirming the check is a deterministic substring match, same as the
+  safeword's own design (see [S2]). In every round, ConvoBox stayed
+  paused through all the safeword hits and only exited on the actual
+  resume word ('Athena'). Traced against the code
+  (`src/convobox/orchestrator/orchestrator.py:197-205`,
+  `src/convobox/adapters/claude_code.py:634-639`): the "hard stop matched
+  safeword" log line only proves the phrase matched, not that
+  `player.stop()`/`tts.stop()`/`send_hard_stop()` had any effect --
+  those calls are silent on success, and with nothing in flight
+  (`busy=False` in all logged hits across all 4 rounds) the adapter's
+  `send_hard_stop()` is an explicit no-op by design when there's no live
+  process. **So P5's match-and-stay-paused behavior is solidly
+  confirmed (4/4 rounds, 4 distinct safeword phrases); the effect-under-
+  load case (safeword landing while `busy=True`, e.g. mid-tool-call or
+  mid-playback, the race scenario this test explicitly calls out) was
+  attempted but not achieved -- every hit across all rounds happened to
+  land while idle. Left open, same as [P1]'s strict mid-playback case.**
 - **[P6] The pause phrase is inert while already paused.** While paused,
   say "stop listening" (or "pause listening") again -- treated as ordinary
   ignored speech per P3, not a special case; still requires the resume word
   to exit.
+  **Log-confirmed pass, 2026-07-31 ~21:36-21:37** (`convobox-tui.log`):
+  three pause/resume cycles, including one pause via the "Pause
+  listening." phrasing variant (confirming that alternate phrase works
+  too). In two of the three cycles, several STT-processed events occurred
+  between pause and resume with no matched transcript logged at all --
+  consistent with the pause phrase (if repeated) being silently dropped
+  rather than re-triggering `paused listening` or doing anything else
+  observable; ConvoBox stayed paused throughout and only exited on
+  'Athena' each time. Same caveat as [P3]: at INFO level, utterances that
+  neither match nor route are dropped without logging their transcript
+  text, so the content of those gap utterances (i.e. whether they were
+  actually a repeated pause phrase) isn't directly confirmed -- same
+  INFO/`--verbose` gap.
 - **[P7] Custom resume_word / pause_listening_phrases via config.** Set
   non-default values in convobox.yaml (or the Settings TUI once it exposes
   these fields) and confirm the whole P1-P6 cycle still works end-to-end,
   not just the unit-tested detector classes in isolation.
+  **Log-confirmed pass (resume_word half only), 2026-07-31 21:44-21:50**
+  (`convobox-tui.log`): `resume_word` switched from `Athena` to `pineapple`
+  at 21:44:07 (`pause_listening_phrases` left at default). 5/5 pause->resume
+  cycles matched on the first attempt: 21:45:19->26 (7s), 21:47:42->49:10
+  (88s -- this window also had 5 safeword hard-stops fire while paused,
+  re-confirming [P5] holds under a custom resume word too), 21:49:14->26
+  (12s), 21:49:30->33 (~3.5s, deliberate rapid pause/resume cycling), and
+  21:49:45->50:05 (20s). Negative check: at 21:49:38/42, saying the generic
+  phrase "Resume listening" (not the configured word) while NOT paused
+  correctly did nothing -- routed as ordinary speech, no false resume. No
+  mismatched/failed `pineapple` attempts appear anywhere in this stretch.
+  **Log-confirmed pass (pause_listening_phrases half), 2026-07-31
+  21:59-22:03** (`convobox-tui.log`): `pause_listening_phrases` set to
+  `["stop private", "pause private"]`, `resume_word` reverted to the
+  default (`Athena`, by removing the `pineapple` override). Both custom
+  phrases matched cleanly: `paused listening (matched 'stop, private.')`
+  at 22:00:18 -> resumed 22:00:32; `paused listening (matched 'pause,
+  private.')` at 22:00:52 -> resumed 22:01:37 (45s); `paused listening
+  (matched 'Pause private.')` at 22:02:00 -> resumed 22:02:48 (48s). All
+  three resumes matched 'Athena' on the first attempt. **P7 is now fully
+  closed** -- both halves (resume_word AND pause_listening_phrases)
+  independently confirmed non-default, on top of the already-solid
+  default-config P1-P6 pass earlier this session. The old default pause
+  phrase ("stop listening") was not separately re-tested to confirm it
+  no longer triggers now that the config no longer lists it -- a minor
+  residual gap, not blocking, since the matcher is a straightforward
+  list-membership check with no other path to a false positive.
+  **Enhancement idea (not a bug, not yet filed), 2026-07-31:** JP noted
+  `resume_word` (`src/convobox/config.py:168`) is a single `str`, unlike
+  `pause_listening_phrases` and the safeword list, which are both lists
+  supporting multiple phrases -- worth considering `resume_word`(s) as a
+  list too, for the same reason multiple safewords/pause phrases exist
+  (STT is unreliable enough live that one exact phrase can be hard to hit
+  reliably, as this same session's P1/P4 degraded-confidence findings
+  show). Not implemented; not filed as an issue yet.
 - **[P8] Resume acknowledgment (open question).** Currently silent on
   resume -- no tone/spoken confirmation. Note whether this feels
   unnervingly silent in practice; see DESIGN-barge-in.md's open question on
   this.
+  **Idea floated, not decided, 2026-07-31 ~22:05:** JP raised a short
+  processing/acknowledgment tone (the Amazon Echo/smart-speaker
+  pattern) as a candidate answer to this open question, right after the
+  P7 pass above -- a non-verbal audio cue on resume (and/or pause)
+  rather than either total silence or a spoken confirmation. Not
+  designed or built; worth weighing against DESIGN-barge-in.md's
+  existing open question the next time P8 is picked up properly.
 
 ## 9. Conversation TUI (`--tui`, `src/convobox/tui/`)
 
