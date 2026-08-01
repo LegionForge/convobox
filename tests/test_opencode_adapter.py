@@ -70,7 +70,19 @@ class OpenCodeServer:
         self.created_session_bodies: list[dict[str, object]] = []
         self.posted_prompts: list[dict[str, object]] = []
         self.interrupt_count = 0
-        self.event_gate = asyncio.Event()
+        # A Semaphore, not an Event: _release_all_gates below fires
+        # repeated releases in a tight loop without confirming the
+        # consumer woke between them. Event.set() is a no-op when already
+        # set, so two releases fired before the consumer's _events loop
+        # gets scheduled back to wait() collapse into a single wakeup and
+        # permanently strand the last frame -- confirmed live as an
+        # intermittent full-suite-only hang (never reproduced running
+        # this file or any single test alone, since only full-suite
+        # contention delays the consumer enough to hit the window).
+        # Semaphore.release() queues properly regardless of scheduling
+        # order, which is what "release exactly one frame, one at a time"
+        # actually needs.
+        self.event_gate = asyncio.Semaphore(0)
         self.client_disconnected = asyncio.Event()
         self._closing = False
         self._server: asyncio.AbstractServer | None = None
@@ -98,7 +110,7 @@ class OpenCodeServer:
             # a parked handler deadlocks teardown — on 3.11 this leak existed
             # too but wait_closed() returned without waiting, masking it.
             self._closing = True
-            self.event_gate.set()
+            self.event_gate.release()
             await self._server.wait_closed()
 
     @property
@@ -187,12 +199,9 @@ class OpenCodeServer:
         await writer.drain()
 
         for frame in self.frames:
-            await self.event_gate.wait()
+            await self.event_gate.acquire()
             if self._closing:
-                # stop() set the gate to reap parked handlers; don't clear it,
-                # any other parked handler needs to wake from it too.
                 return
-            self.event_gate.clear()
             if reader.at_eof():
                 self.client_disconnected.set()
                 return
@@ -252,7 +261,7 @@ async def server() -> AsyncIterator[OpenCodeServer]:
 
 async def _release_all_gates(server: OpenCodeServer, count: int) -> None:
     for _ in range(count):
-        server.event_gate.set()
+        server.event_gate.release()
         await asyncio.sleep(0.05)
 
 
@@ -653,7 +662,7 @@ async def test_is_busy_clears_when_stream_ends_without_terminal_step(
         assert adapter.is_busy() is True
 
         collector = asyncio.ensure_future(drain())
-        server.event_gate.set()
+        server.event_gate.release()
         await asyncio.wait_for(collector, timeout=5)
 
         # Connection dropped after 1 frame (step.started, non-terminal) --
