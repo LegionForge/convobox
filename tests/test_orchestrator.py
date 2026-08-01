@@ -849,6 +849,67 @@ async def test_hard_stop_stops_tts_and_player() -> None:
     await orch.stop_event_loop()
 
 
+@pytest.mark.asyncio
+async def test_hard_stop_suppresses_a_trailing_response_from_before_the_stop() -> None:
+    # Live UAT, 2026-07-31 (docs/UAT-checklist.md [P1]/[P5],
+    # docs/KNOWN-ISSUES.md): a response was heard 1-10+ seconds after a
+    # pause/hard-stop was logged, with no resume in between. Root cause,
+    # confirmed in every adapter's own send_hard_stop() comments (e.g.
+    # claude_code.py: "the in-flight turn's own terminal result DOES
+    # still arrive"): hard-stop only resets the local busy counter -- it
+    # never stopped _consume_events() from reading and speaking whatever
+    # trailing TEXT event the backend still delivered for the turn that
+    # was already in flight when hard-stop fired. Reproduces that exact
+    # race: a TEXT event arriving on the adapter's stream AFTER hard-stop
+    # was requested must never be spoken.
+    gate = asyncio.Event()
+
+    class GatedAdapter(BackendAdapter):
+        def __init__(self) -> None:
+            self.hard_stops = 0
+
+        async def send_text(self, text: str) -> None:
+            pass
+
+        async def send_interject(self, text: str) -> None:
+            pass
+
+        async def send_hard_stop(self) -> None:
+            self.hard_stops += 1
+
+        def is_busy(self) -> bool:
+            return False
+
+        async def events(self) -> AsyncGenerator[BackendEvent, None]:
+            yield BackendEvent(type=BackendEventType.TOOL_CALL, tool="bash")
+            # Parks here until the test releases it, simulating the
+            # backend's trailing result arriving late -- exactly the
+            # window every adapter's send_hard_stop() comment describes.
+            await gate.wait()
+            yield BackendEvent(
+                type=BackendEventType.TEXT,
+                content="the response that should never be heard",
+            )
+
+    adapter = GatedAdapter()
+    safeword = SafewordDetector(["stop stop stop"])
+    tts = FakeTTSEngine()
+    player = FakePlayer()
+    orch = Orchestrator(adapter, safeword, tts=tts, player=player)
+
+    orch.start_event_loop()
+    await asyncio.sleep(0)  # TOOL_CALL processed; task now parked on gate.wait()
+
+    await orch.handle_transcript("stop stop stop")
+    assert adapter.hard_stops == 1
+
+    gate.set()  # the "trailing result" finally arrives, AFTER hard-stop
+    await asyncio.sleep(0.05)  # give a misbehaving events task a chance to speak it
+
+    assert tts.synthesized == []
+    assert player.played == []
+
+
 def test_strip_code_for_speech_removes_fenced_block() -> None:
     text = "Here is the fix:\n```python\nprint('hi')\n```\nThat should work."
     result = strip_code_for_speech(text)

@@ -2406,6 +2406,26 @@ async def run(args: argparse.Namespace) -> None:
                         player.stop()
                         tts.stop()
                         await adapter.send_hard_stop()
+                        # Live UAT, 2026-07-31 (3 confirmed instances across two
+                        # sessions): audio was heard 1-10+ seconds AFTER a pause
+                        # was logged, with no resume in between. Root cause,
+                        # confirmed in every adapter's own send_hard_stop()
+                        # comments (e.g. claude_code.py: "the in-flight turn's
+                        # own terminal result DOES still arrive"): hard-stop
+                        # only resets the LOCAL busy counter -- it does not stop
+                        # Orchestrator._consume_events() from reading and
+                        # speaking whatever trailing TEXT event the backend
+                        # still delivers for the turn that was already in
+                        # flight when pause fired. _on_event() has no pause
+                        # awareness at all, so that trailing event unconditionally
+                        # spawned a fresh _speak_task. stop_event_loop() cancels
+                        # both the in-flight _speak_task AND the event-consumption
+                        # task itself, so nothing from the aborted turn can ever
+                        # reach _on_event() -- Orchestrator.handle_transcript()
+                        # already restarts a fresh subscription on the next real
+                        # utterance (its own first line calls start_event_loop()),
+                        # so this is safe to call on every pause, not just once.
+                        await orchestrator.stop_event_loop()
                         log.info(
                             "paused listening (matched %r) -- hard-stopped in-flight "
                             "work; say %r to resume",
