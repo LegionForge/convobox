@@ -396,6 +396,16 @@ Config phrases: `stop stop stop`, `break break break`.
   safeword. Confirm playback stops IMMEDIATELY (`player.stop()` +
   `tts.stop()` + `send_hard_stop()`), and the app stays listening (safeword does
   NOT exit, per the run_convobox.py docstring).
+  **Log-confirmed pass (tool-call variant), 2026-07-31 18:32:23:**
+  `transcript='Stop, stop, stop.' ... busy=True [HARD STOP]` /
+  `hard stop matched safeword 'stop stop stop'`. Backend was mid-tool-call
+  (`still working` heartbeat active), not mid-audio-playback -- same
+  tool-call-vs-playback distinction as the P1 passes above. The safeword
+  check runs on the raw transcript before any other gate and calls
+  `player.stop()`/`tts.stop()`/`send_hard_stop()` unconditionally, so this
+  exercises the same hard-stop path the literal mid-playback case would;
+  JP classified it as a valid S1 pass. A strict mid-playback (audio
+  actually sounding) case is still untested.
 - **[S2] Safeword cannot be swallowed.** The check runs on the RAW transcript
   before the language-probability gate and before the echo/overlap drop. Test
   a hard stop phrased with low-confidence/garbled audio (e.g. accented, quiet)
@@ -745,10 +755,55 @@ did).
   responding (mid-playback or mid-tool-call), say "stop listening" --
   playback stops immediately, `is_busy()` drops, and the log shows
   "paused listening (matched...)". No spoken response to "stop listening"
-  itself is ever heard.
+  itself is ever heard. **Log-confirmed 2026-07-31** (`convobox-tui.log`,
+  reconciled against the live chat transcript, superseding an earlier
+  in-session verbal tally of 5/5): 6/6 real
+  `paused listening (matched 'Stop listening.')` events, each followed by
+  a clean `resumed listening (resume word matched)`, at 17:45:05,
+  17:46:09, 17:47:24, 17:52:46, 17:56:56, and 18:07:32. Three additional
+  spoken attempts in the same session never reached the pause-matching
+  logic at all -- STT produced "That was nice" and "God bless thee" in
+  place of the intended pause phrase (low decode confidence, `dec`
+  0.45-0.46); ordinary barge-in still triggered on the mistranscribed
+  speech in at least one case, but the deterministic pause matcher (exact
+  normalized-substring match, no fuzzy fallback by design -- see
+  `src/convobox/listening_pause/detector.py`) correctly did not fire on
+  near-misses. Not counted against P1 for that reason. Root cause and
+  JP's call to keep the matcher deterministic (not fuzzy) are recorded
+  under [P2] below, which hit the same failure mode.
 - **[P2] Pause while idle.** Say "stop listening" with nothing running --
   no crash, no spoken response, log shows the pause; the hard-stop calls are
   effectively no-ops (same as the safeword's own idle no-op).
+  **Log-confirmed pass, 2026-07-31 18:20:52:** `paused listening (matched
+  'Stop listening.')` fired cleanly (`dec`/lang confidence 0.98) after a
+  genuine idle gap -- prior response's playback finished at 18:20:27,
+  no `backend still working` heartbeat in the 24s before the pause
+  command, confirming true `busy=False`. Resumed cleanly too (single
+  attempt, confidence 0.50). **Second log-confirmed pass, 18:42:19:**
+  same pattern -- 75s of true idle (no heartbeat) after the prior
+  response's playback ended at 18:41:03, then a clean match at 0.98
+  confidence. **Third log-confirmed pass, 18:46:08:** fired cleanly
+  (0.97 confidence) during a response-tiering continue/decline window
+  (also idle by `is_busy()`, not just post-playback silence), resumed on
+  the first attempt (0.58 confidence). 3/3 clean idle passes logged after
+  the fail below.
+  **Log-confirmed fail, 2026-07-31 18:09:37:** `transcript='Stop listing.'
+  lang=en (0.97) dec=0.45 busy=False` -- STT dropped the unstressed "-en-"
+  in "listening", producing "listing" instead. No `paused listening`
+  line followed; with nothing playing (`busy=False`) there was no
+  barge-in fallback either, so the utterance was routed to the backend as
+  an ordinary (nonsensical) turn -- a real P2 fail, not a no-op.
+  Root cause: `PauseListeningDetector.check()` does exact, deterministic
+  normalized-substring matching with no fuzzy tolerance, by explicit
+  design (same safety tier as `SafewordDetector` -- a hard-stop-class
+  phrase should have no matching ambiguity). "Stop listing" doesn't
+  contain the substring "stop listening", so it's a clean miss, not a
+  bug in the matcher. The actual gap is upstream: a low-confidence
+  transcript (`dec=0.45`) that matched no control phrase produced no
+  fallback (e.g. a confidence-gated re-ask) -- it just fell through to a
+  normal backend turn. **JP's call: keep the matcher deterministic, do
+  not add fuzzy matching for a hard-stop-class phrase.** Left open
+  whether a low-confidence-and-unmatched re-ask is worth adding later.
 - **[P3] Ordinary speech is dropped while paused.** While paused, say a
   normal command ("what time is it", "run the tests") -- NOT routed to the
   backend (no new HTTP/subprocess request; `is_busy()` never flips true),
@@ -756,6 +811,15 @@ did).
 - **[P4] Resume word resumes.** While paused, say the configured resume word
   (default "ConvoBox") -- log shows "resumed listening (resume word
   matched)"; the NEXT ordinary utterance after that routes normally again.
+  **Log-confirmed 2026-07-31, 17:56:56-17:57:47:** with `resume_word:
+  Athena` configured, JP reported needing 3 attempts before it
+  registered, and the log backs that up -- 3 separate audio-processing
+  events during the paused window (`Detected language 'en'` at
+  confidence 0.64, 0.53, then 0.46) before the third one finally produced
+  `resumed listening (resume word matched): 'Athena'`. Same degraded-STT
+  pattern as the [P1] near-misses (low decode/language confidence,
+  legitimate attempts not recognized), not a resume-word-matching
+  sensitivity issue in the detector itself.
 - **[P5] Safeword still works while paused, but does NOT resume.** While
   paused, say "stop stop stop" -- the `[HARD STOP]` path still fires
   (matters if something got started right as pause was requested / a race).
