@@ -373,6 +373,7 @@
     <div id="settings-body" class="settings-body"></div>
     <div class="settings-footer">
       <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden>Test this section</button>
+      <button id="settings-cancel-test-btn" type="button" class="settings-test-btn" hidden>Cancel</button>
       <span id="settings-status" class="settings-status"></span>
       <span class="spacer"></span>
       <button id="settings-save-btn" type="button" class="primary">Save</button>
@@ -809,6 +810,7 @@
   const closeBtn = document.getElementById("settings-close-btn");
   const saveBtn = document.getElementById("settings-save-btn");
   const testSectionBtn = document.getElementById("settings-test-section-btn");
+  const cancelTestBtn = document.getElementById("settings-cancel-test-btn");
   const settingsBtn = document.getElementById("settings-btn");
 
   // Sections with a real probe_* hook in scripts/settings_tui.py (see
@@ -1016,6 +1018,20 @@
     // not "hung". Client-side only: the fetch itself doesn't report byte
     // progress, and hooking huggingface_hub's internal download callback
     // for that isn't worth the fragility for this.
+    const controller = new AbortController();
+    let cancelled = false;
+    cancelTestBtn.hidden = false;
+    cancelTestBtn.onclick = () => {
+      // Aborting the fetch only stops the BROWSER waiting -- it can't
+      // stop the server's background thread mid-download (no safe way to
+      // kill a Python thread, no cancellation hook into huggingface_hub's
+      // transfer loop; see _run_with_spinner's docstring in
+      // settings_tui.py for the TUI's identical constraint). The server
+      // keeps downloading/testing in the background regardless; this
+      // just stops this tab from waiting on it.
+      cancelled = true;
+      controller.abort();
+    };
     const start = performance.now();
     const tick = () => {
       const elapsedS = Math.floor((performance.now() - start) / 1000);
@@ -1028,6 +1044,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ section, field: field || null, values: draft }),
+        signal: controller.signal,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1036,9 +1053,15 @@
       }
       setStatus(data.status, false);
     } catch (err) {
-      setStatus("Test failed: " + err, true);
+      if (cancelled) {
+        setStatus("cancelled -- the server keeps running it in the background; this status may still change once it finishes", false);
+      } else {
+        setStatus("Test failed: " + err, true);
+      }
     } finally {
       clearInterval(timer);
+      cancelTestBtn.hidden = true;
+      cancelTestBtn.onclick = null;
     }
   }
 

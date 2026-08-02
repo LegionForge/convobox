@@ -2363,29 +2363,65 @@ async def _test_state(state: TuiState) -> None:
 _SPINNER_FRAMES = "|/-\\"
 
 
+def _key_waiting() -> bool:
+    """Non-blocking "is a key pending?" check, both platforms.
+
+    read_key() itself always blocks until a key arrives -- fine for the
+    main draw()->read_key() loop, wrong here: this only needs to peek
+    during the spinner's own poll tick, not stall it waiting for input
+    that may never come.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        return msvcrt.kbhit()
+    import select
+
+    return bool(select.select([sys.stdin], [], [], 0)[0])
+
+
 def _run_with_spinner(state: TuiState, run: Callable[[], None]) -> None:
     """Runs `run` on a background thread, redrawing an elapsed-time spinner
-    in state.status until it finishes.
+    in state.status until it finishes, ESC cancels waiting.
 
     run_tui()'s own loop is a plain synchronous draw() -> read_key() cycle
     with no independent redraw tick -- calling something slow (e.g.
     asyncio.run(_test_state(...)) directly, as this used to) blocks that
     loop completely, so a large not-yet-cached Whisper model download
-    (tens of seconds to minutes for large-v3) looked exactly like a hang,
-    with no way to tell the two apart. `run` sets state.status itself on
-    completion (success or failure, see _test_state's own try/except);
-    this only owns the status line while `run` is still in flight.
+    (tens of seconds to minutes for large-v3 -- live-confirmed 2026-08-01,
+    still running past 330s on one real connection) looked exactly like a
+    hang, with no way to tell the two apart. `run` sets state.status
+    itself on completion (success or failure, see _test_state's own
+    try/except); this only owns the status line while `run` is still in
+    flight.
+
+    ESC hands control back immediately but does NOT stop the underlying
+    work -- there's no safe way to kill a Python thread mid-download, and
+    huggingface_hub's own transfer loop exposes no cancellation hook this
+    code could call into. `run` keeps executing as an orphaned daemon
+    thread and will still overwrite state.status with its own real result
+    whenever it eventually finishes, possibly minutes later while the
+    operator is doing something else -- rare and purely cosmetic (the
+    next real keypress redraws normally regardless), not a correctness
+    issue, but worth being honest about rather than implying a clean stop.
     """
     thread = threading.Thread(target=run, daemon=True)
     start = time.monotonic()
     thread.start()
     frame = 0
     while thread.is_alive():
+        if _key_waiting() and read_key() == "ESC":
+            state.status = (
+                "cancelled -- can't safely interrupt an in-flight "
+                "download/model call, so it keeps running in the "
+                "background; this status may still change once it finishes"
+            )
+            return
         elapsed = time.monotonic() - start
         spinner = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
         state.status = (
-            f"{spinner} testing... ({elapsed:.0f}s) -- a not-yet-cached "
-            "model can take a while to download"
+            f"{spinner} testing... ({elapsed:.0f}s, ESC to cancel) -- a "
+            "not-yet-cached model can take a while to download"
         )
         draw(state)
         frame += 1

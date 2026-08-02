@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1746,6 +1747,32 @@ def test_run_with_spinner_runs_to_completion_and_shows_elapsed_status(
     assert state.status == "done"
     # At least one spinner frame was shown before the final status landed.
     assert any("testing..." in s for s in seen_statuses[:-1])
+
+
+def test_run_with_spinner_esc_returns_immediately_without_joining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ESC can't actually stop an in-flight download (no safe way to kill a
+    # Python thread, no cancellation hook into huggingface_hub's transfer
+    # loop) -- it must hand control back right away regardless of whether
+    # `run` is still genuinely working, not block waiting for it to notice.
+    monkeypatch.setattr(settings_tui, "draw", lambda state: None)
+    monkeypatch.setattr(settings_tui, "_key_waiting", lambda: True)
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ESC")
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+
+    release = threading.Event()
+
+    def _still_running_task() -> None:
+        release.wait(timeout=2.0)
+        state.status = "finished late, after cancel"
+
+    settings_tui._run_with_spinner(state, _still_running_task)
+
+    assert "cancelled" in state.status
+    assert "background" in state.status
+    release.set()  # let the orphaned daemon thread finish, don't leak it
 
 
 @pytest.mark.asyncio
