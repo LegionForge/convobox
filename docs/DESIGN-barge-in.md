@@ -302,18 +302,21 @@ TV can't trip the resume word); `duck` mode; full-duplex generative direction.
   **Decided (JP, 2026-08-01): configurable, off by default.** New
   `interaction.pause_resume_ack` field: `none` (default, matches every
   release before this one) or `tone` — a short synthesized 3-note earcon
-  (`convobox.audio.ack_tones`, A-major triad A4/C#5/E5, 300ms/note),
-  ascending on resume and the same three notes descending on pause, so the
-  pair reads as opposites rather than two unrelated sounds. A spoken
-  confirmation ("listening again") was the original leaning here but was
-  dropped in favor of the tone — a synthesized earcon needs no TTS
-  round-trip and sidesteps this same open question's own "naggy" risk
-  entirely, since it carries no words to get old. A third value, `file` (a
-  user-supplied sound), is intentionally deferred — not offered as a choice
-  in either the TUI or web settings picker until it's actually built, so
-  there's no dead-end option that just errors. Not yet live-UAT'd: whether
-  the tone itself lands well in practice, and whether pause should default
-  to the tone too or start opt-in-only for resume. Picker in both
+  (`convobox.audio.ack_tones`, A-major triad A4/C#5/E5, 150ms/note —
+  tightened from an initial 300ms/note after live UAT, 2026-08-01, found
+  the first pass too slow), ascending on resume and the same three notes
+  descending on pause, so the pair reads as opposites rather than two
+  unrelated sounds. A spoken confirmation ("listening again") was the
+  original leaning here but was dropped in favor of the tone — a
+  synthesized earcon needs no TTS round-trip and sidesteps this same open
+  question's own "naggy" risk entirely, since it carries no words to get
+  old. A third value, `file` (a user-supplied sound), is intentionally
+  deferred — not offered as a choice in either the TUI or web settings
+  picker until it's actually built, so there's no dead-end option that
+  just errors. Live-UAT'd so far: timing only (confirmed too slow at
+  300ms/note, tightened to 150ms). Still open: whether 150ms/note lands
+  well, and whether pause should default to the tone too or start
+  opt-in-only for resume. Picker in both
   `scripts/settings_tui.py` and the web UI (`interaction` section,
   "Pause/resume sound") — the web UI derives its schema straight from
   `settings_tui.SECTION_SPECS` (same convention as every other setting),

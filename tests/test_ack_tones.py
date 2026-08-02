@@ -30,7 +30,10 @@ def test_listening_tone_is_the_triad_ascending() -> None:
     freqs = [_dominant_freq_hz(seg, SAMPLE_RATE_HZ) for seg in _note_segments(tone, SAMPLE_RATE_HZ)]
     assert freqs[0] < freqs[1] < freqs[2]
     for measured, expected in zip(freqs, _NOTES_HZ, strict=True):
-        assert measured == pytest.approx(expected, abs=5.0)
+        # FFT bin width at the shortened 150ms note length is ~6.7Hz
+        # (24000 / 3600 samples) -- 10Hz keeps margin above that without
+        # weakening the real assertion, which is the strict ordering above.
+        assert measured == pytest.approx(expected, abs=10.0)
 
 
 def test_paused_tone_is_the_same_triad_descending() -> None:
@@ -40,7 +43,10 @@ def test_paused_tone_is_the_same_triad_descending() -> None:
     freqs = [_dominant_freq_hz(seg, SAMPLE_RATE_HZ) for seg in _note_segments(tone, SAMPLE_RATE_HZ)]
     assert freqs[0] > freqs[1] > freqs[2]
     for measured, expected in zip(freqs, reversed(_NOTES_HZ), strict=True):
-        assert measured == pytest.approx(expected, abs=5.0)
+        # FFT bin width at the shortened 150ms note length is ~6.7Hz
+        # (24000 / 3600 samples) -- 10Hz keeps margin above that without
+        # weakening the real assertion, which is the strict ordering above.
+        assert measured == pytest.approx(expected, abs=10.0)
 
 
 def test_tone_length_is_three_notes_plus_two_gaps() -> None:

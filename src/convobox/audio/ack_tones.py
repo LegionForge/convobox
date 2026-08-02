@@ -10,9 +10,14 @@ import numpy as np
 # reversed on pause, so the two read as a matched pair rather than
 # unrelated sounds.
 _NOTES_HZ = (440.0, 554.365, 659.255)  # A4, C#5, E5
-_NOTE_S = 0.3
+# Live UAT, 2026-08-01: the first pass (300ms/note, 930ms total) felt too
+# slow -- JP asked for roughly double speed. 150ms/note (gap halved to
+# match) halves the total to ~465ms; _FADE_S stays 10ms, still well under
+# half a (now shorter) note's length so the attack/decay ramps can't
+# overlap.
+_NOTE_S = 0.15
 _FADE_S = 0.01  # attack/decay per note, avoids audible clicks at note edges
-_GAP_S = 0.015  # brief silence between notes, keeps the arpeggio legible
+_GAP_S = 0.0075  # brief silence between notes, keeps the arpeggio legible
 _PEAK_AMPLITUDE = 0.3  # modest relative to spoken TTS; tune after live listening
 
 # AudioPlayer resamples to the device rate itself (audio/playback.py's
