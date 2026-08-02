@@ -50,6 +50,29 @@ class VADConfig(BaseModel):
     max_utterance_s: float | None = None
 
 
+# ctranslate2's real supported precisions (verified against the installed
+# 4.8.1 via ctranslate2.get_supported_compute_types("cpu")/("cuda")) --
+# hardcoded rather than queried at validation time: importing ctranslate2
+# costs 2+ seconds on first touch (confirmed empirically), and STTConfig
+# gets constructed everywhere, including hundreds of tests and every CLI
+# path that never touches STT at all. faster_whisper.utils.available_models
+# (settings_tui.py's own STT model picker) already eagerly pulls in
+# ctranslate2 for its own reasons, so that cost is separately unavoidable
+# there -- this list intentionally doesn't ride on it, to keep config.py
+# itself fast regardless of what else happens to import it.
+STT_COMPUTE_TYPES: tuple[str, ...] = (
+    "default",
+    "int8",
+    "int8_float16",
+    "int8_float32",
+    "int8_bfloat16",
+    "int16",
+    "float16",
+    "bfloat16",
+    "float32",
+)
+
+
 class STTConfig(BaseModel):
     # Which STT engine to build (see convobox.stt.factory). Only
     # faster-whisper is implemented today; the field exists so STT is
@@ -79,6 +102,15 @@ class STTConfig(BaseModel):
     # glossary in config makes every rewrite inspectable and portable, rather
     # than silently training on a user's voice data.
     corrections: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("compute_type")
+    @classmethod
+    def _validate_compute_type(cls, v: str) -> str:
+        if v not in STT_COMPUTE_TYPES:
+            raise ValueError(
+                f"compute_type must be one of {STT_COMPUTE_TYPES}, not {v!r}"
+            )
+        return v
 
     @field_validator("corrections")
     @classmethod
