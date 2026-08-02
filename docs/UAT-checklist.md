@@ -420,6 +420,20 @@ Config phrases: `stop stop stop`, `break break break`.
 - **[S5] Hard stop while idle.** Saying the safeword when the backend is not
   busy should be a safe no-op (OpenCode's interrupt is documented idle-no-op).
   Confirm no error and continued listening.
+- **[S6] A misheard safeword can land on the pause phrase instead --
+  same hard-stop effect, different resulting state (see
+  `docs/KNOWN-ISSUES.md`).**
+  **Log-confirmed live, 2026-08-01, 20:07:08:** an utterance intended as
+  'stop stop stop' was transcribed as `'Stop listening.'` instead, which
+  matched `pause_listening_phrases` rather than the safeword. Not a
+  safety gap -- the pause path calls the same `send_hard_stop()` the
+  safeword does, confirmed against the same session's log (the mis-heard
+  phrase correctly cancelled an in-flight bogus query). The real
+  difference is state: safeword returns to normal listening immediately;
+  landing on the pause phrase instead leaves the session paused,
+  requiring the resume word to hear anything else again. Same
+  STT-reliability category as [P7]'s `resume_word` finding, not unique to
+  the safeword. No fix proposed.
 
 ## 4. Busy / interject routing
 
@@ -948,6 +962,20 @@ did).
   the ruling and what's still open): whether the tone lands well in
   practice, and whether `tone` should become the shipped default instead
   of `none`.
+- **[P9] A hard-stopped in-flight turn can show as a generic
+  "error_during_execution" turn -- cosmetic mislabel (see
+  `docs/KNOWN-ISSUES.md`).**
+  **Log-confirmed live, 2026-08-01, ~20:06:29-36:** a mis-transcribed
+  pause attempt ("Stop listing." instead of "Stop listening.") got sent
+  to the backend as a real query; the next attempt correctly matched the
+  pause phrase and hard-stopped that in-flight `claude-code` call via
+  `send_hard_stop()`. The interrupted CLI's own interrupt-confirmation
+  text is what surfaces as an `error_during_execution` TUI turn -- never
+  logged via this project's own logging, never spoken, doesn't affect the
+  hard-stop itself (which worked correctly). TUI-only evidence so far;
+  web UI behavior not separately confirmed. No fix built -- not yet
+  decided whether a distinct turn label is worth it given it's purely
+  cosmetic.
 
 ## 9. Conversation TUI (`--tui`, `src/convobox/tui/`)
 
