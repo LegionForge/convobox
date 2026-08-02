@@ -7,6 +7,129 @@ tested-vs-implemented table, see the README's [Status](../README.md#status)
 section; for the formal per-release changelog, see
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## Since 0.3.0
+
+27 PRs, `0.3.1` (2026-08-01, see [../CHANGELOG.md](../CHANGELOG.md) for the
+formal entry) -- mostly a stability/UX-polish pass on the interaction and
+web UI work `0.3.0` shipped, plus one genuine security fix and one
+safety-critical timing bug, both found and fixed via live UAT rather than
+code review alone. No config schema breaks.
+
+- **Real bugs found and fixed via live UAT, not speculative hardening:**
+  - **Safety-critical: pause/hard-stop could let a stale in-flight turn's
+    response play 1-10+ seconds late**, with no resume in between. Root
+    cause: `send_hard_stop()` only ever reset the local busy counter --
+    it never stopped the event-consumption task from reading and
+    speaking a trailing event from the turn that had just been aborted.
+    The same bug existed at both call sites that hard-stop (the pause
+    handler and the safeword's own branch in `Orchestrator
+    .handle_transcript()`); fixed at both once found, not left as a known
+    duplicate. Live-verified across a 24-minute re-test with repeated
+    pause/hard-stop cycling, zero leaks.
+  - **Security: `backend.permission_mode: permissive` didn't actually
+    bypass all permissions.** It silently mapped to the same Claude Code
+    flag as `approve` (`acceptEdits`), which only auto-approves file
+    edits -- every other tool (Bash, WebFetch, WebSearch, Read, ...)
+    still generated a real approval request that headless mode has no
+    channel to answer, quietly stalling those calls in a mode whose
+    entire contract is "act without asking." Found by cross-referencing
+    an independent sandboxed session's findings (WebFetch/Read/Bash all
+    failing with "permissions... haven't granted it yet" in a session
+    believed to be permissive) against the actual flag-resolution code.
+    Now correctly maps to `bypassPermissions`; live-verified against a
+    real `WebFetch` call succeeding with no approval-hang.
+  - **Barge-in false-positive tag**: utterances spoken in the gap *after*
+    a response finished (not during it) were incorrectly tagged as
+    interrupting it, because `EchoAwarePlayer.audible` was only ever
+    reset at the start of the *next* response, never on the current
+    one's own natural completion.
+  - **Barge-in interrupts near the end of playback could be dropped
+    entirely.** An interruption starting ~1s before natural completion
+    never accumulated enough sustained-speech time to cross the barge-in
+    threshold before playback ended, so it fell through to the overlap
+    gate and was silently discarded as presumed echo -- live-reproduced
+    reliably (every time at ~1s before the end, never at ~5s before).
+    Notably, this bug had been masked by the false-positive-tag bug
+    above until that one was fixed.
+  - **TTS synthesis/playback failures were silently swallowed.** The
+    fire-and-forget speak task had no exception handling anywhere in its
+    call chain; a failure (Kokoro's own ~510-phoneme hard limit is the
+    confirmed live trigger) previously vanished with no log, no error,
+    no indication anything went wrong beyond "the response stopped after
+    the first paragraph." Now logged and surfaced as a real error event
+    through the same path every other backend event already flows
+    through -- live-confirmed 3/3 attempts against the real phoneme
+    limit. Closed out a `--tui`-specific gap in a follow-up once found:
+    the error reached the log and web UI correctly but `--tui` showed
+    nothing on-screen, since `_on_backend_event` only special-cased
+    `APPROVAL_REQUEST`/`TEXT`.
+  - **Backend reconnect retried every ~1s forever against a dead
+    `backend.url`**, with no distinction between a genuine transient
+    hiccup and a permanently misconfigured backend -- ~90 identical
+    tracebacks logged in under 5 minutes during a safe isolated-instance
+    test. Now backs off exponentially (capped at 30s) on consecutive
+    failures, resetting to fast-retry the instant a real event arrives,
+    so recovery from an actual transient failure is exactly as fast as
+    before.
+  - **The web UI's Quit button and a real terminal Ctrl+C only ever
+    stopped the embedded web server**, not the mic loop or backend
+    adapter underneath, while `--web` was active. Root cause: uvicorn
+    installs its own OS signal handler for as long as it runs, so the
+    existing signal-based shutdown path silently never fired. Fixed by
+    cancelling the main task directly instead of round-tripping through
+    a now-unreliable OS signal.
+  - Smaller fixes: `.md` file writes now open the artifact pane (the
+    extension was simply missing from the content-type allowlist);
+    `--tui` now shows `ERROR` events in the transcript, not just the log
+    and web UI; a second instance's mic-lock refusal now shuts down
+    cleanly instead of leaving a noisy uvicorn traceback.
+- **UX polish, all live-verified:** the barge-in interrupt marker
+  reworded from parenthetical prose to `[User interrupted AI response]`;
+  interrupt-preset descriptions rewritten from internal jargon into a
+  plain-language sentence plus a concrete "you say X, it does Y" example
+  per preset (one shared `FieldSpec.help_text` covers both the TUI and
+  web UI, so this one edit updated both surfaces); the web UI's paused
+  status now shows which word resumes listening instead of just
+  `paused`; **Safeword folded into the Interaction tab** in both
+  Settings surfaces (display grouping only -- `config.safeword
+  .hard_stop_phrases` and every real reference to it are unchanged).
+- **New: `interaction.pause_resume_ack` pause/resume tone**, resolving
+  `DESIGN-barge-in.md`'s long-open [P8] question. `none` (default,
+  silent) or `tone` -- a synthesized 3-note earcon (A-major triad,
+  150ms/note after live UAT found an initial 300ms/note too slow),
+  ascending on resume and descending on pause. No bundled audio asset;
+  generated on the fly and fed through the existing `AudioPlayer.play()`
+  path. See [../CHANGELOG.md](../CHANGELOG.md) for the full entry.
+- **Product direction: decided to pursue [ACP](https://agentclientprotocol.com)**
+  as the standard backend-adapter protocol going forward, after
+  comparing ConvoBox against [katipally/openlive](https://github.com/katipally/openlive)
+  (closest prior art found so far) at JP's request. Scoping follow-up
+  found only **OpenCode** exposes an ACP server natively today; Claude
+  Code and Codex each only have third-party bridges of unverified
+  maturity, so no adapter migration has started yet.
+- **New `docs/TROUBLESHOOTING.md`**: why pause/resume/safeword
+  recognition is a deterministic normalized-substring match (checked
+  before `stt.corrections`, deliberately -- a hard-stop-class control
+  can't depend on a rewritable glossary), and how to diagnose/verify a
+  candidate phrase against your own voice, including the "Athena" story
+  (the original `ConvoBox` default was confidently mis-heard as "Control
+  Box" every time).
+- **Two live-UAT findings documented, neither a blocker:** a hard-stopped
+  in-flight backend call can surface the CLI's own interrupt-confirmation
+  as a generic `error_during_execution` turn (cosmetic, never
+  logged/spoken, the hard-stop itself works correctly); a misheard
+  safeword can land on the pause phrase instead of the safeword itself
+  (not a safety gap -- pause calls the identical `send_hard_stop()` the
+  safeword does -- but leaves the session paused rather than returning to
+  normal listening immediately). Both in [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
+- Also fixed: a real, reproducible test-suite flake (`OpenCodeServer
+  .event_gate`, an `asyncio.Event` that could lose a wakeup under
+  full-suite scheduling contention -- fixed by switching to
+  `asyncio.Semaphore(0)`, which queues releases properly regardless of
+  scheduling order); a docs-merge conflict that had accidentally dropped
+  a `KNOWN-ISSUES.md` section still referenced by `run_convobox.py`'s own
+  clean-exit message, restored verbatim.
+
 ## Since 0.2.0
 
 The interaction/safety bundle (`DESIGN-0.3.0-interaction-and-safety.md`) --

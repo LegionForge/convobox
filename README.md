@@ -96,7 +96,7 @@ in-browser editor (same validate/save/backup contract as
 Quit button. See [docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md) for the
 full picture, including its no-auth loopback-only security model.
 
-**Still under construction as of 0.3.0.** The core flows above are
+**Still under construction as of 0.3.1.** The core flows above are
 live-verified and working, but this is the newest, least-hardened part
 of ConvoBox — expect rough edges (e.g. the artifact pane's opencode/codex
 support isn't wired up yet) while it gets the same live-UAT scrutiny the
