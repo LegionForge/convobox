@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import io
 import json
 import os
 import re
@@ -24,6 +25,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import textwrap
 from dataclasses import dataclass, field
@@ -55,6 +57,7 @@ from convobox.config import (
     read_aec_estimate,
     resolve_config_path,
 )
+from convobox.stt.base import TranscriptResult
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import (
     DEFAULT_VOICES_DIR,
@@ -1188,9 +1191,17 @@ def _refresh_kokoro_voices(state: TuiState) -> None:
 
 
 async def probe_stt(config: AppConfig) -> str:
-    transcriber = create_stt_engine(config.stt)
-    silence = np.zeros(int(config.audio.sample_rate), dtype=np.float32)
-    result = transcriber.transcribe(silence)
+    # WhisperModel construction downloads the model on first use (tens of MB
+    # for tiny/base, ~3GB for large-v3) -- a real, possibly multi-minute
+    # blocking call. Off the event loop thread so it can't freeze the TUI's
+    # render loop or, on the web UI, the whole uvicorn server (SSE stream
+    # included) for every connected tab while one Test click downloads.
+    def _run() -> TranscriptResult:
+        transcriber = create_stt_engine(config.stt)
+        silence = np.zeros(int(config.audio.sample_rate), dtype=np.float32)
+        return transcriber.transcribe(silence)
+
+    result = await asyncio.to_thread(_run)
     return (
         "STT probe succeeded "
         f"(text={result.text!r}, lang={result.language}, "
@@ -2350,6 +2361,88 @@ async def _test_state(state: TuiState) -> None:
         state.status = f"{section} test failed: {type(exc).__name__}: {exc}"
 
 
+_SPINNER_FRAMES = "|/-\\"
+
+
+def _key_waiting() -> bool:
+    """Non-blocking "is a key pending?" check, both platforms.
+
+    read_key() itself always blocks until a key arrives -- fine for the
+    main draw()->read_key() loop, wrong here: this only needs to peek
+    during the spinner's own poll tick, not stall it waiting for input
+    that may never come.
+
+    Defensive: select.select() needs sys.stdin to be a real, fileno()-
+    having stream. It isn't always -- pytest's captured stdin under CI is
+    a pseudofile and raises UnsupportedOperation here (live-confirmed:
+    GitHub Actions run for PR #196, io.UnsupportedOperation: "redirected
+    stdin is pseudofile, has no fileno()") -- and the same class of
+    failure could hit any real invocation with stdin redirected/piped,
+    not just tests. Treat "can't check" as "no key waiting" rather than
+    crashing the whole spinner/test over a feature (ESC-cancel) that was
+    never going to fire without a real interactive terminal anyway.
+    """
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            return msvcrt.kbhit()
+        import select
+
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except (OSError, ValueError, io.UnsupportedOperation):
+        return False
+
+
+def _run_with_spinner(state: TuiState, run: Callable[[], None]) -> None:
+    """Runs `run` on a background thread, redrawing an elapsed-time spinner
+    in state.status until it finishes, ESC cancels waiting.
+
+    run_tui()'s own loop is a plain synchronous draw() -> read_key() cycle
+    with no independent redraw tick -- calling something slow (e.g.
+    asyncio.run(_test_state(...)) directly, as this used to) blocks that
+    loop completely, so a large not-yet-cached Whisper model download
+    (tens of seconds to minutes for large-v3 -- live-confirmed 2026-08-01,
+    still running past 330s on one real connection) looked exactly like a
+    hang, with no way to tell the two apart. `run` sets state.status
+    itself on completion (success or failure, see _test_state's own
+    try/except); this only owns the status line while `run` is still in
+    flight.
+
+    ESC hands control back immediately but does NOT stop the underlying
+    work -- there's no safe way to kill a Python thread mid-download, and
+    huggingface_hub's own transfer loop exposes no cancellation hook this
+    code could call into. `run` keeps executing as an orphaned daemon
+    thread and will still overwrite state.status with its own real result
+    whenever it eventually finishes, possibly minutes later while the
+    operator is doing something else -- rare and purely cosmetic (the
+    next real keypress redraws normally regardless), not a correctness
+    issue, but worth being honest about rather than implying a clean stop.
+    """
+    thread = threading.Thread(target=run, daemon=True)
+    start = time.monotonic()
+    thread.start()
+    frame = 0
+    while thread.is_alive():
+        if _key_waiting() and read_key() == "ESC":
+            state.status = (
+                "cancelled -- can't safely interrupt an in-flight "
+                "download/model call, so it keeps running in the "
+                "background; this status may still change once it finishes"
+            )
+            return
+        elapsed = time.monotonic() - start
+        spinner = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
+        state.status = (
+            f"{spinner} testing... ({elapsed:.0f}s, ESC to cancel) -- a "
+            "not-yet-cached model can take a while to download"
+        )
+        draw(state)
+        frame += 1
+        time.sleep(0.12)
+    thread.join()
+
+
 def _handle_browse(state: TuiState, key: str) -> bool:
     lowered = key.lower() if len(key) == 1 else key
     if lowered in ("q", "esc"):
@@ -2399,7 +2492,7 @@ def _handle_browse(state: TuiState, key: str) -> bool:
     elif lowered == "s":
         _save(state)
     elif lowered == "t":
-        asyncio.run(_test_state(state))
+        _run_with_spinner(state, lambda: asyncio.run(_test_state(state)))
     elif lowered == "c":
         asyncio.run(_compare_tts_engines(state))
     elif lowered == "d":
