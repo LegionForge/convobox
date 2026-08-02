@@ -290,16 +290,21 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("interaction", "barge_in_min_speech_ms", "Barge-in min speech ms", "int", help_text="How long speech must continue before it counts as a real interruption."),
             FieldSpec("interaction", "resume_word", "Resume word", "str", help_text="Say this to RESUME after a pause phrase (also the push-word barge-in trigger). Pick something DISTINCT and unlikely in normal conversation (so you don't resume by accident) and clearly transcribable by Whisper (so it matches reliably without needing a corrections-glossary entry). The old default 'ConvoBox' failed both -- confidently mis-heard as 'Control Box' every time. 'Athena' is the round-trip-verified default. Verify a custom word with scripts/roundtrip_smoketest.py first; a warning fires at save time for words already known to mis-transcribe."),
             FieldSpec("interaction", "pause_listening_phrases", "Pause phrases", "list_str", help_text="Comma-separated. Saying one hard-stops in-flight work and pauses listening until the resume word resumes. Same picking rule as the resume word: DISTINCT, unlikely in normal conversation, and cleanly Whisper-transcribable -- a phrase you say naturally mid-conversation would pause the session unexpectedly. Defaults: 'stop listening, pause listening'."),
+            # Lives under config.safeword (its own top-level YAML section,
+            # unchanged -- SafewordDetector/incident-capture/etc. all still
+            # read config.safeword.hard_stop_phrases directly), but grouped
+            # here in the TUI/web UI: safeword is one more member of the
+            # same "what makes ConvoBox stop talking" family as the interrupt
+            # preset and pause phrases above, not a separable concern that
+            # deserves its own tab. FieldSpec's "safeword" section string is
+            # what _get_value/_set_value actually use to resolve the real
+            # config path -- this is a display-grouping change only.
+            FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str", help_text="Comma-separated phrases that immediately hard-stop the current turn, in every interrupt preset, paused or not -- the one always-on safety floor (docs/DESIGN-barge-in.md)."),
             FieldSpec("interaction", "pause_resume_ack", "Pause/resume sound", "choice", _CHOICE_PAUSE_RESUME_ACK, help_text="Audio cue when pausing/resuming listening. none (default): silent, matches every release before this one. tone: a short synthesized 3-note chime -- ascending on resume, descending on pause -- no extra files needed."),
             FieldSpec("interaction", "approval_phrase", "Approval phrase", "optional_str", help_text="Opt-in command/file approvals for Codex or Claude Code (needs backend.permission_mode: approve above). Leave unset to keep the safe default: every approval request is denied automatically, no prompts. When set, say this exact phrase to approve a pending request; say 'no' to deny; silence for approval_timeout_s denies. Use a distinctive multi-word phrase -- plain 'yes' is deliberately rejected. Same STT-reliability caution as the resume word: pick something clearly Whisper-transcribable. A NATO-alphabet-style phrase (e.g. 'juliette papa charlie') tends to round-trip more reliably than ordinary words -- verify with scripts/roundtrip_smoketest.py before relying on it."),
             FieldSpec("interaction", "approval_timeout_s", "Approval timeout s", "float", help_text="How long a pending approval waits for a voice decision before silence is treated as an explicit denial (never as consent)."),
             FieldSpec("interaction", "approval_explanation_mode", "Explanation mode", "choice", ("plain", "verbose"), help_text="When you ask for details during a pending approval ('explain', 'clarify', 'help'): plain = human-friendly intent (tool name + key parameters), verbose = technical details (raw JSON data). Doesn't affect the automatic approval announcement -- only the explanation you request when you ask for more detail."),
         ),
-    ),
-    SectionSpec(
-        key="safeword",
-        label="Safeword",
-        fields=(FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str", help_text="Comma-separated phrases that immediately hard-stop the current turn."),),
     ),
     SectionSpec(
         key="vad",
