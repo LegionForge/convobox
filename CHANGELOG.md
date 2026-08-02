@@ -4,7 +4,11 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
-## [Unreleased]
+## [0.3.1] — 2026-08-01
+
+Patch release: 27 PRs since `0.3.0`, all live-verified. No config schema
+breaks -- every existing `convobox.yaml` keeps behaving exactly as before
+unless it opts into the one new setting below.
 
 ### Added
 - **Pause/resume acknowledgment tone** (`interaction.pause_resume_ack`,
@@ -16,7 +20,80 @@ minor versions carry feature and behavior changes.
   external audio asset, generated on the fly. Pickable (not free-text) in
   both the TUI settings editor and the web UI's Settings panel,
   interaction section. A `file` (user-supplied sound) option is
-  intentionally deferred and not offered anywhere yet.
+  intentionally deferred and not offered anywhere yet. (#192)
+- **Web UI: paused status shows which word resumes listening** -- the
+  activity ribbon now reads `paused (say "Athena" to resume)` instead of
+  just `paused`. (#170)
+
+### Changed
+- **Safeword folded into the Interaction tab**, both the Settings TUI and
+  the web UI -- display grouping only, `config.safeword.hard_stop_phrases`
+  and every real reference to it (`SafewordDetector`, incident capture)
+  are unchanged. (#193)
+- **Interrupt preset descriptions rewritten** with a plain-language
+  sentence and a concrete "you say X, it does Y" example per preset,
+  replacing terse internal jargon -- one shared `FieldSpec.help_text`
+  covers both the TUI and web UI. (#183)
+- **Barge-in interrupt marker reworded** from "(I interrupted your spoken
+  response midway)" to "[User interrupted AI response]", shown in the
+  transcript and forwarded to the backend as conversational context.
+  (#178)
+
+### Fixed
+- **Pause/hard-stop could let a stale in-flight turn's response play
+  1-10+ seconds late.** `send_hard_stop()` only reset the local busy
+  counter -- it never stopped the event-consumption task from reading and
+  speaking a trailing response from the turn that was just aborted. Fixed
+  at both call sites (the pause handler and the safeword's own hard-stop
+  branch) by also cancelling event consumption, not just the speak task.
+  Live-verified across a 24-minute re-test, zero leaks. (#191)
+- **Barge-in false-positive tag.** Utterances spoken in the gap *after* a
+  response finished (not during it) were incorrectly tagged as
+  interrupting it -- `EchoAwarePlayer.audible` was only ever reset at the
+  start of the *next* response, never on the current one's own natural
+  completion. (#174)
+- **Barge-in interrupts landing near the end of playback could be dropped
+  entirely** instead of registering -- an interruption starting ~1s
+  before natural completion never had enough runway to cross the
+  sustained-speech threshold, so it fell through to the overlap gate and
+  was silently discarded as presumed echo. (#179)
+- **TTS synthesis/playback failures are now surfaced, not silently
+  swallowed** -- a fire-and-forget speak task had no exception handling
+  anywhere in its chain, so a failure (e.g. Kokoro's ~510-phoneme hard
+  limit) previously vanished with no log, no error, no indication
+  anything went wrong; now logged and shown as a real error in both the
+  TUI and web UI. (#175)
+- **`--tui` now shows ERROR events in the transcript**, not just the log
+  and web UI, closing the gap #175's fix left on that one surface. (#185)
+- **`.md` file writes now open the artifact pane** -- the extension was
+  simply missing from the content-type allowlist, rejected before an
+  artifact event was ever staged. (#176)
+- **Backend reconnect now backs off exponentially** instead of retrying
+  every ~1s forever against a misconfigured or unreachable
+  `backend.url` -- first retry stays fast (preserving quick recovery from
+  a genuine transient hiccup), consecutive failures double the wait up to
+  30s, and it resets to fast-retry the instant a real event arrives.
+  (#177)
+- **Clean shutdown (no noisy traceback) when a second instance's mic lock
+  is correctly refused** -- the refusal itself was already correct, it
+  just didn't tear down the adapter/web server cleanly on the way out.
+  (#173)
+- **Web UI Quit button and Ctrl+C now actually stop the process while
+  `--web` is active** -- previously they only stopped the embedded web
+  server; the mic loop and backend adapter kept running underneath.
+  Root cause: uvicorn installs its own OS signal handler for as long as
+  it runs, so the existing signal-based shutdown path never fired. (#168)
+
+### Security
+- **`backend.permission_mode: permissive` now genuinely bypasses every
+  tool permission**, not just file edits. It previously mapped to the
+  same Claude Code flag as `approve` (`acceptEdits`), which only
+  auto-approves Write/Edit/NotebookEdit -- every other tool (Bash,
+  WebFetch, WebSearch, Read, ...) still generated a real approval
+  request that headless mode has no channel to answer, silently stalling
+  those calls in a mode whose entire point is "act without asking."
+  `permissive` now correctly maps to `bypassPermissions`; `approve` is
+  unaffected. (#182)
 
 ## [0.3.0] — 2026-07-28
 
