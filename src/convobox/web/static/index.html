@@ -320,6 +320,13 @@
   .settings-footer .spacer { flex: 1 1 auto; }
   .settings-status { font-size: 0.78rem; }
   .settings-status.error { color: var(--error-fg); }
+  .settings-status.pending::before {
+    content: ""; display: inline-block; width: 0.7em; height: 0.7em;
+    margin-right: 0.4em; border: 2px solid currentColor;
+    border-top-color: transparent; border-radius: 50%;
+    animation: settings-spin 0.8s linear infinite; vertical-align: -0.1em;
+  }
+  @keyframes settings-spin { to { transform: rotate(360deg); } }
   .settings-footer button {
     font-size: 0.82rem; padding: 0.4rem 0.8rem; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
@@ -998,13 +1005,24 @@
     testSectionBtn.hidden = !TESTABLE_SECTIONS.includes(activeKey);
   }
 
-  function setStatus(message, isError) {
+  function setStatus(message, isError, isPending) {
     statusEl.textContent = message;
-    statusEl.className = "settings-status" + (isError ? " error" : "");
+    statusEl.className = "settings-status" + (isError ? " error" : "") + (isPending ? " pending" : "");
   }
 
   async function runTest(section, field) {
-    setStatus("Testing…", false);
+    // A not-yet-cached STT model (esp. large-v3, ~3GB) can take a while to
+    // download -- an elapsed timer + spinner so this reads as "working",
+    // not "hung". Client-side only: the fetch itself doesn't report byte
+    // progress, and hooking huggingface_hub's internal download callback
+    // for that isn't worth the fragility for this.
+    const start = performance.now();
+    const tick = () => {
+      const elapsedS = Math.floor((performance.now() - start) / 1000);
+      setStatus(`Testing… (${elapsedS}s) -- a not-yet-cached model can take a while to download`, false, true);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
     try {
       const res = await fetch("/api/settings/test", {
         method: "POST",
@@ -1019,6 +1037,8 @@
       setStatus(data.status, false);
     } catch (err) {
       setStatus("Test failed: " + err, true);
+    } finally {
+      clearInterval(timer);
     }
   }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 
 from convobox.config import AppConfig
+from convobox.stt.base import TranscriptResult
 from scripts import settings_tui
 from scripts.settings_tui import (
     FieldSpec,
@@ -1660,6 +1662,90 @@ def test_edit_device_field_enter_immediately_keeps_current_value(
 
     assert accepted is True
     assert value == "Speaker A, MME"
+
+
+@pytest.mark.asyncio
+async def test_probe_stt_reports_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeTranscriber:
+        def transcribe(self, samples: np.ndarray) -> TranscriptResult:
+            return TranscriptResult(
+                text="hello there",
+                language="en",
+                language_probability=0.91,
+                latency_ms=12.0,
+                duration_s=1.0,
+                avg_logprob=-0.05,
+            )
+
+    monkeypatch.setattr(settings_tui, "create_stt_engine", lambda stt_config: _FakeTranscriber())
+
+    status = await settings_tui.probe_stt(AppConfig())
+
+    assert "STT probe succeeded" in status
+    assert "hello there" in status
+    assert "en" in status
+
+
+@pytest.mark.asyncio
+async def test_probe_stt_does_not_block_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Real regression guard: WhisperModel construction (inside
+    # create_stt_engine) downloads the model on first use -- a genuinely
+    # slow, blocking call. probe_stt must run it via asyncio.to_thread so
+    # it can't freeze the TUI's render loop or, on the web UI, the whole
+    # uvicorn server for every connected tab while one Test click
+    # downloads. Simulated here with a synchronous time.sleep() standing
+    # in for that slow call; a concurrently-running ticker task proves
+    # the event loop stayed free during it.
+    class _SlowTranscriber:
+        def transcribe(self, samples: np.ndarray) -> TranscriptResult:
+            time.sleep(0.3)
+            return TranscriptResult(
+                text="", language="en", language_probability=1.0,
+                latency_ms=0.0, duration_s=0.0, avg_logprob=0.0,
+            )
+
+    monkeypatch.setattr(settings_tui, "create_stt_engine", lambda stt_config: _SlowTranscriber())
+
+    ticks: list[float] = []
+
+    async def _ticker() -> None:
+        for _ in range(6):
+            await asyncio.sleep(0.05)
+            ticks.append(time.monotonic())
+
+    await asyncio.gather(settings_tui.probe_stt(AppConfig()), _ticker())
+
+    # If probe_stt blocked the event loop for its 0.3s "download", the
+    # ticker couldn't have made any progress during that window.
+    assert len(ticks) >= 4
+
+
+def test_run_with_spinner_runs_to_completion_and_shows_elapsed_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings_tui, "draw", lambda state: None)
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    seen_statuses: list[str] = []
+
+    def _slow_task() -> None:
+        time.sleep(0.2)
+        state.status = "done"
+
+    orig_status_setter = TuiState.__setattr__
+
+    def _capturing_setattr(self: TuiState, name: str, value: object) -> None:
+        if name == "status":
+            seen_statuses.append(value)  # type: ignore[arg-type]
+        orig_status_setter(self, name, value)
+
+    monkeypatch.setattr(TuiState, "__setattr__", _capturing_setattr)
+
+    settings_tui._run_with_spinner(state, _slow_task)
+
+    assert state.status == "done"
+    # At least one spinner frame was shown before the final status landed.
+    assert any("testing..." in s for s in seen_statuses[:-1])
 
 
 @pytest.mark.asyncio
