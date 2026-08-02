@@ -158,6 +158,11 @@ interaction:
   pause_listening_phrases:      # say one to hard-stop in-flight work and
     - stop listening             # pause: everything else is ignored until
     - pause listening            # you say resume_word again.
+  pause_resume_ack: none    # none = silent (default, matches every release
+                          # before 0.3.1). tone = a short synthesized 3-note
+                          # chime -- ascending on resume, descending on pause
+                          # -- no extra files needed. Pick from the TUI/web
+                          # Settings picker instead of typing this by hand.
   # approval_phrase: cobalt night and gale
                           # Opt-in Codex command/file approvals. Use a
                           # distinctive multi-word phrase: plain "yes" is
