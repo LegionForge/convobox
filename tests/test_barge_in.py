@@ -126,6 +126,23 @@ def test_interaction_config_resume_word_and_pause_phrase_defaults() -> None:
     assert config.interaction.pause_listening_phrases == ["stop listening", "pause listening"]
 
 
+def test_interaction_config_pause_resume_ack_defaults_to_silent() -> None:
+    # P8 (docs/DESIGN-barge-in.md): opt-in, so every prior release's
+    # silent behavior is unchanged unless explicitly turned on.
+    config = AppConfig()
+    assert config.interaction.pause_resume_ack == "none"
+
+
+def test_pause_resume_ack_accepts_tone() -> None:
+    config = InteractionConfig(pause_resume_ack="tone")
+    assert config.pause_resume_ack == "tone"
+
+
+def test_pause_resume_ack_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError):
+        InteractionConfig(pause_resume_ack="file")
+
+
 def test_interaction_config_tier_responses_off_by_default() -> None:
     # No behavior change for existing sessions: full responses spoken
     # exactly as before unless explicitly opted in.

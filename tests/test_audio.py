@@ -241,6 +241,23 @@ def test_play_writes_all_samples_without_blocking() -> None:
     assert stream.closed is True
 
 
+def test_play_accepts_a_synthesized_ack_tone() -> None:
+    # P8 (docs/DESIGN-barge-in.md): generate_ack_tone()'s whole contract is
+    # that its output is directly playable -- no WAV decode, no extra
+    # conversion -- confirm that against the real AudioPlayer.play() path.
+    from convobox.audio.ack_tones import SAMPLE_RATE_HZ, generate_ack_tone
+
+    tone = generate_ack_tone("listening")
+    player = AudioPlayer()
+    player.play(tone, sample_rate=SAMPLE_RATE_HZ)
+    player.wait()
+
+    assert len(FakeOutputStream.instances) == 1
+    stream = FakeOutputStream.instances[0]
+    assert stream.total_written() == len(tone)
+    assert stream.closed is True
+
+
 def test_play_writes_in_blocks() -> None:
     player = AudioPlayer()
     player.play(np.zeros(2500, dtype=np.float32), sample_rate=16000)

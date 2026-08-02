@@ -172,6 +172,13 @@ class InteractionConfig(BaseModel):
     pause_listening_phrases: list[str] = Field(
         default_factory=lambda: list(DEFAULT_PAUSE_PHRASES)
     )
+    # P8 (docs/DESIGN-barge-in.md, "Open questions"): an optional audio cue
+    # on pause/resume so a paused session doesn't feel silently dead. "tone"
+    # synthesizes a short ascending/descending arpeggio (convobox.audio.
+    # ack_tones) -- no external asset. "file" (a user-supplied sound) is
+    # intentionally not implemented yet -- not offered as a choice anywhere
+    # until it is, so there's no dead-end option that just errors.
+    pause_resume_ack: str = "none"
     # Response tiering (docs/DESIGN-0.3.0-interaction-and-safety.md, Phase
     # 2): "voice always gives the tiered/short version." Off by default --
     # existing sessions hear the full response exactly as before. When on,
@@ -233,6 +240,15 @@ class InteractionConfig(BaseModel):
             modes = "plain or verbose"
             raise ValueError(
                 f"approval_explanation_mode must be {modes}, not {v!r}"
+            )
+        return v
+
+    @field_validator("pause_resume_ack")
+    @classmethod
+    def _validate_pause_resume_ack(cls, v: str) -> str:
+        if v not in ("none", "tone"):
+            raise ValueError(
+                f"pause_resume_ack must be none or tone, not {v!r}"
             )
         return v
 

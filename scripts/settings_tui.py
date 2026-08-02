@@ -129,6 +129,9 @@ _CHOICE_STT_DEVICES = ("auto", "cpu", "cuda")
 # validates the actual value against that dict at load time; this tuple is
 # just what the TUI offers to pick from).
 _CHOICE_INTERRUPT_PRESETS = ("conversational", "patient", "do-not-disturb", "halt", "take-over")
+# "file" (a user-supplied sound) isn't implemented yet -- not offered here
+# until it is; config.py's own validator rejects anything but these two.
+_CHOICE_PAUSE_RESUME_ACK = ("none", "tone")
 _BACKEND_PROFILE_DEFAULTS: dict[str, BackendProfileConfig] = {
     "opencode": BackendProfileConfig(url="http://localhost:4096"),
     "claude-code": BackendProfileConfig(url="http://localhost:4096", command=["claude"]),
@@ -297,6 +300,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             # what _get_value/_set_value actually use to resolve the real
             # config path -- this is a display-grouping change only.
             FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str", help_text="Comma-separated phrases that immediately hard-stop the current turn, in every interrupt preset, paused or not -- the one always-on safety floor (docs/DESIGN-barge-in.md)."),
+            FieldSpec("interaction", "pause_resume_ack", "Pause/resume sound", "choice", _CHOICE_PAUSE_RESUME_ACK, help_text="Audio cue when pausing/resuming listening. none (default): silent, matches every release before this one. tone: a short synthesized 3-note chime -- ascending on resume, descending on pause -- no extra files needed."),
             FieldSpec("interaction", "approval_phrase", "Approval phrase", "optional_str", help_text="Opt-in command/file approvals for Codex or Claude Code (needs backend.permission_mode: approve above). Leave unset to keep the safe default: every approval request is denied automatically, no prompts. When set, say this exact phrase to approve a pending request; say 'no' to deny; silence for approval_timeout_s denies. Use a distinctive multi-word phrase -- plain 'yes' is deliberately rejected. Same STT-reliability caution as the resume word: pick something clearly Whisper-transcribable. A NATO-alphabet-style phrase (e.g. 'juliette papa charlie') tends to round-trip more reliably than ordinary words -- verify with scripts/roundtrip_smoketest.py before relying on it."),
             FieldSpec("interaction", "approval_timeout_s", "Approval timeout s", "float", help_text="How long a pending approval waits for a voice decision before silence is treated as an explicit denial (never as consent)."),
             FieldSpec("interaction", "approval_explanation_mode", "Explanation mode", "choice", ("plain", "verbose"), help_text="When you ask for details during a pending approval ('explain', 'clarify', 'help'): plain = human-friendly intent (tool name + key parameters), verbose = technical details (raw JSON data). Doesn't affect the automatic approval announcement -- only the explanation you request when you ask for more detail."),

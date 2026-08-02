@@ -926,17 +926,28 @@ did).
   (STT is unreliable enough live that one exact phrase can be hard to hit
   reliably, as this same session's P1/P4 degraded-confidence findings
   show). Not implemented; not filed as an issue yet.
-- **[P8] Resume acknowledgment (open question).** Currently silent on
-  resume -- no tone/spoken confirmation. Note whether this feels
-  unnervingly silent in practice; see DESIGN-barge-in.md's open question on
-  this.
-  **Idea floated, not decided, 2026-07-31 ~22:05:** JP raised a short
-  processing/acknowledgment tone (the Amazon Echo/smart-speaker
-  pattern) as a candidate answer to this open question, right after the
-  P7 pass above -- a non-verbal audio cue on resume (and/or pause)
-  rather than either total silence or a spoken confirmation. Not
-  designed or built; worth weighing against DESIGN-barge-in.md's
-  existing open question the next time P8 is picked up properly.
+- **[P8] Pause/resume acknowledgment tone.** Set
+  `interaction.pause_resume_ack: tone` (default is `none`, silent --
+  verify that default separately: P1-P7's existing passes above were all
+  against the silent default, so no separate silent-mode retest is
+  needed). With `tone` set:
+  1. Say a pause phrase -- confirm a short 3-note descending tone plays
+     (`convobox.audio.ack_tones`, E5-C#5-A4) immediately, before or
+     alongside the "paused listening" log line.
+  2. Say the resume word -- confirm the same three notes play ascending
+     (A4-C#5-E5).
+  3. Confirm the tone doesn't clip/click at note boundaries and isn't
+     jarringly loud relative to normal TTS speech volume.
+  4. Say a pause phrase while a response is actively speaking -- confirm
+     the pause tone plays cleanly after playback/hard-stop settle, not
+     garbled or cut off by the interrupted speech.
+  5. Confirm the setting is pickable (not free-text) in both `--settings`
+     (TUI) and the web UI's Settings panel, interaction section,
+     "Pause/resume sound".
+  Not yet live-UAT'd (see DESIGN-barge-in.md's now-resolved P8 entry for
+  the ruling and what's still open): whether the tone lands well in
+  practice, and whether `tone` should become the shipped default instead
+  of `none`.
 
 ## 9. Conversation TUI (`--tui`, `src/convobox/tui/`)
 
