@@ -102,6 +102,26 @@ def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.Monke
     assert drawn == ["do-not-disturb", "conversational", "take-over"]
 
 
+def test_safeword_has_no_section_of_its_own() -> None:
+    assert not any(s.key == "safeword" for s in settings_tui.SECTION_SPECS)
+
+
+def test_safeword_field_is_grouped_under_interaction() -> None:
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    spec = next(f for f in interaction.fields if f.key == "hard_stop_phrases")
+    assert spec.kind == "list_str"
+    # Display grouping only -- the field's own "section" is still
+    # "safeword", which is what _get_value/_set_value use to resolve the
+    # real config.safeword.hard_stop_phrases path (SafewordDetector,
+    # incident capture, etc. are all untouched by this reorg).
+    assert spec.section == "safeword"
+
+    config = AppConfig()
+    assert settings_tui._get_value(config, spec) == config.safeword.hard_stop_phrases
+    settings_tui._set_value(config, spec, ["stop stop stop", "abort now"])
+    assert config.safeword.hard_stop_phrases == ["stop stop stop", "abort now"]
+
+
 def test_switching_backends_remembers_backend_specific_values() -> None:
     config = _make_config(
         **{
