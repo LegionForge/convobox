@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import io
 import json
 import os
 import re
@@ -2370,14 +2371,27 @@ def _key_waiting() -> bool:
     main draw()->read_key() loop, wrong here: this only needs to peek
     during the spinner's own poll tick, not stall it waiting for input
     that may never come.
+
+    Defensive: select.select() needs sys.stdin to be a real, fileno()-
+    having stream. It isn't always -- pytest's captured stdin under CI is
+    a pseudofile and raises UnsupportedOperation here (live-confirmed:
+    GitHub Actions run for PR #196, io.UnsupportedOperation: "redirected
+    stdin is pseudofile, has no fileno()") -- and the same class of
+    failure could hit any real invocation with stdin redirected/piped,
+    not just tests. Treat "can't check" as "no key waiting" rather than
+    crashing the whole spinner/test over a feature (ESC-cancel) that was
+    never going to fire without a real interactive terminal anyway.
     """
-    if sys.platform == "win32":
-        import msvcrt
+    try:
+        if sys.platform == "win32":
+            import msvcrt
 
-        return msvcrt.kbhit()
-    import select
+            return msvcrt.kbhit()
+        import select
 
-    return bool(select.select([sys.stdin], [], [], 0)[0])
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except (OSError, ValueError, io.UnsupportedOperation):
+        return False
 
 
 def _run_with_spinner(state: TuiState, run: Callable[[], None]) -> None:

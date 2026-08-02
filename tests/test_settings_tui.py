@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 import threading
@@ -1719,6 +1720,18 @@ async def test_probe_stt_does_not_block_the_event_loop(monkeypatch: pytest.Monke
     # If probe_stt blocked the event loop for its 0.3s "download", the
     # ticker couldn't have made any progress during that window.
     assert len(ticks) >= 4
+
+
+def test_key_waiting_survives_a_stdin_with_no_fileno(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: pytest's own captured stdin under CI is a pseudofile
+    # with no real fd -- select.select() raised io.UnsupportedOperation
+    # here, live-confirmed on GitHub Actions for PR #196. Any real
+    # invocation with stdin redirected/piped could hit the same class of
+    # failure, not just tests.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+
+    assert settings_tui._key_waiting() is False
 
 
 def test_run_with_spinner_runs_to_completion_and_shows_elapsed_status(
