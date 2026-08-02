@@ -539,3 +539,91 @@ the finding so the ~500 number isn't re-diagnosed from scratch later.
 [Hugging Face model card](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX);
 chunking workaround precedent --
 [Kokoro-FastAPI README](https://github.com/remsky/Kokoro-FastAPI/blob/master/README.md).
+
+---
+
+## A hard-stopped in-flight turn can show as a generic "error_during_execution" turn -- cosmetic mislabel
+
+**Status:** diagnosed (first noted 2026-08-01 during PR #191's live UAT),
+unfixed. Cosmetic only -- never logged via this project's own logging,
+never spoken, and doesn't affect the hard-stop itself, which works
+correctly. Scoped fix identified, not built.
+
+**Symptom.** Live-confirmed again 2026-08-01 (`convobox-UAT` @ `3d9d4b9`,
+`backend.name: claude-code`, `--tui --web`): a `[TUI]` turn labeled
+`error_during_execution` appears whenever a hard-stop (pause or safeword)
+interrupts an in-flight `claude-code` CLI call. Concrete example from
+this session's `convobox-tui.log`:
+- `20:06:29,364 transcript='Stop listing.' ... busy=False` -- STT
+  mis-transcribed "stop listening" as "Stop listing.", which matched
+  neither the pause phrase nor the safeword, so it was sent to the
+  backend as a real (nonsensical) query.
+- `20:06:35 - 20:06:36` -- a second attempt correctly transcribed as
+  `'Stop listening.'`, matched the pause phrase, and hard-stopped the
+  still-busy "Stop listing." call via `send_hard_stop()`.
+- The interrupted `claude-code` CLI process's own interrupt-confirmation
+  text is what surfaces as the `error_during_execution` turn -- it's the
+  CLI's own output, not a real ConvoBox error, and it's real behavior
+  visible in the TUI turn history, not written to `convobox-tui.log` via
+  this project's own `log.*()` calls at all (confirmed: the exact string
+  `error_during_execution` does not appear anywhere in the text log for
+  this session, only in the on-screen TUI transcript pane).
+
+**Root cause.** `claude-code`'s headless-mode interrupt path (see
+`src/convobox/adapters/claude_code.py`'s own module docstring on how this
+adapter builds hard-stop since there's no native per-call channel) emits
+its own confirmation output when a call is interrupted mid-execution.
+`_on_backend_event` in `scripts/run_convobox.py` has no special case for
+this and falls through to the generic ERROR system-turn tag ([U10]'s
+convention for session-level events worth showing inline), the same
+fallthrough noted for [T6]'s TTS-failure-in-`--tui` gap.
+
+**Not yet decided:** whether to give this its own recognizable turn label
+(distinguishing "backend confirms it was interrupted, as expected" from
+"something actually errored") or leave it as-is since it's cosmetic and
+never misleads about whether the hard-stop itself worked. Web UI behavior
+not yet separately confirmed -- this session's evidence is TUI-only.
+
+---
+
+## A misheard safeword can land on the pause phrase instead of the safeword -- same hard-stop effect, different resulting state
+
+**Status:** diagnosed live 2026-08-01, not a safety gap, no fix planned
+(STT-accuracy category, same underlying risk already noted for
+`resume_word`/`pause_listening_phrases` in `docs/UAT-checklist.md`'s [P7]
+enhancement idea). Documented so the distinction between "safe" and
+"expected state" isn't lost.
+
+**Symptom.** Live UAT, `convobox-UAT` @ `3d9d4b9`, `20:07:08`: an
+utterance intended (per JP's own live report) as the safeword ("stop stop
+stop") was transcribed by STT as `'Stop listening.'` instead --
+```
+20:07:08,019 Detected language 'en' with probability 0.97
+20:07:08,570 paused listening (matched 'Stop listening.') -- hard-stopped
+in-flight work; say 'Athena' to resume
+```
+Both `SafewordDetector` and `PauseListeningDetector` check the same raw
+STT transcript (`docs/DESIGN-barge-in.md`, "Pause/resume listening" --
+safeword checked first, then the pause phrase); when STT mishears one
+configured phrase as a different, *also*-configured phrase, whichever one
+the transcript actually matches is the one that fires. There's no gap
+where the utterance is silently swallowed -- it always resolves to
+whatever ConvoBox actually heard.
+
+**Why this is not a safety gap.** The pause path calls the exact same
+`send_hard_stop()` the safeword path does (see `scripts/run_convobox.py`'s
+pause branch), so in-flight work is cancelled either way -- confirmed in
+this same session, where the mis-heard "stop listening" correctly
+hard-stopped the bogus in-flight "Stop listing." call from the entry
+above. The real, user-visible difference is state, not safety: the
+safeword returns to normal listening immediately, while landing on the
+pause phrase instead leaves the session paused, requiring the resume word
+before it hears anything else again -- an extra step someone reaching for
+the emergency-stop phrase likely didn't intend.
+
+**No fix proposed.** This is the same STT-reliability category already
+tracked for `resume_word` (docs/UAT-checklist.md's [P7] entry: "STT is
+unreliable enough live that one exact phrase can be hard to hit
+reliably"), not a new problem this feature introduced. Worth keeping in
+mind if `pause_listening_phrases`/`hard_stop_phrases` are ever tuned
+closer together in pronunciation.
