@@ -2405,7 +2405,18 @@ async def run(args: argparse.Namespace) -> None:
                             tui_state.add_turn("system", "resumed listening")
                         continue
                     if gate_action == "drop":
-                        log.debug("dropped (paused, not the resume word): %r", text)
+                        # Every other drop reason in this loop (no-input,
+                        # low-confidence, overlap-gate, echo-tail-guard) logs
+                        # at INFO with the actual text -- this one logged at
+                        # DEBUG, invisible at the default log level. Live
+                        # UAT, 2026-08-02: a stuck-paused session looked
+                        # exactly like STT/CUDA had silently stopped
+                        # (repeated "Processing audio"/"Detected language"
+                        # with zero indication of what was heard or why it
+                        # didn't match), when transcription was in fact
+                        # still running throughout -- this log line was the
+                        # only place that visibility was missing.
+                        log.info("dropped (paused, not the resume word): %r", text)
                         continue
                     if gate_action == "pause":
                         player.stop()
