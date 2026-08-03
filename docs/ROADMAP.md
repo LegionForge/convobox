@@ -97,6 +97,64 @@ package (Python-native, WebSocket streaming support), so a prototype
 would be straightforward to wire up as a second STTEngine implementation
 if the numbers ever check out.
 
+**Second candidate, added 2026-08-03 (SOTA STT research pass, prompted by
+a real live UAT finding -- see below):** **NVIDIA Parakeet TDT (0.6B v3)**
+via the `onnx-asr` PyPI package (not NVIDIA's full NeMo toolkit --
+heavy, Linux/CUDA-centric, painful on Windows; `onnx-asr` runs on plain
+ONNX Runtime, closer in shape to how faster-whisper already gets used
+here). Meaningfully more credible evidence than the FunASR thread above:
+- Open ASR Leaderboard (a real, third-party benchmark, not a self-
+  reported number from an interested party): WER 6.32% vs. large-v3's
+  7.44%, and ~3,300x realtime throughput -- trivial headroom on an 8GB
+  consumer GPU.
+- Trained specifically on 36,000+ hours of *noisy and non-speech* audio,
+  and multiple independent 2026 comparison sources report it rarely
+  hallucinates on silence/low-signal input -- directly relevant to this
+  project's own live finding (2026-08-02 UAT): a short `resume_word`
+  ("Athena") got repeatedly hallucinated by faster-whisper as unrelated
+  *fluent* sentences (and once as Cyrillic text) across every model/
+  compute_type/device combination tried (base/large-v3, int8/float16/
+  float32, cpu/cuda) -- the well-documented Whisper failure mode on
+  short/low-signal clips, confirmed to sit upstream of model choice
+  within the faster-whisper family specifically.
+- Tradeoff: 25 languages vs. Whisper's 99 -- a real cost if ConvoBox
+  ever needs more than English, a non-issue if it doesn't.
+- A different runtime dependency than today's ctranslate2 (see the
+  allocator-leak entry above this one in KNOWN-ISSUES.md) -- moving to
+  ONNX Runtime would sidestep that whole class of bug, not just work
+  around it, which is a real argument in its favor beyond raw accuracy.
+
+**A third, architecturally different option, same research pass:**
+rather than (or in addition to) swapping the general-purpose STT model,
+route short/critical phrases (the resume word, safewords, approval
+phrase) through a **dedicated wake-word classifier** in front of
+faster-whisper -- the standard architecture elsewhere (Home Assistant's
+Assist pipeline: mic -> wake-word engine -> full STT only after
+activation). **openWakeWord** (Apache/MIT-family, trained on Google's
+audio embedding model + Piper-synthesized data, ships a built-in
+Silero-VAD gate) is a closed-set classifier, not a generative decoder --
+it structurally cannot hallucinate a fluent unrelated sentence the way
+Whisper can, sidestepping the failure mode above rather than tuning
+around it. This is the same idea as the already-on-hold Sherpa-ONNX
+keyword-spotting entry in the ConvoBox quickref's "Interesting Ideas"
+(2026-08-01, JP's call: real accuracy against ConvoBox's actual phrases
+unevaluated, `MicrophoneStream` is single-consumer so a parallel spotter
+needs real broadcast/tee plumbing, and it's in tension with the safety
+path's deliberate no-ML design) -- openWakeWord is a concrete alternative
+*engine* for that same architectural idea, not a new idea on its own.
+Same reasoning for staying on hold: revisit only if `stt.hotwords`
+(shipped 2026-08-03, a much smaller change already in flight) turns out
+not to be enough on its own.
+
+**Cheaper, do-first candidates from the same research pass, already
+shipped 2026-08-03** (not a roadmap item -- small enough to just build):
+`stt.hotwords` (faster-whisper's own prompt-biasing param, direct
+mitigation for the failure mode above), plus opt-in
+`stt.condition_on_previous_text: false` and a pinned `stt.temperature`
+-- see `STTConfig` in `src/convobox/config.py` for the live rationale on
+each. Worth exhausting these first (near-zero cost, already built) before
+spending real effort on either alternative-engine option above.
+
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)

@@ -131,6 +131,48 @@ See `docs/field-notes/2026-07-22-native-allocator-leak-also-surfaces-as-numpy-me
 for the full writeup; `tests/test_transcriber.py::test_numpy_array_memory_error_is_recovered_not_raised`
 covers it the same way the RuntimeError case already was.
 
+**Follow-up (2026-08-02): the "recurring often enough to be disruptive"
+condition this entry already flagged as worth revisiting -- now actually
+hit live, on `large-v3`.** A `convobox-UAT` session (CPU fallback after a
+separate CUDA-extra-not-installed gap, unrelated) hit the allocator
+failure after ~9 successful transcriptions (~15 minutes) -- faster than
+the original 2026-07-14 baseline (~20 transcriptions/13 minutes),
+plausibly because `large-v3`'s much larger per-call native memory
+footprint exhausts the leaking arena sooner than the smaller model that
+first surfaced this bug. The mitigation above worked exactly as designed
+(no crash, no unhandled traceback) -- but the reload it triggers **never
+recovered**: every retry over the following 4+ minutes hit the identical
+`mkl_malloc` failure, `self._model` stayed `None` for the rest of the
+session, and every subsequent utterance was silently treated as unheard.
+The mitigation's job was "don't crash," not "always recover," and it did
+exactly that -- but this is the first live confirmation that once the
+native allocator gets into this state, it can stay broken for the rest
+of a session rather than self-healing on a later retry, which is worth
+knowing before assuming "no crash" means "still working."
+
+**Follow-up (2026-08-03, SOTA STT research pass): no upstream fix
+exists, and ctranslate2 itself looks stalled.** ctranslate2's most recent
+GitHub release is **v4.8.1, dated 2024-07-03** -- over two years old as
+of this research, with no evidence of a newer release addressing this
+leak. faster-whisper issue #390 is closed via PR #448, but that fix
+could not be confirmed to specifically cover the MKL allocator leak
+(vs. a narrower SageMaker-specific OOM); #660 shows no confirmed
+resolution; a related, still-open issue (**#992**, "Memory on GPU not
+cleared after transcription") suggests this is an ongoing pattern in the
+library, not a one-off bug that got fixed. Community-circulated
+workarounds (pinning to older ctranslate2 versions, e.g. 3.24.0 for
+CUDA11/cuDNN8) were reported in the context of a *different* GPU-
+allocation bug, not confirmed for this specific leak -- not a verified
+fix. Practical implication: keep treating this as permanently unfixed
+upstream rather than "unfixed for now" -- the reload mitigation (and
+accepting that it can leave STT dead for the rest of a session once
+triggered, per the follow-up above) is likely the durable state of
+things, not a stopgap. The clean long-term fix, if this becomes worth
+real effort, is moving off ctranslate2 entirely (see ROADMAP.md's
+"Alternative local STT engines" -- the NVIDIA Parakeet TDT / `onnx-asr`
+candidate runs on ONNX Runtime instead, sidestepping this whole class of
+bug rather than working around it).
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")
