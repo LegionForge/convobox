@@ -247,11 +247,14 @@ persistence), is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ConvoBox is not the first attempt at voice-driven coding agents —
 [VoiceMode](https://github.com/mbailey/voicemode),
-[duck_talk](https://github.com/dhuynh95/duck_talk), and the built-in
-`/voice` in Claude Code and Aider are the closest relatives, but none
-combine backend-agnostic, local-first, and full-duplex in one project.
-See [docs/PRIOR-ART.md](docs/PRIOR-ART.md) for the full comparison,
-reusable building blocks, and [docs/LESSONS-FROM-VOICE-OPENCODE.md](docs/LESSONS-FROM-VOICE-OPENCODE.md)
+[duck_talk](https://github.com/dhuynh95/duck_talk),
+[AgentsRoom](https://agentsroom.dev/) (priced, cloud-routed, 8 CLIs), and
+the built-in `/voice` in Claude Code, Codex CLI, and Aider are the
+closest relatives, but none combine backend-agnostic, local-first (both
+directions), full-duplex, *and* voice-native safety gating (spoken
+safeword hard-stop, voice approval-gating for destructive actions) in
+one project. See [docs/PRIOR-ART.md](docs/PRIOR-ART.md) for the full
+comparison, reusable building blocks, and [docs/LESSONS-FROM-VOICE-OPENCODE.md](docs/LESSONS-FROM-VOICE-OPENCODE.md)
 for what an earlier, unreleased attempt at this same problem got wrong.
 
 ## Credits & attributions
