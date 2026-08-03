@@ -2282,6 +2282,17 @@ def _prompt_edit(state: TuiState) -> None:
     if not accepted:
         state.status = "edit cancelled"
         return
+    if new_value == current:
+        # Live UAT, 2026-08-02: pressing Enter to confirm a picker without
+        # cycling to a different choice (a natural way to back out, short
+        # of knowing Esc is the actual cancel key) is "accepted" with the
+        # SAME value -- previously fell through to _field_updated_status
+        # below, which said "{label} updated" (state.dirty came back False
+        # because nothing in the whole config changed) even though this
+        # field was never actually touched. Distinct message, and skips
+        # the pointless _set_value/_switch_* calls below.
+        state.status = f"{spec.label} unchanged"
+        return
     if spec.section == "backend" and spec.key == "name":
         # backend.name is always a "choice" field (never one of the
         # picker kinds above that can return None), so this is a real
