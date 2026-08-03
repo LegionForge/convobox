@@ -197,25 +197,7 @@ class Orchestrator:
         matched = self._safeword.check(transcript)
         if matched is not None:
             logger.info("hard stop matched safeword %r", matched)
-            if self._player is not None:
-                self._player.stop()
-            if self._tts is not None:
-                self._tts.stop()
-            await self._adapter.send_hard_stop()
-            # Live UAT, 2026-07-31: found via the equivalent "pause" hard-stop
-            # in scripts/run_convobox.py's main loop leaking a trailing
-            # response 1-10+ seconds after the pause was logged. Every
-            # adapter's own send_hard_stop() comments confirm the in-flight
-            # turn's terminal result still arrives even after hard-stop (it
-            # only resets the local busy counter) -- and _on_event() has no
-            # awareness of hard-stop having just happened, so that trailing
-            # TEXT event would unconditionally spawn a fresh _speak_task here
-            # too. stop_event_loop() cancels both the in-flight _speak_task
-            # and event-consumption task, so nothing from the aborted turn
-            # can reach _on_event() -- start_event_loop() at the top of this
-            # method already restarts a fresh subscription on the NEXT call,
-            # so this is safe on every hard stop, not just the first.
-            await self.stop_event_loop()
+            await self.hard_stop()
             return
 
         # Background noise can trigger VAD yet transcribe to nothing (observed
@@ -277,6 +259,42 @@ class Orchestrator:
             return
         self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak_after_delay(text, delay_s))
+
+    async def hard_stop(self) -> None:
+        """Stop playback/TTS, tell the backend to abort the in-flight turn,
+        and cancel event consumption -- the exact sequence handle_transcript's
+        safeword branch already ran inline, extracted so any other trigger
+        with the same "stop stop stop" semantics (e.g. the web UI's Stop
+        button) can call the identical, already-safety-verified sequence
+        rather than a second hand-copied one.
+
+        Deliberately does NOT touch listening/pause state -- unlike
+        run_convobox.py's ListeningGate "pause" branch (which also enters a
+        paused-until-resume-word state on top of this same sequence), the
+        safeword itself never pauses listening; it aborts the current turn
+        and the session immediately keeps listening normally. Callers that
+        need the pause behavior too still own that decision themselves.
+
+        Live UAT, 2026-07-31: found via the equivalent "pause" hard-stop in
+        scripts/run_convobox.py's main loop leaking a trailing response
+        1-10+ seconds after the pause was logged. Every adapter's own
+        send_hard_stop() comments confirm the in-flight turn's terminal
+        result still arrives even after hard-stop (it only resets the local
+        busy counter) -- and _on_event() has no awareness of hard-stop
+        having just happened, so that trailing TEXT event would
+        unconditionally spawn a fresh _speak_task here too. stop_event_loop()
+        cancels both the in-flight _speak_task and event-consumption task,
+        so nothing from the aborted turn can reach _on_event() --
+        handle_transcript()'s own start_event_loop() call restarts a fresh
+        subscription on the NEXT call, so this is safe to call every time,
+        not just the first.
+        """
+        if self._player is not None:
+            self._player.stop()
+        if self._tts is not None:
+            self._tts.stop()
+        await self._adapter.send_hard_stop()
+        await self.stop_event_loop()
 
     async def stop_event_loop(self) -> None:
         self._cancel_speak_task()
