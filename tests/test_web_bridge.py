@@ -374,9 +374,13 @@ class _FakeListeningGate:
 class _FakePlayer:
     def __init__(self) -> None:
         self.stop_calls = 0
+        self.play_calls: list[tuple[object, int]] = []
 
     def stop(self) -> None:
         self.stop_calls += 1
+
+    def play(self, samples: object, sample_rate: int) -> None:
+        self.play_calls.append((samples, sample_rate))
 
 
 class _FakeTTS:
@@ -393,6 +397,14 @@ class _FakeAdapterForListening:
 
     async def send_hard_stop(self) -> None:
         self.hard_stop_calls += 1
+
+
+class _FakeOrchestratorForListening:
+    def __init__(self) -> None:
+        self.stop_event_loop_calls = 0
+
+    async def stop_event_loop(self) -> None:
+        self.stop_event_loop_calls += 1
 
 
 def test_listening_bridge_with_no_targets_reports_not_ready_and_not_paused() -> None:
@@ -418,8 +430,9 @@ async def test_listening_bridge_pause_hard_stops_playback_and_backend() -> None:
     player = _FakePlayer()
     tts = _FakeTTS()
     adapter = _FakeAdapterForListening()
+    orchestrator = _FakeOrchestratorForListening()
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+    bridge.set_targets(gate, player, tts, adapter, orchestrator)  # type: ignore[arg-type]
 
     changed = await bridge.pause()
 
@@ -432,6 +445,25 @@ async def test_listening_bridge_pause_hard_stops_playback_and_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_listening_bridge_pause_stops_the_event_loop() -> None:
+    # PR #191 (2026-07-31, safety-critical): hard-stopping the adapter
+    # alone still lets an already-in-flight turn's trailing TEXT event
+    # reach _on_event() and get spoken after the pause. The voice path's
+    # two call sites got stop_event_loop() as the fix; the web button was
+    # a third, unfixed call site until this test (live UAT, 2026-08-02).
+    gate = _FakeListeningGate(is_paused=False)
+    orchestrator = _FakeOrchestratorForListening()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(), orchestrator,
+    )
+
+    await bridge.pause()
+
+    assert orchestrator.stop_event_loop_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_listening_bridge_pause_while_already_paused_is_a_noop() -> None:
     # Matches ListeningGate.observe()'s own behavior: once is_paused is
     # true, it never re-enters the "pause" branch, so a second pause
@@ -440,8 +472,9 @@ async def test_listening_bridge_pause_while_already_paused_is_a_noop() -> None:
     player = _FakePlayer()
     tts = _FakeTTS()
     adapter = _FakeAdapterForListening()
+    orchestrator = _FakeOrchestratorForListening()
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+    bridge.set_targets(gate, player, tts, adapter, orchestrator)  # type: ignore[arg-type]
 
     changed = await bridge.pause()
 
@@ -449,6 +482,36 @@ async def test_listening_bridge_pause_while_already_paused_is_a_noop() -> None:
     assert player.stop_calls == 0
     assert tts.stop_calls == 0
     assert adapter.hard_stop_calls == 0
+    assert orchestrator.stop_event_loop_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_plays_the_ack_tone_when_configured() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(), "tone",
+    )
+
+    await bridge.pause()
+
+    assert len(player.play_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_plays_no_tone_by_default() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening(),
+    )
+
+    await bridge.pause()
+
+    assert player.play_calls == []
 
 
 def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
@@ -456,8 +519,9 @@ def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
     player = _FakePlayer()
     tts = _FakeTTS()
     adapter = _FakeAdapterForListening()
+    orchestrator = _FakeOrchestratorForListening()
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+    bridge.set_targets(gate, player, tts, adapter, orchestrator)  # type: ignore[arg-type]
 
     changed = bridge.resume()
 
@@ -469,9 +533,38 @@ def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
     assert adapter.hard_stop_calls == 0
 
 
+def test_listening_bridge_resume_plays_the_ack_tone_when_configured() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(), "tone",
+    )
+
+    bridge.resume()
+
+    assert len(player.play_calls) == 1
+
+
+def test_listening_bridge_resume_plays_no_tone_by_default() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening(),
+    )
+
+    bridge.resume()
+
+    assert player.play_calls == []
+
+
 def test_listening_bridge_resume_while_not_paused_is_a_noop() -> None:
     gate = _FakeListeningGate(is_paused=False)
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening())  # type: ignore[arg-type]
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening(),
+    )
 
     assert bridge.resume() is False

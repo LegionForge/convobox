@@ -12,6 +12,8 @@ import time
 from typing import Protocol
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
+from convobox.audio.ack_tones import generate_ack_tone
 from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.tts.base import TTSEngine
@@ -191,10 +193,10 @@ class WebListeningBridge:
 
     Constructed with no targets (create_app() needs something to hand its
     route closures at server-startup time, before the real ListeningGate/
-    player/tts/adapter exist), wired via set_targets() once they're built
-    -- same pattern as WebApprovalBridge. Every method degrades to "did
-    nothing" (returns False) if called before set_targets() runs, rather
-    than raising.
+    player/tts/adapter/orchestrator exist), wired via set_targets() once
+    they're built -- same pattern as WebApprovalBridge. Every method
+    degrades to "did nothing" (returns False) if called before
+    set_targets() runs, rather than raising.
 
     Deliberately does NOT touch a TUI's ConversationTuiState (unlike the
     voice path, which logs a system-turn line there) -- that's a
@@ -207,6 +209,8 @@ class WebListeningBridge:
         self._player: AudioPlayer | None = None
         self._tts: TTSEngine | None = None
         self._adapter: BackendAdapter | None = None
+        self._orchestrator: Orchestrator | None = None
+        self._pause_resume_ack: str = "none"
 
     def set_targets(
         self,
@@ -214,11 +218,15 @@ class WebListeningBridge:
         player: AudioPlayer,
         tts: TTSEngine,
         adapter: BackendAdapter,
+        orchestrator: Orchestrator,
+        pause_resume_ack: str = "none",
     ) -> None:
         self._gate = gate
         self._player = player
         self._tts = tts
         self._adapter = adapter
+        self._orchestrator = orchestrator
+        self._pause_resume_ack = pause_resume_ack
 
     @property
     def is_ready(self) -> bool:
@@ -233,8 +241,23 @@ class WebListeningBridge:
         (no live session) or already paused -- a second pause is a no-op,
         matching ListeningGate.observe()'s own behavior: once is_paused is
         true, it only ever checks for the resume word, it never re-enters
-        the "pause" branch to re-run these side effects."""
-        if self._gate is None or self._player is None or self._tts is None or self._adapter is None:
+        the "pause" branch to re-run these side effects.
+
+        Mirrors run_convobox.py's voice-triggered "pause" branch exactly,
+        including the stop_event_loop() call -- live UAT, 2026-07-31
+        (PR #191, safety-critical): hard-stopping the adapter alone still
+        let an already-in-flight turn's trailing TEXT event reach
+        _on_event() and get spoken after the pause. That fix originally
+        only covered the two voice call sites; this button was a third,
+        unfixed one until now.
+        """
+        if (
+            self._gate is None
+            or self._player is None
+            or self._tts is None
+            or self._adapter is None
+            or self._orchestrator is None
+        ):
             return False
         if self._gate.is_paused:
             return False
@@ -242,15 +265,21 @@ class WebListeningBridge:
         self._player.stop()
         self._tts.stop()
         await self._adapter.send_hard_stop()
+        await self._orchestrator.stop_event_loop()
+        if self._pause_resume_ack == "tone":
+            self._player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
         return True
 
     def resume(self) -> bool:
         """Voice resume only clears the flag (ListeningGate.observe()'s
         "resume" branch) -- nothing was hard-stopped to undo, so nothing
-        to redo here either."""
+        to redo here either, beyond the same ack tone the voice path
+        plays."""
         if self._gate is None:
             return False
         if not self._gate.is_paused:
             return False
         self._gate.is_paused = False
+        if self._pause_resume_ack == "tone" and self._player is not None:
+            self._player.play(generate_ack_tone("listening"), ACK_TONE_SAMPLE_RATE_HZ)
         return True
