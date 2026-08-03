@@ -166,6 +166,22 @@
     font-family: ui-monospace, monospace;
     font-size: 0.85rem;
   }
+  /* Tool call/result bodies default to collapsed (a busy tool-using turn
+     can otherwise dump a wall of raw input/output into the transcript) --
+     <details>/<summary> gets click-to-expand, keyboard access, and the
+     disclosure triangle for free, no custom JS state needed. */
+  .bubble.tool_call summary, .bubble.tool_result summary {
+    cursor: pointer;
+  }
+  .bubble.tool_call summary:hover, .bubble.tool_result summary:hover {
+    opacity: 0.8;
+  }
+  .tool-detail {
+    margin-top: 0.4rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    opacity: 0.9;
+  }
   .bubble.approval_request { background: var(--assistant-bg); border: 1px solid #e0a030; }
   .bubble.error { background: var(--assistant-bg); color: var(--error-fg); }
   #empty { color: var(--dim); text-align: center; padding: 2rem; }
@@ -624,15 +640,35 @@
     meta.textContent = displayNames[kind] || kind.replace(/_/g, " ");
     bubble.appendChild(meta);
 
-    const body = document.createElement("div");
-    // textContent, never innerHTML -- transcripts/tool output/backend
-    // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
-    // XSS-prevention note), so no HTML in them is ever interpreted.
-    body.textContent =
-      ev.backend_response || ev.content || ev.user_transcript ||
-      (ev.tool_name ? `${ev.tool_name}(${ev.tool_input || ""})` : "") ||
-      (ev.tool_output || "");
-    bubble.appendChild(body);
+    if (kind === "tool_call" || kind === "tool_result") {
+      // Collapsed by default (a tool-heavy turn can otherwise dump a wall
+      // of raw input/output into the transcript) -- <details> handles the
+      // click-to-expand itself, no click handler needed here.
+      // ev.tool (live SSE shape, event_to_dict) vs ev.tool_name (persisted
+      // history row shape) name the same field -- same reasoning as
+      // kind's own event_type/type fallback above.
+      const toolName = ev.tool_name || ev.tool || "tool";
+      const detail = kind === "tool_call"
+        ? (ev.tool_input || "(no input)")
+        : (ev.backend_response || ev.tool_output || "(no output)");
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = kind === "tool_call" ? toolName : `${toolName} result`;
+      details.appendChild(summary);
+      const pre = document.createElement("div");
+      pre.className = "tool-detail";
+      // textContent, never innerHTML -- see the note below.
+      pre.textContent = detail;
+      details.appendChild(pre);
+      bubble.appendChild(details);
+    } else {
+      const body = document.createElement("div");
+      // textContent, never innerHTML -- transcripts/tool output/backend
+      // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
+      // XSS-prevention note), so no HTML in them is ever interpreted.
+      body.textContent = ev.backend_response || ev.content || ev.user_transcript || "";
+      bubble.appendChild(body);
+    }
 
     if (kind === "approval_request") {
       if (pendingApprovalActions) {

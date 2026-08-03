@@ -2152,7 +2152,10 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.resume_word,
     )
     if listening_bridge is not None:
-        listening_bridge.set_targets(listening_gate, player, tts, adapter)
+        listening_bridge.set_targets(
+            listening_gate, player, tts, adapter, orchestrator,
+            config.interaction.pause_resume_ack,
+        )
     if text_bridge is not None:
         text_bridge.set_targets(orchestrator, transcript_corrector, web_forwarder)
 
