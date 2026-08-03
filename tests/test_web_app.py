@@ -572,3 +572,27 @@ def test_submit_text_rejected_by_the_bridge_returns_400() -> None:
     with TestClient(app) as client:
         response = client.post("/api/text", json={"text": "   "})
     assert response.status_code == 400
+
+
+def test_upload_notifies_a_ready_text_bridge(tmp_path: Path) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    bridge = _FakeTextBridge()
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir, text_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/upload", files={"file": ("photo.png", b"fake-bytes")})
+    assert response.status_code == 200
+    assert bridge.submitted == ["[Uploaded file: photo.png]"]
+
+
+def test_upload_with_a_not_ready_text_bridge_still_succeeds(tmp_path: Path) -> None:
+    # Best-effort notification (app.py's _notify_backend_of_upload) -- no
+    # live session must never make the upload itself fail.
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    bridge = _FakeTextBridge(ready=False)
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir, text_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/upload", files={"file": ("photo.png", b"fake-bytes")})
+    assert response.status_code == 200
+    assert bridge.submitted == []

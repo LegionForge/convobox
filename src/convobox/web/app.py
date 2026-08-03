@@ -25,6 +25,7 @@ from convobox.web.bridge import WebApprovalBridge, WebListeningBridge, WebTextIn
 from convobox.web.history import HistoryDB
 from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
+from convobox.web.uploads import add_upload_routes
 
 
 class ApprovalDecision(BaseModel):
@@ -113,6 +114,15 @@ def create_app(
 
     add_settings_routes(app, config_path if config_path is not None else resolve_config_path())
     add_artifact_routes(app, working_dir)
+
+    async def _notify_backend_of_upload(filename: str) -> None:
+        # Best-effort: no live session (text_bridge unset/not ready) means
+        # the file still landed in working_dir successfully -- the upload
+        # itself must not fail just because there's nothing to tell yet.
+        if text_bridge is not None and text_bridge.is_ready:
+            await text_bridge.submit(f"[Uploaded file: {filename}]")
+
+    add_upload_routes(app, working_dir, on_uploaded=_notify_backend_of_upload)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
