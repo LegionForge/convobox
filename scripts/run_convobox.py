@@ -2142,7 +2142,10 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.resume_word,
     )
     if listening_bridge is not None:
-        listening_bridge.set_targets(listening_gate, player, tts, adapter)
+        listening_bridge.set_targets(
+            listening_gate, player, tts, adapter, orchestrator,
+            config.interaction.pause_resume_ack,
+        )
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending, next_overlap_grace_s
