@@ -104,6 +104,19 @@
     border-color: #b00020;
     color: #ffffff;
   }
+  /* Stop button: always red, no arm/confirm step -- it mirrors the spoken
+     safeword ("stop stop stop"), which also acts on the first utterance,
+     not a two-step confirm. Same fixed #b00020/white pairing as quit-btn's
+     armed state (chosen there for the same 4.5:1-contrast reason). */
+  .ribbon button.stop-btn {
+    background: #b00020;
+    border-color: #b00020;
+    color: #ffffff;
+  }
+  .ribbon button.stop-btn:hover:not(:disabled) {
+    background: #8f0019;
+    border-color: #8f0019;
+  }
 
   /* --- Row below the ribbon: chat on the left, the artifact pane (when
      open) on the right. min-height: 0 on both the row and its scrolling
@@ -406,6 +419,7 @@
   <select id="session-select"></select>
   <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
   <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead">Stop listening</button>
+  <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after.">&#9209; Stop</button>
   <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
@@ -456,6 +470,7 @@
   const statusEl = document.getElementById("status");
   const activityStatusEl = document.getElementById("activity-status");
   const listeningBtn = document.getElementById("listening-btn");
+  const stopBtn = document.getElementById("stop-btn");
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
   const quitBtn = document.getElementById("quit-btn");
@@ -820,6 +835,22 @@
       console.error("listening toggle failed", err);
     } finally {
       listeningBtn.disabled = false;
+    }
+  });
+
+  // No arm/confirm step -- mirrors the spoken safeword, which also acts
+  // the instant it's heard, not on a second repetition.
+  stopBtn.addEventListener("click", async () => {
+    stopBtn.disabled = true;
+    const originalText = stopBtn.textContent;
+    stopBtn.textContent = "Stopping…";
+    try {
+      await fetch("/api/stop", { method: "POST" });
+    } catch (err) {
+      console.error("stop failed", err);
+    } finally {
+      stopBtn.disabled = false;
+      stopBtn.textContent = originalText;
     }
   });
 

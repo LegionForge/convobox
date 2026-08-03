@@ -251,6 +251,11 @@ class WebListeningBridge:
         _on_event() and get spoken after the pause. That fix originally
         only covered the two voice call sites; this button was a third,
         unfixed one until now.
+
+        Delegates the actual stop sequence to Orchestrator.hard_stop() (the
+        same method the voice-triggered safeword and the web UI's Stop
+        button use) rather than repeating it inline a third time -- one
+        already-safety-verified sequence, not three hand-copied ones.
         """
         if (
             self._gate is None
@@ -263,10 +268,7 @@ class WebListeningBridge:
         if self._gate.is_paused:
             return False
         self._gate.is_paused = True
-        self._player.stop()
-        self._tts.stop()
-        await self._adapter.send_hard_stop()
-        await self._orchestrator.stop_event_loop()
+        await self._orchestrator.hard_stop()
         if self._pause_resume_ack == "tone":
             self._player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
         return True
@@ -283,6 +285,44 @@ class WebListeningBridge:
         self._gate.is_paused = False
         if self._pause_resume_ack == "tone" and self._player is not None:
             self._player.play(generate_ack_tone("listening"), ACK_TONE_SAMPLE_RATE_HZ)
+        return True
+
+
+class WebSafewordBridge:
+    """Lets the web UI's Stop button do exactly what saying a safeword
+    phrase ("stop stop stop") does -- Orchestrator.hard_stop() -- as a
+    distinct action from WebListeningBridge.pause().
+
+    Deliberately separate from pause: the spoken safeword aborts the
+    current turn and the session immediately keeps listening normally
+    afterward, it does NOT enter ListeningGate's paused-until-resume-word
+    state the way "stop listening" does. A button that only ever called
+    WebListeningBridge.pause() would give the web UI no way to do the
+    plain "abort and keep going" action voice already has -- this is that
+    button's own bridge, not a WebListeningBridge alias.
+
+    Constructed with no target (create_app() needs something to hand its
+    route closure at server-startup time), wired via set_targets() once
+    the real Orchestrator exists -- same pattern as the other bridges.
+    """
+
+    def __init__(self) -> None:
+        self._orchestrator: Orchestrator | None = None
+
+    def set_targets(self, orchestrator: Orchestrator) -> None:
+        self._orchestrator = orchestrator
+
+    @property
+    def is_ready(self) -> bool:
+        return self._orchestrator is not None
+
+    async def trigger(self) -> bool:
+        """Returns False (nothing done) if called before set_targets()
+        (no live session). Never raises -- Orchestrator.hard_stop() itself
+        already guards on tts/player being None (e.g. --mute)."""
+        if self._orchestrator is None:
+            return False
+        await self._orchestrator.hard_stop()
         return True
 
 

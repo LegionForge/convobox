@@ -24,6 +24,7 @@ from convobox.web.artifacts import add_artifact_routes
 from convobox.web.bridge import (
     WebApprovalBridge,
     WebListeningBridge,
+    WebSafewordBridge,
     WebTextInputBridge,
 )
 from convobox.web.history import HistoryDB
@@ -96,6 +97,7 @@ def create_app(
     display: DisplayConfig | None = None,
     approval_bridge: WebApprovalBridge | None = None,
     listening_bridge: WebListeningBridge | None = None,
+    safeword_bridge: WebSafewordBridge | None = None,
     text_bridge: WebTextInputBridge | None = None,
     quit_handler: Callable[[], None] | None = None,
     config_path: Path | None = None,
@@ -162,6 +164,23 @@ def create_app(
         else:
             listening_bridge.resume()
         return {"is_paused": listening_bridge.is_paused}
+
+    @app.post("/api/stop")
+    async def stop_now() -> dict[str, bool]:
+        # Same trust boundary as every other mutating route here (no auth,
+        # loopback-only). Distinct from /api/listening's pause action --
+        # this does exactly what saying the safeword does (abort the
+        # current turn, keep listening normally afterward), not the
+        # pause-until-resume-word behavior. See WebSafewordBridge's own
+        # docstring for why these are deliberately separate bridges.
+        if safeword_bridge is None or not safeword_bridge.is_ready:
+            raise HTTPException(
+                503,
+                "no live session to stop -- this only works during a "
+                "real run_convobox.py --web session, not a disconnected preview",
+            )
+        await safeword_bridge.trigger()
+        return {"stopped": True}
 
     @app.post("/api/text")
     async def submit_text(submission: TextSubmission) -> dict[str, bool]:

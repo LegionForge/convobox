@@ -1838,6 +1838,10 @@ async def run(args: argparse.Namespace) -> None:
     # route closures before any of those are built.
     listening_bridge = None
     # Same staging reasoning as approval_bridge/listening_bridge above --
+    # populated below once the real Orchestrator exists
+    # (WebSafewordBridge.set_targets).
+    safeword_bridge = None
+    # Same staging reasoning as approval_bridge/listening_bridge above --
     # populated below once the real Orchestrator/TranscriptCorrector exist
     # (WebTextInputBridge.set_targets).
     text_bridge = None
@@ -1857,6 +1861,7 @@ async def run(args: argparse.Namespace) -> None:
             from convobox.web.bridge import (
                 WebApprovalBridge,
                 WebListeningBridge,
+                WebSafewordBridge,
                 WebTextInputBridge,
             )
         except ImportError as e:
@@ -1878,6 +1883,7 @@ async def run(args: argparse.Namespace) -> None:
         )
         approval_bridge = WebApprovalBridge()
         listening_bridge = WebListeningBridge()
+        safeword_bridge = WebSafewordBridge()
         text_bridge = WebTextInputBridge()
         web_app = create_app(
             db=web_app_history,
@@ -1885,6 +1891,7 @@ async def run(args: argparse.Namespace) -> None:
             display=config.display,
             approval_bridge=approval_bridge,
             listening_bridge=listening_bridge,
+            safeword_bridge=safeword_bridge,
             text_bridge=text_bridge,
             quit_handler=lambda: _cancel_main_task(main_task),
             config_path=config_path,
@@ -2156,6 +2163,8 @@ async def run(args: argparse.Namespace) -> None:
             listening_gate, player, tts, adapter, orchestrator,
             config.interaction.pause_resume_ack,
         )
+    if safeword_bridge is not None:
+        safeword_bridge.set_targets(orchestrator)
     if text_bridge is not None:
         text_bridge.set_targets(orchestrator, transcript_corrector, web_forwarder)
 
