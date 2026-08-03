@@ -43,10 +43,21 @@ class _FakeModel:
         self.fail_times = fail_times
         self.calls = 0
         self.last_hotwords: str | None = None
+        self.last_condition_on_previous_text: bool | None = None
+        self.last_kwargs: dict = {}
 
-    def transcribe(self, audio: np.ndarray, language: str | None = None, hotwords: str | None = None):
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        language: str | None = None,
+        hotwords: str | None = None,
+        condition_on_previous_text: bool = True,
+        **kwargs,
+    ):
         self.calls += 1
         self.last_hotwords = hotwords
+        self.last_condition_on_previous_text = condition_on_previous_text
+        self.last_kwargs = kwargs
         if self.calls <= self.fail_times:
             raise RuntimeError("could not create a memory object")
         segments = [_FakeSegment(text="hello world", avg_logprob=-0.2)]
@@ -89,6 +100,44 @@ def test_hotwords_passed_through_to_the_model() -> None:
     assert model.last_hotwords == "Athena stop stop stop"
 
 
+def test_condition_on_previous_text_defaults_to_true() -> None:
+    # Matches faster-whisper's own default -- zero behavior change for
+    # anyone who hasn't touched this new field.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_condition_on_previous_text is True
+
+
+def test_condition_on_previous_text_passed_through_when_disabled() -> None:
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", condition_on_previous_text=False
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_condition_on_previous_text is False
+
+
+def test_temperature_unset_omits_the_kwarg_entirely() -> None:
+    # Must NOT pass temperature=None -- faster-whisper's own transcribe()
+    # types it as Union[float, List[float], Tuple[float, ...]], no None in
+    # that union, so passing None explicitly would override its real
+    # default (the fallback ladder) instead of actually leaving it alone.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert "temperature" not in model.last_kwargs
+
+
+def test_temperature_passed_through_when_set() -> None:
+    model = _FakeModel()
+    config = STTConfig(model="tiny.en", device="cpu", compute_type="int8", temperature=0.0)
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_kwargs.get("temperature") == 0.0
+
+
 def test_model_factory_called_once_at_construction() -> None:
     calls = []
 
@@ -129,7 +178,14 @@ def test_numpy_array_memory_error_is_recovered_not_raised() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def transcribe(self, audio: np.ndarray, language: str | None = None, hotwords: str | None = None):
+        def transcribe(
+            self,
+            audio: np.ndarray,
+            language: str | None = None,
+            hotwords: str | None = None,
+            condition_on_previous_text: bool = True,
+            **kwargs,
+        ):
             self.calls += 1
             if self.calls == 1:
                 raise MemoryError("Unable to allocate 1.15 MiB for an array with shape (1, 376, 400)")
