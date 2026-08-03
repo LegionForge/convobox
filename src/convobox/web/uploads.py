@@ -69,7 +69,7 @@ def add_upload_routes(
     reference to it would reach the backend."""
 
     @app.post("/api/upload")
-    async def upload_file(file: UploadFile = File(...)) -> dict[str, str]:
+    async def upload_file(file: UploadFile = File(...)) -> dict[str, str]:  # noqa: B008 -- FastAPI's own required parameter-declaration idiom, not a real mutable-default bug
         if working_dir is None:
             raise HTTPException(
                 503,
