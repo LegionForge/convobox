@@ -21,7 +21,7 @@ from starlette.staticfiles import StaticFiles
 
 from convobox.config import DisplayConfig, resolve_config_path
 from convobox.web.artifacts import add_artifact_routes
-from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
+from convobox.web.bridge import WebApprovalBridge, WebListeningBridge, WebSafewordBridge
 from convobox.web.history import HistoryDB
 from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
@@ -88,6 +88,7 @@ def create_app(
     display: DisplayConfig | None = None,
     approval_bridge: WebApprovalBridge | None = None,
     listening_bridge: WebListeningBridge | None = None,
+    safeword_bridge: WebSafewordBridge | None = None,
     quit_handler: Callable[[], None] | None = None,
     config_path: Path | None = None,
     working_dir: Path | None = None,
@@ -153,6 +154,23 @@ def create_app(
         else:
             listening_bridge.resume()
         return {"is_paused": listening_bridge.is_paused}
+
+    @app.post("/api/stop")
+    async def stop_now() -> dict[str, bool]:
+        # Same trust boundary as every other mutating route here (no auth,
+        # loopback-only). Distinct from /api/listening's pause action --
+        # this does exactly what saying the safeword does (abort the
+        # current turn, keep listening normally afterward), not the
+        # pause-until-resume-word behavior. See WebSafewordBridge's own
+        # docstring for why these are deliberately separate bridges.
+        if safeword_bridge is None or not safeword_bridge.is_ready:
+            raise HTTPException(
+                503,
+                "no live session to stop -- this only works during a "
+                "real run_convobox.py --web session, not a disconnected preview",
+            )
+        await safeword_bridge.trigger()
+        return {"stopped": True}
 
     @app.get("/api/config")
     async def get_display_config() -> dict[str, str | None]:
