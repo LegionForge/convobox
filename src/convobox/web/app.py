@@ -21,7 +21,11 @@ from starlette.staticfiles import StaticFiles
 
 from convobox.config import DisplayConfig, resolve_config_path
 from convobox.web.artifacts import add_artifact_routes
-from convobox.web.bridge import WebApprovalBridge, WebListeningBridge, WebTextInputBridge
+from convobox.web.bridge import (
+    WebApprovalBridge,
+    WebListeningBridge,
+    WebTextInputBridge,
+)
 from convobox.web.history import HistoryDB
 from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
