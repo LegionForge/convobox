@@ -91,8 +91,16 @@ stt:
   model: base             # tiny.en (fastest, English-only) | base | small | ...
   device: auto            # "auto" (recommended -- picks a real GPU if one is
                           # visible, e.g. NVIDIA CUDA, else cpu) | "cpu" | "cuda"
-  compute_type: default   # "default" (recommended -- matches whatever device
-                          # picked above) | int8 (cpu) | float16 (gpu) | ...
+  compute_type: default   # "default" (recommended -- int8 on cpu, float16 on
+                          # cuda) | int8 | int8_float32 | int16 (cpu) |
+                          # float16 | bfloat16 | int8_float16 | int8_bfloat16
+                          # (cuda) | float32 (full precision, the ceiling --
+                          # the model itself was trained in float32, so
+                          # there's nothing more precise to recover; no
+                          # float64). Lower precision = faster + less memory,
+                          # higher = more accurate. Settings TUI/web UI Test
+                          # ([t]) shows a clear error for an incompatible
+                          # device/precision pairing (e.g. bfloat16 needs cuda).
   # language: null        # null = auto-detect (recommended). Pin (e.g. "en")
                           # only to force one language.
   min_language_probability: 0.0   # drop transcripts whose detected-language

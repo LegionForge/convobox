@@ -5,10 +5,12 @@ from pathlib import Path
 import pytest
 
 from convobox.config import (
+    STT_COMPUTE_TYPES,
     AppConfig,
     AudioConfig,
     DisplayConfig,
     InteractionConfig,
+    STTConfig,
     WebConfig,
     aec_estimate_path,
     load_config,
@@ -155,6 +157,26 @@ def test_approval_explanation_mode_rejects_an_unrecognized_value() -> None:
     )
     with pytest.raises(ValueError, match="plain or verbose"):
         InteractionConfig(approval_explanation_mode="chatty")
+
+
+# --- STTConfig.compute_type: picker in both TUI and web UI, fail fast on an
+# unknown value rather than a runtime ctranslate2 error at Test/session time.
+
+
+def test_compute_type_defaults_to_default() -> None:
+    assert STTConfig().compute_type == "default"
+
+
+def test_compute_type_accepts_every_known_ctranslate2_precision() -> None:
+    for value in STT_COMPUTE_TYPES:
+        assert STTConfig(compute_type=value).compute_type == value
+
+
+def test_compute_type_rejects_an_unrecognized_value() -> None:
+    # Fail fast at config load, not at the first live Test/session --
+    # same discipline as approval_explanation_mode's own validator above.
+    with pytest.raises(ValueError, match="compute_type must be one of"):
+        STTConfig(compute_type="float64")
 
 
 # --- WebConfig: off/loopback-only by default (docs/WEB-UI-ARCHITECTURE.md's

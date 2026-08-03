@@ -106,6 +106,30 @@ def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.Monke
     assert drawn == ["do-not-disturb", "conversational", "take-over"]
 
 
+def test_compute_type_is_registered_as_a_choice_field() -> None:
+    stt = next(s for s in settings_tui.SECTION_SPECS if s.key == "stt")
+    spec = next(f for f in stt.fields if f.key == "compute_type")
+    assert spec.kind == "choice"
+    # Same source of truth as config.py's own validator (STT_COMPUTE_TYPES)
+    # -- picker and validator can never drift apart.
+    assert spec.choices == settings_tui.STT_COMPUTE_TYPES
+    assert "default" in spec.choices
+    assert "float32" in spec.choices
+    assert "float64" not in spec.choices  # no such thing -- float32 is the ceiling
+
+
+def test_compute_type_cycles_with_space_and_arrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = FieldSpec("stt", "compute_type", "Compute type", "choice", ("default", "int8", "float32"))
+    keys = iter([" ", " ", "ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    monkeypatch.setattr(settings_tui, "_draw_modal", lambda *a, **k: None)
+
+    accepted, value = settings_tui._edit_value_interactive(spec, "default", AppConfig())
+
+    assert accepted is True
+    assert value == "float32"
+
+
 def test_pause_resume_ack_is_registered_as_a_choice_field() -> None:
     # P8 (docs/DESIGN-barge-in.md): must be pickable, not free-text, and
     # must NOT offer "file" -- that value isn't implemented yet.
