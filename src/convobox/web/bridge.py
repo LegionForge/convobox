@@ -14,6 +14,7 @@ from typing import Protocol
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import Orchestrator
+from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.web.history import HistoryDB, event_to_dict
 from convobox.web.stream import EventBroadcaster
@@ -253,4 +254,65 @@ class WebListeningBridge:
         if not self._gate.is_paused:
             return False
         self._gate.is_paused = False
+        return True
+
+
+class WebTextInputBridge:
+    """Lets the web UI's text entry box submit a message the same way
+    `run_convobox.py --text "..."` already does: apply the same glossary
+    corrections, forward it to history/SSE as a transcript (so it renders
+    as a normal user bubble, live and on reload), then
+    Orchestrator.handle_transcript() -- which itself still checks the
+    safeword first, unconditionally, so a typed safeword still hard-stops.
+
+    Deliberately does NOT run the mic loop's own pause/approval/overlap-
+    gate pipeline in scripts/run_convobox.py (listening_gate.observe(),
+    approval_gate.observe_transcript(), continue_gate, echo/overlap
+    checks) -- that logic is inline in the mic loop's closures, not a
+    reusable unit, and re-deriving it here risks a second, subtly
+    different copy of a safety-relevant gate. Same scope boundary
+    --text mode already has: typed text always reaches the backend
+    (safeword aside), it does not interact with a live pause or a
+    pending approval prompt the way a spoken reply would.
+
+    Constructed with no targets (create_app() needs something to hand its
+    route closure at server-startup time), wired via set_targets() once
+    the real Orchestrator/corrector/forwarder exist -- same pattern as
+    WebApprovalBridge/WebListeningBridge.
+    """
+
+    def __init__(self) -> None:
+        self._orchestrator: Orchestrator | None = None
+        self._corrector: TranscriptCorrector | None = None
+        self._forwarder: WebEventForwarder | None = None
+
+    def set_targets(
+        self,
+        orchestrator: Orchestrator,
+        corrector: TranscriptCorrector,
+        forwarder: WebEventForwarder | None,
+    ) -> None:
+        self._orchestrator = orchestrator
+        self._corrector = corrector
+        self._forwarder = forwarder
+
+    @property
+    def is_ready(self) -> bool:
+        return self._orchestrator is not None
+
+    async def submit(self, text: str) -> bool:
+        """Returns False (nothing sent) for a no-session/blank submission,
+        never raises. Whitespace-only text is rejected the same way the
+        mic loop's own "no input" gate treats an empty transcript --
+        there's nothing a blank message could mean."""
+        if self._orchestrator is None:
+            return False
+        text = text.strip()
+        if not text:
+            return False
+        if self._corrector is not None:
+            text = self._corrector.correct(text)
+        if self._forwarder is not None:
+            self._forwarder.forward_transcript(text)
+        await self._orchestrator.handle_transcript(text)
         return True

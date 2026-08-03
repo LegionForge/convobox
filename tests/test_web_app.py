@@ -525,3 +525,50 @@ def test_set_listening_resume_calls_the_bridge_and_returns_listening() -> None:
 def test_set_listening_rejects_an_unknown_action(client: TestClient) -> None:
     response = client.post("/api/listening", json={"action": "yolo"})
     assert response.status_code == 422
+
+
+class _FakeTextBridge:
+    def __init__(self, ready: bool = True, accepts: bool = True) -> None:
+        self.ready = ready
+        self.accepts = accepts
+        self.submitted: list[str] = []
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ready
+
+    async def submit(self, text: str) -> bool:
+        self.submitted.append(text)
+        return self.accepts
+
+
+def test_submit_text_with_no_bridge_returns_503(client: TestClient) -> None:
+    response = client.post("/api/text", json={"text": "hello"})
+    assert response.status_code == 503
+
+
+def test_submit_text_with_a_not_ready_bridge_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=_FakeTextBridge(ready=False))
+    with TestClient(app) as client:
+        response = client.post("/api/text", json={"text": "hello"})
+    assert response.status_code == 503
+
+
+def test_submit_text_forwards_to_the_bridge_and_returns_accepted() -> None:
+    bridge = _FakeTextBridge()
+    app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/text", json={"text": "what should I work on next"})
+    assert response.status_code == 200
+    assert response.json() == {"accepted": True}
+    assert bridge.submitted == ["what should I work on next"]
+
+
+def test_submit_text_rejected_by_the_bridge_returns_400() -> None:
+    # Matches WebTextInputBridge.submit()'s own contract: False means
+    # "nothing sent" (e.g. blank after stripping), not a server error.
+    bridge = _FakeTextBridge(accepts=False)
+    app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/text", json={"text": "   "})
+    assert response.status_code == 400

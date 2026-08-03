@@ -117,13 +117,19 @@
     min-height: 0;
   }
 
-  /* --- Chat: scrollable, mobile-texting-style bubbles. --- */
+  /* --- Chat: scrollable, mobile-texting-style bubbles, with a fixed
+     composer bar below (not part of the scrolling area -- see
+     #events-scroll). --- */
   main {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
     display: flex;
     flex-direction: column;
+  }
+  #events-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
   #events {
     max-width: 760px;
@@ -163,6 +169,45 @@
   .bubble.approval_request { background: var(--assistant-bg); border: 1px solid #e0a030; }
   .bubble.error { background: var(--assistant-bg); color: var(--error-fg); }
   #empty { color: var(--dim); text-align: center; padding: 2rem; }
+
+  /* --- Composer: the web UI's typed-text equivalent of a spoken
+     transcript (POST /api/text) -- goes through the same corrections +
+     Orchestrator.handle_transcript() path --text mode already uses,
+     src/convobox/web/bridge.py's WebTextInputBridge. --- */
+  #composer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    border-top: 1px solid var(--border);
+    background: var(--ribbon-bg);
+  }
+  #composer-input {
+    flex: 1 1 auto;
+    resize: none;
+    min-height: 2.3rem;
+    max-height: 8rem;
+    padding: 0.5rem 0.7rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.9rem;
+  }
+  #composer-send-btn {
+    flex: 0 0 auto;
+    font-size: 0.85rem;
+    padding: 0.55rem 1rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  #composer-send-btn:hover:not(:disabled) { border-color: var(--dim); }
+  #composer-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* --- Approval actions: a non-voice equivalent of saying the approval
      phrase / "no" / "explain" out loud. Text labels carry the meaning
@@ -350,9 +395,15 @@
 </header>
 <div class="body-row">
 <main>
-  <div id="events">
-    <div id="empty">No events yet.</div>
+  <div id="events-scroll">
+    <div id="events">
+      <div id="empty">No events yet.</div>
+    </div>
   </div>
+  <form id="composer">
+    <textarea id="composer-input" placeholder="Type a message&hellip;" rows="1"></textarea>
+    <button id="composer-send-btn" type="submit">Send</button>
+  </form>
 </main>
 <aside id="artifact-pane" hidden>
   <div class="artifact-pane-header">
@@ -396,6 +447,9 @@
   const artifactTitleEl = document.getElementById("artifact-pane-title");
   const artifactBodyEl = document.getElementById("artifact-pane-body");
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
+  const composerForm = document.getElementById("composer");
+  const composerInput = document.getElementById("composer-input");
+  const composerSendBtn = document.getElementById("composer-send-btn");
   let currentSessionId = null;
 
   // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
@@ -730,6 +784,45 @@
       console.error("listening toggle failed", err);
     } finally {
       listeningBtn.disabled = false;
+    }
+  });
+
+  // Enter sends (Shift+Enter for a newline, standard chat-box convention);
+  // the <form> submit (button click or Enter with no handler override)
+  // covers the rest. No local bubble render on success -- the same SSE
+  // broadcast a spoken transcript triggers (WebTextInputBridge.submit ->
+  // forward_transcript) is what renders it, so typed and spoken input
+  // stay on one rendering path rather than risking a double-render.
+  composerInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      composerForm.requestSubmit();
+    }
+  });
+
+  composerForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = composerInput.value.trim();
+    if (!text) return;
+    composerInput.disabled = true;
+    composerSendBtn.disabled = true;
+    try {
+      const res = await fetch("/api/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (res.ok) {
+        composerInput.value = "";
+      } else {
+        console.error("text submit failed", res.status, await res.text());
+      }
+    } catch (err) {
+      console.error("text submit failed", err);
+    } finally {
+      composerInput.disabled = false;
+      composerSendBtn.disabled = false;
+      composerInput.focus();
     }
   });
 
