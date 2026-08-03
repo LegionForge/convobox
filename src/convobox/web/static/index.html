@@ -680,9 +680,17 @@
       : "Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead";
   }
 
-  function renderActivityStatus(status) {
-    activityStatusEl.textContent =
-      status === "paused" && resumeWord ? `paused (say "${resumeWord}" to resume)` : status;
+  function renderActivityStatus(status, detail) {
+    // detail is WorkingIndicator.current_activity (a tool name, or null
+    // for "thinking, no tool call yet") -- only meaningful for "working",
+    // same as the TUI's own [TOOL x]/[THINKING] heartbeat tag.
+    let text = status;
+    if (status === "paused" && resumeWord) {
+      text = `paused (say "${resumeWord}" to resume)`;
+    } else if (status === "working") {
+      text = detail ? `working (${detail})` : "working (thinking)";
+    }
+    activityStatusEl.textContent = text;
     activityStatusEl.className = status === "paused" ? "paused" : "";
     setListeningButton(status === "paused");
   }
@@ -701,7 +709,7 @@
       try {
         const payload = JSON.parse(e.data);
         if (payload.type === "status") {
-          renderActivityStatus(payload.status);
+          renderActivityStatus(payload.status, payload.detail);
         } else {
           renderEvent(payload);
         }

@@ -189,7 +189,22 @@ async def test_forward_status_broadcasts_to_a_subscriber() -> None:
     forwarder.forward_status("paused")
     await asyncio.sleep(0)
 
-    assert queue.get_nowait() == {"type": "status", "status": "paused"}
+    assert queue.get_nowait() == {"type": "status", "status": "paused", "detail": None}
+
+
+@pytest.mark.asyncio
+async def test_forward_status_includes_the_current_activity_detail() -> None:
+    # WorkingIndicator.current_activity (a tool name, or None for
+    # "thinking") -- the TUI's own heartbeat tag has shown this since
+    # PR #190; this is that same detail reaching the web UI's status line.
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder.forward_status("working", "Bash")
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait() == {"type": "status", "status": "working", "detail": "Bash"}
 
 
 def test_forward_status_never_touches_history(db: HistoryDB) -> None:

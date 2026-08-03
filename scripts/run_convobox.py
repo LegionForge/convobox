@@ -1131,7 +1131,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         os.system("")  # nosec B605 B607
     interval = 1.0
     was_playing = False
-    last_broadcast_status: str | None = None
+    last_broadcast: tuple[str | None, str | None] = (None, None)
     while True:
         await asyncio.sleep(interval)
         busy, playing = adapter.is_busy(), player.is_playing()
@@ -1237,9 +1237,16 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         if tui_state is not None:
             tui_state.status = status
             tui_state.waiting_hint = waiting_hint
-        if web_forwarder is not None and status != last_broadcast_status:
-            web_forwarder.forward_status(status)
-            last_broadcast_status = status
+        # Same current_activity the TUI's heartbeat log line already shows
+        # (a tool name, or None for "thinking, no tool call yet") -- only
+        # meaningful while status == "working", otherwise it's stale from
+        # a previous busy stretch (WorkingIndicator.observe() only clears
+        # it when busy AND not playing; "working" is the one status where
+        # that's guaranteed to be current).
+        detail = indicator.current_activity if status == "working" else None
+        if web_forwarder is not None and (status, detail) != last_broadcast:
+            web_forwarder.forward_status(status, detail)
+            last_broadcast = (status, detail)
 
 
 def _render_approval_explanation_verbose(
