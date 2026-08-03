@@ -42,9 +42,11 @@ class _FakeModel:
     def __init__(self, fail_times: int = 0) -> None:
         self.fail_times = fail_times
         self.calls = 0
+        self.last_hotwords: str | None = None
 
-    def transcribe(self, audio: np.ndarray, language: str | None = None):
+    def transcribe(self, audio: np.ndarray, language: str | None = None, hotwords: str | None = None):
         self.calls += 1
+        self.last_hotwords = hotwords
         if self.calls <= self.fail_times:
             raise RuntimeError("could not create a memory object")
         segments = [_FakeSegment(text="hello world", avg_logprob=-0.2)]
@@ -64,6 +66,27 @@ def test_normal_transcription_returns_expected_result() -> None:
     assert result.language == "en"
     assert result.language_probability == 0.95
     assert result.avg_logprob == pytest.approx(-0.2)
+
+
+def test_hotwords_defaults_to_none() -> None:
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_hotwords is None
+
+
+def test_hotwords_passed_through_to_the_model() -> None:
+    # Live UAT, 2026-08-02: a short resume_word was repeatedly hallucinated
+    # as unrelated fluent sentences -- faster-whisper's own hotwords param
+    # exists to bias exactly this case; confirm STTConfig.hotwords actually
+    # reaches the real transcribe() call.
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", hotwords="Athena stop stop stop"
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_hotwords == "Athena stop stop stop"
 
 
 def test_model_factory_called_once_at_construction() -> None:
@@ -106,7 +129,7 @@ def test_numpy_array_memory_error_is_recovered_not_raised() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def transcribe(self, audio: np.ndarray, language: str | None = None):
+        def transcribe(self, audio: np.ndarray, language: str | None = None, hotwords: str | None = None):
             self.calls += 1
             if self.calls == 1:
                 raise MemoryError("Unable to allocate 1.15 MiB for an array with shape (1, 376, 400)")

@@ -93,7 +93,9 @@ class _WhisperLikeModel(Protocol):
     without either depending on the other.
     """
 
-    def transcribe(self, audio: np.ndarray, language: str | None = None) -> tuple[Any, Any]: ...
+    def transcribe(
+        self, audio: np.ndarray, language: str | None = None, hotwords: str | None = None
+    ) -> tuple[Any, Any]: ...
 
 
 # Substrings from real CUDA/cuBLAS/cuDNN library-loading failures --
@@ -370,6 +372,7 @@ class LocalTranscriber(STTEngine):
             segments, info = model.transcribe(
                 audio,
                 language=self._config.language,
+                hotwords=self._config.hotwords,
             )
             # transcribe() returns a lazy generator; materializing it here
             # is what actually runs the decode, so it must stay inside the

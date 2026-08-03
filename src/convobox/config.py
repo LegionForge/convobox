@@ -102,6 +102,22 @@ class STTConfig(BaseModel):
     # glossary in config makes every rewrite inspectable and portable, rather
     # than silently training on a user's voice data.
     corrections: dict[str, str] = Field(default_factory=dict)
+    # Passed straight through to faster-whisper's own transcribe(hotwords=...)
+    # -- a free-text prompt bias toward words/phrases the model should
+    # recognize more readily. Live UAT, 2026-08-02: a short, out-of-vocabulary
+    # word (a configured resume_word) was repeatedly hallucinated as unrelated
+    # fluent sentences ("We'll see you on the other side.", Cyrillic text)
+    # rather than being misheard as something similar -- the well-documented
+    # Whisper failure mode on short/low-signal clips. Operators should
+    # include their resume_word, safeword.hard_stop_phrases, and
+    # interaction.approval_phrase here (space-separated) to bias toward the
+    # exact short phrases most likely to hit this failure mode. Deliberately
+    # not auto-derived from those configs: STTConfig has no dependency on
+    # InteractionConfig/SafewordConfig today, and hotwords is a real-word
+    # accuracy nudge, not a safety mechanism -- the safeword/resume-word
+    # checks themselves still run on the raw transcript regardless of
+    # whether this helped or not.
+    hotwords: str | None = None
 
     @field_validator("compute_type")
     @classmethod
