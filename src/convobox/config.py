@@ -143,7 +143,7 @@ class STTConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_compute_type_matches_device(self) -> "STTConfig":
+    def _validate_compute_type_matches_device(self) -> STTConfig:
         # Only device: cpu/cuda are checked -- device: auto (or anything
         # else) resolves its real target at construction time, so there's
         # nothing to validate against here. compute_type: default is always
