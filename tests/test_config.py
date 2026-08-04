@@ -6,6 +6,8 @@ import pytest
 
 from convobox.config import (
     STT_COMPUTE_TYPES,
+    STT_COMPUTE_TYPES_CPU,
+    STT_COMPUTE_TYPES_CUDA,
     AppConfig,
     AudioConfig,
     DisplayConfig,
@@ -177,6 +179,52 @@ def test_compute_type_rejects_an_unrecognized_value() -> None:
     # same discipline as approval_explanation_mode's own validator above.
     with pytest.raises(ValueError, match="compute_type must be one of"):
         STTConfig(compute_type="float64")
+
+
+# --- STTConfig.compute_type vs. device: an incompatible pairing (e.g.
+# float16 on cpu) previously passed config validation cleanly and only
+# failed three layers deep inside ctranslate2's Whisper constructor with a
+# raw traceback -- live-hit 2026-08-03 hand-editing convobox.yaml after a
+# device swap (compute_type: float16 left over from a cuda config, device
+# switched to cpu). These reproduce that exact crash pre-fix.
+
+
+def test_compute_type_float16_rejected_on_cpu() -> None:
+    with pytest.raises(ValueError, match="not supported on device 'cpu'"):
+        STTConfig(device="cpu", compute_type="float16")
+
+
+def test_compute_type_bfloat16_rejected_on_cpu() -> None:
+    with pytest.raises(ValueError, match="not supported on device 'cpu'"):
+        STTConfig(device="cpu", compute_type="bfloat16")
+
+
+def test_compute_type_int16_rejected_on_cuda() -> None:
+    with pytest.raises(ValueError, match="not supported on device 'cuda'"):
+        STTConfig(device="cuda", compute_type="int16")
+
+
+def test_compute_type_default_is_always_valid_regardless_of_device() -> None:
+    assert STTConfig(device="cpu", compute_type="default").compute_type == "default"
+    assert STTConfig(device="cuda", compute_type="default").compute_type == "default"
+
+
+def test_compute_type_auto_device_skips_the_cross_check() -> None:
+    # device: auto resolves its real target at construction time (cuda if
+    # present, else cpu) -- nothing to validate statically against, so a
+    # cuda-only compute_type must not be rejected just because it might
+    # end up running on a cpu-only box.
+    assert STTConfig(device="auto", compute_type="float16").compute_type == "float16"
+
+
+def test_compute_type_every_cpu_supported_value_is_accepted_on_cpu() -> None:
+    for value in STT_COMPUTE_TYPES_CPU:
+        assert STTConfig(device="cpu", compute_type=value).compute_type == value
+
+
+def test_compute_type_every_cuda_supported_value_is_accepted_on_cuda() -> None:
+    for value in STT_COMPUTE_TYPES_CUDA:
+        assert STTConfig(device="cuda", compute_type=value).compute_type == value
 
 
 # --- WebConfig: off/loopback-only by default (docs/WEB-UI-ARCHITECTURE.md's
