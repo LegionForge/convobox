@@ -9,7 +9,14 @@ import pytest
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
-from convobox.web.bridge import WebApprovalBridge, WebEventForwarder, WebListeningBridge
+from convobox.stt.corrections import TranscriptCorrector
+from convobox.web.bridge import (
+    WebApprovalBridge,
+    WebEventForwarder,
+    WebListeningBridge,
+    WebSafewordBridge,
+    WebTextInputBridge,
+)
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
 
@@ -374,9 +381,13 @@ class _FakeListeningGate:
 class _FakePlayer:
     def __init__(self) -> None:
         self.stop_calls = 0
+        self.play_calls: list[tuple[object, int]] = []
 
     def stop(self) -> None:
         self.stop_calls += 1
+
+    def play(self, samples: object, sample_rate: int) -> None:
+        self.play_calls.append((samples, sample_rate))
 
 
 class _FakeTTS:
@@ -392,6 +403,24 @@ class _FakeAdapterForListening:
         self.hard_stop_calls = 0
 
     async def send_hard_stop(self) -> None:
+        self.hard_stop_calls += 1
+
+
+class _FakeOrchestratorForListening:
+    def __init__(self) -> None:
+        self.stop_event_loop_calls = 0
+        self.hard_stop_calls = 0
+
+    async def stop_event_loop(self) -> None:
+        self.stop_event_loop_calls += 1
+
+    async def hard_stop(self) -> None:
+        # WebListeningBridge.pause() delegates to this rather than calling
+        # player.stop()/tts.stop()/adapter.send_hard_stop() itself -- the
+        # real Orchestrator.hard_stop() does those on ITS OWN stored
+        # player/tts/adapter (the same instances, in production; separate
+        # fakes here, by design -- see the tests that assert on this
+        # counter instead of the player/tts/adapter fakes directly).
         self.hard_stop_calls += 1
 
 
@@ -414,21 +443,30 @@ def test_listening_bridge_with_no_targets_resume_is_a_harmless_false() -> None:
 
 @pytest.mark.asyncio
 async def test_listening_bridge_pause_hard_stops_playback_and_backend() -> None:
+    # PR #191 (2026-07-31, safety-critical): hard-stopping the adapter
+    # alone still lets an already-in-flight turn's trailing TEXT event
+    # reach _on_event() and get spoken after the pause -- stop_event_loop()
+    # is what actually prevents that, and this button was a third,
+    # previously-unfixed call site missing it (live UAT, 2026-08-02).
+    # The actual player.stop()/tts.stop()/adapter.send_hard_stop()/
+    # stop_event_loop() sequence is Orchestrator.hard_stop()'s own
+    # responsibility now (see test_orchestrator.py's
+    # test_hard_stop_method_runs_the_same_sequence_directly and
+    # test_hard_stop_method_cancels_the_event_loop) -- this test only
+    # needs to confirm the bridge delegates to it.
     gate = _FakeListeningGate(is_paused=False)
-    player = _FakePlayer()
-    tts = _FakeTTS()
-    adapter = _FakeAdapterForListening()
+    orchestrator = _FakeOrchestratorForListening()
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(), orchestrator,
+    )
 
     changed = await bridge.pause()
 
     assert changed is True
     assert gate.is_paused is True
     assert bridge.is_paused is True
-    assert player.stop_calls == 1
-    assert tts.stop_calls == 1
-    assert adapter.hard_stop_calls == 1
+    assert orchestrator.hard_stop_calls == 1
 
 
 @pytest.mark.asyncio
@@ -440,8 +478,9 @@ async def test_listening_bridge_pause_while_already_paused_is_a_noop() -> None:
     player = _FakePlayer()
     tts = _FakeTTS()
     adapter = _FakeAdapterForListening()
+    orchestrator = _FakeOrchestratorForListening()
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+    bridge.set_targets(gate, player, tts, adapter, orchestrator)  # type: ignore[arg-type]
 
     changed = await bridge.pause()
 
@@ -449,6 +488,36 @@ async def test_listening_bridge_pause_while_already_paused_is_a_noop() -> None:
     assert player.stop_calls == 0
     assert tts.stop_calls == 0
     assert adapter.hard_stop_calls == 0
+    assert orchestrator.stop_event_loop_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_plays_the_ack_tone_when_configured() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(), "tone",
+    )
+
+    await bridge.pause()
+
+    assert len(player.play_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_plays_no_tone_by_default() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening(),
+    )
+
+    await bridge.pause()
+
+    assert player.play_calls == []
 
 
 def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
@@ -456,8 +525,9 @@ def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
     player = _FakePlayer()
     tts = _FakeTTS()
     adapter = _FakeAdapterForListening()
+    orchestrator = _FakeOrchestratorForListening()
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, player, tts, adapter)  # type: ignore[arg-type]
+    bridge.set_targets(gate, player, tts, adapter, orchestrator)  # type: ignore[arg-type]
 
     changed = bridge.resume()
 
@@ -469,9 +539,151 @@ def test_listening_bridge_resume_clears_the_flag_with_no_side_effects() -> None:
     assert adapter.hard_stop_calls == 0
 
 
+def test_listening_bridge_resume_plays_the_ack_tone_when_configured() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(), "tone",
+    )
+
+    bridge.resume()
+
+    assert len(player.play_calls) == 1
+
+
+def test_listening_bridge_resume_plays_no_tone_by_default() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    player = _FakePlayer()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, player, _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening(),
+    )
+
+    bridge.resume()
+
+    assert player.play_calls == []
+
+
 def test_listening_bridge_resume_while_not_paused_is_a_noop() -> None:
     gate = _FakeListeningGate(is_paused=False)
     bridge = WebListeningBridge()
-    bridge.set_targets(gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening())  # type: ignore[arg-type]
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening(),
+    )
 
     assert bridge.resume() is False
+
+
+# --- WebSafewordBridge: lets the web UI's Stop button do exactly what
+# saying a safeword phrase does (Orchestrator.hard_stop()) -- distinct from
+# WebListeningBridge.pause(), which additionally enters ListeningGate's
+# paused-until-resume-word state. Reuses _FakeOrchestratorForListening
+# above since both bridges delegate to the same Orchestrator.hard_stop(). ---
+
+
+def test_safeword_bridge_with_no_target_reports_not_ready() -> None:
+    bridge = WebSafewordBridge()
+    assert bridge.is_ready is False
+
+
+@pytest.mark.asyncio
+async def test_safeword_bridge_with_no_target_trigger_is_a_harmless_false() -> None:
+    bridge = WebSafewordBridge()
+    assert await bridge.trigger() is False
+
+
+@pytest.mark.asyncio
+async def test_safeword_bridge_trigger_delegates_to_orchestrator_hard_stop() -> None:
+    orchestrator = _FakeOrchestratorForListening()
+    bridge = WebSafewordBridge()
+    bridge.set_targets(orchestrator)  # type: ignore[arg-type]
+
+    assert bridge.is_ready is True
+    triggered = await bridge.trigger()
+
+    assert triggered is True
+    assert orchestrator.hard_stop_calls == 1
+
+
+# --- WebTextInputBridge: lets the web UI's text entry box submit a message
+# the same way `run_convobox.py --text "..."` already does -- corrections
+# applied, forwarded to history/SSE as a transcript, then
+# Orchestrator.handle_transcript(). Uses the real TranscriptCorrector (cheap,
+# pure, no I/O) rather than a fake -- this is exactly the behavior worth
+# proving, not something to stub past. ---
+
+
+class _FakeOrchestratorForText:
+    def __init__(self) -> None:
+        self.handled: list[str] = []
+
+    async def handle_transcript(self, text: str) -> None:
+        self.handled.append(text)
+
+
+class _FakeForwarderForText:
+    def __init__(self) -> None:
+        self.forwarded: list[str] = []
+
+    def forward_transcript(self, text: str) -> None:
+        self.forwarded.append(text)
+
+
+def test_text_bridge_with_no_targets_reports_not_ready() -> None:
+    bridge = WebTextInputBridge()
+    assert bridge.is_ready is False
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_with_no_targets_submit_is_a_harmless_false() -> None:
+    bridge = WebTextInputBridge()
+    assert await bridge.submit("hello") is False
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_rejects_blank_text() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, TranscriptCorrector(), None)  # type: ignore[arg-type]
+
+    assert await bridge.submit("   ") is False
+    assert orchestrator.handled == []
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_submits_stripped_text_to_the_orchestrator() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, TranscriptCorrector(), None)  # type: ignore[arg-type]
+
+    accepted = await bridge.submit("  run the tests  ")
+
+    assert accepted is True
+    assert orchestrator.handled == ["run the tests"]
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_applies_corrections_before_sending() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    corrector = TranscriptCorrector({"bargain": "barge-in"})
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, corrector, None)  # type: ignore[arg-type]
+
+    await bridge.submit("test the bargain detection")
+
+    assert orchestrator.handled == ["test the barge-in detection"]
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_forwards_the_corrected_text_to_history() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    forwarder = _FakeForwarderForText()
+    corrector = TranscriptCorrector({"bargain": "barge-in"})
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, corrector, forwarder)  # type: ignore[arg-type]
+
+    await bridge.submit("test the bargain detection")
+
+    assert forwarder.forwarded == ["test the barge-in detection"]

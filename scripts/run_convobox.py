@@ -1837,6 +1837,14 @@ async def run(args: argparse.Namespace) -> None:
     # approval_bridge above -- create_app() needs something to hand its
     # route closures before any of those are built.
     listening_bridge = None
+    # Same staging reasoning as approval_bridge/listening_bridge above --
+    # populated below once the real Orchestrator exists
+    # (WebSafewordBridge.set_targets).
+    safeword_bridge = None
+    # Same staging reasoning as approval_bridge/listening_bridge above --
+    # populated below once the real Orchestrator/TranscriptCorrector exist
+    # (WebTextInputBridge.set_targets).
+    text_bridge = None
     if config.web.enabled:
         # Type-narrowing only, not a real runtime check: this branch only
         # ever executes inside run(), which only ever executes as
@@ -1850,7 +1858,12 @@ async def run(args: argparse.Namespace) -> None:
             import uvicorn
 
             from convobox.web.app import create_app
-            from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
+            from convobox.web.bridge import (
+                WebApprovalBridge,
+                WebListeningBridge,
+                WebSafewordBridge,
+                WebTextInputBridge,
+            )
         except ImportError as e:
             raise ImportError(
                 "web.enabled is set but the 'web' extra isn't installed. "
@@ -1870,12 +1883,16 @@ async def run(args: argparse.Namespace) -> None:
         )
         approval_bridge = WebApprovalBridge()
         listening_bridge = WebListeningBridge()
+        safeword_bridge = WebSafewordBridge()
+        text_bridge = WebTextInputBridge()
         web_app = create_app(
             db=web_app_history,
             broadcaster=web_broadcaster,
             display=config.display,
             approval_bridge=approval_bridge,
             listening_bridge=listening_bridge,
+            safeword_bridge=safeword_bridge,
+            text_bridge=text_bridge,
             quit_handler=lambda: _cancel_main_task(main_task),
             config_path=config_path,
             working_dir=(
@@ -2142,7 +2159,14 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.resume_word,
     )
     if listening_bridge is not None:
-        listening_bridge.set_targets(listening_gate, player, tts, adapter)
+        listening_bridge.set_targets(
+            listening_gate, player, tts, adapter, orchestrator,
+            config.interaction.pause_resume_ack,
+        )
+    if safeword_bridge is not None:
+        safeword_bridge.set_targets(orchestrator)
+    if text_bridge is not None:
+        text_bridge.set_targets(orchestrator, transcript_corrector, web_forwarder)
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending, next_overlap_grace_s
