@@ -21,7 +21,12 @@ from starlette.staticfiles import StaticFiles
 
 from convobox.config import DisplayConfig, resolve_config_path
 from convobox.web.artifacts import add_artifact_routes
-from convobox.web.bridge import WebApprovalBridge, WebListeningBridge, WebSafewordBridge
+from convobox.web.bridge import (
+    WebApprovalBridge,
+    WebListeningBridge,
+    WebSafewordBridge,
+    WebTextInputBridge,
+)
 from convobox.web.history import HistoryDB
 from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
@@ -33,6 +38,10 @@ class ApprovalDecision(BaseModel):
 
 class ListeningDecision(BaseModel):
     action: Literal["pause", "resume"]
+
+
+class TextSubmission(BaseModel):
+    text: str
 
 
 # Loopback-only, any port -- CORSMiddleware's allow_origins does an exact
@@ -89,6 +98,7 @@ def create_app(
     approval_bridge: WebApprovalBridge | None = None,
     listening_bridge: WebListeningBridge | None = None,
     safeword_bridge: WebSafewordBridge | None = None,
+    text_bridge: WebTextInputBridge | None = None,
     quit_handler: Callable[[], None] | None = None,
     config_path: Path | None = None,
     working_dir: Path | None = None,
@@ -171,6 +181,23 @@ def create_app(
             )
         await safeword_bridge.trigger()
         return {"stopped": True}
+
+    @app.post("/api/text")
+    async def submit_text(submission: TextSubmission) -> dict[str, bool]:
+        # Same trust boundary as every other mutating route here (no auth,
+        # loopback-only). Goes through WebTextInputBridge, not straight to
+        # the orchestrator, so this stays testable without a live session
+        # and matches the approval/listening bridges' own shape.
+        if text_bridge is None or not text_bridge.is_ready:
+            raise HTTPException(
+                503,
+                "no live session to send text to -- this only works during a "
+                "real run_convobox.py --web session, not a disconnected preview",
+            )
+        accepted = await text_bridge.submit(submission.text)
+        if not accepted:
+            raise HTTPException(400, "text was empty")
+        return {"accepted": True}
 
     @app.get("/api/config")
     async def get_display_config() -> dict[str, str | None]:

@@ -9,11 +9,13 @@ import pytest
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
+from convobox.stt.corrections import TranscriptCorrector
 from convobox.web.bridge import (
     WebApprovalBridge,
     WebEventForwarder,
     WebListeningBridge,
     WebSafewordBridge,
+    WebTextInputBridge,
 )
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
@@ -603,3 +605,85 @@ async def test_safeword_bridge_trigger_delegates_to_orchestrator_hard_stop() -> 
 
     assert triggered is True
     assert orchestrator.hard_stop_calls == 1
+
+
+# --- WebTextInputBridge: lets the web UI's text entry box submit a message
+# the same way `run_convobox.py --text "..."` already does -- corrections
+# applied, forwarded to history/SSE as a transcript, then
+# Orchestrator.handle_transcript(). Uses the real TranscriptCorrector (cheap,
+# pure, no I/O) rather than a fake -- this is exactly the behavior worth
+# proving, not something to stub past. ---
+
+
+class _FakeOrchestratorForText:
+    def __init__(self) -> None:
+        self.handled: list[str] = []
+
+    async def handle_transcript(self, text: str) -> None:
+        self.handled.append(text)
+
+
+class _FakeForwarderForText:
+    def __init__(self) -> None:
+        self.forwarded: list[str] = []
+
+    def forward_transcript(self, text: str) -> None:
+        self.forwarded.append(text)
+
+
+def test_text_bridge_with_no_targets_reports_not_ready() -> None:
+    bridge = WebTextInputBridge()
+    assert bridge.is_ready is False
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_with_no_targets_submit_is_a_harmless_false() -> None:
+    bridge = WebTextInputBridge()
+    assert await bridge.submit("hello") is False
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_rejects_blank_text() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, TranscriptCorrector(), None)  # type: ignore[arg-type]
+
+    assert await bridge.submit("   ") is False
+    assert orchestrator.handled == []
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_submits_stripped_text_to_the_orchestrator() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, TranscriptCorrector(), None)  # type: ignore[arg-type]
+
+    accepted = await bridge.submit("  run the tests  ")
+
+    assert accepted is True
+    assert orchestrator.handled == ["run the tests"]
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_applies_corrections_before_sending() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    corrector = TranscriptCorrector({"bargain": "barge-in"})
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, corrector, None)  # type: ignore[arg-type]
+
+    await bridge.submit("test the bargain detection")
+
+    assert orchestrator.handled == ["test the barge-in detection"]
+
+
+@pytest.mark.asyncio
+async def test_text_bridge_forwards_the_corrected_text_to_history() -> None:
+    orchestrator = _FakeOrchestratorForText()
+    forwarder = _FakeForwarderForText()
+    corrector = TranscriptCorrector({"bargain": "barge-in"})
+    bridge = WebTextInputBridge()
+    bridge.set_targets(orchestrator, corrector, forwarder)  # type: ignore[arg-type]
+
+    await bridge.submit("test the bargain detection")
+
+    assert forwarder.forwarded == ["test the barge-in detection"]
