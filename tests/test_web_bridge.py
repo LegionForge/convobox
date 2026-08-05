@@ -10,6 +10,7 @@ from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventTyp
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.safeword.detector import SafewordDetector
 from convobox.stt.corrections import TranscriptCorrector
+from convobox.tui.state import ConversationTuiState
 from convobox.web.bridge import (
     WebApprovalBridge,
     WebEventForwarder,
@@ -574,6 +575,70 @@ def test_listening_bridge_resume_while_not_paused_is_a_noop() -> None:
     )
 
     assert bridge.resume() is False
+
+
+# --- Live incident, 2026-08-05 (docs/field-notes/2026-08-05-web-resume-
+# desyncs-tui-display.md): a web-triggered pause/resume flipped the real
+# ListeningGate but left an attached TUI's transcript pane showing the
+# stale "paused" system turn forever, reading as a hung session even
+# though the mic loop had genuinely resumed. These tests cover the fix --
+# pause()/resume() now append a system turn when a real ConversationTuiState
+# is wired in via set_targets(), same as the voice path already did. ---
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_appends_a_tui_system_turn_when_wired() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    tui_state = ConversationTuiState()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(), "none", tui_state, "Athena",
+    )
+
+    await bridge.pause()
+
+    assert len(tui_state.turns) == 1
+    assert tui_state.turns[0].speaker == "system"
+    assert "Athena" in tui_state.turns[0].text
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_is_silent_without_a_tui_state() -> None:
+    # No tui_state passed to set_targets() (the default) -- must not raise,
+    # matching every other optional target on this bridge.
+    gate = _FakeListeningGate(is_paused=False)
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(),
+    )
+
+    assert await bridge.pause() is True
+
+
+def test_listening_bridge_resume_appends_a_tui_system_turn_when_wired() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    tui_state = ConversationTuiState()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(), "none", tui_state,
+    )
+
+    bridge.resume()
+
+    assert len(tui_state.turns) == 1
+    assert tui_state.turns[0].speaker == "system"
+    assert "resumed" in tui_state.turns[0].text.lower()
+
+
+def test_listening_bridge_resume_is_silent_without_a_tui_state() -> None:
+    gate = _FakeListeningGate(is_paused=True)
+    bridge = WebListeningBridge()
+    bridge.set_targets(gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(), _FakeOrchestratorForListening())  # type: ignore[arg-type]
+
+    assert bridge.resume() is True
 
 
 # --- WebSafewordBridge: lets the web UI's Stop button do exactly what
