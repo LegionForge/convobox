@@ -7,6 +7,7 @@ versions: incident session on feat/stt-hotwords-bias (#204 unmerged), faster-whi
 evidence:
   - convobox-tui.log 2026-08-05 14:41:52-14:43:10 (original incident, pause/resume sequence)
   - convobox-tui.log 2026-08-05 15:36:22-15:43:21 (follow-up session, three pause/resume cycles + a second false-positive pause)
+  - convobox-tui.log 2026-08-05 15:52:42-15:53:14 (live UAT of PR #212 itself: 3 web-button cycles + 1 voice cycle, back to back)
   - src/convobox/web/bridge.py:276-288 (WebListeningBridge.resume()/pause(), pre-fix)
   - scripts/run_convobox.py:2411-2483 (mic-loop pause/resume gate, listening_gate)
   - src/convobox/tui/state.py (turn log is the TUI's only pause/resume indicator)
@@ -18,7 +19,7 @@ provenance:
     - Claude Code (Anthropic claude-sonnet-5) — live log/code investigation, writing, fix (PR #212)
   org: https://legionforge.org
   created: 2026-08-05T14:56:31-05:00
-  revised: 2026-08-05T15:48:17-05:00
+  revised: 2026-08-05T15:54:03-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -179,8 +180,21 @@ same log file).
   `log.info` pattern the voice path uses and append the same
   `tui_state.add_turn("system", ...)` line, parameterized by which surface
   triggered it (e.g. "paused listening (web)" / "resumed listening (web)").
-  **Built**: PR #212 (open, unmerged), unit-tested (4 new tests, 1234
-  passed overall). Still open: a live UAT actually clicking the web
-  Resume/Stop-listening button and confirming the `(web)`-tagged turn
-  appears in the TUI transcript pane — every resume so far, in both
-  sessions, went through voice, not the button.
+  **Built and live-verified**: PR #212 (open, unmerged), unit-tested (4
+  new tests, 1234 passed overall). Live UAT, same day, 15:52:42-15:52:53:
+  three web-button pause/resume cycles, each producing the new tagged log
+  line (`paused listening (web UI) -- ...` / `resumed listening (web UI)`),
+  immediately followed by a voice-triggered cycle in the original untagged
+  format — confirms both paths log distinctly and neither regressed the
+  other. Operator confirmed the TUI transcript pane reflected it correctly
+  too.
+
+```
+15:52:43,815 INFO resumed listening (web UI)
+15:52:46,852 INFO paused listening (web UI) -- hard-stopped in-flight work; say 'Athena' to resume
+15:52:48,727 INFO resumed listening (web UI)
+15:52:50,473 INFO paused listening (web UI) -- hard-stopped in-flight work; say 'Athena' to resume
+15:52:52,286 INFO resumed listening (web UI)
+15:53:05,188 INFO paused listening (matched 'Stop listening.') -- hard-stopped in-flight work; say 'Athena' to resume
+15:53:08,476 INFO resumed listening (resume word matched): 'Athena'
+```
