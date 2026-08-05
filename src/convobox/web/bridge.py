@@ -8,6 +8,7 @@ unit-testable without spinning up the whole voice loop.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Protocol
 
@@ -18,8 +19,11 @@ from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
+from convobox.tui.state import ConversationTuiState
 from convobox.web.history import HistoryDB, event_to_dict
 from convobox.web.stream import EventBroadcaster
+
+logger = logging.getLogger(__name__)
 
 # Mirrors WEB-UI-ARCHITECTURE.md's event_type vocabulary ("tool_call",
 # "response", etc.) for the history row's own event_type column.
@@ -199,10 +203,17 @@ class WebListeningBridge:
     degrades to "did nothing" (returns False) if called before
     set_targets() runs, rather than raising.
 
-    Deliberately does NOT touch a TUI's ConversationTuiState (unlike the
-    voice path, which logs a system-turn line there) -- that's a
-    terminal-only nicety, and wiring it in here would need yet another
-    script-local Protocol for a cosmetic gap, not a functional one.
+    Also logs and (if a TUI is attached) appends a system turn on every
+    pause/resume, same as the voice path in run_convobox.py -- REVERSED
+    2026-08-05 from an earlier "deliberately cosmetic-only" scoping
+    decision. Live incident (docs/field-notes/2026-08-05-web-resume-
+    desyncs-tui-display.md): an operator resumed via this button after
+    voice resume kept failing, which worked, but the TUI's transcript pane
+    kept showing the stale "paused -- say the resume word to resume"
+    system turn forever (nothing ever told it otherwise) and the session
+    read as hung even though it wasn't. ConversationTuiState now lives in
+    the installed package (convobox.tui.state), not scripts/, so this no
+    longer needs a script-local Protocol to reach it.
     """
 
     def __init__(self) -> None:
@@ -212,6 +223,8 @@ class WebListeningBridge:
         self._adapter: BackendAdapter | None = None
         self._orchestrator: Orchestrator | None = None
         self._pause_resume_ack: str = "none"
+        self._tui_state: ConversationTuiState | None = None
+        self._resume_word: str = ""
 
     def set_targets(
         self,
@@ -221,6 +234,8 @@ class WebListeningBridge:
         adapter: BackendAdapter,
         orchestrator: Orchestrator,
         pause_resume_ack: str = "none",
+        tui_state: ConversationTuiState | None = None,
+        resume_word: str = "",
     ) -> None:
         self._gate = gate
         self._player = player
@@ -228,6 +243,8 @@ class WebListeningBridge:
         self._adapter = adapter
         self._orchestrator = orchestrator
         self._pause_resume_ack = pause_resume_ack
+        self._tui_state = tui_state
+        self._resume_word = resume_word
 
     @property
     def is_ready(self) -> bool:
@@ -271,6 +288,15 @@ class WebListeningBridge:
         await self._orchestrator.hard_stop()
         if self._pause_resume_ack == "tone":
             self._player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
+        logger.info(
+            "paused listening (web UI) -- hard-stopped in-flight work; say %r to resume",
+            self._resume_word,
+        )
+        if self._tui_state is not None:
+            self._tui_state.add_turn(
+                "system",
+                f"paused listening (web) -- say {self._resume_word!r} to resume",
+            )
         return True
 
     def resume(self) -> bool:
@@ -285,6 +311,9 @@ class WebListeningBridge:
         self._gate.is_paused = False
         if self._pause_resume_ack == "tone" and self._player is not None:
             self._player.play(generate_ack_tone("listening"), ACK_TONE_SAMPLE_RATE_HZ)
+        logger.info("resumed listening (web UI)")
+        if self._tui_state is not None:
+            self._tui_state.add_turn("system", "resumed listening (web)")
         return True
 
 
