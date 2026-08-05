@@ -2162,6 +2162,8 @@ async def run(args: argparse.Namespace) -> None:
         listening_bridge.set_targets(
             listening_gate, player, tts, adapter, orchestrator,
             config.interaction.pause_resume_ack,
+            tui_state=tui_state,
+            resume_word=config.interaction.resume_word,
         )
     if safeword_bridge is not None:
         safeword_bridge.set_targets(orchestrator)
