@@ -81,14 +81,21 @@ class WebEventForwarder:
             self._history.append_event(self._session_id, "transcript", user_transcript=text)
         self._broadcast({"type": "transcript", "content": text})
 
-    def forward_status(self, status: str) -> None:
+    def forward_status(self, status: str, detail: str | None = None) -> None:
         """The mic loop's own activity state (listening/capturing/speaking/
         working/waiting/paused -- the same vocabulary _working_watchdog
         already computes for a TUI's status line), broadcast to the web UI
         too. Never persisted to history -- this is live/ephemeral, not a
         conversation event; a page reload gets it fresh from the next
-        broadcast, not from replayed history."""
-        self._broadcast({"type": "status", "status": status})
+        broadcast, not from replayed history.
+
+        detail is WorkingIndicator.current_activity (a tool name, or None
+        for "thinking, no tool call yet") -- the TUI's heartbeat log line
+        has shown this since PR #190; the web UI's own status line never
+        did, a gap noted at the time and left for its own PR. Only
+        meaningful when status == "working"; every other status ignores it.
+        """
+        self._broadcast({"type": "status", "status": status, "detail": detail})
 
     def _broadcast(self, payload: dict[str, object]) -> None:
         if self._broadcaster is not None:
