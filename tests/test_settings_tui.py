@@ -757,6 +757,27 @@ def test_prompt_edit_switches_tts_engine_via_profile(monkeypatch: pytest.MonkeyP
     assert state.working.tts_profiles["kokoro"].voice == "af_sarah"
 
 
+def test_prompt_edit_confirming_without_cycling_reports_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Live UAT, 2026-08-02: pressing Enter to accept a picker without ever
+    # cycling to a different choice previously said "Compute type updated"
+    # -- state.dirty came back False (nothing in the whole config changed)
+    # so _field_updated_status's dirty=False branch fired, but that message
+    # was written for "changed then reverted," not "never touched." Confirm
+    # the field is genuinely untouched and the status says so distinctly.
+    config = _make_config(**{"stt.compute_type": "default"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "stt")
+    state.selected_field = next(i for i, f in enumerate(state.current_fields()) if f.key == "compute_type")
+
+    keys = iter(["ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    settings_tui._prompt_edit(state)
+
+    assert state.working.stt.compute_type == "default"
+    assert state.status == "Compute type unchanged"
+    assert state.dirty is False
+
+
 # --- [c] compare: hear Kokoro and Piper speak the same phrase back to
 # back, each built from its own remembered profile, without touching
 # tts.engine or anything staged for save. ---

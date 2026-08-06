@@ -222,6 +222,44 @@ async def test_hard_stop_wins_over_busy_interject() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hard_stop_method_runs_the_same_sequence_directly() -> None:
+    # hard_stop() is what handle_transcript()'s safeword branch delegates
+    # to (see test_hard_stop_when_idle above) -- this exercises it as a
+    # standalone entry point, the shape a non-transcript trigger (e.g. the
+    # web UI's Stop button) needs: no matching text, just call it.
+    orch, adapter, tts, player = make_orchestrator(busy=False, with_tts=True)
+    await orch.hard_stop()
+    assert adapter.hard_stops == 1
+    assert tts.stop_calls == 1
+    assert player.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_method_without_tts_or_player_does_not_raise() -> None:
+    # Matches handle_transcript()'s own None-guards on self._tts/self._player
+    # (Orchestrator is constructible without either, e.g. --text --mute).
+    orch, adapter, _, _ = make_orchestrator(busy=False, with_tts=False)
+    await orch.hard_stop()
+    assert adapter.hard_stops == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_method_cancels_the_event_loop() -> None:
+    # PR #191 (2026-07-31, safety-critical): hard-stopping the adapter
+    # alone still let an already-in-flight turn's trailing TEXT event
+    # reach _on_event() and get spoken after the stop -- stop_event_loop()
+    # (cancelling _events_task) is what actually prevents that. Direct
+    # coverage on hard_stop() itself, not just through handle_transcript()'s
+    # safeword branch, now that other callers (the web UI's Pause/Stop
+    # buttons) delegate to it too.
+    orch, adapter, _, _ = make_orchestrator(busy=False)
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch.hard_stop()
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
 async def test_handle_transcript_starts_event_loop_automatically() -> None:
     # Regression test: is_busy() only stays fresh while _consume_events() is
     # draining adapter.events(). If a caller forgets to call
