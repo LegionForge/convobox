@@ -95,6 +95,7 @@ class UtteranceSegmenter:
         self._speech_windows = 0
         self._trailing_silence_windows = 0
         self._last_forced = False
+        self._discarded_forced_runs = 0
         # Read-only diagnostic observability.  The acoustic calibration
         # harness records the exact probability that drove each production
         # VAD decision; normal segmentation behavior does not depend on it.
@@ -133,6 +134,25 @@ class UtteranceSegmenter:
         empty or length one" as the common case, not a guarantee.
         """
         return self._last_forced
+
+    @property
+    def discarded_forced_runs(self) -> int:
+        """Count of `max_utterance_s`-forced runs discarded because they
+        never accumulated `min_speech_ms` of confidently-classified speech
+        (see `_finish_run`) -- the cap fired and reset `_triggered`, but
+        there was nothing worth emitting as an utterance. Distinct from a
+        normal short/noise run ending naturally on silence: this only
+        counts the forced-cap case, live-confirmed (2026-08-05 field note:
+        docs/field-notes/2026-08-05-vad-segmenter-silent-unbounded-lockup.md)
+        as a real, repeatable failure mode even with the cap enabled --
+        audio hovering in the exit-hysteresis band for a full
+        `max_utterance_s` window produces total silence (no transcript, no
+        log line) every cycle, indistinguishable from "nobody is talking"
+        without this counter. Monotonically increasing for the segmenter's
+        lifetime; callers poll and diff against their own last-seen value
+        to detect new occurrences, same pattern as `was_forced`.
+        """
+        return self._discarded_forced_runs
 
     @property
     def last_probability(self) -> float | None:
@@ -229,6 +249,8 @@ class UtteranceSegmenter:
 
     def _finish_run(self, forced: bool) -> np.ndarray | None:
         emit = self._speech_windows >= self._min_speech_windows
+        if forced and not emit:
+            self._discarded_forced_runs += 1
         utterance = np.concatenate(self._speech) if emit else None
         # Set before _reset_run() clears _speech, but that's irrelevant here
         # -- was_forced only describes WHY this run ended, not its content.
