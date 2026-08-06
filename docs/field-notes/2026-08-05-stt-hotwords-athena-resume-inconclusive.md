@@ -13,6 +13,7 @@ evidence:
   - convobox-tui.log 2026-08-05 21:45:56-21:51:41 (UAT part 12: hotwords ON, Lavalier mic)
   - convobox-tui.log 2026-08-05 21:55:27-22:01:44 (UAT part 13: hotwords ON, 1080 Pro Stream mic again)
   - convobox-tui.log 2026-08-05 22:06:04-22:26:42+ (UAT part 14: hotwords ON, Airhug 28 mic, AI DSP toggled on/off/on/off within the session)
+  - convobox-tui.log 2026-08-05 22:39:06-22:54:28 (UAT part 15: hotwords ON, back to 1080 Pro Stream -- the operator's adopted configuration)
   - uat-echo.log (per-run labels; note it is overwritten, not appended, by `Tee-Object` without `-Append` -- only the LAST label survives on disk, session-start banners in convobox-tui.log are the durable boundary markers)
   - PR #204 (open, unmerged) — its own live-UAT checklist item this note answers
   - src/convobox/config.py:76-104 (STTConfig: temperature/condition_on_previous_text default to a faster-whisper no-op when unset)
@@ -128,6 +129,15 @@ far larger effect than anything hotwords showed in parts 9/10. Whatever
 share of the day's variance hotwords accounts for, it is not the
 dominant lever for this failure mode — mic hardware is.
 
+**Part 15 — a return to the 1080 Pro Stream, hotwords still ON**, the
+best showing yet on that mic: **4/4 voice-resolved**, three of the four
+on a *bare* "Athena" with zero drops (0, 0, 0, and one 2-drop cycle).
+Notably better than part 13's 4/5 on the same mic/config, and it
+complicates the "must embed in a sentence" note below — bare "Athena"
+clearly works fine under these conditions too, it just isn't the *only*
+thing that works. Operator's conclusion after this run: adopting 1080
+Pro Stream + `stt.hotwords` ON as the standing configuration.
+
 **A secondary finding inside part 14**: performance dipped hard in the
 middle of a ~20-minute continuous session (one cycle needed 11 drops)
 without lining up with any deliberate variable change (it falls in the
@@ -177,8 +187,16 @@ enough across independent sessions to note.
   performance drift over ~20 minutes, independent of any deliberate
   variable (part 14). Not yet investigated — worth a dedicated session
   if it recurs.
-- **Actionable operator technique**: embedding the resume word in a full
-  sentence resolves more reliably than saying it alone, corroborated
-  across three independent sessions/mics. Worth surfacing as UX guidance
-  (e.g. Settings TUI hint text) once corroborated further — not yet a
-  product decision, just a live observation.
+- **Actionable operator technique, with a caveat**: embedding the resume
+  word in a full sentence resolved more reliably than saying it alone in
+  parts 10/13/14 — but part 15 (best 1080 Pro Stream showing of the day)
+  had bare "Athena" succeed 3 times with zero drops. Reads as "a full
+  sentence is a safe fallback when the bare word keeps failing," not "the
+  bare word doesn't work" — mic/session conditions likely matter more
+  than phrasing choice per se. Worth surfacing as UX guidance eventually,
+  not yet a product decision.
+- **Operator's adopted configuration, end of day**: 1080 Pro Stream mic +
+  `stt.hotwords` ON. Consistent with the data (favors hotwords, and this
+  mic performed well/consistently across parts 9, 10, 13, and especially
+  15) without needing to chase the single best-of-day outlier (Airhug 28,
+  part 14, n=1 session).
