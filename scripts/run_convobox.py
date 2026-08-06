@@ -1094,21 +1094,33 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     continue_gate: ContinuePromptGate | None = None,
     approval_gate: ApprovalPromptGate | None = None,
     web_forwarder: WebEventForwarder | None = None,
+    vad_max_utterance_s: float | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
     is fully idle (docs/DESIGN-barge-in.md's "patient" preset), derives
-    the TUI's status label when a TUI is active, and starts/expires the
-    response-tiering continue-prompt wait -- all sharing one 1s poll
-    rather than each growing its own timer: unrelated jobs piggybacking
-    on the SAME tick as the original heartbeat, not one job growing new
-    responsibilities. The status label and continue-wait start are both
-    poll-based rather than threaded through every call site in the main
-    loop because of a real constraint, not laziness: transcriber.transcribe()
-    blocks the event loop synchronously today (no asyncio.to_thread
-    offload), so nothing can react DURING that decode regardless of
-    whether it's poll- or event-driven; polling is the lower-risk
-    mechanism either way.
+    the TUI's status label when a TUI is active, starts/expires the
+    response-tiering continue-prompt wait, and surfaces VAD forced-cap
+    discards (below) -- all sharing one 1s poll rather than each growing
+    its own timer: unrelated jobs piggybacking on the SAME tick as the
+    original heartbeat, not one job growing new responsibilities. The
+    status label and continue-wait start are both poll-based rather than
+    threaded through every call site in the main loop because of a real
+    constraint, not laziness: transcriber.transcribe() blocks the event
+    loop synchronously today (no asyncio.to_thread offload), so nothing
+    can react DURING that decode regardless of whether it's poll- or
+    event-driven; polling is the lower-risk mechanism either way.
+
+    VAD forced-cap discards (live incident, 2026-08-05: docs/field-notes/
+    2026-08-05-vad-segmenter-silent-unbounded-lockup.md): with
+    ``vad.max_utterance_s`` set, ``UtteranceSegmenter`` no longer locks up
+    permanently, but a run that hits the cap without ever accumulating
+    ``min_speech_ms`` of confident speech (audio hovering in the VAD's
+    exit-hysteresis band) is discarded with zero other observable effect
+    -- no transcript, no log line, indistinguishable from genuine silence.
+    Polling ``segmenter.discarded_forced_runs`` here and logging on
+    increase is the same "poll a pure counter, log the delta" pattern
+    already used for the heartbeat/status/continue-wait jobs above.
 
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
@@ -1132,8 +1144,21 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     interval = 1.0
     was_playing = False
     last_broadcast: tuple[str | None, str | None] = (None, None)
+    last_discarded_forced_runs = segmenter.discarded_forced_runs if segmenter is not None else 0
     while True:
         await asyncio.sleep(interval)
+        if segmenter is not None:
+            discarded_now = segmenter.discarded_forced_runs
+            newly_discarded = discarded_now - last_discarded_forced_runs
+            if newly_discarded > 0:
+                log.warning(
+                    "VAD discarded %d forced-cap run(s) (~%.0fs of audio each) with no "
+                    "confident speech -- nothing was transcribed. If this repeats, "
+                    "background noise may be sitting near vad.threshold; see "
+                    "docs/field-notes/2026-08-05-vad-segmenter-silent-unbounded-lockup.md",
+                    newly_discarded, vad_max_utterance_s or 0.0,
+                )
+                last_discarded_forced_runs = discarded_now
         busy, playing = adapter.is_busy(), player.is_playing()
         elapsed = indicator.observe(busy, playing, interval)
         if tui_state is not None:
@@ -1844,6 +1869,14 @@ async def run(args: argparse.Namespace) -> None:
     # approval_bridge above -- create_app() needs something to hand its
     # route closures before any of those are built.
     listening_bridge = None
+    # Same staging reasoning as approval_bridge/listening_bridge above --
+    # populated below once the real Orchestrator exists
+    # (WebSafewordBridge.set_targets).
+    safeword_bridge = None
+    # Same staging reasoning as approval_bridge/listening_bridge above --
+    # populated below once the real Orchestrator/TranscriptCorrector exist
+    # (WebTextInputBridge.set_targets).
+    text_bridge = None
     if config.web.enabled:
         # Type-narrowing only, not a real runtime check: this branch only
         # ever executes inside run(), which only ever executes as
@@ -1857,7 +1890,12 @@ async def run(args: argparse.Namespace) -> None:
             import uvicorn
 
             from convobox.web.app import create_app
-            from convobox.web.bridge import WebApprovalBridge, WebListeningBridge
+            from convobox.web.bridge import (
+                WebApprovalBridge,
+                WebListeningBridge,
+                WebSafewordBridge,
+                WebTextInputBridge,
+            )
         except ImportError as e:
             raise ImportError(
                 "web.enabled is set but the 'web' extra isn't installed. "
@@ -1877,12 +1915,16 @@ async def run(args: argparse.Namespace) -> None:
         )
         approval_bridge = WebApprovalBridge()
         listening_bridge = WebListeningBridge()
+        safeword_bridge = WebSafewordBridge()
+        text_bridge = WebTextInputBridge()
         web_app = create_app(
             db=web_app_history,
             broadcaster=web_broadcaster,
             display=config.display,
             approval_bridge=approval_bridge,
             listening_bridge=listening_bridge,
+            safeword_bridge=safeword_bridge,
+            text_bridge=text_bridge,
             quit_handler=lambda: _cancel_main_task(main_task),
             config_path=config_path,
             working_dir=(
@@ -2149,7 +2191,16 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.resume_word,
     )
     if listening_bridge is not None:
-        listening_bridge.set_targets(listening_gate, player, tts, adapter)
+        listening_bridge.set_targets(
+            listening_gate, player, tts, adapter, orchestrator,
+            config.interaction.pause_resume_ack,
+            tui_state=tui_state,
+            resume_word=config.interaction.resume_word,
+        )
+    if safeword_bridge is not None:
+        safeword_bridge.set_targets(orchestrator)
+    if text_bridge is not None:
+        text_bridge.set_targets(orchestrator, transcript_corrector, web_forwarder)
 
     async def _mic_chunks(mic: MicrophoneStream):  # type: ignore[no-untyped-def]
         nonlocal barge_in_pending, next_overlap_grace_s
@@ -2300,7 +2351,7 @@ async def run(args: argparse.Namespace) -> None:
         _working_watchdog(
             adapter, player, indicator, orchestrator, interject_queue,
             segmenter, listening_gate, tui_state, continue_gate, approval_gate,
-            web_forwarder,
+            web_forwarder, config.vad.max_utterance_s,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None

@@ -8,15 +8,22 @@ unit-testable without spinning up the whole voice loop.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Protocol
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
+from convobox.audio.ack_tones import generate_ack_tone
 from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import Orchestrator
+from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
+from convobox.tui.state import ConversationTuiState
 from convobox.web.history import HistoryDB, event_to_dict
 from convobox.web.stream import EventBroadcaster
+
+logger = logging.getLogger(__name__)
 
 # Mirrors WEB-UI-ARCHITECTURE.md's event_type vocabulary ("tool_call",
 # "response", etc.) for the history row's own event_type column.
@@ -198,15 +205,22 @@ class WebListeningBridge:
 
     Constructed with no targets (create_app() needs something to hand its
     route closures at server-startup time, before the real ListeningGate/
-    player/tts/adapter exist), wired via set_targets() once they're built
-    -- same pattern as WebApprovalBridge. Every method degrades to "did
-    nothing" (returns False) if called before set_targets() runs, rather
-    than raising.
+    player/tts/adapter/orchestrator exist), wired via set_targets() once
+    they're built -- same pattern as WebApprovalBridge. Every method
+    degrades to "did nothing" (returns False) if called before
+    set_targets() runs, rather than raising.
 
-    Deliberately does NOT touch a TUI's ConversationTuiState (unlike the
-    voice path, which logs a system-turn line there) -- that's a
-    terminal-only nicety, and wiring it in here would need yet another
-    script-local Protocol for a cosmetic gap, not a functional one.
+    Also logs and (if a TUI is attached) appends a system turn on every
+    pause/resume, same as the voice path in run_convobox.py -- REVERSED
+    2026-08-05 from an earlier "deliberately cosmetic-only" scoping
+    decision. Live incident (docs/field-notes/2026-08-05-web-resume-
+    desyncs-tui-display.md): an operator resumed via this button after
+    voice resume kept failing, which worked, but the TUI's transcript pane
+    kept showing the stale "paused -- say the resume word to resume"
+    system turn forever (nothing ever told it otherwise) and the session
+    read as hung even though it wasn't. ConversationTuiState now lives in
+    the installed package (convobox.tui.state), not scripts/, so this no
+    longer needs a script-local Protocol to reach it.
     """
 
     def __init__(self) -> None:
@@ -214,6 +228,10 @@ class WebListeningBridge:
         self._player: AudioPlayer | None = None
         self._tts: TTSEngine | None = None
         self._adapter: BackendAdapter | None = None
+        self._orchestrator: Orchestrator | None = None
+        self._pause_resume_ack: str = "none"
+        self._tui_state: ConversationTuiState | None = None
+        self._resume_word: str = ""
 
     def set_targets(
         self,
@@ -221,11 +239,19 @@ class WebListeningBridge:
         player: AudioPlayer,
         tts: TTSEngine,
         adapter: BackendAdapter,
+        orchestrator: Orchestrator,
+        pause_resume_ack: str = "none",
+        tui_state: ConversationTuiState | None = None,
+        resume_word: str = "",
     ) -> None:
         self._gate = gate
         self._player = player
         self._tts = tts
         self._adapter = adapter
+        self._orchestrator = orchestrator
+        self._pause_resume_ack = pause_resume_ack
+        self._tui_state = tui_state
+        self._resume_word = resume_word
 
     @property
     def is_ready(self) -> bool:
@@ -240,24 +266,158 @@ class WebListeningBridge:
         (no live session) or already paused -- a second pause is a no-op,
         matching ListeningGate.observe()'s own behavior: once is_paused is
         true, it only ever checks for the resume word, it never re-enters
-        the "pause" branch to re-run these side effects."""
-        if self._gate is None or self._player is None or self._tts is None or self._adapter is None:
+        the "pause" branch to re-run these side effects.
+
+        Mirrors run_convobox.py's voice-triggered "pause" branch exactly,
+        including the stop_event_loop() call -- live UAT, 2026-07-31
+        (PR #191, safety-critical): hard-stopping the adapter alone still
+        let an already-in-flight turn's trailing TEXT event reach
+        _on_event() and get spoken after the pause. That fix originally
+        only covered the two voice call sites; this button was a third,
+        unfixed one until now.
+
+        Delegates the actual stop sequence to Orchestrator.hard_stop() (the
+        same method the voice-triggered safeword and the web UI's Stop
+        button use) rather than repeating it inline a third time -- one
+        already-safety-verified sequence, not three hand-copied ones.
+        """
+        if (
+            self._gate is None
+            or self._player is None
+            or self._tts is None
+            or self._adapter is None
+            or self._orchestrator is None
+        ):
             return False
         if self._gate.is_paused:
             return False
         self._gate.is_paused = True
-        self._player.stop()
-        self._tts.stop()
-        await self._adapter.send_hard_stop()
+        await self._orchestrator.hard_stop()
+        if self._pause_resume_ack == "tone":
+            self._player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
+        logger.info(
+            "paused listening (web UI) -- hard-stopped in-flight work; say %r to resume",
+            self._resume_word,
+        )
+        if self._tui_state is not None:
+            self._tui_state.add_turn(
+                "system",
+                f"paused listening (web) -- say {self._resume_word!r} to resume",
+            )
         return True
 
     def resume(self) -> bool:
         """Voice resume only clears the flag (ListeningGate.observe()'s
         "resume" branch) -- nothing was hard-stopped to undo, so nothing
-        to redo here either."""
+        to redo here either, beyond the same ack tone the voice path
+        plays."""
         if self._gate is None:
             return False
         if not self._gate.is_paused:
             return False
         self._gate.is_paused = False
+        if self._pause_resume_ack == "tone" and self._player is not None:
+            self._player.play(generate_ack_tone("listening"), ACK_TONE_SAMPLE_RATE_HZ)
+        logger.info("resumed listening (web UI)")
+        if self._tui_state is not None:
+            self._tui_state.add_turn("system", "resumed listening (web)")
+        return True
+
+
+class WebSafewordBridge:
+    """Lets the web UI's Stop button do exactly what saying a safeword
+    phrase ("stop stop stop") does -- Orchestrator.hard_stop() -- as a
+    distinct action from WebListeningBridge.pause().
+
+    Deliberately separate from pause: the spoken safeword aborts the
+    current turn and the session immediately keeps listening normally
+    afterward, it does NOT enter ListeningGate's paused-until-resume-word
+    state the way "stop listening" does. A button that only ever called
+    WebListeningBridge.pause() would give the web UI no way to do the
+    plain "abort and keep going" action voice already has -- this is that
+    button's own bridge, not a WebListeningBridge alias.
+
+    Constructed with no target (create_app() needs something to hand its
+    route closure at server-startup time), wired via set_targets() once
+    the real Orchestrator exists -- same pattern as the other bridges.
+    """
+
+    def __init__(self) -> None:
+        self._orchestrator: Orchestrator | None = None
+
+    def set_targets(self, orchestrator: Orchestrator) -> None:
+        self._orchestrator = orchestrator
+
+    @property
+    def is_ready(self) -> bool:
+        return self._orchestrator is not None
+
+    async def trigger(self) -> bool:
+        """Returns False (nothing done) if called before set_targets()
+        (no live session). Never raises -- Orchestrator.hard_stop() itself
+        already guards on tts/player being None (e.g. --mute)."""
+        if self._orchestrator is None:
+            return False
+        await self._orchestrator.hard_stop()
+        return True
+
+
+class WebTextInputBridge:
+    """Lets the web UI's text entry box submit a message the same way
+    `run_convobox.py --text "..."` already does: apply the same glossary
+    corrections, forward it to history/SSE as a transcript (so it renders
+    as a normal user bubble, live and on reload), then
+    Orchestrator.handle_transcript() -- which itself still checks the
+    safeword first, unconditionally, so a typed safeword still hard-stops.
+
+    Deliberately does NOT run the mic loop's own pause/approval/overlap-
+    gate pipeline in scripts/run_convobox.py (listening_gate.observe(),
+    approval_gate.observe_transcript(), continue_gate, echo/overlap
+    checks) -- that logic is inline in the mic loop's closures, not a
+    reusable unit, and re-deriving it here risks a second, subtly
+    different copy of a safety-relevant gate. Same scope boundary
+    --text mode already has: typed text always reaches the backend
+    (safeword aside), it does not interact with a live pause or a
+    pending approval prompt the way a spoken reply would.
+
+    Constructed with no targets (create_app() needs something to hand its
+    route closure at server-startup time), wired via set_targets() once
+    the real Orchestrator/corrector/forwarder exist -- same pattern as
+    WebApprovalBridge/WebListeningBridge.
+    """
+
+    def __init__(self) -> None:
+        self._orchestrator: Orchestrator | None = None
+        self._corrector: TranscriptCorrector | None = None
+        self._forwarder: WebEventForwarder | None = None
+
+    def set_targets(
+        self,
+        orchestrator: Orchestrator,
+        corrector: TranscriptCorrector,
+        forwarder: WebEventForwarder | None,
+    ) -> None:
+        self._orchestrator = orchestrator
+        self._corrector = corrector
+        self._forwarder = forwarder
+
+    @property
+    def is_ready(self) -> bool:
+        return self._orchestrator is not None
+
+    async def submit(self, text: str) -> bool:
+        """Returns False (nothing sent) for a no-session/blank submission,
+        never raises. Whitespace-only text is rejected the same way the
+        mic loop's own "no input" gate treats an empty transcript --
+        there's nothing a blank message could mean."""
+        if self._orchestrator is None:
+            return False
+        text = text.strip()
+        if not text:
+            return False
+        if self._corrector is not None:
+            text = self._corrector.correct(text)
+        if self._forwarder is not None:
+            self._forwarder.forward_transcript(text)
+        await self._orchestrator.handle_transcript(text)
         return True
