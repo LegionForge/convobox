@@ -1,0 +1,68 @@
+name: Publish to PyPI
+
+# Triggered by pushing a version tag (e.g. git tag v0.4.0 && git push --tags).
+# Uses PyPI Trusted Publishing (OIDC) — no API token stored in secrets.
+# Configure the trusted publisher at https://pypi.org/manage/project/legionforge-convobox/settings/
+# before pushing the first tag:
+#   Publisher: GitHub Actions
+#   Repository: LegionForge/convobox
+#   Workflow: publish.yml
+#   Environment: pypi
+#
+# PyPI distribution name is legionforge-convobox (org convention: PyPI is a
+# flat global namespace, so every LegionForge package is prefixed to avoid
+# squatting/ambiguity -- see LegionForge/convobox's own DEPENDENCY_LICENSE_AUDIT.md
+# and pyproject.toml `[project] name`). The repo name, import path, and CLI
+# commands (convobox/convobox-settings/convobox-spike) stay unprefixed.
+#
+# Template: LegionForge/llm-valet/.github/workflows/publish.yml, adapted to
+# this repo's actual Python floor (3.12, matching pyproject.toml's
+# requires-python and ci.yml's python-version -- not copied blindly from
+# llm-valet's 3.11).
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install hatchling build
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for OIDC trusted publishing
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
