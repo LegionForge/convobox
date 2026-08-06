@@ -525,3 +525,95 @@ def test_set_listening_resume_calls_the_bridge_and_returns_listening() -> None:
 def test_set_listening_rejects_an_unknown_action(client: TestClient) -> None:
     response = client.post("/api/listening", json={"action": "yolo"})
     assert response.status_code == 422
+
+
+# --- POST /api/stop: the web UI's Stop button, distinct from
+# /api/listening's pause action -- does exactly what saying the safeword
+# does (abort the current turn, keep listening normally afterward), not
+# pause-until-resume-word. safeword_bridge's own trigger() logic is covered
+# by tests/test_web_bridge.py -- this only tests that the route wires the
+# action/status codes to the bridge correctly, same shape as the listening
+# route tests above. ---
+
+
+class _FakeSafewordBridge:
+    def __init__(self, ready: bool = True) -> None:
+        self.ready = ready
+        self.trigger_calls = 0
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ready
+
+    async def trigger(self) -> bool:
+        self.trigger_calls += 1
+        return True
+
+
+def test_stop_with_no_bridge_returns_503(client: TestClient) -> None:
+    response = client.post("/api/stop")
+    assert response.status_code == 503
+
+
+def test_stop_with_a_not_ready_bridge_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), safeword_bridge=_FakeSafewordBridge(ready=False))
+    with TestClient(app) as client:
+        response = client.post("/api/stop")
+    assert response.status_code == 503
+
+
+def test_stop_calls_the_bridge_and_returns_stopped() -> None:
+    bridge = _FakeSafewordBridge()
+    app = create_app(db=HistoryDB(Path(":memory:")), safeword_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/stop")
+    assert response.status_code == 200
+    assert response.json() == {"stopped": True}
+    assert bridge.trigger_calls == 1
+
+
+class _FakeTextBridge:
+    def __init__(self, ready: bool = True, accepts: bool = True) -> None:
+        self.ready = ready
+        self.accepts = accepts
+        self.submitted: list[str] = []
+
+    @property
+    def is_ready(self) -> bool:
+        return self.ready
+
+    async def submit(self, text: str) -> bool:
+        self.submitted.append(text)
+        return self.accepts
+
+
+def test_submit_text_with_no_bridge_returns_503(client: TestClient) -> None:
+    response = client.post("/api/text", json={"text": "hello"})
+    assert response.status_code == 503
+
+
+def test_submit_text_with_a_not_ready_bridge_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=_FakeTextBridge(ready=False))
+    with TestClient(app) as client:
+        response = client.post("/api/text", json={"text": "hello"})
+    assert response.status_code == 503
+
+
+def test_submit_text_forwards_to_the_bridge_and_returns_accepted() -> None:
+    bridge = _FakeTextBridge()
+    app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/text", json={"text": "what should I work on next"})
+    assert response.status_code == 200
+    assert response.json() == {"accepted": True}
+    assert bridge.submitted == ["what should I work on next"]
+
+
+def test_submit_text_rejected_by_the_bridge_returns_400() -> None:
+    # Matches WebTextInputBridge.submit()'s own contract: False means
+    # "nothing sent" (e.g. blank after stripping), not a server error.
+    bridge = _FakeTextBridge(accepts=False)
+    app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
+    with TestClient(app) as client:
+        response = client.post("/api/text", json={"text": "   "})
+    assert response.status_code == 400
