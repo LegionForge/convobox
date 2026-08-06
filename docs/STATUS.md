@@ -7,6 +7,114 @@ tested-vs-implemented table, see the README's [Status](../README.md#status)
 section; for the formal per-release changelog, see
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## Since 0.3.1 (in progress, not yet tagged)
+
+A day-long live-UAT + infra-hardening pass, 2026-08-05/06. Four PRs
+merged (#212, #202, #204, #205), two open and ready (#206, #213), plus
+cross-repo GitHub/PyPI publishing hardening still in progress. Full
+evidence for every finding below lives in `docs/field-notes/` (dated
+2026-08-05) rather than repeated here.
+
+- **`stt.hotwords` (#204, merged) — live-UAT'd properly, not just shipped.**
+  faster-whisper's own prompt-bias, added to fight the recurring
+  short-resume-word ("Athena") mis-transcription pattern. First attempts
+  at a same-day A/B were genuinely inconclusive (the same hotwords-active
+  branch produced both the best and worst runs of the day before
+  `stt.temperature` was pinned to remove the STT's own decode
+  randomness as a confound) — see
+  `docs/field-notes/2026-08-05-stt-hotwords-athena-resume-inconclusive.md`
+  for the full self-correcting methodology story. Once properly
+  controlled (temperature pinned, same mic, back-to-back), hotwords ON
+  did show a real advantage (2/2 vs 0/2 voice-resolved). Bigger finding
+  from the same pass: **microphone hardware swung the resume-success
+  rate far more than hotwords did** (0/2 on a Lavalier to 14/14 on
+  another mic, all else held constant) — worth remembering before
+  crediting any future STT-config change without also controlling for
+  mic.
+- **VAD segmenter could go silent indefinitely (bundled into #204's
+  branch).** Two related live incidents, same day:
+  1. With `vad.max_utterance_s` unset, `UtteranceSegmenter` could lock
+     up permanently — mic capture and AEC processing stayed alive
+     (confirmed via AEC-dump frame-count arithmetic matching wall-clock
+     time), but zero utterances were ever completed, zero log output,
+     for 3+ minutes until the operator gave up and quit.
+  2. Setting `vad.max_utterance_s: 30` (the pre-existing mitigation for
+     exactly this class of bug) stopped the *permanent* lockup but
+     exposed a second, subtler gap: a forced-cap run that never
+     accumulated `min_speech_ms` of confidently-classified speech
+     (audio sitting in the VAD's exit-hysteresis band) was silently
+     discarded — no utterance, no log line, indistinguishable from
+     genuine silence, repeating every 30s cap cycle. Fixed with a new
+     `UtteranceSegmenter.discarded_forced_runs` counter and a
+     `_working_watchdog` heartbeat `WARNING` on increase, so this state
+     is now visible instead of silent. Full write-up:
+     `docs/field-notes/2026-08-05-vad-segmenter-silent-unbounded-lockup.md`.
+- **Web UI showed less than the TUI, twice, in two different ways —
+  both real bugs, one fixed, one open:**
+  - **Fixed (#212, merged):** a web-triggered pause/resume (the
+    Stop/Resume-listening button) correctly flipped the shared
+    `ListeningGate` but never logged or touched the TUI's
+    `ConversationTuiState` — only the voice path did. A session that
+    was genuinely working (resumed via the button after voice kept
+    missing the resume word) read as permanently hung because the TUI
+    kept showing the stale "paused" banner forever.
+    `docs/field-notes/2026-08-05-web-resume-desyncs-tui-display.md`.
+  - **Found, fix ready but not yet merged (#213):** any utterance
+    dropped by *any* gate (paused/not-the-resume-word, low-confidence,
+    etc.) showed in the TUI's transcript pane (which logs everything
+    heard, by design) but never reached the web UI at all —
+    `web_forwarder.forward_transcript()` used to fire only for
+    utterances that survived every gate and reached the backend, not
+    at the same point the TUI logs from. Live-caught example: STT
+    correctly transcribed the literal word "Athena," but it failed the
+    confidence gate (0.33 < 0.40, a short-utterance false negative) and
+    silently vanished from the web view.
+    `docs/field-notes/2026-08-05-web-transcript-forwarding-parity.md`.
+- **Web status line now shows what the backend is doing, not just that
+  it's busy (#205, merged, live-verified in-browser)**: `working
+  (thinking)` / `working (<tool name>)` instead of a bare `working`,
+  closing a gap the TUI's own heartbeat tag has had since PR #190.
+- **PyPI packaging fix (#206, open, CI green, ready to merge) grew into
+  a real publishing-infra pass**, not just the original entry-point bug:
+  - The original fix (`pip install convobox` shipped with every CLI
+    entry point broken — `scripts/` present in the sdist but dropped
+    from the wheel) is unchanged from when it first shipped.
+  - **PyPI distribution renamed to `legionforge-convobox`**, matching
+    this org's own naming convention (PyPI has no namespace scoping;
+    every LegionForge package is prefixed to avoid squatting/ambiguity
+    — `legionforge-guardian`/`legionforge-llm-valet` already exist
+    under the same pattern). Confirmed unclaimed and live-verified via
+    a real `uv build` → clean-venv install → `convobox --help` /
+    `convobox-settings --help` cycle, not just edited and assumed.
+  - **New `publish.yml`** (OIDC Trusted Publishing, no stored PyPI
+    token), dormant until a `vX.Y.Z` tag is actually pushed — every
+    action SHA-pinned (a self-caught inconsistency: `ci.yml` already
+    pins `dev-rig` this way with a comment explaining why; the first
+    draft of `publish.yml` didn't carry the same discipline over).
+  - **The `pypi` GitHub environment is now gated**: restricted to
+    deploys from `main` only, plus a required human reviewer
+    (jp-cruz) before the actual publish job runs — deliberately added
+    ahead of multiple AI agents (not just this one) gaining push access
+    to this and sibling repos. The same environment protection was
+    also brought up to this bar on `LegionForge/guardian` and
+    `LegionForge/llm-valet` (both already live on PyPI, neither had any
+    environment protection before) — see those repos' own settings for
+    detail, not duplicated here since it's cross-repo, not
+    convobox-specific.
+  - **Still open, blocked on the operator, not code**: an org-level
+    GitHub Ruleset (tag-creation restricted to `v*`, required PR review
+    count ≥1, scoped to `convobox`/`guardian`/`llm-valet`) is designed
+    and ready but not yet created — the automation token lacks the
+    `admin:org` scope, which requires an interactive browser
+    authorization only a human can grant (`gh auth refresh -h
+    github.com -s admin:org`). Also found in the same pass: `guardian`'s
+    own CI is more hardened than convobox's (`step-security/harden-
+    runner`, build-provenance attestation, Dependabot-driven action-pin
+    bumps) — worth treating as the reference template going forward,
+    not convobox; `llm-valet`'s `publish.yml` has the same
+    floating-action-tag issue convobox's did before this pass, not yet
+    fixed.
+
 ## Since 0.3.0
 
 27 PRs, `0.3.1` (2026-08-01, see [../CHANGELOG.md](../CHANGELOG.md) for the
