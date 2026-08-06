@@ -19,6 +19,19 @@ name: Publish to PyPI
 # this repo's actual Python floor (3.12, matching pyproject.toml's
 # requires-python and ci.yml's python-version -- not copied blindly from
 # llm-valet's 3.11).
+#
+# Every action below is pinned to a commit SHA, not a floating tag --
+# same discipline ci.yml already applies to dev-rig (see that file's own
+# comment on why a moved tag is a real supply-chain vector), just not
+# consistently carried over here when this file was first written.
+# pypa/gh-action-pypi-publish's `release/v1` ref is a BRANCH, not a tag --
+# more mutable than a normal version tag, not less, so pinning matters
+# even more for it. Resolved 2026-08-06:
+#   actions/checkout@v7                  -> 3d3c42e5aac5ba805825da76410c181273ba90b1
+#   actions/setup-python@v6              -> ece7cb06caefa5fff74198d8649806c4678c61a1
+#   actions/upload-artifact@v7           -> 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+#   actions/download-artifact@v8         -> 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+#   pypa/gh-action-pypi-publish@release/v1 -> dc37677b2e1c63e2034f94d8a5b11f265b73ba33
 
 on:
   push:
@@ -31,9 +44,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -44,7 +57,7 @@ jobs:
         run: python -m build
 
       - name: Upload dist artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist
           path: dist/
@@ -59,10 +72,10 @@ jobs:
 
     steps:
       - name: Download dist artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dist
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
