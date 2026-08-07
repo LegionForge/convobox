@@ -16,6 +16,7 @@ from convobox.config import (
     WebConfig,
     aec_estimate_path,
     load_config,
+    load_config_lenient,
     read_aec_estimate,
     resolve_config_path,
     write_aec_estimate,
@@ -225,6 +226,65 @@ def test_compute_type_every_cpu_supported_value_is_accepted_on_cpu() -> None:
 def test_compute_type_every_cuda_supported_value_is_accepted_on_cuda() -> None:
     for value in STT_COMPUTE_TYPES_CUDA:
         assert STTConfig(device="cuda", compute_type=value).compute_type == value
+
+
+# --- load_config_lenient: settings_tui.py's own startup load, which must
+# never raise -- a bad on-disk value should fall the affected SECTION back
+# to defaults (not the whole file), with the caller told what/why. Live
+# UAT, 2026-08-06: a leftover stt.compute_type: float16 / stt.device: cpu
+# (left over from PR #210's own live-test) crashed settings_tui.py's
+# plain load_config() with an unhandled traceback -- the one tool meant to
+# fix a bad config couldn't even open with one.
+
+
+def test_load_config_lenient_matches_load_config_for_a_valid_file(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text("stt:\n  device: cpu\n  compute_type: int8\n", encoding="utf-8")
+    config, raw, problems = load_config_lenient(path)
+    assert problems == []
+    assert config == load_config(path)
+    assert raw == {"stt": {"device": "cpu", "compute_type": "int8"}}
+
+
+def test_load_config_lenient_returns_defaults_when_the_file_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    config, raw, problems = load_config_lenient(tmp_path / "does-not-exist.yaml")
+    assert config == AppConfig()
+    assert raw == {}
+    assert problems == []
+
+
+def test_load_config_lenient_resets_only_the_bad_section_to_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text(
+        "stt:\n  device: cpu\n  compute_type: float16\n"
+        "tts:\n  engine: piper\n  voice: en_GB-alba-medium\n",
+        encoding="utf-8",
+    )
+    config, raw, problems = load_config_lenient(path)
+    # The bad section falls back to its schema default...
+    assert config.stt == STTConfig()
+    # ...but an unrelated, valid section is untouched.
+    assert config.tts.engine == "piper"
+    assert config.tts.voice == "en_GB-alba-medium"
+    # raw is the as-parsed file, unchanged -- callers can still show what
+    # the rejected value actually was.
+    assert raw["stt"]["compute_type"] == "float16"
+    assert len(problems) == 1
+    assert problems[0].startswith("stt:")
+    assert "float16" in problems[0]
+    assert "cpu" in problems[0]
+
+
+def test_load_config_lenient_never_raises_regardless_of_how_broken_the_section_is(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text("stt:\n  device: cpu\n  compute_type: not-a-real-value\n", encoding="utf-8")
+    config, _raw, problems = load_config_lenient(path)
+    assert config.stt == STTConfig()
+    assert len(problems) == 1
 
 
 # --- WebConfig: off/loopback-only by default (docs/WEB-UI-ARCHITECTURE.md's

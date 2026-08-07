@@ -1132,6 +1132,121 @@ def test_backup_config_returns_none_for_new_file(tmp_path: Path) -> None:
     assert backup_config(tmp_path / "missing.yaml") is None
 
 
+# --- Recovering from a bad on-disk config (docs/field-notes/2026-08-06-
+# settings-tui-cannot-open-invalid-config.md): a leftover stt.compute_type/
+# stt.device mismatch (from PR #210's own live-test) crashed settings_tui.py
+# outright -- the one tool meant to fix a bad config couldn't open with one.
+
+
+def test_list_config_backups_is_newest_first(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    (tmp_path / "convobox.yaml.backup-20260805-100000").write_text("a", encoding="utf-8")
+    (tmp_path / "convobox.yaml.backup-20260806-090000").write_text("b", encoding="utf-8")
+    (tmp_path / "convobox.yaml.backup-20260805-223836").write_text("c", encoding="utf-8")
+    (tmp_path / "unrelated.yaml.backup-20260807-000000").write_text("d", encoding="utf-8")
+
+    backups = settings_tui.list_config_backups(path)
+
+    assert [b.name for b in backups] == [
+        "convobox.yaml.backup-20260806-090000",
+        "convobox.yaml.backup-20260805-223836",
+        "convobox.yaml.backup-20260805-100000",
+    ]
+
+
+def test_list_config_backups_empty_when_none_exist(tmp_path: Path) -> None:
+    assert settings_tui.list_config_backups(tmp_path / "convobox.yaml") == []
+
+
+def test_apply_load_recovery_is_a_no_op_when_nothing_failed() -> None:
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    settings_tui._apply_load_recovery(state, [])
+    assert state.load_problems == []
+    assert state.dirty is False
+    assert state.status == "BIOS style: Left/Right tabs, Up/Down fields, Enter edit"
+
+
+def test_apply_load_recovery_flags_dirty_and_jumps_to_the_bad_section() -> None:
+    config = AppConfig()  # stt already at its (valid) defaults, as load_config_lenient would return
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    problems = ["stt: Value error, compute_type 'float16' is not supported on device 'cpu'"]
+
+    settings_tui._apply_load_recovery(state, problems)
+
+    assert state.load_problems == problems
+    assert state.dirty is True
+    assert state.flagged_sections == {"stt"}
+    assert state.sections[state.selected_section].key == "stt"
+    assert "1 setting(s)" in state.status
+    assert "[B] restore last backup" in state.status
+
+
+def test_section_tabs_marks_a_flagged_section() -> None:
+    config = AppConfig()
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.load_problems = ["stt: bad pairing"]
+
+    tabs = settings_tui._section_tabs(state, 200)
+
+    assert "! STT" in tabs
+    assert "! Audio" not in tabs  # unrelated section stays unmarked
+
+
+def test_restore_from_backup_loads_the_newest_backup_and_clears_load_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "convobox.yaml"
+    good = _make_config(**{"stt.device": "cpu", "stt.compute_type": "int8"})
+    save_with_backup(path, good)  # 1st save: no prior file, so no backup yet
+    save_with_backup(path, AppConfig())  # 2nd save: backs up `good` into .backup-<stamp>
+
+    broken = AppConfig()  # stands in for load_config_lenient's defaults-fallback result
+    state = TuiState(path=path, original=broken, working=broken.model_copy(deep=True))
+    state.load_problems = ["stt: Value error, compute_type 'float16' is not supported"]
+
+    monkeypatch.setattr(settings_tui, "_draw_modal", lambda *a, **k: None)
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ENTER")
+
+    settings_tui._restore_from_backup(state)
+
+    assert state.working.stt.compute_type == "int8"
+    assert state.load_problems == []
+    assert state.dirty is True  # restored value differs from `broken` (state.original)
+    assert "restored from" in state.status
+
+
+def test_restore_from_backup_cancelled_leaves_state_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "convobox.yaml"
+    save_with_backup(path, _make_config(**{"stt.compute_type": "int8"}))  # no backup yet
+    save_with_backup(path, AppConfig())  # backs up the int8 config into .backup-<stamp>
+
+    config = AppConfig()
+    state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
+    state.load_problems = ["stt: bad pairing"]
+
+    monkeypatch.setattr(settings_tui, "_draw_modal", lambda *a, **k: None)
+    monkeypatch.setattr(settings_tui, "read_key", lambda: "ESC")
+
+    settings_tui._restore_from_backup(state)
+
+    assert state.working == config  # unchanged
+    assert state.load_problems == ["stt: bad pairing"]  # unchanged
+    assert state.status == "restore cancelled"
+
+
+def test_restore_from_backup_reports_when_none_exist(tmp_path: Path) -> None:
+    path = tmp_path / "convobox.yaml"
+    config = AppConfig()
+    state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
+
+    settings_tui._restore_from_backup(state)
+
+    assert "no backups found" in state.status
+
+
 def test_save_only_writes_fields_that_actually_differ_from_defaults(tmp_path: Path) -> None:
     # The 2026-07-15 incident this guards against: a plain model_dump()
     # writes EVERY field, including ones the user never touched -- so a
