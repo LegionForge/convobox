@@ -1,10 +1,13 @@
 # Design: opencode artifact-pane wiring (file.edited)
 
-Status: DESIGN RECORDED 2026-08-07, not implemented. Origin: closing
-opencode's half of the artifact-pane gap `docs/KNOWN-ISSUES.md` tracks
-("Web UI: artifact pane gaps") -- codex's half shipped schema-verified in
-PR #219; this is the harder of the two remaining backends (Claude Code
-already ships this).
+Status: DESIGN RECORDED 2026-08-07, revised same day after a real (free)
+live-verification attempt narrowed the open question, still not
+implemented -- BLOCKED on Slice 0, which needs a small real API-cost
+budget JP hasn't approved yet (see below). Origin: closing opencode's
+half of the artifact-pane gap `docs/KNOWN-ISSUES.md` tracks ("Web UI:
+artifact pane gaps") -- codex's half shipped schema-verified in PR #219;
+this is the harder of the two remaining backends (Claude Code already
+ships this).
 
 ## Why this needs a design note and codex's fix didn't
 
@@ -51,16 +54,42 @@ query parameter -- neither current-gen endpoint does. If `directory`
 actually scopes the stream server-side, that's a categorically better
 correlation mechanism than anything client-side (see below) -- but the
 spec gives no parameter description ("Subscribe to events" is the whole
-docstring), so **whether it actually filters, or is accepted and ignored,
-is unconfirmed from the schema alone.** This needs a real live check
-(subscribe with and without `?directory=...` against a real `opencode
-serve` instance with two different working directories, confirm which
-events each connection receives) before it can be trusted -- not
-something a schema fetch can answer. Do this check FIRST, before writing
-the subscription code -- if `directory` genuinely filters, it replaces
-the working-dir-fencing plan below entirely (a real architectural
-simplification, not just a nice-to-have), and the choice of endpoint
-changes from `/api/event` to `/event`.
+docstring), so whether it actually filters, or is accepted and ignored,
+was not resolvable from the schema alone.
+
+**Attempted a real, zero-cost live check same day (2026-08-07, later):**
+started a fresh local `opencode serve`, created a real session scoped to
+a scratch test directory (`POST /api/session`, confirmed via the
+response's `location.directory` matching), subscribed to `/event` both
+with and without `?directory=<that path>`, then wrote a file directly to
+that directory with a plain shell redirect (`echo ... > file`) -- no
+agent, no tool call, no LLM round-trip, genuinely free. **Result: neither
+subscription received a `file.edited` (or `file.watcher.updated`) event
+for the direct filesystem write -- only `server.connected`/
+`server.heartbeat` on both.** This is a real negative result, not just
+"didn't get around to testing it": it strongly suggests `file.edited`
+fires specifically from the agent's own write/edit TOOL CALL completing,
+not from generic filesystem watching -- consistent with the event's name
+("edited" as an agent action, not "changed" as a filesystem verb; compare
+`file.watcher.updated`'s own `add`/`change`/`unlink` enum, which sounds
+more filesystem-shaped but ALSO didn't fire here, so even that generic
+watcher isn't watching an arbitrary directory by default, or needs
+something this test didn't set up).
+
+**Practical consequence: there is no free way to finish this
+verification.** Confirming `file.edited`'s real shape and whether
+`directory` filters it requires provoking a real agent-driven file write
+-- i.e. an actual prompt through a real, costed LLM call (JP's configured
+default is `openai/gpt-5.6-terra`, a paid model; the free Zen catalog is
+explicitly disabled in his own opencode config,
+`disabled_providers: ["opencode"]`). Spending real API cost/credentials
+unattended, without JP's live authorization, was judged out of scope for
+this research pass -- same discipline as not live-UAT-ing PR #219's codex
+wiring with a real mic session. **This is now the single concrete
+blocker on Slice 0**, not a "nice to verify eventually" -- next session
+with JP present and a small API-cost budget should run exactly this test
+(same setup, but with a real one-line prompt like "write a one-sentence
+README to test.md") before writing any adapter code.
 
 Add a second `async for` loop over whichever endpoint the live check
 above confirms (`/event?directory=...` if it filters; `/api/event`
@@ -154,14 +183,18 @@ if event_type == "file.edited":
 
 ## Slicing
 
-- **Slice 0 (do this first, before writing any adapter code):** live-check
-  whether `/event?directory=<path>` actually filters the stream, by
-  opening two connections (one with a `directory` matching a test file's
-  location, one without / with a different one) against a real `opencode
-  serve` and comparing which `file.edited` events each receives -- a real
-  file-write is still needed to generate the event, so this can piggyback
-  on Slice 2's own live-verification step below rather than being fully
-  separate work, but the QUESTION needs answering before Slice 1's fencing
+- **Slice 0 (do this first, before writing any adapter code -- attempted
+  free, blocked on real cost, see above):** live-check whether
+  `/event?directory=<path>` actually filters the stream, and confirm
+  `file.edited`'s real trigger condition, by opening two connections (one
+  with a `directory` matching a test file's location, one without / with
+  a different one) against a real `opencode serve` and comparing which
+  `file.edited` events each receives while a REAL agent-driven file write
+  happens (a direct filesystem write, confirmed 2026-08-07, produces
+  nothing on either stream even with an active session in that
+  directory -- this needs a real prompt/tool-call, i.e. real API cost,
+  not a free shell write). Needs JP present with a small cost budget
+  approved; the question must be answered before Slice 1's fencing
   approach is even decided, not after.
 - **Slice 1 (safe, read-only):** add the second subscription (endpoint
   chosen per Slice 0's finding), log every `file.edited` event that
