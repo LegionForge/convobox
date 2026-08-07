@@ -1098,15 +1098,29 @@
     }
   }
 
+  // path (e.g. "audio.input_device") -> a valid, stable HTML id -- shared
+  // by buildInput() (sets it on the control) and buildFieldRow() (points
+  // its <label for> at it). Every settings field previously rendered a
+  // <label> with no for/id association at all -- programmatically
+  // invisible to a screen reader, same gap the inclusive-design lessons'
+  // forms section calls out explicitly ("every input needs a <label>,
+  // not a placeholder" -- true here for the missing ASSOCIATION too, not
+  // just placeholder-only inputs).
+  function fieldElementId(path) {
+    return `field-${path.replace(/\./g, "-")}`;
+  }
+
   // Kind -> control. Picker kinds (choice/device/kokoro_voice/piper_voice/
   // piper_speaker) share one <select> path: field.unset_value/
   // unavailable_value (from settings_api.py's _field_to_dict) are the
   // TUI's own sentinel strings, never hardcoded here.
   function buildInput(field, path) {
     const value = getPath(draft, path);
+    const fieldId = fieldElementId(path);
 
     if (field.kind === "bool") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "checkbox";
       input.checked = Boolean(value);
       input.addEventListener("change", () => {
@@ -1118,6 +1132,7 @@
 
     if (["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"].includes(field.kind)) {
       const select = document.createElement("select");
+      select.id = fieldId;
       for (const choice of field.choices) {
         const opt = document.createElement("option");
         opt.value = choice;
@@ -1137,6 +1152,7 @@
 
     if (field.kind === "list_str") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "text";
       input.value = (value || []).join(", ");
       input.addEventListener("change", () => {
@@ -1150,6 +1166,7 @@
 
     if (field.kind === "command") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "text";
       input.value = (value || []).join(" ");
       input.addEventListener("change", () => {
@@ -1160,6 +1177,7 @@
 
     if (["int", "optional_int", "float", "optional_float"].includes(field.kind)) {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "number";
       if (field.kind === "float" || field.kind === "optional_float") input.step = "any";
       input.value = value === null || value === undefined ? "" : String(value);
@@ -1176,6 +1194,7 @@
 
     // str / optional_str
     const input = document.createElement("input");
+    input.id = fieldId;
     input.type = "text";
     input.value = value === null || value === undefined ? "" : String(value);
     input.addEventListener("change", () => {
@@ -1191,6 +1210,7 @@
 
     const label = document.createElement("label");
     label.textContent = field.label;
+    label.htmlFor = fieldElementId(path);
     wrap.appendChild(label);
 
     // Input device/output device get their own [Test] button, same
@@ -1205,6 +1225,16 @@
       btn.type = "button";
       btn.className = "settings-test-btn";
       btn.textContent = "Test";
+      // Matches probe_audio()'s real, direction-specific behavior
+      // (scripts/settings_tui.py) -- input records-then-plays-back so you
+      // can hear whether the right mic is picking you up; output just
+      // plays a tone. Don't blur the two into one generic "plays a tone"
+      // claim -- that would be wrong for input_device.
+      btn.title = field.key === "input_device"
+        ? "Records a few seconds from this mic, then plays it back through your speaker so you can hear if it's the right one"
+        : field.key === "output_device"
+        ? "Plays a short test tone through this speaker/output"
+        : `Tests the audio device(s) relevant to ${field.label}`;
       btn.addEventListener("click", () => runTest(field.section, field.key));
       row.appendChild(btn);
       wrap.appendChild(row);
