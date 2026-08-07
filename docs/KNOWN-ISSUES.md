@@ -180,6 +180,62 @@ bug rather than working around it).
 
 ---
 
+## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
+
+**Status:** diagnosed (2026-08-07) by reading the code after a live
+recurrence, **not fixed, not yet forensically confirmed the same way the
+related transcribe()-freeze finding was** (see
+docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md's
+addendum for the live incident this came from). We're still testing
+this one -- recorded now for transparency and so it isn't lost, not
+because a fix is ready.
+
+**Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
+fix, PR #217, was already merged into the checkout): the app went
+completely unresponsive -- multiple confirmed voice attempts produced
+not even a `dropped (...)` log line, and the web UI's Stop-listening
+button (a completely separate code path, an HTTP handler via uvicorn,
+not the mic loop) also produced no log line and no effect. Zero
+`Processing audio` lines appeared for the entire stuck window, meaning
+the freeze happened *before* any utterance was ever handed to
+`transcriber.transcribe()`.
+
+**Why this is a different bug than the transcribe() freeze PR #217
+already fixed:** that fix offloads `transcriber.transcribe()` to a
+thread with an optional timeout -- it only helps once an utterance has
+already been segmented. This incident's total absence of `Processing
+audio` lines means the STT call was never reached at all.
+
+**Root-cause candidate.** `UtteranceSegmenter._process_window()`
+(`src/convobox/vad/segmenter.py`) calls `self._model(torch.from_numpy
+(window), _SAMPLE_RATE).item()` -- a synchronous Silero VAD (ONNX)
+inference call, made once per 512-sample (32ms) window, directly inside
+`async def segment()`'s consumption loop (via `feed()`), with no thread
+offload and no timeout. Same architectural shape as the transcribe()
+bug PR #217 fixed -- a synchronous ML inference call that can freeze the
+whole single-threaded event loop if it ever hangs -- just upstream of
+it and far more frequent (~31 calls/second of audio vs. once per
+completed utterance). `MicrophoneStream`'s own `blocksize: int = 512`
+(`src/convobox/audio/capture.py`) matches `_WINDOW_SAMPLES` exactly, so
+every mic chunk feeds exactly one VAD window through this same
+synchronous path -- there's no batching that would reduce call
+frequency at the chunk-consumption layer.
+
+**Why not fixed yet, and the design wrinkle that makes this harder than
+PR #217:** `transcribe()` is called once per completed utterance;
+offloading it to `asyncio.to_thread()` per call is cheap relative to
+its own cost. This model call happens ~31x/second -- offloading every
+individual window call the same way would add real per-call thread-pool
+overhead at that frequency, potentially comparable in magnitude to
+Silero's own (very fast) inference time. The likely right fix is
+offloading at the `feed()` (per-chunk) granularity rather than per-
+window (the two are ~1:1 today given the blocksize match, but `feed()`
+is the natural async/sync boundary `segment()`'s generator already
+awaits at, and doesn't require reaching inside `_process_window()`) --
+proposed, not yet built or benchmarked for the added-overhead tradeoff.
+
+---
+
 ## WASAPI output plays speech an octave too high ("static chipmunk")
 
 **Status:** deferred (2026-07-12). Mitigation: use an **MME** output device.
@@ -418,6 +474,32 @@ in `GET /api/model` (the Zen catalog: grok-code, kimi-k2.5-free,
 minimax-m3-free, qwen3.6-plus-free, ...). Config default `"model"` is
 also ignored for API sessions (always Zen `hy3-free`).
 
+**Follow-up (2026-08-07): a real upstream fix for the root cause
+described above appears to exist, but this is diagnosed from opencode's
+own changelog, NOT live-reverified against ConvoBox -- do not treat as
+resolved without re-running the curl matrix above first.** opencode has
+shipped 12 releases since 1.18.3 (up to v1.18.15 as of this check,
+`gh release list -R sst/opencode`). Two changes in that range look like
+they fix exactly this mechanism ("the server's API path never loads the
+OAuth-credentialed provider"): **`fix(app): refresh V1 providers after
+auth` (sst/opencode#38786, merged 2026-07-25)** -- its own root-cause
+description: "V1 provider state is instance-cached... the refetch kept
+returning the pre-auth connected-provider list," i.e. a newly
+OAuth-authenticated provider's catalog never got rebuilt, which is the
+same symptom as `GET /api/model` never listing `openai` here -- and
+**`fix(app): refresh global provider state` (sst/opencode#39220, merged
+2026-07-28)**, a closely related follow-up. Both predate the locally
+installed v1.18.13 by several releases. **Not done, deliberately:** no
+live opencode session was run to confirm `GET /api/model` now lists an
+OAuth-authenticated provider, or that a `backend.model` pin against it
+actually generates -- that would need a real API round-trip against a
+live-authenticated provider, out of scope for an unattended research
+pass. **Next step, concrete:** re-run the exact curl matrix this entry
+already documents (pin `openai/*`, check `GET /api/model`, watch for a
+generated reply) against the currently-installed opencode version before
+re-enabling `backend.model` in any config -- if it passes, this whole
+entry can move to a changelog/fixed note instead of KNOWN-ISSUES.md.
+
 ---
 
 ## Web UI: artifact pane gaps (0.3.0)
@@ -425,22 +507,75 @@ also ignored for API sessions (always Zen `hy3-free`).
 **Status:** diagnosed/scoped, deferred. The web UI (docs/WEB-UI-USAGE.md)
 is new in 0.3.0 -- these are known rough edges, not silently-missed bugs.
 
-**PDF doesn't render in the artifact pane.** Live-confirmed 2026-07-28: a
-PDF renders correctly in a standalone browser tab (BrowserOS's own
-PDFium, no plugin needed) but shows nothing when opened through
-`GET /api/artifacts/{path}` inside the pane's frame. Root cause not yet
-inspected (frontend content-type dispatch most likely assumes HTML/
-image and gives `.pdf` no `<iframe>`/`<embed>` treatment, or the
-artifacts route isn't setting `Content-Type: application/pdf`) --
-`docs/ARTIFACT-PANE-SCOPE.md` only documents image/plot/HTML as in-scope
-today, so this may end up a documented exclusion rather than a fix; JP's
-call, not yet made.
+**PDF doesn't render inline in the artifact pane -- confirmed intentional
+v1 design, not a bug (resolved as a non-issue, per the ConvoBox quickref's
+PR #176 entry, 2026-07-29; this entry itself never got updated to say
+so).** The original 2026-07-28 report observed a PDF opened via
+`GET /api/artifacts/{path}` showing nothing inside the pane's frame.
+Re-checked directly against current code: `src/convobox/adapters/base.py`'s
+`ARTIFACT_MEDIA_TYPES` already maps `.pdf` -> `application/pdf`, so the
+serving route (`src/convobox/web/artifacts.py`) sets the correct
+`Content-Type` via `FileResponse` -- the backend was never the gap. The
+frontend (`index.html`'s `renderArtifact()`) deliberately does NOT put
+PDFs (or CSV/txt/md) in an `<iframe>`, by design: only
+`_ARTIFACT_IMAGE_EXTENSIONS` get an `<img>` and `_ARTIFACT_HTML_EXTENSIONS`
+get a sandboxed `<iframe>`; everything else in the allowlist renders a
+plain "Download {filename}" link instead, exactly matching
+`docs/ARTIFACT-PANE-SCOPE.md`'s own documented v1 rendering scope ("PDF/
+CSV/plain text -> punt to a simple embed/pre fallback or a download link;
+not worth [building rich viewers for] v1"). So today's real behavior is a
+working download link, not a blank frame -- the "shows nothing" symptom
+either predates this fallback-link code (same commit that shipped it,
+`b40146e`, 2026-07-28) or was testing the raw API URL directly rather
+than the real pane UI. No fix needed; a richer PDF/CSV viewer remains a
+legitimate future v2 idea, not an open bug.
 
 **opencode/codex backends don't trigger the artifact pane at all.** Only
 the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
-(`src/convobox/adapters/claude_code.py`). opencode's `file.edited` event
-path format hasn't been live-verified yet (blocks wiring it up); codex
-hasn't been looked at. See `docs/ARTIFACT-PANE-SCOPE.md`.
+(`src/convobox/adapters/claude_code.py`). See `docs/ARTIFACT-PANE-SCOPE.md`.
+(codex's half of this gap has a schema-verified fix in flight -- see PR #219.)
+
+**opencode's `file.edited` event: the payload shape is now known, and it
+turns out to be a bigger wiring job than "verify the format," not a
+smaller one.** (2026-08-07, schema-checked against a real local
+`opencode serve` instance, v1.18.13 -- `GET /doc`'s OpenAPI 3.1 spec
+fetched live, no prompt sent, no LLM call made, zero cost.) Two real
+findings:
+
+1. **The payload is trivial**: `FileEdited`/`EventFileEdited`'s schema is
+   just `{type: "file.edited", data: {file: <path string>}}` (or
+   `properties: {file: ...}` on the older `/event` variant) -- no
+   status/confirmation field at all, unlike codex's `fileChange` (which
+   has `inProgress`/`completed`/`failed`/`declined`). If it arrived on
+   the adapter's existing stream, wiring it would be close to trivial.
+2. **It does NOT arrive on the adapter's existing stream, though --
+   confirmed from the schema, not guessed.** `OpenCodeAdapter.events()`
+   subscribes to `GET /api/session/{sessionID}/event`, whose SSE payload
+   is typed `SessionDurableEvent` -- a 28-member union (`SessionNext*`
+   only: prompted, step/tool/text/reasoning lifecycle, compaction,
+   revert). `file.edited` is NOT one of those 28 members. It only
+   appears in the broader `Event` (`/event`, 89 members) and `V2Event`
+   (`/api/event`, 88 members) unions -- i.e. it's a **global,
+   not session-scoped** event. Wiring it up means a SECOND, separate SSE
+   subscription (`/api/event` most likely, matching the versioned `/api/`
+   surface the rest of this adapter already uses) running alongside the
+   existing session-scoped one, not just a new case in the current event
+   parser. There's also a real correlation question the schema alone
+   doesn't answer: `file.edited`'s `data` has no session ID, only a bare
+   path, so multiple concurrent opencode sessions (if that's ever a real
+   ConvoBox scenario) would be indistinguishable on this stream --
+   `GlobalEvent`'s own envelope carries `directory`/`project`/`workspace`
+   fields that might be enough to scope it to "this adapter's own
+   server," but that's an architecture question, not confirmed here.
+
+**Not done, deliberately:** no code was written for this. This is schema
+evidence clarifying scope, the same discipline as the codex investigation
+(PR #219). The follow-up design call this entry originally asked for is
+now written up: `docs/DESIGN-opencode-artifact-pane-wiring.md` (a second
+concurrent `/api/event` subscription, `working_dir` fencing as the
+correlation mechanism in place of a session ID the payload doesn't carry,
+sliced into a log-only step before a real `ARTIFACT`-emitting one) -- not
+implemented, still a design note, not a blind port of the codex pattern.
 
 ---
 

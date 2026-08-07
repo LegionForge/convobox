@@ -155,6 +155,27 @@ mitigation for the failure mode above), plus opt-in
 each. Worth exhausting these first (near-zero cost, already built) before
 spending real effort on either alternative-engine option above.
 
+**One-month follow-up (2026-08-07, no live hardware -- a status check, not
+a re-test):** the ctranslate2 allocator leak (see KNOWN-ISSUES.md) is
+still open upstream with no fix, and one issue previously read as "closed,
+unclear if it covers the leak" turns out to have closed over a live,
+unaddressed new leak report -- read as no material change. `onnx-asr`
+(the Parakeet TDT vehicle) looks healthier than it did a month ago:
+active monthly releases, explicit Windows+CUDA+DirectML support, and a
+previously-open GPU-slowness issue now closed -- strengthens the case for
+a real prototype, still not started. `openWakeWord`'s maintenance has
+visibly slowed (no tagged release since 2024-02) with an open, unresolved
+Windows error on this project's own dev platform -- new reason for
+caution beyond the already-known integration cost. New candidate spotted:
+**Moonshine** (`moonshine-ai/moonshine`) -- very actively developed,
+English models cleanly MIT-licensed, but its hallucination-control claims
+are currently blog-sourced and unverified (same category of claim that
+burned this project once already with FunASR); worth a real look later,
+not acted on now. Full sourcing and reasoning:
+`docs/field-notes/2026-08-07-stt-engine-continued-investment-research.md`.
+Net recommendation: keep faster-whisper shipped, treat a real `onnx-asr`
+prototype as "when, not if" rather than urgent.
+
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)
@@ -192,6 +213,30 @@ this is real, non-trivial work for the one platform where it's hardest
 to get right, with no CI/automated way to exercise real mouse events
 either way. Worth doing once the keyboard controls have had a live UAT
 pass and mouse support is still wanted -- not blocking today's fix.
+
+### Web UI transcript timestamps, user-configurable on/off (proposed, scoped)
+The TUI's transcript pane has always shown a per-line timestamp; the web
+UI never has, in either its live SSE stream or its history replay --
+raised directly by JP during a live UAT session (2026-08-06) after
+needing timestamps to correlate what he said against the log while
+diagnosing an unrelated STT freeze (docs/field-notes/
+2026-08-06-resume-word-hallucination-and-runaway-repetition.md).
+
+Scoped, not yet built:
+- `history.py`'s `events` table already stores a `timestamp REAL`
+  (epoch seconds) column per row, and `get_session_events()`'s
+  `SELECT *` already returns it -- history replay has the data today,
+  the frontend just never renders it.
+- The **live** SSE stream is the actual gap: `WebEventForwarder.
+  __call__`'s broadcast (via `event_to_dict()`) and `forward_transcript
+  ()`'s `{"type": "transcript", ...}` payload carry no timestamp field
+  at all today. Adding one (`time.time()`, matching the DB column's own
+  epoch-seconds shape so both paths can share one frontend formatter)
+  closes that gap.
+- JP wants this **user-configurable on/off**, not always-on (unlike the
+  TUI, which has no such toggle) -- needs a new `display.*` (or
+  `web.*`) boolean setting, exposed in both Settings surfaces, not just
+  a frontend-only visual tweak.
 
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response
