@@ -1,10 +1,38 @@
 [project]
-name = "convobox"
+name = "legionforge-convobox"
 version = "0.3.1"
 description = "Local, backend-agnostic voice frontend for CLI coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+authors = [
+    { name = "JP Cruz", email = "jp@legionforge.org" },
+]
+# "3 - Alpha" is accurate, not aspirational: pre-PyPI-publish, early/active
+# development. Only claims the Python version this project actually tests
+# against (requires-python's own floor, and lint.yml's CI matrix) -- no
+# 3.13/3.14 classifier without that being true.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = [
+    "voice-assistant",
+    "speech-to-text",
+    "text-to-speech",
+    "claude-code",
+    "codex",
+    "opencode",
+    "coding-agent",
+    "cli",
+]
 dependencies = [
     "sounddevice>=0.4.7",
     "numpy>=1.26",
@@ -16,6 +44,11 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/LegionForge/convobox"
+Repository = "https://github.com/LegionForge/convobox"
+Issues = "https://github.com/LegionForge/convobox/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -94,6 +127,7 @@ analysis = [
 ]
 
 [project.scripts]
+convobox = "scripts.run_convobox:main"
 convobox-spike = "scripts.spike:main"
 convobox-settings = "scripts.settings_tui:main"
 
@@ -102,7 +136,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/convobox"]
+# Live-verified, 2026-08-03: without "scripts" here, `pip install convobox`
+# from the built wheel left every [project.scripts] entry point broken
+# (ModuleNotFoundError: No module named 'scripts') -- the scripts/ package
+# was present in the sdist but never made it into the wheel, the thing
+# pip actually installs from. scripts.run_convobox/settings_tui/spike are
+# real first-party modules (not build tooling), they just live outside
+# src/convobox for historical reasons (standalone-run via `python
+# scripts/foo.py`, predating packaging as installable entry points).
+packages = ["src/convobox", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

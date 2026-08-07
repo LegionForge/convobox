@@ -280,6 +280,67 @@ def test_was_forced_true_only_for_the_capped_utterance_not_the_next_natural_one(
     assert seg.was_forced is False
 
 
+# --- discarded_forced_runs: live incident, 2026-08-05 (docs/field-notes/
+# 2026-08-05-vad-segmenter-silent-unbounded-lockup.md) -- max_utterance_s
+# stops a PERMANENT lockup, but a run that hits the cap without ever
+# accumulating min_speech_ms of confident speech (audio sitting in the
+# exit-hysteresis band) is discarded with zero other observable effect: no
+# utterance, no log line, indistinguishable from genuine silence. This
+# counter is the fix's own visibility mechanism. ---
+
+
+def test_discarded_forced_runs_zero_initially(monkeypatch: pytest.MonkeyPatch) -> None:
+    seg, _ = _make_capped_segmenter(monkeypatch, [0.9] * 5, max_utterance_s=1.0)
+    assert seg.discarded_forced_runs == 0
+
+
+def test_discarded_forced_runs_increments_when_cap_fires_without_enough_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One confident-speech window triggers the run, then hysteresis-band
+    # windows (0.35-0.5, neither >= threshold nor < threshold - 0.15) fill
+    # the rest of the 1s cap -- speech_windows never reaches
+    # _MIN_SPEECH_WINDOWS, so the forced run must be discarded, not emitted.
+    cap_windows = 31
+    probs = [0.9] + [0.4] * (cap_windows - 1)
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    utterances = seg.feed(_windows(cap_windows))
+
+    assert utterances == []
+    assert seg.discarded_forced_runs == 1
+    # The cap still resets state either way -- a discarded run is not stuck.
+    assert seg.in_speech is False
+
+
+def test_discarded_forced_runs_not_incremented_when_cap_emits_normally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probs = [0.9] * 70
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    utterances = seg.feed(_windows(70))
+
+    assert len(utterances) == 2
+    assert seg.discarded_forced_runs == 0
+
+
+def test_discarded_forced_runs_not_incremented_for_a_natural_short_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A short run that ends NATURALLY (silence, not the cap) and gets
+    # dropped for being under min_speech_ms is a different, pre-existing
+    # code path (forced=False) -- must not be counted here.
+    speech_windows = _MIN_SPEECH_WINDOWS - 1
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=60.0)
+
+    utterances = seg.feed(_windows(speech_windows + _MIN_SILENCE_WINDOWS))
+
+    assert utterances == []
+    assert seg.discarded_forced_runs == 0
+
+
 def test_no_cap_preserves_unbounded_behavior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
