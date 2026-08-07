@@ -1358,9 +1358,14 @@
     closeArmed = false;
     clearTimeout(closeArmTimer);
     closeBtn.textContent = "×";
+    // Focus must never just vanish when a modal closes (WCAG 2.4.3) --
+    // settingsBtn is the only thing that ever opens this dialog, so
+    // there's no "previously focused element" to track, just send focus
+    // straight back to it.
+    settingsBtn.focus();
   }
 
-  closeBtn.addEventListener("click", () => {
+  function attemptClose() {
     if (!isDirty() || closeArmed) {
       doClose();
       return;
@@ -1373,6 +1378,39 @@
       closeBtn.textContent = "×";
       closeBtn.title = "Close settings";
     }, 4000);
+  }
+
+  closeBtn.addEventListener("click", attemptClose);
+
+  // Keyboard support a modal dialog is expected to have (WCAG 2.1.1/2.1.2):
+  // Esc closes it (same arm/discard-confirm as the × button, not a silent
+  // bypass of unsaved-changes protection), and Tab/Shift+Tab cycle only
+  // among the dialog's own focusable elements instead of escaping into the
+  // page underneath -- aria-modal="true" on its own does not enforce this
+  // in any browser; it has to be done by hand.
+  overlay.addEventListener("keydown", (e) => {
+    if (overlay.hidden) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      attemptClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(
+      overlay.querySelectorAll(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((el) => el.offsetParent !== null); // skip hidden (e.g. [hidden] ancestors, display:none)
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   });
 
   saveBtn.addEventListener("click", saveSettings);
@@ -1388,6 +1426,10 @@
     errorsEl.hidden = true;
     overlay.hidden = false;
     await fetchSchema();
+    // Send focus INTO the dialog now that it has real content -- a modal
+    // that opens without moving focus leaves a screen reader/keyboard
+    // user still "in" the page behind it, unaware anything changed.
+    closeBtn.focus();
   });
 })();
 </script>
