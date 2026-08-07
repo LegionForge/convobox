@@ -411,6 +411,13 @@
     animation: settings-spin 0.8s linear infinite; vertical-align: -0.1em;
   }
   @keyframes settings-spin { to { transform: rotate(360deg); } }
+  /* WCAG 2.3.3 -- never animate without checking this. An infinite spin
+     can be a genuine vestibular-disorder trigger, not just a preference;
+     the pending state is still fully conveyed by the text next to it
+     ("Testing… (Ns)"), so freezing the spinner loses no information. */
+  @media (prefers-reduced-motion: reduce) {
+    .settings-status.pending::before { animation: none; }
+  }
   .settings-footer button {
     font-size: 0.82rem; padding: 0.4rem 0.8rem; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
@@ -423,8 +430,8 @@
 <header class="ribbon">
   <img class="logo" src="img/legionforge-logo.svg" alt="LegionForge">
   <span class="brand">ConvoBox</span>
-  <span id="status" class="disconnected">connecting&hellip;</span>
-  <span id="activity-status"></span>
+  <span id="status" class="disconnected" role="status" aria-live="polite">connecting&hellip;</span>
+  <span id="activity-status" role="status" aria-live="polite"></span>
   <span class="spacer"></span>
   <label for="session-select" class="visually-hidden">Saved session</label>
   <select id="session-select" title="Switch between saved conversation sessions -- only populated when Settings &gt; Web &gt; history tracking is on"></select>
@@ -462,12 +469,12 @@
       <button id="settings-close-btn" type="button" aria-label="Close settings" title="Close settings">&times;</button>
     </div>
     <div id="settings-tabs" class="settings-tabs"></div>
-    <div id="settings-errors" class="settings-errors" hidden></div>
+    <div id="settings-errors" class="settings-errors" role="alert" hidden></div>
     <div id="settings-body" class="settings-body"></div>
     <div class="settings-footer">
       <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden title="Try this tab's current settings live without saving them to disk yet (e.g. downloads/tests an STT or TTS model)">Test this section</button>
       <button id="settings-cancel-test-btn" type="button" class="settings-test-btn" hidden title="Stop waiting for the test -- the server keeps running it in the background regardless">Cancel</button>
-      <span id="settings-status" class="settings-status"></span>
+      <span id="settings-status" class="settings-status" role="status" aria-live="polite"></span>
       <span class="spacer"></span>
       <button id="settings-save-btn" type="button" class="primary" title="Save changes to convobox.yaml -- some settings need a restart to take effect">Save</button>
     </div>
