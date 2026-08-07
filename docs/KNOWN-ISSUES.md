@@ -474,6 +474,32 @@ in `GET /api/model` (the Zen catalog: grok-code, kimi-k2.5-free,
 minimax-m3-free, qwen3.6-plus-free, ...). Config default `"model"` is
 also ignored for API sessions (always Zen `hy3-free`).
 
+**Follow-up (2026-08-07): a real upstream fix for the root cause
+described above appears to exist, but this is diagnosed from opencode's
+own changelog, NOT live-reverified against ConvoBox -- do not treat as
+resolved without re-running the curl matrix above first.** opencode has
+shipped 12 releases since 1.18.3 (up to v1.18.15 as of this check,
+`gh release list -R sst/opencode`). Two changes in that range look like
+they fix exactly this mechanism ("the server's API path never loads the
+OAuth-credentialed provider"): **`fix(app): refresh V1 providers after
+auth` (sst/opencode#38786, merged 2026-07-25)** -- its own root-cause
+description: "V1 provider state is instance-cached... the refetch kept
+returning the pre-auth connected-provider list," i.e. a newly
+OAuth-authenticated provider's catalog never got rebuilt, which is the
+same symptom as `GET /api/model` never listing `openai` here -- and
+**`fix(app): refresh global provider state` (sst/opencode#39220, merged
+2026-07-28)**, a closely related follow-up. Both predate the locally
+installed v1.18.13 by several releases. **Not done, deliberately:** no
+live opencode session was run to confirm `GET /api/model` now lists an
+OAuth-authenticated provider, or that a `backend.model` pin against it
+actually generates -- that would need a real API round-trip against a
+live-authenticated provider, out of scope for an unattended research
+pass. **Next step, concrete:** re-run the exact curl matrix this entry
+already documents (pin `openai/*`, check `GET /api/model`, watch for a
+generated reply) against the currently-installed opencode version before
+re-enabling `backend.model` in any config -- if it passes, this whole
+entry can move to a changelog/fixed note instead of KNOWN-ISSUES.md.
+
 ---
 
 ## Web UI: artifact pane gaps (0.3.0)
