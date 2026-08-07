@@ -494,9 +494,48 @@ call, not yet made.
 
 **opencode/codex backends don't trigger the artifact pane at all.** Only
 the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
-(`src/convobox/adapters/claude_code.py`). opencode's `file.edited` event
-path format hasn't been live-verified yet (blocks wiring it up); codex
-hasn't been looked at. See `docs/ARTIFACT-PANE-SCOPE.md`.
+(`src/convobox/adapters/claude_code.py`). See `docs/ARTIFACT-PANE-SCOPE.md`.
+(codex's half of this gap has a schema-verified fix in flight -- see PR #219.)
+
+**opencode's `file.edited` event: the payload shape is now known, and it
+turns out to be a bigger wiring job than "verify the format," not a
+smaller one.** (2026-08-07, schema-checked against a real local
+`opencode serve` instance, v1.18.13 -- `GET /doc`'s OpenAPI 3.1 spec
+fetched live, no prompt sent, no LLM call made, zero cost.) Two real
+findings:
+
+1. **The payload is trivial**: `FileEdited`/`EventFileEdited`'s schema is
+   just `{type: "file.edited", data: {file: <path string>}}` (or
+   `properties: {file: ...}` on the older `/event` variant) -- no
+   status/confirmation field at all, unlike codex's `fileChange` (which
+   has `inProgress`/`completed`/`failed`/`declined`). If it arrived on
+   the adapter's existing stream, wiring it would be close to trivial.
+2. **It does NOT arrive on the adapter's existing stream, though --
+   confirmed from the schema, not guessed.** `OpenCodeAdapter.events()`
+   subscribes to `GET /api/session/{sessionID}/event`, whose SSE payload
+   is typed `SessionDurableEvent` -- a 28-member union (`SessionNext*`
+   only: prompted, step/tool/text/reasoning lifecycle, compaction,
+   revert). `file.edited` is NOT one of those 28 members. It only
+   appears in the broader `Event` (`/event`, 89 members) and `V2Event`
+   (`/api/event`, 88 members) unions -- i.e. it's a **global,
+   not session-scoped** event. Wiring it up means a SECOND, separate SSE
+   subscription (`/api/event` most likely, matching the versioned `/api/`
+   surface the rest of this adapter already uses) running alongside the
+   existing session-scoped one, not just a new case in the current event
+   parser. There's also a real correlation question the schema alone
+   doesn't answer: `file.edited`'s `data` has no session ID, only a bare
+   path, so multiple concurrent opencode sessions (if that's ever a real
+   ConvoBox scenario) would be indistinguishable on this stream --
+   `GlobalEvent`'s own envelope carries `directory`/`project`/`workspace`
+   fields that might be enough to scope it to "this adapter's own
+   server," but that's an architecture question, not confirmed here.
+
+**Not done, deliberately:** no code was written for this. This is schema
+evidence clarifying scope, the same discipline as the codex investigation
+(PR #219) -- next step for whoever picks this up is a real design call on
+the two-subscription approach (worth its own small design note before
+implementation, given it's a bigger change than codex's single-stream fix
+turned out to be), not a blind port of the codex pattern.
 
 ---
 
