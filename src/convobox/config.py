@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from convobox.approval import ApprovalDetector
 from convobox.interrupt_presets import resolve_preset
@@ -70,6 +70,25 @@ STT_COMPUTE_TYPES: tuple[str, ...] = (
     "float16",
     "bfloat16",
     "float32",
+)
+
+# Per-device breakdown of the same real ctranslate2 4.8.1 precisions, from
+# the same verification method (ctranslate2.get_supported_compute_types(...)),
+# so an incompatible device/compute_type pairing (e.g. compute_type: float16
+# with device: cpu) can be rejected with a clear config-level error instead
+# of a raw ValueError three layers deep inside ctranslate2's Whisper
+# constructor. "default" is deliberately excluded from both -- it's a
+# sentinel resolved internally (int8 on cpu, float16 on cuda), never a real
+# compute type passed to ctranslate2 directly, so it's valid on any device.
+STT_COMPUTE_TYPES_CPU: tuple[str, ...] = ("float32", "int16", "int8", "int8_float32")
+STT_COMPUTE_TYPES_CUDA: tuple[str, ...] = (
+    "bfloat16",
+    "float16",
+    "float32",
+    "int8",
+    "int8_bfloat16",
+    "int8_float16",
+    "int8_float32",
 )
 
 
@@ -161,6 +180,32 @@ class STTConfig(BaseModel):
 
         TranscriptCorrector(v)
         return v
+
+    @model_validator(mode="after")
+    def _validate_compute_type_matches_device(self) -> STTConfig:
+        # Only device: cpu/cuda are checked -- device: auto (or anything
+        # else) resolves its real target at construction time, so there's
+        # nothing to validate against here. compute_type: default is always
+        # valid on any device (see STT_COMPUTE_TYPES_CPU/CUDA's docstring).
+        # Without this, an incompatible pairing (e.g. float16 on cpu) passes
+        # config validation cleanly and only fails three layers deep inside
+        # ctranslate2's Whisper constructor with a raw traceback -- live-hit
+        # 2026-08-03 hand-editing convobox.yaml after a device swap.
+        if self.compute_type == "default":
+            return self
+        if self.device == "cpu" and self.compute_type not in STT_COMPUTE_TYPES_CPU:
+            raise ValueError(
+                f"compute_type {self.compute_type!r} is not supported on "
+                f"device 'cpu' -- use one of {STT_COMPUTE_TYPES_CPU} "
+                "or 'default'"
+            )
+        if self.device == "cuda" and self.compute_type not in STT_COMPUTE_TYPES_CUDA:
+            raise ValueError(
+                f"compute_type {self.compute_type!r} is not supported on "
+                f"device 'cuda' -- use one of {STT_COMPUTE_TYPES_CUDA} "
+                "or 'default'"
+            )
+        return self
 
 
 class TTSConfig(BaseModel):
