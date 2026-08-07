@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from convobox.approval import ApprovalDetector
 from convobox.interrupt_presets import resolve_preset
@@ -72,6 +79,25 @@ STT_COMPUTE_TYPES: tuple[str, ...] = (
     "float32",
 )
 
+# Per-device breakdown of the same real ctranslate2 4.8.1 precisions, from
+# the same verification method (ctranslate2.get_supported_compute_types(...)),
+# so an incompatible device/compute_type pairing (e.g. compute_type: float16
+# with device: cpu) can be rejected with a clear config-level error instead
+# of a raw ValueError three layers deep inside ctranslate2's Whisper
+# constructor. "default" is deliberately excluded from both -- it's a
+# sentinel resolved internally (int8 on cpu, float16 on cuda), never a real
+# compute type passed to ctranslate2 directly, so it's valid on any device.
+STT_COMPUTE_TYPES_CPU: tuple[str, ...] = ("float32", "int16", "int8", "int8_float32")
+STT_COMPUTE_TYPES_CUDA: tuple[str, ...] = (
+    "bfloat16",
+    "float16",
+    "float32",
+    "int8",
+    "int8_bfloat16",
+    "int8_float16",
+    "int8_float32",
+)
+
 
 class STTConfig(BaseModel):
     # Which STT engine to build (see convobox.stt.factory). Only
@@ -102,6 +128,45 @@ class STTConfig(BaseModel):
     # glossary in config makes every rewrite inspectable and portable, rather
     # than silently training on a user's voice data.
     corrections: dict[str, str] = Field(default_factory=dict)
+    # Passed straight through to faster-whisper's own transcribe(hotwords=...)
+    # -- a free-text prompt bias toward words/phrases the model should
+    # recognize more readily. Live UAT, 2026-08-02: a short, out-of-vocabulary
+    # word (a configured resume_word) was repeatedly hallucinated as unrelated
+    # fluent sentences ("We'll see you on the other side.", Cyrillic text)
+    # rather than being misheard as something similar -- the well-documented
+    # Whisper failure mode on short/low-signal clips. Operators should
+    # include their resume_word, safeword.hard_stop_phrases, and
+    # interaction.approval_phrase here (space-separated) to bias toward the
+    # exact short phrases most likely to hit this failure mode. Deliberately
+    # not auto-derived from those configs: STTConfig has no dependency on
+    # InteractionConfig/SafewordConfig today, and hotwords is a real-word
+    # accuracy nudge, not a safety mechanism -- the safeword/resume-word
+    # checks themselves still run on the raw transcript regardless of
+    # whether this helped or not.
+    hotwords: str | None = None
+    # None (default) leaves faster-whisper's own condition_on_previous_text
+    # default (True) untouched -- zero behavior change unless explicitly
+    # set. False is the second of the three related levers flagged
+    # alongside hotwords (SOTA STT research pass, 2026-08-03): disabling it
+    # stops a low-signal/short utterance's decode from being biased by
+    # whatever fluent text the PREVIOUS segment produced, which is one
+    # documented contributor to the hallucinate-a-fluent-unrelated-sentence
+    # failure mode this project hit live with a short resume_word. Unlike
+    # hotwords (a clear, low-risk accuracy nudge), this is a real tradeoff
+    # -- worth testing, not yet validated live -- so it stays opt-in rather
+    # than a new default.
+    condition_on_previous_text: bool = True
+    # None (default) leaves faster-whisper's own temperature fallback
+    # ladder ([0.0, 0.2, 0.4, ... 1.0]) untouched -- zero behavior change
+    # unless explicitly set. A float pins decoding to that single
+    # temperature instead -- 0.0 (fully deterministic, no higher-randomness
+    # retries) is the specific value the same research pass flagged: on an
+    # already-short/low-signal clip, the fallback ladder's higher-
+    # temperature retries are themselves a plausible source of the
+    # hallucinated-fluent-sentence failure mode, not just a recovery
+    # mechanism. Also not yet validated live -- opt-in, not a new default,
+    # same reasoning as condition_on_previous_text above.
+    temperature: float | None = None
 
     @field_validator("compute_type")
     @classmethod
@@ -122,6 +187,32 @@ class STTConfig(BaseModel):
 
         TranscriptCorrector(v)
         return v
+
+    @model_validator(mode="after")
+    def _validate_compute_type_matches_device(self) -> STTConfig:
+        # Only device: cpu/cuda are checked -- device: auto (or anything
+        # else) resolves its real target at construction time, so there's
+        # nothing to validate against here. compute_type: default is always
+        # valid on any device (see STT_COMPUTE_TYPES_CPU/CUDA's docstring).
+        # Without this, an incompatible pairing (e.g. float16 on cpu) passes
+        # config validation cleanly and only fails three layers deep inside
+        # ctranslate2's Whisper constructor with a raw traceback -- live-hit
+        # 2026-08-03 hand-editing convobox.yaml after a device swap.
+        if self.compute_type == "default":
+            return self
+        if self.device == "cpu" and self.compute_type not in STT_COMPUTE_TYPES_CPU:
+            raise ValueError(
+                f"compute_type {self.compute_type!r} is not supported on "
+                f"device 'cpu' -- use one of {STT_COMPUTE_TYPES_CPU} "
+                "or 'default'"
+            )
+        if self.device == "cuda" and self.compute_type not in STT_COMPUTE_TYPES_CUDA:
+            raise ValueError(
+                f"compute_type {self.compute_type!r} is not supported on "
+                f"device 'cuda' -- use one of {STT_COMPUTE_TYPES_CUDA} "
+                "or 'default'"
+            )
+        return self
 
 
 class TTSConfig(BaseModel):
@@ -541,6 +632,61 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     with candidate.open() as f:
         raw = yaml.safe_load(f) or {}
     return AppConfig.model_validate(raw)
+
+
+def load_config_lenient(
+    path: str | Path | None = None,
+) -> tuple[AppConfig, dict[str, Any], list[str]]:
+    """Like load_config, but never raises on a bad on-disk value: any
+    top-level section that fails its own validation (e.g. an incompatible
+    stt.compute_type/stt.device pairing) falls back to that section's
+    defaults instead of failing the whole file, and the caller gets back
+    which section(s) were rejected and why.
+
+    Exists for settings_tui.py's own startup load -- the one tool meant to
+    let an operator FIX a bad convobox.yaml previously couldn't open at
+    all if the file already had one (live UAT, 2026-08-06: a leftover
+    stt.compute_type: float16 with stt.device: cpu, from PR #210's own
+    live-test, crashed both run_convobox.py -- correctly, that one should
+    refuse to start a voice session on an unvalidated config -- AND
+    settings_tui.py, which shouldn't, since recovering from exactly this
+    is its entire purpose). run_convobox.py intentionally keeps using
+    plain load_config()/model_validate() and still hard-fails on a bad
+    config; only the settings editor gets the forgiving path in.
+
+    Returns (config, raw, problems): config is always a fully valid
+    AppConfig (bad sections reset to their defaults); raw is the
+    as-parsed YAML dict, unchanged, so a caller can still show what the
+    rejected value actually was; problems is a list of human-readable
+    "section.field: message" strings (pydantic's own error locations/
+    messages), empty when the whole file validated cleanly.
+    """
+    candidate = resolve_config_path(path)
+    if not candidate.exists():
+        return AppConfig(), {}, []
+    with candidate.open() as f:
+        raw = yaml.safe_load(f) or {}
+    try:
+        return AppConfig.model_validate(raw), raw, []
+    except ValidationError as exc:
+        problems = [
+            f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}" for err in exc.errors()
+        ]
+        kwargs: dict[str, Any] = {}
+        for name, model_field in AppConfig.model_fields.items():
+            section_raw = raw.get(name)
+            if section_raw is None:
+                kwargs[name] = model_field.get_default(call_default_factory=True)
+                continue
+            try:
+                # TypeAdapter handles both plain-BaseModel sections (stt,
+                # tts, ...) and the dict[str, ...] profile maps
+                # (tts_profiles/backend_profiles) through the same call --
+                # no need to special-case the two shapes.
+                kwargs[name] = TypeAdapter(model_field.annotation).validate_python(section_raw)
+            except ValidationError:
+                kwargs[name] = model_field.get_default(call_default_factory=True)
+        return AppConfig(**kwargs), raw, problems
 
 
 def aec_estimate_path(config_path: Path) -> Path:
