@@ -492,11 +492,24 @@ artifacts route isn't setting `Content-Type: application/pdf`) --
 today, so this may end up a documented exclusion rather than a fix; JP's
 call, not yet made.
 
-**opencode/codex backends don't trigger the artifact pane at all.** Only
-the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
-(`src/convobox/adapters/claude_code.py`). opencode's `file.edited` event
-path format hasn't been live-verified yet (blocks wiring it up); codex
-hasn't been looked at. See `docs/ARTIFACT-PANE-SCOPE.md`.
+**opencode's backend still doesn't trigger the artifact pane.** opencode's
+`file.edited` event path format hasn't been live-verified yet (blocks
+wiring it up). See `docs/ARTIFACT-PANE-SCOPE.md`.
+
+**codex now has the same `ARTIFACT` wiring, schema-verified but NOT yet
+live-verified end-to-end.** (2026-08-07, `feat/codex-artifact-pane-wiring`
+branch.) `CodexAdapter._resolve_artifact_writes`
+(`src/convobox/adapters/codex.py`) reads a completed `fileChange` item's
+`changes: [{path, kind, diff}]` array (confirmed via `codex app-server
+generate-json-schema`, codex-cli 0.146.1) and emits an `ARTIFACT` event
+per renderable, in-`working_dir` path -- same `ARTIFACT_MEDIA_TYPES`
+allowlist and `working_dir` fencing as `ClaudeCodeAdapter`. Unit-tested
+against a fake app-server, but **no live session has confirmed the real
+`codex app-server` actually reports paths in this shape at runtime** (the
+schema bundle and the module's other live probes were done in separate
+sessions) -- the first live codex+artifact-pane UAT pass should treat
+this as the thing to specifically confirm, not assume-working. See
+`docs/field-notes/2026-08-07-codex-artifact-pane-wiring.md`.
 
 ---
 

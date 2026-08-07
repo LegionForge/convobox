@@ -142,6 +142,105 @@ async def test_tool_turn_yields_tool_call_and_tool_result() -> None:
         await _shutdown(adapter)
 
 
+# --- BackendEventType.ARTIFACT: a completed fileChange item's renderable,
+# in-working_dir paths get a matching ARTIFACT event each -- parity with
+# ClaudeCodeAdapter's Write/Edit wiring, closing the gap docs/KNOWN-ISSUES.md
+# flagged ("codex hasn't been looked at"). See codex.py's
+# _resolve_artifact_writes docstring for the schema this is grounded in. ---
+
+
+@pytest.mark.asyncio
+async def test_successful_file_change_yields_artifact_events_for_renderable_paths_only(
+    tmp_path: Path,
+) -> None:
+    # The fake server's "write a file" scenario reports three changes:
+    # notes.md (renderable, inside working_dir), script.py (not a
+    # renderable extension), and ../outside.md (renderable extension but
+    # outside working_dir) -- only notes.md should produce an ARTIFACT.
+    adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("write a file please")
+        events = await _collect(adapter, 5)
+
+        assert [e.type for e in events] == [
+            BackendEventType.TOOL_CALL,
+            BackendEventType.TOOL_RESULT,
+            BackendEventType.ARTIFACT,
+            BackendEventType.TEXT,
+            BackendEventType.DONE,
+        ]
+        assert events[2].artifact_path == "notes.md"
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_failed_file_change_yields_no_artifact_event(tmp_path: Path) -> None:
+    adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("write a broken file please")
+        events = await _collect(adapter, 4)
+
+        assert [e.type for e in events] == [
+            BackendEventType.TOOL_CALL,
+            BackendEventType.TOOL_RESULT,
+            BackendEventType.TEXT,
+            BackendEventType.DONE,
+        ]
+        assert not any(e.type == BackendEventType.ARTIFACT for e in events)
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_successful_file_change_with_no_working_dir_configured_yields_no_artifact() -> None:
+    adapter = CodexAdapter(_FAKE_CODEX)  # working_dir defaults to None
+    try:
+        await adapter.send_text("write a file please")
+        events = await _collect(adapter, 4)
+
+        assert [e.type for e in events] == [
+            BackendEventType.TOOL_CALL,
+            BackendEventType.TOOL_RESULT,
+            BackendEventType.TEXT,
+            BackendEventType.DONE,
+        ]
+    finally:
+        await _shutdown(adapter)
+
+
+def test_resolve_artifact_writes_ignores_a_non_renderable_extension(tmp_path: Path) -> None:
+    adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
+    result = adapter._resolve_artifact_writes(
+        {"status": "completed", "changes": [{"path": "script.py"}]}
+    )
+    assert result == []
+
+
+def test_resolve_artifact_writes_ignores_an_incomplete_status(tmp_path: Path) -> None:
+    adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
+    result = adapter._resolve_artifact_writes(
+        {"status": "inProgress", "changes": [{"path": "notes.md"}]}
+    )
+    assert result == []
+
+
+def test_resolve_artifact_path_rejects_a_path_outside_working_dir(tmp_path: Path) -> None:
+    adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path / "workspace"))
+    outside = str(tmp_path / "outside.png")
+    assert adapter._resolve_artifact_path(outside) is None
+
+
+def test_resolve_artifact_path_accepts_an_absolute_path_inside_working_dir(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    absolute = str(working_dir / "plots" / "chart.png")
+    adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(working_dir))
+    assert adapter._resolve_artifact_path(absolute) == str(Path("plots") / "chart.png")
+
+
 @pytest.mark.asyncio
 async def test_interject_steers_the_active_turn() -> None:
     # Codex has REAL steering (turn/steer), unlike Claude Code's queueing.
