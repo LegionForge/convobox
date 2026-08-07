@@ -167,6 +167,33 @@ class STTConfig(BaseModel):
     # mechanism. Also not yet validated live -- opt-in, not a new default,
     # same reasoning as condition_on_previous_text above.
     temperature: float | None = None
+    # None (default) leaves faster-whisper's own repetition_penalty=1.0
+    # (no penalty) untouched -- zero behavior change unless explicitly
+    # set. Real bug, found live (2026-08-07, JP's own UAT session): a
+    # 1.056s clip of "That's right." (once) decoded as "that's right"
+    # repeated 8 times -- a single transcribe() call, one audio buffer,
+    # the repetition was already baked into the decoder's own output,
+    # not an app-level duplication bug (see
+    # docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-
+    # repetition.md for the first, hotword-specific instance of this same
+    # failure class -- this incident proves it's not hotword-specific).
+    # faster-whisper exposes this exact parameter to penalize repeated
+    # tokens during decoding; > 1.0 discourages repetition. Not yet
+    # validated live -- opt-in, same reasoning as temperature above, not
+    # a new default (an untested penalty value could make normal decodes
+    # worse, not just fix the rare repetition case).
+    repetition_penalty: float | None = None
+    # None (default) leaves faster-whisper's own no_repeat_ngram_size=0
+    # (disabled) untouched -- zero behavior change unless explicitly set.
+    # The second lever for the same repetition-loop failure mode above:
+    # blocks the decoder from repeating any n-gram of this length twice
+    # in one decode (e.g. blocks "that's right that's" from recurring).
+    # A blunter, more mechanical guard than repetition_penalty's soft
+    # scoring nudge -- worth having both available to test independently
+    # rather than assuming one subsumes the other. Not yet validated
+    # live -- opt-in, not a new default, same reasoning throughout this
+    # section.
+    no_repeat_ngram_size: int | None = None
 
     @field_validator("compute_type")
     @classmethod
