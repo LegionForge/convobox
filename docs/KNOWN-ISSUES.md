@@ -570,10 +570,12 @@ findings:
 
 **Not done, deliberately:** no code was written for this. This is schema
 evidence clarifying scope, the same discipline as the codex investigation
-(PR #219) -- next step for whoever picks this up is a real design call on
-the two-subscription approach (worth its own small design note before
-implementation, given it's a bigger change than codex's single-stream fix
-turned out to be), not a blind port of the codex pattern.
+(PR #219). The follow-up design call this entry originally asked for is
+now written up: `docs/DESIGN-opencode-artifact-pane-wiring.md` (a second
+concurrent `/api/event` subscription, `working_dir` fencing as the
+correlation mechanism in place of a session ID the payload doesn't carry,
+sliced into a log-only step before a real `ARTIFACT`-emitting one) -- not
+implemented, still a design note, not a blind port of the codex pattern.
 
 ---
 
