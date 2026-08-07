@@ -155,6 +155,27 @@ mitigation for the failure mode above), plus opt-in
 each. Worth exhausting these first (near-zero cost, already built) before
 spending real effort on either alternative-engine option above.
 
+**One-month follow-up (2026-08-07, no live hardware -- a status check, not
+a re-test):** the ctranslate2 allocator leak (see KNOWN-ISSUES.md) is
+still open upstream with no fix, and one issue previously read as "closed,
+unclear if it covers the leak" turns out to have closed over a live,
+unaddressed new leak report -- read as no material change. `onnx-asr`
+(the Parakeet TDT vehicle) looks healthier than it did a month ago:
+active monthly releases, explicit Windows+CUDA+DirectML support, and a
+previously-open GPU-slowness issue now closed -- strengthens the case for
+a real prototype, still not started. `openWakeWord`'s maintenance has
+visibly slowed (no tagged release since 2024-02) with an open, unresolved
+Windows error on this project's own dev platform -- new reason for
+caution beyond the already-known integration cost. New candidate spotted:
+**Moonshine** (`moonshine-ai/moonshine`) -- very actively developed,
+English models cleanly MIT-licensed, but its hallucination-control claims
+are currently blog-sourced and unverified (same category of claim that
+burned this project once already with FunASR); worth a real look later,
+not acted on now. Full sourcing and reasoning:
+`docs/field-notes/2026-08-07-stt-engine-continued-investment-research.md`.
+Net recommendation: keep faster-whisper shipped, treat a real `onnx-asr`
+prototype as "when, not if" rather than urgent.
+
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)
