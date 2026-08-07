@@ -59,6 +59,32 @@ def test_schema_swaps_to_piper_fields_when_engine_is_piper(client: TestClient) -
     assert "model_path" not in keys
 
 
+# --- restart_required (2026-08-07, JP asked directly): display is the
+# ONLY section not consumed by the mic-loop pipeline run_convobox.py
+# builds once at startup -- see SectionSpec.restart_required's own
+# docstring in scripts/settings_tui.py for how that was confirmed. ---
+
+
+def test_schema_marks_display_section_as_not_requiring_restart(
+    client: TestClient,
+) -> None:
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    sections = {s["key"]: s["restart_required"] for s in response.json()["sections"]}
+    assert sections["display"] is False
+
+
+def test_schema_marks_every_other_section_as_requiring_restart(
+    client: TestClient,
+) -> None:
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    sections = {s["key"]: s["restart_required"] for s in response.json()["sections"]}
+    del sections["display"]
+    assert sections, "expected at least one non-display section to check"
+    assert all(sections.values()), sections
+
+
 def test_schema_exposes_unset_sentinel_for_device_fields(client: TestClient) -> None:
     values = client.get("/api/settings").json()["values"]
     response = client.post("/api/settings/schema", json={"values": values})

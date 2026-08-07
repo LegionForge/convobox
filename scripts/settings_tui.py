@@ -194,6 +194,20 @@ class SectionSpec:
     key: str
     label: str
     fields: tuple[FieldSpec, ...]
+    # True for every section except "display" -- confirmed by reading
+    # every call site (2026-08-07, JP asked live after hitting the
+    # restart-to-see-a-color-change friction firsthand): run_convobox.py's
+    # main() reads load_config() exactly once at startup and constructs
+    # the whole mic-loop pipeline (audio streams, STT/TTS engines, the
+    # backend subprocess, VAD, safeword/interaction state) from that one
+    # snapshot -- none of it re-reads the file live, so every section
+    # genuinely needs a restart today. display.* is the one exception:
+    # grepped for every read of config.display and it's ONLY ever passed
+    # into web/app.py's create_app() to serve GET /api/config -- nothing
+    # in the mic loop touches it. Per-SECTION, not per-field, because
+    # that's the real granularity the current architecture has -- would
+    # need updating if a future section gets split hot/cold internally.
+    restart_required: bool = True
 
 
 @dataclass
@@ -347,6 +361,10 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
     SectionSpec(
         key="display",
         label="Display",
+        # The one section a plain browser refresh picks up -- see
+        # SectionSpec.restart_required's own docstring for how this was
+        # confirmed, not assumed.
+        restart_required=False,
         fields=(
             FieldSpec("display", "user_color", "User bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #2e7dfb) for your own speech bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
             FieldSpec("display", "assistant_color", "Assistant bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #f0f0f2) for the AI's response bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),

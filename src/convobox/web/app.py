@@ -19,7 +19,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
 
-from convobox.config import DisplayConfig, resolve_config_path
+from convobox.config import DisplayConfig, load_config, resolve_config_path
 from convobox.web.artifacts import add_artifact_routes
 from convobox.web.bridge import (
     WebApprovalBridge,
@@ -206,6 +206,29 @@ def create_app(
         # model as everything else here), and AppConfig carries fields
         # (backend.working_dir, backend.command, ...) that shouldn't be
         # handed to any page this browser happens to load.
+        #
+        # Re-reads config_path fresh on every call (2026-08-07, fixed
+        # live after JP hit this directly): unlike every other section,
+        # display.* is never consumed by the mic-loop pipeline
+        # run_convobox.py builds once at startup (see
+        # scripts/settings_tui.py's SectionSpec.restart_required for the
+        # grep confirming that) -- it exists purely to answer THIS route.
+        # There was never a real reason to only read it once at
+        # create_app() time; that was just an unexamined default, not a
+        # deliberate choice, and it's what made a color/name change need
+        # a full backend restart instead of a page refresh. Falls back
+        # to the closure-captured `display` param when config_path is
+        # None (tests that construct DisplayConfig directly, with no
+        # real file backing it -- same shape resolve_config_path()
+        # itself can't help with).
+        if config_path is not None:
+            live_display = load_config(config_path).display
+            return {
+                "user_color": live_display.user_color,
+                "assistant_color": live_display.assistant_color,
+                "user_name": live_display.user_name,
+                "assistant_name": live_display.assistant_name,
+            }
         return {
             "user_color": display.user_color,
             "assistant_color": display.assistant_color,
