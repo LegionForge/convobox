@@ -121,6 +121,45 @@ class STTConfig(BaseModel):
     # glossary in config makes every rewrite inspectable and portable, rather
     # than silently training on a user's voice data.
     corrections: dict[str, str] = Field(default_factory=dict)
+    # Passed straight through to faster-whisper's own transcribe(hotwords=...)
+    # -- a free-text prompt bias toward words/phrases the model should
+    # recognize more readily. Live UAT, 2026-08-02: a short, out-of-vocabulary
+    # word (a configured resume_word) was repeatedly hallucinated as unrelated
+    # fluent sentences ("We'll see you on the other side.", Cyrillic text)
+    # rather than being misheard as something similar -- the well-documented
+    # Whisper failure mode on short/low-signal clips. Operators should
+    # include their resume_word, safeword.hard_stop_phrases, and
+    # interaction.approval_phrase here (space-separated) to bias toward the
+    # exact short phrases most likely to hit this failure mode. Deliberately
+    # not auto-derived from those configs: STTConfig has no dependency on
+    # InteractionConfig/SafewordConfig today, and hotwords is a real-word
+    # accuracy nudge, not a safety mechanism -- the safeword/resume-word
+    # checks themselves still run on the raw transcript regardless of
+    # whether this helped or not.
+    hotwords: str | None = None
+    # None (default) leaves faster-whisper's own condition_on_previous_text
+    # default (True) untouched -- zero behavior change unless explicitly
+    # set. False is the second of the three related levers flagged
+    # alongside hotwords (SOTA STT research pass, 2026-08-03): disabling it
+    # stops a low-signal/short utterance's decode from being biased by
+    # whatever fluent text the PREVIOUS segment produced, which is one
+    # documented contributor to the hallucinate-a-fluent-unrelated-sentence
+    # failure mode this project hit live with a short resume_word. Unlike
+    # hotwords (a clear, low-risk accuracy nudge), this is a real tradeoff
+    # -- worth testing, not yet validated live -- so it stays opt-in rather
+    # than a new default.
+    condition_on_previous_text: bool = True
+    # None (default) leaves faster-whisper's own temperature fallback
+    # ladder ([0.0, 0.2, 0.4, ... 1.0]) untouched -- zero behavior change
+    # unless explicitly set. A float pins decoding to that single
+    # temperature instead -- 0.0 (fully deterministic, no higher-randomness
+    # retries) is the specific value the same research pass flagged: on an
+    # already-short/low-signal clip, the fallback ladder's higher-
+    # temperature retries are themselves a plausible source of the
+    # hallucinated-fluent-sentence failure mode, not just a recovery
+    # mechanism. Also not yet validated live -- opt-in, not a new default,
+    # same reasoning as condition_on_previous_text above.
+    temperature: float | None = None
 
     @field_validator("compute_type")
     @classmethod
