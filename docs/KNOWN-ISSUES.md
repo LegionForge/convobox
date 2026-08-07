@@ -481,16 +481,28 @@ also ignored for API sessions (always Zen `hy3-free`).
 **Status:** diagnosed/scoped, deferred. The web UI (docs/WEB-UI-USAGE.md)
 is new in 0.3.0 -- these are known rough edges, not silently-missed bugs.
 
-**PDF doesn't render in the artifact pane.** Live-confirmed 2026-07-28: a
-PDF renders correctly in a standalone browser tab (BrowserOS's own
-PDFium, no plugin needed) but shows nothing when opened through
-`GET /api/artifacts/{path}` inside the pane's frame. Root cause not yet
-inspected (frontend content-type dispatch most likely assumes HTML/
-image and gives `.pdf` no `<iframe>`/`<embed>` treatment, or the
-artifacts route isn't setting `Content-Type: application/pdf`) --
-`docs/ARTIFACT-PANE-SCOPE.md` only documents image/plot/HTML as in-scope
-today, so this may end up a documented exclusion rather than a fix; JP's
-call, not yet made.
+**PDF doesn't render inline in the artifact pane -- confirmed intentional
+v1 design, not a bug (resolved as a non-issue, per the ConvoBox quickref's
+PR #176 entry, 2026-07-29; this entry itself never got updated to say
+so).** The original 2026-07-28 report observed a PDF opened via
+`GET /api/artifacts/{path}` showing nothing inside the pane's frame.
+Re-checked directly against current code: `src/convobox/adapters/base.py`'s
+`ARTIFACT_MEDIA_TYPES` already maps `.pdf` -> `application/pdf`, so the
+serving route (`src/convobox/web/artifacts.py`) sets the correct
+`Content-Type` via `FileResponse` -- the backend was never the gap. The
+frontend (`index.html`'s `renderArtifact()`) deliberately does NOT put
+PDFs (or CSV/txt/md) in an `<iframe>`, by design: only
+`_ARTIFACT_IMAGE_EXTENSIONS` get an `<img>` and `_ARTIFACT_HTML_EXTENSIONS`
+get a sandboxed `<iframe>`; everything else in the allowlist renders a
+plain "Download {filename}" link instead, exactly matching
+`docs/ARTIFACT-PANE-SCOPE.md`'s own documented v1 rendering scope ("PDF/
+CSV/plain text -> punt to a simple embed/pre fallback or a download link;
+not worth [building rich viewers for] v1"). So today's real behavior is a
+working download link, not a blank frame -- the "shows nothing" symptom
+either predates this fallback-link code (same commit that shipped it,
+`b40146e`, 2026-07-28) or was testing the raw API URL directly rather
+than the real pane UI. No fix needed; a richer PDF/CSV viewer remains a
+legitimate future v2 idea, not an open bug.
 
 **opencode/codex backends don't trigger the artifact pane at all.** Only
 the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
