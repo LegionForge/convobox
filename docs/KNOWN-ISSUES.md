@@ -151,10 +151,15 @@ of a session rather than self-healing on a later retry, which is worth
 knowing before assuming "no crash" means "still working."
 
 **Follow-up (2026-08-03, SOTA STT research pass): no upstream fix
-exists, and ctranslate2 itself looks stalled.** ctranslate2's most recent
-GitHub release is **v4.8.1, dated 2024-07-03** -- over two years old as
-of this research, with no evidence of a newer release addressing this
-leak. faster-whisper issue #390 is closed via PR #448, but that fix
+exists, and this specific leak looks abandoned even though ctranslate2
+itself is not.** ctranslate2's most recent GitHub release is **v4.8.1,
+dated 2026-07-03** -- about a month old as of this research, one of five
+releases in the preceding six months (v4.7.0 2026-02-03, v4.7.1
+2026-02-04, v4.7.2 2026-05-19, v4.8.0 2026-06-06, v4.8.1 2026-07-03 --
+the latest adding Gemma4 12B dense model support). The project itself is
+actively maintained; what's missing across all of those releases is any
+evidence of a fix for *this* leak specifically. faster-whisper issue
+#390 is closed via PR #448, but that fix
 could not be confirmed to specifically cover the MKL allocator leak
 (vs. a narrower SageMaker-specific OOM); #660 shows no confirmed
 resolution; a related, still-open issue (**#992**, "Memory on GPU not
