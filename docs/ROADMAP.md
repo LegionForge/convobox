@@ -193,6 +193,30 @@ to get right, with no CI/automated way to exercise real mouse events
 either way. Worth doing once the keyboard controls have had a live UAT
 pass and mouse support is still wanted -- not blocking today's fix.
 
+### Web UI transcript timestamps, user-configurable on/off (proposed, scoped)
+The TUI's transcript pane has always shown a per-line timestamp; the web
+UI never has, in either its live SSE stream or its history replay --
+raised directly by JP during a live UAT session (2026-08-06) after
+needing timestamps to correlate what he said against the log while
+diagnosing an unrelated STT freeze (docs/field-notes/
+2026-08-06-resume-word-hallucination-and-runaway-repetition.md).
+
+Scoped, not yet built:
+- `history.py`'s `events` table already stores a `timestamp REAL`
+  (epoch seconds) column per row, and `get_session_events()`'s
+  `SELECT *` already returns it -- history replay has the data today,
+  the frontend just never renders it.
+- The **live** SSE stream is the actual gap: `WebEventForwarder.
+  __call__`'s broadcast (via `event_to_dict()`) and `forward_transcript
+  ()`'s `{"type": "transcript", ...}` payload carry no timestamp field
+  at all today. Adding one (`time.time()`, matching the DB column's own
+  epoch-seconds shape so both paths can share one frontend formatter)
+  closes that gap.
+- JP wants this **user-configurable on/off**, not always-on (unlike the
+  TUI, which has no such toggle) -- needs a new `display.*` (or
+  `web.*`) boolean setting, exposed in both Settings surfaces, not just
+  a frontend-only visual tweak.
+
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response
   routing: VERBALIZE vs DISPLAY (spoken summary + full text on screen).
