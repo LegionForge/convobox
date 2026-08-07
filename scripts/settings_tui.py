@@ -265,6 +265,9 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("stt", "compute_type", "Compute type", "choice", _CHOICE_STT_COMPUTE_TYPES, help_text="Precision/quantization tradeoff: lower precision = faster + less memory, higher = more accurate. default (recommended): int8 on cpu, float16 on cuda. float32 is the ceiling -- the model itself was trained in float32, so nothing more precise exists to recover accuracy from (no float64). int8: smallest/fastest, most quantization loss. int8_float32 (cpu) / int8_float16, int8_bfloat16 (cuda): quantized weights with higher-precision math -- a real middle ground, more accurate than plain int8 while still lighter than full precision. int16: cpu-only quantized alternative to int8. float16/bfloat16 (cuda only): near-float32 accuracy, much faster than float32 -- ctranslate2's own recommended GPU default is float16; bfloat16 trades a little precision for better numerical stability on newer GPUs. Not every value works on every device (e.g. bfloat16 needs cuda) -- an incompatible pairing fails clearly at [t] Test, not silently."),
             FieldSpec("stt", "language", "Language", "optional_str", help_text="Pin a language code like en, or leave unset for auto-detect."),
             FieldSpec("stt", "min_language_probability", "Min language probability", "float", help_text="Drop auto-detected transcripts below this confidence threshold."),
+            FieldSpec("stt", "hotwords", "Hotwords", "optional_str", help_text="Space-separated words/phrases faster-whisper should be biased toward recognizing. Live UAT finding: a short resume/wake word got repeatedly hallucinated as unrelated fluent sentences instead of misheard as something similar -- Whisper's known failure mode on short/low-signal clips. Put your resume word, safeword phrases, and approval phrase here to bias toward exactly the short critical phrases most likely to hit this. Accuracy nudge only, not a safety mechanism -- the safeword/resume-word checks still run on the raw transcript regardless."),
+            FieldSpec("stt", "condition_on_previous_text", "Condition on previous text", "bool", help_text="faster-whisper default: on. Disabling stops a low-signal/short utterance's decode from being biased by whatever fluent text the PREVIOUS segment produced -- a documented contributor to the same short-clip hallucination pattern hotwords addresses. A real tradeoff, not yet live-validated -- worth testing if hotwords alone doesn't fully fix a short resume/wake word, not a default recommendation."),
+            FieldSpec("stt", "temperature", "Temperature", "optional_float", help_text="Leave unset (recommended) for faster-whisper's own fallback ladder (0.0, 0.2, 0.4, ... up to 1.0, each retried on a low-confidence decode). Pin to a single value -- 0.0 for fully deterministic, no-fallback decoding -- to test whether the ladder's own higher-temperature retries are contributing to hallucination on an already-short/low-signal clip. Not yet live-validated -- worth testing, not a default recommendation."),
         ),
     ),
     SectionSpec(
@@ -2281,6 +2284,17 @@ def _prompt_edit(state: TuiState) -> None:
 
     if not accepted:
         state.status = "edit cancelled"
+        return
+    if new_value == current:
+        # Live UAT, 2026-08-02: pressing Enter to confirm a picker without
+        # cycling to a different choice (a natural way to back out, short
+        # of knowing Esc is the actual cancel key) is "accepted" with the
+        # SAME value -- previously fell through to _field_updated_status
+        # below, which said "{label} updated" (state.dirty came back False
+        # because nothing in the whole config changed) even though this
+        # field was never actually touched. Distinct message, and skips
+        # the pointless _set_value/_switch_* calls below.
+        state.status = f"{spec.label} unchanged"
         return
     if spec.section == "backend" and spec.key == "name":
         # backend.name is always a "choice" field (never one of the
