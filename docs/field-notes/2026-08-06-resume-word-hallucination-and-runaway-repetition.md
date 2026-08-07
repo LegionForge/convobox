@@ -6,15 +6,19 @@ project: ConvoBox (github.com/LegionForge/convobox)
 versions: ConvoBox main + PR #210/#213/#215 (fix/web-transcript-forwarding-parity branch), faster-whisper 1.2.1, ctranslate2 4.8.1, stt.device=cuda, stt.temperature=0.0, stt.hotwords="stop brake eject mayday listening resume alpha bravo delta"
 evidence:
   - convobox-tui.log, 2026-08-06 22:37:10-23:08:xx session (D:\LegionForge\convobox-UAT, live PR #213 UAT)
+  - convobox-tui.log, 2026-08-06 23:52:03 / 2026-08-07 00:11-00:20 sessions (same checkout, stt.device: cpu, PR #217 merged locally)
   - .aec-dumps/20260806-223710/mic-raw.wav (continuous raw mic capture, forensic cross-check)
   - src/convobox/stt/transcriber.py (transcribe() call site, confirms repetition_penalty/no_repeat_ngram_size are never passed)
+  - PR #217 (fix(stt): offload transcribe() to a thread and add an optional timeout -- fixes Problem 3's original manifestation, confirmed NOT sufficient for the addendum's freeze recurrence)
+  - src/convobox/vad/segmenter.py (UtteranceSegmenter._process_window()/feed(), the addendum's root-cause candidate)
+  - src/convobox/audio/capture.py (MicrophoneStream blocksize=512, confirmed to match _WINDOW_SAMPLES)
 provenance:
   authors:
     - JP Cruz <jp@legionforge.org> (operator; live UAT session, triggered every incident below)
     - Claude Code (Anthropic claude-sonnet-5) -- live log investigation, forensic AEC-dump cross-check, root-cause analysis, writing
   org: https://legionforge.org
   created: 2026-08-06T23:09:55-05:00
-  revised: 2026-08-06T23:09:55-05:00
+  revised: 2026-08-07T00:25:20-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -203,3 +207,62 @@ for this failure class: `repetition_penalty` around `1.1-1.3`,
 `no_repeat_ngram_size` around `2-3` -- not yet validated against this
 project's own real audio, worth live-testing once implemented, not
 assumed correct from community numbers alone.
+
+## Addendum, 2026-08-07 (same session, continued): the runaway-repetition hallucination reproduces on CPU too, and the freeze bug's real location is upstream of transcribe()
+
+Two follow-ups from continued live testing after the fix work above was
+already in flight.
+
+**1. Runaway hotword repetition confirmed device-independent.** After
+switching `stt.device` to `cpu` (see the freeze section below for why),
+the same "brake" repeated ~70 times on a ~1.2s audio clip reproduced
+again: `23:59[Processing audio with duration 00:01.248] -> [transcript
+'stop brake brake ... brake' x~70, dec=0.81] [HARD STOP]`, decoded in
+under 2 seconds. This rules out GPU-memory pressure (faster-whisper
+#992) as the sole or root cause of the *repetition* bug specifically --
+it is a decoder-level pathology from hotword biasing on short/ambiguous
+audio, independent of compute device. The proposed fix above (
+`repetition_penalty`/`no_repeat_ngram_size`) is unaffected by this --
+still the right fix, now with stronger justification for prioritizing
+it (not a CUDA-only edge case).
+
+**2. The freeze bug is real, reproduces on CPU too, was NOT fixed by
+offloading transcribe() -- because it doesn't happen there.** A
+same-night follow-up PR (#217, `fix(stt): offload transcribe() to a
+thread and add an optional timeout`) was built and merged into this
+live UAT checkout specifically to address the freeze first documented
+above (Problem 3). The freeze then reproduced AGAIN after that fix was
+in place, on CPU, with these distinguishing symptoms:
+- Multiple confirmed voice attempts after a pause, zero effect -- not
+  even a `dropped (...)` log line, unlike every prior "stuck" report
+  this session (which always had SOME trailing log activity).
+- The web UI's Stop-listening button also produced no log line and no
+  effect -- a *different* code path (an HTTP request handler via
+  uvicorn) than the mic loop entirely, evidence the whole event loop
+  was blocked, not just STT.
+- **Zero `Processing audio` log lines for the entire stuck window** --
+  meaning the freeze happens *before* an utterance is ever handed to
+  `transcriber.transcribe()`. #217's fix only wraps that call, so it
+  correctly did not (and could not) fix this.
+
+Root cause candidate, found by reading the code (not yet proven the
+same way #217's diagnosis was): `src/convobox/vad/segmenter.py`'s
+`UtteranceSegmenter._process_window()` calls `self._model(torch.
+from_numpy(window), _SAMPLE_RATE).item()` -- a synchronous Silero VAD
+(ONNX) inference call, made once per 512-sample (32ms) window, directly
+inside `async def segment()`'s consumption loop, with no thread offload
+and no timeout. Same architectural shape as the bug #217 just fixed
+(a synchronous native/ML call with no offload, able to freeze the whole
+event loop if it ever hangs), just upstream of it and far more
+frequent (~31 calls/second of audio vs. once per completed utterance
+for STT) -- confirmed via `MicrophoneStream`'s own `blocksize: int =
+512`, which matches `_WINDOW_SAMPLES` exactly, so each mic chunk feeds
+exactly one VAD window through this same synchronous path.
+
+**Not yet fixed.** Not yet proven with the same rigor as the transcribe()
+freeze (no AEC-dump-style forensic cross-check was run specifically
+against this new hypothesis before the session ended) -- filed as a
+`KNOWN-ISSUES.md` entry (status: diagnosed, not fixed) rather than
+claimed here as fully validated-live, since the code-reading diagnosis,
+while strong, has not itself been forensically confirmed the way the
+original transcribe()-freeze finding was.

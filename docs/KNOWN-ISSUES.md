@@ -180,6 +180,62 @@ bug rather than working around it).
 
 ---
 
+## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
+
+**Status:** diagnosed (2026-08-07) by reading the code after a live
+recurrence, **not fixed, not yet forensically confirmed the same way the
+related transcribe()-freeze finding was** (see
+docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md's
+addendum for the live incident this came from). We're still testing
+this one -- recorded now for transparency and so it isn't lost, not
+because a fix is ready.
+
+**Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
+fix, PR #217, was already merged into the checkout): the app went
+completely unresponsive -- multiple confirmed voice attempts produced
+not even a `dropped (...)` log line, and the web UI's Stop-listening
+button (a completely separate code path, an HTTP handler via uvicorn,
+not the mic loop) also produced no log line and no effect. Zero
+`Processing audio` lines appeared for the entire stuck window, meaning
+the freeze happened *before* any utterance was ever handed to
+`transcriber.transcribe()`.
+
+**Why this is a different bug than the transcribe() freeze PR #217
+already fixed:** that fix offloads `transcriber.transcribe()` to a
+thread with an optional timeout -- it only helps once an utterance has
+already been segmented. This incident's total absence of `Processing
+audio` lines means the STT call was never reached at all.
+
+**Root-cause candidate.** `UtteranceSegmenter._process_window()`
+(`src/convobox/vad/segmenter.py`) calls `self._model(torch.from_numpy
+(window), _SAMPLE_RATE).item()` -- a synchronous Silero VAD (ONNX)
+inference call, made once per 512-sample (32ms) window, directly inside
+`async def segment()`'s consumption loop (via `feed()`), with no thread
+offload and no timeout. Same architectural shape as the transcribe()
+bug PR #217 fixed -- a synchronous ML inference call that can freeze the
+whole single-threaded event loop if it ever hangs -- just upstream of
+it and far more frequent (~31 calls/second of audio vs. once per
+completed utterance). `MicrophoneStream`'s own `blocksize: int = 512`
+(`src/convobox/audio/capture.py`) matches `_WINDOW_SAMPLES` exactly, so
+every mic chunk feeds exactly one VAD window through this same
+synchronous path -- there's no batching that would reduce call
+frequency at the chunk-consumption layer.
+
+**Why not fixed yet, and the design wrinkle that makes this harder than
+PR #217:** `transcribe()` is called once per completed utterance;
+offloading it to `asyncio.to_thread()` per call is cheap relative to
+its own cost. This model call happens ~31x/second -- offloading every
+individual window call the same way would add real per-call thread-pool
+overhead at that frequency, potentially comparable in magnitude to
+Silero's own (very fast) inference time. The likely right fix is
+offloading at the `feed()` (per-chunk) granularity rather than per-
+window (the two are ~1:1 today given the blocksize match, but `feed()`
+is the natural async/sync boundary `segment()`'s generator already
+awaits at, and doesn't require reaching inside `_process_window()`) --
+proposed, not yet built or benchmarked for the added-overhead tradeoff.
+
+---
+
 ## WASAPI output plays speech an octave too high ("static chipmunk")
 
 **Status:** deferred (2026-07-12). Mitigation: use an **MME** output device.
