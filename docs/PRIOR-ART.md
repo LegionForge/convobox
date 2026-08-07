@@ -14,13 +14,41 @@ projects, and where this one differs:
   [RealtimeVoiceChat](https://github.com/KoljaB/RealtimeVoiceChat)** — not
   coding-agent tools, but the low-latency local STT/TTS/VAD/barge-in
   building blocks this project leans on.
-- **Claude Code's native `/voice`** — push-to-talk dictation, one
-  directional (speech in, no speech out), Claude Code only.
+- **Claude Code's native `/voice`** (shipped 2026-03-03) — push-to-talk
+  dictation tuned for code vocabulary, one directional (speech in, no
+  speech out), free and excluded from rate limits, Claude Code only.
+- **OpenAI Codex CLI's native dictation** (shipped 2026-02-25, six days
+  *before* Claude Code's — a direct competitive reaction) — same shape:
+  push-to-talk, speech in only, no spoken output, Codex CLI only.
 - **Aider's built-in `/voice`** — Whisper-based push-to-talk dictation,
   aider only.
+- **[AgentsRoom](https://agentsroom.dev/)** — the closest existing
+  competitor on backend-agnostic and full-duplex, and worth being honest
+  about: a priced (free tier + €6.99/mo Pro), commercial desktop app supporting
+  **8 CLIs** (Claude Code, Codex, Antigravity, OpenCode, Aider, Grok
+  Build, Mistral Vibe, Kimi Code), with real two-way voice conversation
+  *and* PreToolUse-hook-based guardrails ("block any `rm -rf`, any
+  `push --force`") that overlap with ConvoBox's own safety framing.
+  Backend-agnostic and full-duplex, yes — but voice STT/TTS routes
+  through AgentsRoom's own backend rather than confirmed on-device, so
+  it isn't local-first the way ConvoBox is, and its safety mechanism is
+  generic hook-based guardrails rather than a voice-native safeword
+  hard-stop or spoken approval gate for destructive actions.
 
-None of the above are both backend-agnostic *and* local-first *and*
-full-duplex. That combination is the gap ConvoBox is trying to fill.
+None of the above combine backend-agnostic *and* local-first (both
+directions, not just STT) *and* full-duplex *and* voice-native safety
+gating (a spoken safeword hard-stop, voice approval-gating for
+destructive tool calls) in one project. That combination — not just
+"voice for a coding agent," which both Anthropic and OpenAI now ship for
+free — is the gap ConvoBox is trying to fill.
+
+**A note on durability, not just current-state comparison:** opencode's
+maintainers have explicitly closed the most-requested native-voice
+feature request as not planned. Unlike Claude Code/Codex CLI (where the
+platform vendors are actively encroaching on at least the dictation
+slice of this space), that's a standing gap third-party tools like
+ConvoBox can keep filling rather than compete against a first-party
+feature that might ship any month.
 
 **[RealtimeVoiceChat](https://github.com/KoljaB/RealtimeVoiceChat)**
 deserves a separate callout: it already implements almost the entire
