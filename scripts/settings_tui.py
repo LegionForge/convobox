@@ -55,6 +55,7 @@ from convobox.config import (
     TTSProfileConfig,
     detect_permission_conflict,
     load_config,
+    load_config_lenient,
     read_aec_estimate,
     resolve_config_path,
 )
@@ -214,10 +215,23 @@ class TuiState:
     dirty: bool = False
     status: str = "BIOS style: Left/Right tabs, Up/Down fields, Enter edit"
     last_report: ValidationReport | None = None
+    # Populated at startup only, when load_config_lenient() had to fall a
+    # section back to defaults because the on-disk value failed validation
+    # (docs/field-notes/2026-08-06-settings-tui-cannot-open-invalid-config.md).
+    # Each entry is "section: message" -- see load_config_lenient's own
+    # docstring. Cleared the moment the operator saves or restores a backup,
+    # not on every ordinary edit -- it describes what happened at LOAD, not
+    # the current validity of state.working (validate_config/_save already
+    # covers that separately).
+    load_problems: list[str] = field(default_factory=list)
 
     @property
     def sections(self) -> tuple[SectionSpec, ...]:
         return SECTION_SPECS
+
+    @property
+    def flagged_sections(self) -> set[str]:
+        return {p.split(":", 1)[0].strip() for p in self.load_problems}
 
     def current_section(self) -> SectionSpec:
         return self.sections[self.selected_section]
@@ -849,6 +863,16 @@ def backup_config(path: Path) -> Path | None:
     return backup
 
 
+def list_config_backups(path: Path) -> list[Path]:
+    """Every backup_config()-written convobox.yaml.backup-* next to path,
+    newest first. Filenames are that function's own <name>.backup-
+    <YYYYMMDD-HHMMSS> stamp, which sorts lexicographically = chronologically
+    -- a hand-renamed one (e.g. a trailing custom suffix) still sorts
+    correctly by its date/time prefix, since glob only matches names that
+    already start with that stamp."""
+    return sorted(path.parent.glob(f"{path.name}.backup-*"), reverse=True)
+
+
 def write_config(path: Path, config: AppConfig) -> None:
     header = _read_leading_header(path)
     body = _dump_config(config)
@@ -1408,9 +1432,11 @@ def _section_summary(config: AppConfig) -> list[str]:
 
 
 def _section_tabs(state: TuiState, width: int) -> str:
+    flagged = state.flagged_sections
     tabs: list[str] = []
     for idx, section in enumerate(state.sections):
-        label = f" {section.label} "
+        marker = "! " if section.key in flagged else ""
+        label = f" {marker}{section.label} "
         if idx == state.selected_section:
             tabs.append(f"{_REVERSE}[{label}]{_RESET}")
         else:
@@ -2318,6 +2344,42 @@ def _restore_original(state: TuiState) -> None:
     state.status = "staged changes reverted"
 
 
+def _restore_from_backup(state: TuiState) -> None:
+    backups = list_config_backups(state.path)
+    if not backups:
+        state.status = f"no backups found next to {state.path}"
+        return
+    latest = backups[0]
+    if not _confirm_modal(
+        "Restore From Backup",
+        f"Load {latest.name} into the working copy?",
+        [
+            f"This replaces every staged value with {latest.name}'s contents.",
+            "Nothing is written to disk until you press [S] to save.",
+            f"({len(backups)} backup(s) available next to this config; "
+            "restoring the most recent.)",
+        ],
+    ):
+        state.status = "restore cancelled"
+        return
+    try:
+        restored = load_config(latest)
+    except ValidationError as exc:
+        # A backup should always have been a previously-valid save -- if
+        # one somehow isn't, say so loudly rather than silently falling
+        # back to defaults the way load_config_lenient does for the
+        # startup case; this path is meant to recover known-good state,
+        # not manufacture a new fallback.
+        state.status = f"backup {latest.name} itself failed to load: {exc}"
+        return
+    state.working = restored
+    state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(
+        mode="python"
+    )
+    state.load_problems = []
+    state.status = f"restored from {latest.name} -- [S] to save, or keep editing"
+
+
 def _save(state: TuiState) -> None:
     report = validate_config(state.working)
     state.last_report = report
@@ -2348,6 +2410,7 @@ def _save(state: TuiState) -> None:
         return
     state.original = state.working.model_copy(deep=True)
     state.dirty = False
+    state.load_problems = []
     # Explicit that quitting is now safe -- the operator just watched the
     # dirty-state header/save hint tell them to press [S]; closing the
     # loop here means they don't have to separately notice the header
@@ -2513,6 +2576,8 @@ def _handle_browse(state: TuiState, key: str) -> bool:
             state.status = "revert cancelled"
     elif lowered == "s":
         _save(state)
+    elif lowered == "b":
+        _restore_from_backup(state)
     elif lowered == "t":
         _run_with_spinner(state, lambda: asyncio.run(_test_state(state)))
     elif lowered == "c":
@@ -2522,10 +2587,41 @@ def _handle_browse(state: TuiState, key: str) -> bool:
     return True
 
 
+def _apply_load_recovery(state: TuiState, problems: list[str]) -> None:
+    """Reflects load_config_lenient()'s problems list (if any) onto a
+    freshly constructed TuiState: flags it dirty, jumps to the first
+    affected section, and sets a status banner naming what happened and
+    how to respond. No-op when problems is empty (the ordinary case).
+
+    Split out from run_tui() so this logic -- which is the whole point of
+    load_config_lenient existing -- is unit-testable without driving the
+    real interactive read_key()/draw() loop.
+    """
+    if not problems:
+        return
+    # Section(s) on disk failed validation and were loaded as defaults
+    # instead of crashing (load_config_lenient's docstring has the full
+    # incident). Marked dirty even though working == original here --
+    # "clean" would wrongly claim this matches the file that's still
+    # sitting on disk with the rejected value in it.
+    state.load_problems = problems
+    state.dirty = True
+    for idx, section in enumerate(state.sections):
+        if section.key in state.flagged_sections:
+            state.selected_section = idx
+            break
+    state.status = (
+        f"{len(problems)} setting(s) on disk were invalid and reset to "
+        f"defaults ({', '.join(sorted(state.flagged_sections))}) -- "
+        "review and [S] save, or [B] restore last backup"
+    )
+
+
 def run_tui(config_path: Path | None = None) -> None:
     path = config_path or default_config_path()
-    config = load_config(path)
+    config, _raw, problems = load_config_lenient(path)
     state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
+    _apply_load_recovery(state, problems)
     _enable_ansi()
     sys.stdout.write("\x1b[?25l\x1b[2J")
     sys.stdout.flush()
