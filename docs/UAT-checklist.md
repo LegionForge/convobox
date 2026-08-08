@@ -509,15 +509,22 @@ Implements in `src/convobox/tts/piper.py`, `audio/playback.py`.
   Kokoro's ~510-phoneme cap produced the clean, expected signature (log:
   `ERROR TTS synthesis/playback failed mid-response` with the real
   RuntimeError text, no crash, mic loop kept working afterward). CLI and
-  web UI both show the failure correctly. **Gap found, not yet fixed**:
-  `--tui` mode shows nothing on-screen -- `_on_backend_event` in
-  `scripts/run_convobox.py` only special-cases `APPROVAL_REQUEST`/`TEXT`,
-  so an `ERROR` event is silently dropped by the TUI dispatcher and only
-  reaches `convobox-tui.log`, not the transcript/full-detail pane. This
-  contradicts the fix's own commit message ("so both the TUI and web UI
-  show something failed") for the TUI half specifically. Not yet decided
-  whether to fix (wire ERROR into the TUI transcript, matching web) or
-  accept log-only as sufficient for the TUI surface.
+  web UI both show the failure correctly. **Gap found, then fixed same day
+  (commit `70c3d6d`, 2026-07-30)**: `--tui` mode used to show nothing
+  on-screen -- `_on_backend_event` in `scripts/run_convobox.py` only
+  special-cased `APPROVAL_REQUEST`/`TEXT`, so an `ERROR` event was
+  silently dropped by the TUI dispatcher and only reached
+  `convobox-tui.log`, not the transcript/full-detail pane. Fixed by adding
+  a `"system"` turn (`tui_state.add_turn("system", f"error: {event.content}")`)
+  for `ERROR` events, matching `[U10]`'s existing convention for
+  session-level events worth showing inline -- unit-tested (3 new cases in
+  `tests/test_approval_prompt_gate.py`), CLI/web/TUI now all surface a TTS
+  failure the same way. **Still outstanding, per the fix's own commit
+  message**: a real `--tui` session hasn't been watched provoke a TTS
+  failure live (e.g. the Kokoro ~510-phoneme trigger) to confirm the error
+  turn actually renders correctly in a real terminal, not just in a
+  unit-tested `ConversationTuiState` -- the next live-UAT pass on `--tui`
+  should specifically try to reproduce this.
 
 ## 7. Scriptable / non-mic modes
 
