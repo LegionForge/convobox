@@ -117,6 +117,12 @@
     background: #8f0019;
     border-color: #8f0019;
   }
+  /* Decorative only (aria-hidden) -- the button's own text/aria-label
+     already carries the real accessible name and state (WCAG 1.1.1: a
+     glyph is never the sole carrier of meaning). Purely a faster visual
+     at-a-glance cue for sighted users switching between "click to pause"
+     and "click to resume". */
+  #listening-btn-icon { margin-right: 0.3em; }
 
   /* --- Row below the ribbon: chat on the left, the artifact pane (when
      open) on the right. min-height: 0 on both the row and its scrolling
@@ -418,7 +424,7 @@
   <span class="spacer"></span>
   <select id="session-select"></select>
   <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
-  <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead">Stop listening</button>
+  <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead" aria-label="Pause listening"><span id="listening-btn-icon" aria-hidden="true">&#9208;</span><span id="listening-btn-label">Stop listening</span></button>
   <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after.">&#9209; Stop</button>
   <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
@@ -470,6 +476,8 @@
   const statusEl = document.getElementById("status");
   const activityStatusEl = document.getElementById("activity-status");
   const listeningBtn = document.getElementById("listening-btn");
+  const listeningBtnIcon = document.getElementById("listening-btn-icon");
+  const listeningBtnLabel = document.getElementById("listening-btn-label");
   const stopBtn = document.getElementById("stop-btn");
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
@@ -779,7 +787,15 @@
 
   function setListeningButton(paused) {
     isPaused = paused;
-    listeningBtn.textContent = paused ? "Resume listening" : "Stop listening";
+    // Icon is aria-hidden and purely decorative -- the label span's text
+    // and the button's own aria-label are what a screen reader announces
+    // and what carries the real state (WCAG 1.1.1: never icon-only).
+    // ⏸ (pause bars) = "click to pause" (currently listening); ▶
+    // (play triangle) = "click to resume" (currently paused) -- the same
+    // convention as a media player's own play/pause button.
+    listeningBtnIcon.textContent = paused ? "▶" : "⏸";
+    listeningBtnLabel.textContent = paused ? "Resume listening" : "Stop listening";
+    listeningBtn.setAttribute("aria-label", paused ? "Resume listening" : "Pause listening");
     listeningBtn.title = paused
       ? "Resume listening -- say the resume word to do this by voice instead"
       : "Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead";
