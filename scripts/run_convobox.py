@@ -87,7 +87,7 @@ from convobox.safeword.detector import SafewordDetector
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
-from convobox.tui import ConversationTuiState, render_conversation_frame
+from convobox.tui import ConversationTuiState, TuiStatus, render_conversation_frame
 from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
 from convobox.audio.ack_tones import generate_ack_tone
 from convobox.resumeword import ResumeWordDetector
@@ -1236,7 +1236,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         # than a poll.
         waiting_hint: str | None = None
         if listening_gate is not None and listening_gate.is_paused:
-            status = "paused"
+            status: TuiStatus = "paused"
         elif approval_gate is not None and approval_gate.is_waiting:
             status = "waiting"
             waiting_hint = "approval needed — say your approval phrase or 'no'"
@@ -2104,8 +2104,17 @@ async def run(args: argparse.Namespace) -> None:
         # right; don't silently override a configured value here.
         _INITIAL_AEC_DELAY_MS = 100
         delay_explicit = config.audio.aec_delay_ms is not None
+        # config.audio.aec_delay_ms's own `is not None` check (not the
+        # delay_explicit bool derived from it) is what mypy can actually
+        # narrow on -- a bool captured from an earlier statement doesn't
+        # propagate that narrowing to a later expression.
+        initial_delay_ms: int = (
+            config.audio.aec_delay_ms
+            if config.audio.aec_delay_ms is not None
+            else _INITIAL_AEC_DELAY_MS
+        )
         canceller = EchoCanceller(
-            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
+            delay_ms=initial_delay_ms,
             dump=aec_dump,
         )
         delay_estimated = False
@@ -2144,7 +2153,7 @@ async def run(args: argparse.Namespace) -> None:
         player.on_block_played = _feed_reference
         log.info(
             "acoustic echo cancellation ON (delay hint %dms%s)",
-            config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
+            initial_delay_ms,
             " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
         )
     elif incident_capture is not None:
