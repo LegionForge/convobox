@@ -74,6 +74,7 @@ from convobox.approval import ApprovalDetector
 from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
     resolve_config_path,
@@ -1630,14 +1631,18 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
         await asyncio.sleep(0.1)
 
 
-def _check_backend_permission_mode(backend: object) -> None:
+def _check_backend_permission_mode(backend: object, interaction: object) -> None:
     """Enforce permission_mode as the single source of truth: reject a
-    conflicting command flag, warn where the mode can't be enforced, log
+    conflicting command flag, reject a claude-code approval hook with
+    nothing able to answer it, warn where the mode can't be enforced, log
     the effective posture. SystemExit on conflict (safety control -- fail
     closed rather than run with an ambiguous posture)."""
     conflict = detect_permission_conflict(backend)  # type: ignore[arg-type]
     if conflict is not None:
         raise SystemExit(conflict)
+    approval_gap = detect_claude_code_approval_gap(backend, interaction)  # type: ignore[arg-type]
+    if approval_gap is not None:
+        raise SystemExit(approval_gap)
     name = getattr(backend, "name", "")
     mode = getattr(backend, "permission_mode", "plan")
     if name == "opencode" and mode != "plan":
@@ -1787,7 +1792,7 @@ async def run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.permission_mode is not None:
         config.backend.permission_mode = args.permission_mode
-    _check_backend_permission_mode(config.backend)
+    _check_backend_permission_mode(config.backend, config.interaction)
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
