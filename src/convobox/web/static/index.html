@@ -462,20 +462,29 @@
   </div>
 </div>
 <script>
+// Required on every mutating (POST/PUT/PATCH/DELETE) request -- the
+// backend's own middleware rejects any without it (src/convobox/web/
+// app.py). A custom header forces the browser to CORS-preflight even a
+// body-less POST, closing a real CSRF gap: without this, a cross-origin
+// page's `fetch(url, {method:"POST"})` reached routes like /api/quit,
+// /api/stop, and /api/sessions/{id}/clear with no preflight at all --
+// CORS only controls whether the ATTACKING page can read the response,
+// never whether the browser sends a "simple" request in the first
+// place. Found via autonomous codebase review, 2026-08-08 (GitHub
+// issue #235, finding A3).
+//
+// Declared here, OUTSIDE both of this page's IIFEs (this script block's
+// and the settings-modal script block's) -- true page-global scope, not
+// either IIFE's own module-like closure. A prior version of this fix
+// declared it INSIDE the first IIFE, which left every fetch() call in
+// the second one (fetchSchema/testSettings/saveSettings -- the entire
+// settings-save flow, i.e. exactly A4's own route) throwing
+// `ReferenceError: CSRF_HEADERS is not defined` at runtime -- caught
+// live via a real browser + console error check, not assumed.
+const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
+
 (function () {
   "use strict";
-
-  // Required on every mutating (POST/PUT/PATCH/DELETE) request -- the
-  // backend's own middleware rejects any without it (src/convobox/web/
-  // app.py). A custom header forces the browser to CORS-preflight even a
-  // body-less POST, closing a real CSRF gap: without this, a cross-origin
-  // page's `fetch(url, {method:"POST"})` reached routes like /api/quit,
-  // /api/stop, and /api/sessions/{id}/clear with no preflight at all --
-  // CORS only controls whether the ATTACKING page can read the response,
-  // never whether the browser sends a "simple" request in the first
-  // place. Found via autonomous codebase review, 2026-08-08 (GitHub
-  // issue #235, finding A3).
-  const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
   const eventsEl = document.getElementById("events");
   const emptyEl = document.getElementById("empty");
