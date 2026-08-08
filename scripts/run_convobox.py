@@ -2399,13 +2399,25 @@ async def run(args: argparse.Namespace) -> None:
                 barged_in, barge_in_pending = barge_in_pending, False
                 if tui_state is not None:
                     tui_state.barge_in_active = False
-                    if text.strip():
-                        # Every utterance ConvoBox actually heard, even
-                        # ones later dropped by a gate below -- "what was
-                        # heard" per the design doc's scope, and a real
-                        # debugging aid ("did it hear me right") distinct
-                        # from "what got forwarded."
+                if text.strip():
+                    # Every utterance ConvoBox actually heard, even ones
+                    # later dropped by a gate below -- "what was heard"
+                    # per the design doc's scope, and a real debugging aid
+                    # ("did it hear me right") distinct from "what got
+                    # forwarded." TUI and web now both get this the same
+                    # way (live incident, 2026-08-05: a dropped utterance
+                    # -- paused/not-the-resume-word, low-confidence, etc.
+                    # -- showed in the TUI transcript pane but was
+                    # invisible in the web UI, since forward_transcript()
+                    # used to fire only much later, right before a
+                    # SURVIVING utterance reached the backend). Sends the
+                    # raw heard text, same as the TUI -- correction/
+                    # barge-in-marking further down changes what's
+                    # forwarded to the backend, not what was heard.
+                    if tui_state is not None:
                         tui_state.add_turn("user", text)
+                    if web_forwarder is not None:
+                        web_forwarder.forward_transcript(text)
 
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
@@ -2756,8 +2768,11 @@ async def run(args: argparse.Namespace) -> None:
                     # before this point, correctly: neither delivers a fresh
                     # response right now.
                     tui_state.full_detail = ""
-                if web_forwarder is not None:
-                    web_forwarder.forward_transcript(text)
+                # web_forwarder.forward_transcript() already ran earlier
+                # (unconditionally, on the raw heard text) alongside
+                # tui_state.add_turn() above -- not repeated here, which
+                # would otherwise double up an already-forwarded
+                # utterance in the web history/SSE feed.
                 try:
                     await orchestrator.handle_transcript(text)
                 except Exception as exc:  # noqa: BLE001
