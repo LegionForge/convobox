@@ -182,12 +182,13 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** fix implemented 2026-08-07 (schema/unit-level; see the
-"Fix implemented" note below), **not yet live-validated against a real
-recurrence** the same way the related transcribe()-freeze finding was
-(see
-docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md's
-addendum for the live incident this came from).
+**Status:** fix implemented 2026-08-07, **partially live-validated the
+same day** -- the freeze itself still reproduces live, but the fix's
+actual claim (the rest of the app, including the web UI's Resume
+Listening button, stays responsive while it happens) held up under a
+real recurrence. See the "Follow-up (2026-08-07, live UAT with this fix
+applied)" note below for the full picture; root cause of the underlying
+hang is still unconfirmed.
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -268,6 +269,59 @@ re-verification against a real recurrence of the freeze (the same gap
 PR #217's own field note flagged for its STT-side fix) -- this is
 unit-proven-correct, not yet confirmed to actually prevent the next
 live Stop/Resume-button lockup.
+
+**Follow-up (2026-08-07, live UAT with this fix applied): the freeze
+recurred, and the result is a genuine partial improvement, not a full
+fix -- worth being precise about which part actually changed.** JP ran
+a live voice UAT session on a branch combining this fix with PR #230's
+STT changes, deliberately stress-testing pause/resume cycling. The
+freeze recurred: real, active speech produced zero log activity
+(`convobox-tui.log`, 20:57:40 -> 20:59:32, ~1m52s) -- confirmed live by
+JP ("was hung for a few minutes... but had to manually resume
+listening"; "during the gap, I was trying some utterances[,] but
+stopped [trying] until a few minutes later"), i.e. this was not silence
+being mistaken for a freeze, it was real speech the mic pipeline never
+processed.
+
+**What's different from the original incident, and why it matters:**
+JP recovered by clicking the web UI's Resume Listening button, **and it
+worked** -- in the original 2026-08-07 incident this follow-up's
+sibling entry documents, all three recovery paths (voice safeword, web
+Stop, web Resume) were simultaneously unresponsive for the same
+2-minute-class duration. This time only the mic/voice path was stuck;
+the web route stayed alive and functional. That is exactly what this
+fix's own design claims -- offloading `feed()`'s Silero calls to a
+worker thread keeps the *rest of the event loop* (HTTP routes, the
+watchdog, TUI) responsive while a slow/stuck window call runs -- and
+this live recurrence is the first real evidence that claim holds, not
+just the unit test's proof of the mechanism in isolation.
+
+**What the fix was never going to solve, and didn't:** `segment()`'s
+own consumption of incoming mic chunks is still strictly sequential --
+`await self.feed_async(chunk)` blocks that specific async generator
+until the offloaded call returns, no matter which thread it runs in.
+If one window's Silero call genuinely hangs, no *later* audio can be
+processed until it returns, regardless of threading. This recurrence is
+consistent with that being exactly what happened: the mic pipeline
+itself stayed stuck for ~2 minutes while the rest of the app didn't.
+**Net: this fix contains the blast radius (proven, live, this session)
+but does not resolve the underlying hang (still reproduces, live, this
+session) -- "partially validated," not "validated" or "insufficient."**
+
+**Root cause of the underlying hang is still unconfirmed.** Not
+determined this pass: whether it's genuinely Silero's own ONNX
+inference stalling (OS scheduling, resource contention, a driver-level
+stall), or something else entirely that this fix's instrumentation
+can't currently distinguish from that. The immediate diagnostic gap:
+there is no logging of when a `feed_async()` call starts, how long it
+takes, or that it's still pending -- a future recurrence produces the
+same "silence, then it's back" signature regardless of what's actually
+stuck inside that await. Next concrete step, not done here: add
+start/elapsed timing around the `asyncio.to_thread(self.feed, chunk)`
+call in `feed_async()` (e.g. log a warning if a single call exceeds
+some multiple of the ~1-3ms Silero normally takes), so the next
+recurrence's own log distinguishes "one window call is still running,
+N seconds in" from the current signature's total silence.
 
 ---
 
