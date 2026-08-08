@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from typing import Protocol
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
 from convobox.audio.playback import AudioPlayer
@@ -143,6 +144,18 @@ def render_approval_request_for_speech(tool: str | None, approval_phrase: str | 
     return f"Approval needed to run {name}. Say {phrase} to approve, or say no to deny."
 
 
+class ApprovalWaitCanceler(Protocol):
+    """The one method hard_stop() needs from run_convobox.py's
+    ApprovalPromptGate. A Protocol (structural typing) rather than a real
+    import: ApprovalPromptGate lives in scripts/run_convobox.py, which is
+    a script, not part of the installed convobox package -- src/ code
+    must not import from scripts/ (that dependency direction only ever
+    runs the other way, scripts importing from src). Same reasoning as
+    web/bridge.py's ApprovalGateLike."""
+
+    def cancel_wait(self) -> None: ...
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -153,6 +166,7 @@ class Orchestrator:
         on_event: Callable[[BackendEvent], None] | None = None,
         tier_responses: bool = False,
         approval_phrase: str | None = None,
+        approval_gate: ApprovalWaitCanceler | None = None,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
@@ -181,6 +195,11 @@ class Orchestrator:
         # is a hook, not a second consumer contending for the same events.
         self._on_event_hook = on_event
         self._approval_phrase = approval_phrase
+        # Optional -- only set when the session actually has voice-gated
+        # approval configured (see hard_stop()'s own docstring for why
+        # this needs clearing on every hard stop, not just left to its own
+        # timeout).
+        self._approval_gate = approval_gate
         self._events_task: asyncio.Task[None] | None = None
         self._speak_task: asyncio.Task[None] | None = None
 
@@ -288,6 +307,17 @@ class Orchestrator:
         handle_transcript()'s own start_event_loop() call restarts a fresh
         subscription on the NEXT call, so this is safe to call every time,
         not just the first.
+
+        Also cancels any pending voice-approval wait (if approval_gate was
+        configured at construction). Distinct from the adapter's own
+        pending-approval-writer reset (ClaudeCodeAdapter.send_hard_stop()):
+        this is the backend-agnostic voice/web gate's OWN wait state.
+        Without this, a safeword or web-Stop fired while an approval was
+        pending left approval_gate.is_waiting True until its own timeout
+        (up to approval_timeout_s later) -- ApprovalPromptGate.cancel_wait()
+        was already built for exactly this "decision arrived through a
+        different channel" case (see its own docstring), just never called
+        from here.
         """
         if self._player is not None:
             self._player.stop()
@@ -295,6 +325,8 @@ class Orchestrator:
             self._tts.stop()
         await self._adapter.send_hard_stop()
         await self.stop_event_loop()
+        if self._approval_gate is not None:
+            self._approval_gate.cancel_wait()
 
     async def stop_event_loop(self) -> None:
         self._cancel_speak_task()

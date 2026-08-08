@@ -1794,6 +1794,27 @@ async def run(args: argparse.Namespace) -> None:
     if args.web:
         config.web.enabled = True
     adapter = create_backend_adapter(config.backend)
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
+    # tool approval. The GATE (this) is backend-agnostic -- it just needs
+    # a phrase to recognize, and does nothing if the active backend never
+    # emits APPROVAL_REQUEST. Whether a backend actually gates anything is
+    # driven entirely by config.backend.permission_mode == "approve" (see
+    # create_backend_adapter/ClaudeCodeAdapter/CodexAdapter, each derives
+    # its own hook/channel wiring from permission_mode -- no separate flag
+    # passed through here). There is no safe default phrase -- see
+    # InteractionConfig.approval_phrase's own field comment for why.
+    # Built here, before Orchestrator, so Orchestrator.hard_stop() can be
+    # given the gate directly (to cancel a pending wait on hard-stop) --
+    # see Orchestrator's own approval_gate docstring/param.
+    approval_gate = (
+        ApprovalPromptGate(
+            ApprovalDetector(config.interaction.approval_phrase),
+            config.interaction.approval_timeout_s,
+        )
+        if config.interaction.approval_phrase is not None
+        else None
+    )
+    adapter.set_interactive_approvals(approval_gate is not None)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
@@ -1952,26 +1973,9 @@ async def run(args: argparse.Namespace) -> None:
         on_event=_dispatch_event,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
+        approval_gate=approval_gate,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
-    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
-    # tool approval. The GATE (this) is backend-agnostic -- it just needs
-    # a phrase to recognize, and does nothing if the active backend never
-    # emits APPROVAL_REQUEST. Whether a backend actually gates anything is
-    # driven entirely by config.backend.permission_mode == "approve" (see
-    # create_backend_adapter/ClaudeCodeAdapter/CodexAdapter, each derives
-    # its own hook/channel wiring from permission_mode -- no separate flag
-    # passed through here). There is no safe default phrase -- see
-    # InteractionConfig.approval_phrase's own field comment for why.
-    approval_gate = (
-        ApprovalPromptGate(
-            ApprovalDetector(config.interaction.approval_phrase),
-            config.interaction.approval_timeout_s,
-        )
-        if config.interaction.approval_phrase is not None
-        else None
-    )
-    adapter.set_interactive_approvals(approval_gate is not None)
     if approval_bridge is not None:
         approval_bridge.set_targets(orchestrator, approval_gate)
     error_ladder = RecognitionErrorLadder()
