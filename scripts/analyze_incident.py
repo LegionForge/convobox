@@ -188,9 +188,9 @@ def analyze(directory: Path, max_lag_ms: float | None, window_s: float, plot: bo
         confident = False
         if lag_ms is not None and baseline_rms > 1e-9:
             lag_samples = round(lag_ms * rate / 1000)
-            window = mic_raw[lag_samples : lag_samples + (end - start)]
-            if window.size:
-                energy_ratio = float(np.sqrt(np.mean(window**2))) / baseline_rms
+            aligned_window = mic_raw[lag_samples : lag_samples + (end - start)]
+            if aligned_window.size:
+                energy_ratio = float(np.sqrt(np.mean(aligned_window**2))) / baseline_rms
                 # An aligned window that isn't meaningfully louder than the
                 # capture's own baseline is a strong sign the search locked
                 # onto a spurious match rather than the real echo -- this is
@@ -207,6 +207,10 @@ def analyze(directory: Path, max_lag_ms: float | None, window_s: float, plot: bo
         if r.lag_ms is None:
             print(f"  {label} ({seg_time}): too short/quiet for a reliable alignment")
             continue
+        # estimate_reference_lag() only ever returns (None, None) or
+        # (float, float) together (convobox/audio/correlation.py) -- lag_ms
+        # non-None here guarantees raw_corr is too.
+        assert r.raw_corr is not None  # nosec B101
         line = f"  {label} ({seg_time}): lag={r.lag_ms:.1f}ms  raw={r.raw_corr:+.4f}"
         if r.processed_corr is not None:
             line += f"  processed={r.processed_corr:+.4f}"
@@ -254,7 +258,11 @@ def _make_plot(
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 8))
-    colors = plt.get_cmap("tab10").colors
+    # get_cmap()'s declared return type is the base Colormap class, but
+    # "tab10" is always a real ListedColormap at runtime (a fixed, named
+    # matplotlib qualitative palette) -- .colors only exists on that
+    # subclass, not the base one mypy sees statically.
+    colors = plt.get_cmap("tab10").colors  # type: ignore[attr-defined]
 
     t_ref = np.arange(len(reference)) / rate
     axes[0].plot(t_ref, reference, linewidth=0.5)
