@@ -167,6 +167,24 @@ class STTConfig(BaseModel):
     # mechanism. Also not yet validated live -- opt-in, not a new default,
     # same reasoning as condition_on_previous_text above.
     temperature: float | None = None
+    # None (default) means no timeout: transcribe() is offloaded to a
+    # thread (see run_convobox.py's mic loop) but awaited indefinitely,
+    # same behavior as before this field existed. A real number caps how
+    # long any single utterance's transcribe() call is allowed to run
+    # before it's abandoned and treated as unheard -- live-hit 2026-08-06:
+    # a stuck transcribe() call, run synchronously on the main event loop
+    # with no offload at the time, froze the ENTIRE app (mic loop, web UI,
+    # TUI, even the once-a-second background watchdog) while mic capture
+    # kept running on its own separate thread, unaffected -- confirmed via
+    # AEC-dump frame-count forensic cross-check showing continuous capture
+    # straight through the "frozen" window. The thread-offload alone (see
+    # run_convobox.py) fixes the "everything else freezes too" half of
+    # that regardless of whether this timeout is set; this field additionally
+    # lets the mic loop itself recover and move on to the next utterance
+    # instead of waiting forever for a call that may never return (Python
+    # cannot force-kill a native thread, so an abandoned call's background
+    # thread may keep running -- see LocalTranscriber.invalidate()).
+    transcribe_timeout_s: float | None = None
 
     @field_validator("compute_type")
     @classmethod
