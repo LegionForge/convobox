@@ -570,6 +570,16 @@ duplicated here.
    actually work (`CORSMiddleware.allow_origins` does an exact string
    match, no mid-string wildcard) -- use `allow_origin_regex` instead,
    confirmed live against both a matching and a rejected Origin header.
+   Follow-up (2026-08-08, B5 in the overnight codebase review): each
+   subscriber's `asyncio.Queue` is now bounded (`EventBroadcaster`'s
+   `max_queue_size`, default 200) -- unbounded meant a subscriber that
+   stopped draining (a backgrounded/suspended browser tab, still TCP-
+   connected) grew its queue for the rest of the session. A full queue
+   evicts its oldest item (not the newest) rather than blocking
+   `broadcast()`'s delivery to every other subscriber; the evicted
+   subscriber gets a `{"type": "dropped", "count": N}` marker on its next
+   delivery so the frontend can surface that it missed events, instead of
+   silently falling behind with no signal.
 
 3. **Integrate with run_convobox.py** -- DONE (2026-07-25).
    `WebEventForwarder` (convobox/web/bridge.py) is a callable that plugs
