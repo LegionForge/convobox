@@ -690,3 +690,35 @@ async def test_feed_async_never_abandons_a_stalled_call(
     # for this input) and the model was actually invoked, not abandoned.
     assert result == []
     assert model.calls == 1
+
+
+# --- trace_silero_calls: opt-in, off-by-default per-window Silero call
+# timing, deliberately separate from --verbose/DEBUG -- see VADConfig's
+# own field docstring for the live incident this was added to help
+# diagnose.
+
+
+def test_trace_silero_calls_off_by_default_logs_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = FakeSileroModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig(trace_silero_calls=False))
+    caplog.set_level(logging.DEBUG)
+
+    seg.feed(_windows(1))
+
+    assert "VAD Silero call took" not in caplog.text
+
+
+def test_trace_silero_calls_when_enabled_logs_one_line_per_window(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = FakeSileroModel([0.9, 0.9, 0.0, 0.0])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig(trace_silero_calls=True))
+    caplog.set_level(logging.DEBUG)
+
+    seg.feed(_windows(4))
+
+    assert caplog.text.count("VAD Silero call took") == 4

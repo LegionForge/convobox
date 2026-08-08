@@ -282,7 +282,14 @@ class UtteranceSegmenter:
         return utterance
 
     def _process_window(self, window: np.ndarray) -> np.ndarray | None:
-        prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
+        if self._config.trace_silero_calls:
+            call_start = time.monotonic()
+            prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
+            logger.debug(
+                "VAD Silero call took %.1fms", (time.monotonic() - call_start) * 1000
+            )
+        else:
+            prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
         self._last_probability = prob
         is_speech = prob >= self._threshold
         is_silence = prob < self._threshold - _EXIT_HYSTERESIS
