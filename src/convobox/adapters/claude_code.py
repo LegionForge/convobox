@@ -589,7 +589,7 @@ class ClaudeCodeAdapter(BackendAdapter):
         if self._pending_approval_writer is writer:
             await self.resolve_pending_approval(False)
 
-    def _on_approval_watcher_done(self, task: "asyncio.Task[None]") -> None:
+    def _on_approval_watcher_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         exc = task.exception()
