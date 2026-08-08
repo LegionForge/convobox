@@ -131,7 +131,7 @@ class WebEventForwarder:
             self._broadcast_tasks.add(task)
             task.add_done_callback(self._on_broadcast_task_done)
 
-    def _on_broadcast_task_done(self, task: "asyncio.Task[None]") -> None:
+    def _on_broadcast_task_done(self, task: asyncio.Task[None]) -> None:
         self._broadcast_tasks.discard(task)
         if task.cancelled():
             return
