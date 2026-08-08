@@ -1793,25 +1793,6 @@ async def run(args: argparse.Namespace) -> None:
     _check_backend_working_dir(config.backend)
     if args.web:
         config.web.enabled = True
-    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
-    # tool approval. The GATE (this) is backend-agnostic -- it just needs
-    # a phrase to recognize, and does nothing if the active backend never
-    # emits APPROVAL_REQUEST. Whether a backend actually gates anything is
-    # driven entirely by config.backend.permission_mode == "approve" (see
-    # create_backend_adapter/ClaudeCodeAdapter/CodexAdapter, each derives
-    # its own hook/channel wiring from permission_mode -- no separate flag
-    # passed through here). There is no safe default phrase -- see
-    # InteractionConfig.approval_phrase's own field comment for why.
-    approval_detector = (
-        ApprovalDetector(config.interaction.approval_phrase)
-        if config.interaction.approval_phrase
-        else None
-    )
-    approval_gate = (
-        ApprovalPromptGate(approval_detector, config.interaction.approval_timeout_s)
-        if approval_detector is not None
-        else None
-    )
     adapter = create_backend_adapter(config.backend)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
@@ -1973,6 +1954,15 @@ async def run(args: argparse.Namespace) -> None:
         approval_phrase=config.interaction.approval_phrase,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
+    # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
+    # tool approval. The GATE (this) is backend-agnostic -- it just needs
+    # a phrase to recognize, and does nothing if the active backend never
+    # emits APPROVAL_REQUEST. Whether a backend actually gates anything is
+    # driven entirely by config.backend.permission_mode == "approve" (see
+    # create_backend_adapter/ClaudeCodeAdapter/CodexAdapter, each derives
+    # its own hook/channel wiring from permission_mode -- no separate flag
+    # passed through here). There is no safe default phrase -- see
+    # InteractionConfig.approval_phrase's own field comment for why.
     approval_gate = (
         ApprovalPromptGate(
             ApprovalDetector(config.interaction.approval_phrase),
