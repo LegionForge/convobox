@@ -158,7 +158,14 @@ before wiring `file.edited` → `BackendEventType.ARTIFACT`.
 
 ## Deferred For Later
 
-- PDF/CSV/rich viewers beyond the simple fallback above.
+- PDF/CSV rich viewers beyond the simple fallback above. **Partially
+  superseded 2026-08-07:** source code (JS/TS, YAML, Java, C/C++/C#,
+  JSON, XML, Markdown) now gets a real bespoke viewer -- syntax
+  highlighting via a vendored highlight.js (`vendor/highlightjs/`, no
+  CDN, no build step, matches this file's own "plain HTML/JS" rendering
+  constraint) -- JP asked for this directly, listing the exact language
+  set. PDF/CSV specifically remain the simple fallback; not revisited
+  this pass.
 - codex adapter support (Claude Code shipped; opencode still blocked, see
   "Progress" above).
 - Multiple simultaneous artifacts / a history of past artifacts — v1
@@ -166,7 +173,16 @@ before wiring `file.edited` → `BackendEventType.ARTIFACT`.
   Artifact Chooser below, per JP's request.
 - Any artifact *editing* (this pane is view-only; an editable artifact
   pane is a control-plane-shaped feature, same class of decision as the
-  stop/resume-listening buttons — not assumed in scope here).
+  stop/resume-listening buttons — not assumed in scope here). **Still
+  true as of 2026-08-07** -- the same session that added code
+  highlighting also added an "Open in editor" link
+  (`GET /api/artifacts/{path}/editor-uri` → a `vscode://file/` URI), but
+  that is a DIFFERENT, smaller decision: hand off to an external tool
+  the user already trusts and already manages concurrent
+  edit/save/conflict semantics in, not build in-pane editing inside
+  ConvoBox's own no-auth loopback surface. VS Code-specific by
+  construction (the URI scheme); no other editor's scheme is detected or
+  supported.
 
 ## Artifact Chooser (2026-07-29, design pass before code)
 

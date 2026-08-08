@@ -118,3 +118,82 @@ def test_get_artifact_rejects_a_string_prefix_sibling_directory(
         response = client.get(f"/api/artifacts/%2e%2e/{sibling.name}/leak.png")
     assert response.status_code == 403
     assert response.content != b"leaked"
+
+
+# --- Code files (2026-08-07, JP asked directly for syntax-highlighted
+# rendering): served as text/plain regardless of language -- the frontend
+# fetches the raw text and highlights it client-side, browsers have no
+# native rendering for these the way they do images/HTML/PDF. ---
+
+
+def test_get_artifact_serves_a_code_file_as_text_plain(working_dir: Path) -> None:
+    (working_dir / "main.js").write_text("console.log('hi');")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts/main.js")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.content == b"console.log('hi');"
+
+
+# --- "Open in editor" (.../editor-uri): resolves the same working_dir
+# fence as the main route, returns a vscode://file/ URI for the browser
+# to navigate to. ---
+
+
+def test_get_artifact_editor_uri_with_no_working_dir_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts/chart.png/editor-uri")
+    assert response.status_code == 503
+
+
+def test_get_artifact_editor_uri_returns_a_vscode_uri_for_the_resolved_path(
+    working_dir: Path,
+) -> None:
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts/notes.md/editor-uri")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["uri"] == f"vscode://file/{(working_dir / 'notes.md').resolve()}"
+
+
+def test_get_artifact_editor_uri_missing_file_returns_404(working_dir: Path) -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts/does-not-exist.js/editor-uri")
+    assert response.status_code == 404
+
+
+def test_get_artifact_editor_uri_rejects_path_traversal(
+    working_dir: Path, tmp_path: Path
+) -> None:
+    secret = tmp_path / "secret.js"
+    secret.write_text("do-not-serve-me")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts/%2e%2e/secret.js/editor-uri")
+    assert response.status_code == 403
+
+
+def test_editor_uri_route_does_not_get_swallowed_by_the_catch_all_artifact_route(
+    working_dir: Path,
+) -> None:
+    # Regression guard for the route-registration-order gotcha:
+    # {artifact_path:path} in get_artifact() greedily matches an entire
+    # remaining path including slashes, so if that route were registered
+    # BEFORE .../editor-uri, this exact request would resolve as
+    # artifact_path="deep/nested/main.js/editor-uri" (a literal, real
+    # file lookup that 404s) instead of reaching get_artifact_editor_uri
+    # at all. A real nested path is used here specifically so a passing
+    # test can't be an accident of a flat, one-segment path.
+    nested = working_dir / "deep" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "main.js").write_text("console.log('hi');")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts/deep/nested/main.js/editor-uri")
+    assert response.status_code == 200
+    assert response.json()["uri"] == f"vscode://file/{(nested / 'main.js').resolve()}"
