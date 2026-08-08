@@ -323,6 +323,23 @@ some multiple of the ~1-3ms Silero normally takes), so the next
 recurrence's own log distinguishes "one window call is still running,
 N seconds in" from the current signature's total silence.
 
+**JP's own real-time qualitative read, same session, worth recording
+verbatim-close:** "stop and resume listening seem to be significantly
+more reliable... assuming 1) I don't pound the paused client with lots
+of hotwords, and 2) I don't spam the client while paused with lots of
+conversation." Two things line up with this: the recurrence above
+happened during a deliberate rapid-fire pause-overload stress test
+(short repeated hotword-biased phrases, utterances arriving every few
+seconds), and both this fix and PR #217's now both offload onto
+`asyncio.to_thread()`'s shared default executor -- a real, untested
+hypothesis for a follow-up session: sustained high-rate utterances
+during a pause could be piling up VAD and/or STT thread submissions
+faster than they drain, which would produce exactly this "fine under
+normal use, hangs under rapid-fire stress" pattern without requiring
+Silero itself to ever actually stall. Not confirmed -- a concrete lead
+for whoever picks up the diagnostic-logging step above, not a
+diagnosis.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")
