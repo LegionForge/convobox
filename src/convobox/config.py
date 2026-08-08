@@ -55,6 +55,24 @@ class VADConfig(BaseModel):
     # and no transcript at all until the speaker pauses; observed live as a
     # 30.5s single utterance whose transcript only arrived after it ended.
     max_utterance_s: float | None = None
+    # Off by default, deliberately separate from --verbose/DEBUG logging:
+    # logs every single Silero window call's duration (~31/s during active
+    # audio) at DEBUG level -- genuinely too noisy for normal --verbose use,
+    # even though DEBUG is the level it logs at. Added 2026-08-07 live, at
+    # JP's own suggestion, after a live UAT gap (~47s, no Processing audio
+    # lines) produced none of feed_async()'s existing >0.5s stall warnings
+    # either -- leaving it ambiguous whether that gap was genuine silence
+    # (VAD correctly saw nothing to process) or something stalled upstream
+    # of Silero entirely (mic capture, AEC) that never even reached a
+    # feed_async() call to warn about. Per-call tracing resolves that:
+    # a real freeze inside Silero shows continuous fast calls right up to
+    # a gap in the trace itself; a stalled call is caught by the existing
+    # feed_async() warnings; and genuine silence shows... also nothing,
+    # which is the point -- if it's on and NOTHING logs during a "frozen"
+    # period, the stall is upstream of the VAD windowing loop entirely, an
+    # entirely different investigation than this fix's own scope. See
+    # docs/KNOWN-ISSUES.md's VAD segmenter freeze entry.
+    trace_silero_calls: bool = False
 
 
 # ctranslate2's real supported precisions (verified against the installed

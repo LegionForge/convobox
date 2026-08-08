@@ -342,6 +342,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("vad", "min_silence_ms", "Min silence ms", "int", help_text="Trailing silence needed to end an utterance."),
             FieldSpec("vad", "min_speech_ms", "Min speech ms", "int", help_text="Minimum speech burst to keep as a real utterance."),
             FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
+            FieldSpec("vad", "trace_silero_calls", "Trace Silero calls", "bool", help_text="Diagnostic only, off by default -- logs every single Silero window call's duration (~31/s during active audio) at DEBUG level. Deliberately separate from --verbose: too noisy for normal use even at DEBUG. Turn on only when actively chasing the live-hit VAD-freeze issue (see docs/KNOWN-ISSUES.md)."),
         ),
     ),
     SectionSpec(
