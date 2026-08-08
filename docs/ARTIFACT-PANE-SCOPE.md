@@ -156,11 +156,81 @@ continues this should either get an explicit go-ahead to run that one
 prompt, or already knows the answer from other live opencode experience,
 before wiring `file.edited` → `BackendEventType.ARTIFACT`.
 
+### Codex adapter investigation (2026-08-08, JP's own overnight-loop ask)
+
+JP's original ask (the recurring overnight `/loop` prompt) specifically
+said artifact rendering had been "tested a few times with codex and
+wasn't working" — codex, not opencode, is what he's actually hit this
+gap with day to day. Worth noting: codex adapter support isn't wired at
+all yet (still listed under "Deferred For Later" below), so "wasn't
+working" is expected today, not a regression — there's no ARTIFACT
+detection logic in `src/convobox/adapters/codex.py` at all yet.
+
+Investigated for free (no live LLM completion spent), same method
+`codex.py`'s own module docstring already used to verify its approval
+payload shapes: `codex app-server generate-json-schema --out <dir>`
+(codex-cli 0.146.1, installed locally) is a static schema dump, zero
+API cost. Findings:
+
+- `codex.py` already parses `item/completed` notifications and already
+  recognizes `"fileChange"` as one of `_TOOL_ITEM_TYPES` (line ~111) —
+  today it's only used to build a generic `TOOL_RESULT` event
+  (`aggregatedOutput`/`status`), not to extract which file changed.
+- The schema (`ItemCompletedNotification.json`'s `ThreadItem` →
+  `FileChangeThreadItem` definition) is fully typed and unambiguous:
+  ```
+  FileChangeThreadItem: { id, status: PatchApplyStatus, changes: FileUpdateChange[] }
+  PatchApplyStatus: "inProgress" | "completed" | "failed" | "declined"
+  FileUpdateChange: { path: string, kind: PatchChangeKind, diff: string }
+  PatchChangeKind: {type:"add"} | {type:"delete"} | {type:"update", move_path: string|null}
+  ```
+  So on `item/completed` with `item.type == "fileChange"` and
+  `item.status == "completed"`, `item.changes` is a structured array of
+  `{path, kind, diff}` — exactly the signal `ARTIFACT` needs, and a
+  strictly better hook than opencode's single-file `file.edited`: a
+  codex `fileChange` item can name several files in one patch, kind
+  distinguishes add/update/delete (a delete shouldn't open an artifact
+  pane), and `status` distinguishes a genuinely completed change from
+  one that failed or was declined at approval.
+- **The one thing the schema does NOT settle, same open question as
+  opencode's `file.edited.file`:** whether `FileUpdateChange.path` is
+  absolute or relative to the session's `cwd`. The schema declares it as
+  a plain `string` with no format annotation (unlike, e.g., `cwd` on the
+  commandExecution item type, which is at least a named
+  `LegacyAppPathString` alias — still just a plain string underneath,
+  no stronger guarantee, but confirms the schema author didn't bother
+  distinguishing path conventions anywhere in this API). Checked
+  whether the installed CLI's own source could resolve this for free
+  too: `codex` on this machine is a thin shell wrapper around a
+  compiled binary, not inspectable Rust source, so no free answer there
+  either.
+
+**Same discipline as the opencode finding above, deliberately not
+crossed here:** confirming the real path format needs one real prompt
+through a real `codex app-server` session that actually edits a file
+(e.g. "write 'hello' to test.txt") and inspecting the resulting
+`item/completed` notification on the wire — a genuine, small LLM
+completion cost, not free like the schema dump above. Not spent
+autonomously this pass. Whoever continues this should either get an
+explicit go-ahead to run that one prompt, or already knows the answer
+from other live codex experience, before wiring `fileChange` →
+`BackendEventType.ARTIFACT` in `codex.py`. Once that's confirmed, the
+actual wiring is small: in the `item/completed` branch already handling
+`_TOOL_ITEM_TYPES`, special-case `item_type == "fileChange" and
+item.get("status") == "completed"`, and for each entry in
+`item["changes"]` where `kind` isn't `"delete"`, emit a
+`BackendEventType.ARTIFACT` with `artifact_path` resolved against
+`backend.working_dir` the same way `GET /api/artifacts/{path}` already
+fences it (only serve inside `working_dir`) — no new backend route
+needed, this reuses the existing one opencode's slice would have too.
+
 ## Deferred For Later
 
 - PDF/CSV/rich viewers beyond the simple fallback above.
-- codex adapter support (Claude Code shipped; opencode still blocked, see
-  "Progress" above).
+- codex adapter wiring for `ARTIFACT` (schema investigated for free,
+  2026-08-08 above; the one remaining unknown — `path`'s absolute-vs-
+  relative format — needs one real live prompt through codex, not yet
+  spent; opencode is similarly blocked, see "Progress" above).
 - Multiple simultaneous artifacts / a history of past artifacts — v1
   shipped as "one pane, latest artifact only." Now being designed as the
   Artifact Chooser below, per JP's request.
