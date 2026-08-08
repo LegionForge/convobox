@@ -275,6 +275,113 @@ async def test_broadcast_still_delivers_real_events_unaffected_by_close_all() ->
     assert event == {"type": "response", "content": "still works"}
 
 
+# --- EventBroadcaster: bounded queues + oldest-drop (B5, 2026-08-08 review):
+# an unbounded per-subscriber queue meant a stalled/backgrounded browser tab
+# (still connected, no longer draining) grew its queue for the rest of the
+# session. subscribe() now caps it; a full queue evicts its oldest item
+# instead of blocking broadcast()'s delivery to every OTHER subscriber. ---
+
+
+@pytest.mark.asyncio
+async def test_subscribe_returns_a_bounded_queue() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=3)
+    queue = broadcaster.subscribe()
+    assert queue.maxsize == 3
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_a_full_queue_evicts_the_oldest_event() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=2)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    await broadcaster.broadcast({"type": "response", "content": "3"})
+
+    # "1" was evicted to make room -- queue never exceeds its cap, and the
+    # newest events (not the oldest) are what a live UI most needs to see.
+    assert queue.qsize() == 2
+    assert await queue.get() == {"type": "response", "content": "2"}
+    assert await queue.get() == {"type": "response", "content": "3"}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_still_delivers_normally_below_capacity() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=200)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "a"})
+    await broadcaster.broadcast({"type": "response", "content": "b"})
+
+    assert await queue.get() == {"type": "response", "content": "a"}
+    assert await queue.get() == {"type": "response", "content": "b"}
+
+
+@pytest.mark.asyncio
+async def test_dropped_events_surface_as_a_marker_on_the_next_broadcast() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=1)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    # Evicts "1" (dropped count -> 1), queue now holds "2".
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    # Delivers the pending marker first, which itself evicts "2" to fit
+    # (maxsize=1 has no spare room) -- then the "3" payload evicts the
+    # marker in turn to fit. maxsize=1 is the pathological extreme where
+    # even the marker can't coexist with a real event in the same queue;
+    # broadcast() still ends this call holding the newest real payload,
+    # "3", with the evicted marker's own count rolled into whatever the
+    # NEXT marker eventually reports (see test_dropped_marker_reports_the_
+    # correct_count_with_room_to_spare below for the non-pathological case).
+    await broadcaster.broadcast({"type": "response", "content": "3"})
+
+    assert await queue.get() == {"type": "response", "content": "3"}
+
+
+@pytest.mark.asyncio
+async def test_dropped_marker_reports_the_correct_count_with_room_to_spare() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=2)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    # Queue is now full (["1", "2"]). This evicts "1" (dropped -> 1).
+    await broadcaster.broadcast({"type": "response", "content": "3"})
+    # Delivers the pending marker first (evicting "2" to fit it, since the
+    # queue is still full: ["2", "3"]), then "4" (evicting "3").
+    await broadcaster.broadcast({"type": "response", "content": "4"})
+
+    assert await queue.get() == {"type": "dropped", "count": 1}
+    assert await queue.get() == {"type": "response", "content": "4"}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_clears_pending_drop_count() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=1)
+    queue = broadcaster.subscribe()
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    assert broadcaster._dropped.get(queue)
+
+    broadcaster.unsubscribe(queue)
+
+    assert queue not in broadcaster._dropped
+
+
+@pytest.mark.asyncio
+async def test_close_all_delivers_the_none_sentinel_even_when_the_queue_is_full() -> None:
+    # The original bug this whole method exists for: close_all() must
+    # actually reach every subscriber. A raw blocking `await queue.put(None)`
+    # against a full, undrained queue would hang this call forever.
+    broadcaster = EventBroadcaster(max_queue_size=1)
+    queue = broadcaster.subscribe()
+    await broadcaster.broadcast({"type": "response", "content": "still queued"})
+
+    await broadcaster.close_all()
+
+    assert await queue.get() is None
+
+
 # --- /api/events/stream: a real uvicorn server + a real socket, since
 # ASGITransport can't drive an infinite streaming response (see above). ---
 

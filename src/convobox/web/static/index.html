@@ -631,6 +631,16 @@
   function renderEvent(ev) {
     const kind = ev.event_type || ev.type || "event";
     if (kind === "done") return;
+    if (kind === "dropped") {
+      // EventBroadcaster's bounded-queue backpressure marker (src/convobox/
+      // web/stream.py) -- this tab's SSE queue fell behind and some live
+      // events were evicted to make room for newer ones. No chat bubble
+      // (there's no transcript/response content to show, only a count) --
+      // logged so it's still discoverable if a session looks like it's
+      // missing turns.
+      console.warn(`live event stream dropped ${ev.count} event(s) -- this tab fell behind`);
+      return;
+    }
     if (kind === "artifact") {
       // No chat bubble for this one -- the pane IS the rendering, a
       // bubble would just be empty (nothing in the backend_response/
