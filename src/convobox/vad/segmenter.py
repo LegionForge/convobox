@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator
 
@@ -182,6 +183,37 @@ class UtteranceSegmenter:
         self._carry = buffer[offset:].copy()
         return completed
 
+    async def feed_async(self, chunk: np.ndarray) -> list[np.ndarray]:
+        """Same as ``feed()``, but runs the underlying Silero calls in a
+        worker thread instead of blocking the caller's event loop.
+
+        `segment()` (the real mic loop's only streaming consumer) calls
+        this instead of `feed()` directly. Live-hit 2026-08-06/07
+        (docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md,
+        docs/KNOWN-ISSUES.md "VAD segmenter's per-window model call is
+        synchronous..."): `_process_window()` makes a synchronous Silero
+        ONNX inference call ~31x/second (every 512-sample/32ms window)
+        inside an async loop with no offload -- a single slow/stuck call
+        blocks the WHOLE single-threaded event loop, not just VAD, which
+        live evidence showed taking out the safeword check, the web
+        server's HTTP routes (Stop/Resume buttons going unresponsive
+        together), and the once-a-second watchdog simultaneously.
+
+        Deliberately NOT a new timeout/abandon/invalidate mechanism like
+        PR #217's analogous STT fix: unlike `transcribe()` (stateless per
+        call), Silero's model carries sequential recurrent state across
+        windows via `reset_states()`, and abandoning an in-flight window
+        while a background thread still holds it risks that thread's
+        eventual completion racing a fresh call against the same
+        (non-thread-safe) model object. Plain thread offload alone
+        already fixes the documented symptom -- other event-loop tasks
+        (HTTP routes, watchdog, TUI) stay responsive while a slow window
+        call runs -- without introducing that new race. `feed()` itself
+        is left synchronous and unchanged: existing callers (tests, any
+        non-realtime/offline processing) keep exact prior behavior.
+        """
+        return await asyncio.to_thread(self.feed, chunk)
+
     def flush(self) -> np.ndarray | None:
         """End any in-progress utterance and return it (e.g. on stream close).
 
@@ -270,7 +302,7 @@ class UtteranceSegmenter:
     ) -> AsyncIterator[np.ndarray]:
         """Consume an async chunk stream, yielding one array per utterance."""
         async for chunk in chunks:
-            for utterance in self.feed(chunk):
+            for utterance in await self.feed_async(chunk):
                 yield utterance
         tail = self.flush()
         if tail is not None:

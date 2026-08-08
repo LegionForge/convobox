@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, AsyncIterator
 
 import numpy as np
@@ -555,3 +557,58 @@ async def test_segment_yields_nothing_for_empty_stream(
     utterances = [u async for u in seg.segment(_achunks([]))]
 
     assert utterances == []
+
+
+# --- feed_async: offloads feed()'s Silero model calls to a worker thread
+# (asyncio.to_thread) so a slow/stuck window can't freeze the caller's
+# event loop -- the same shape of fix as PR #217's _transcribe_with_timeout,
+# applied to the VAD segmenter. See feed_async's own docstring for the
+# live incident and why this is a plain offload with no timeout/abandon.
+
+
+@pytest.mark.asyncio
+async def test_feed_async_returns_the_same_result_as_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    speech_windows = 10
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg_sync, _ = _make_segmenter(monkeypatch, probs)
+    seg_async, _ = _make_segmenter(monkeypatch, probs)
+
+    total_windows = speech_windows + _MIN_SILENCE_WINDOWS
+    audio = _windows(total_windows)
+
+    sync_result = seg_sync.feed(audio)
+    async_result = await seg_async.feed_async(audio)
+
+    assert len(async_result) == len(sync_result) == 1
+    assert np.array_equal(async_result[0], sync_result[0])
+
+
+@pytest.mark.asyncio
+async def test_feed_async_does_not_block_other_concurrent_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of the offload: a slow/stuck model call must not
+    # freeze the event loop for anything else running concurrently (HTTP
+    # routes, the watchdog, TUI redraw) -- live-hit 2026-08-06/07, see
+    # feed_async's docstring.
+    class _SlowModel(FakeSileroModel):
+        def __call__(self, window: Any, sample_rate: int) -> _Prob:
+            time.sleep(0.2)
+            return super().__call__(window, sample_rate)
+
+    model = _SlowModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig())
+
+    ticks: list[float] = []
+
+    async def ticker() -> None:
+        for _ in range(3):
+            await asyncio.sleep(0.02)
+            ticks.append(time.monotonic())
+
+    await asyncio.gather(seg.feed_async(_windows(1)), ticker())
+
+    assert len(ticks) == 3

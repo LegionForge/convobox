@@ -182,13 +182,12 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** diagnosed (2026-08-07) by reading the code after a live
-recurrence, **not fixed, not yet forensically confirmed the same way the
-related transcribe()-freeze finding was** (see
+**Status:** fix implemented 2026-08-07 (schema/unit-level; see the
+"Fix implemented" note below), **not yet live-validated against a real
+recurrence** the same way the related transcribe()-freeze finding was
+(see
 docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md's
-addendum for the live incident this came from). We're still testing
-this one -- recorded now for transparency and so it isn't lost, not
-because a fix is ready.
+addendum for the live incident this came from).
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -233,6 +232,42 @@ window (the two are ~1:1 today given the blocksize match, but `feed()`
 is the natural async/sync boundary `segment()`'s generator already
 awaits at, and doesn't require reaching inside `_process_window()`) --
 proposed, not yet built or benchmarked for the added-overhead tradeoff.
+
+**Fix implemented 2026-08-07 (schema/unit-level; not yet live-validated
+against a real recurrence).** New `UtteranceSegmenter.feed_async()`
+(`src/convobox/vad/segmenter.py`) wraps the existing synchronous
+`feed()` in `asyncio.to_thread()`, at exactly the `feed()`-granularity
+proposed above. `segment()` (the mic loop's only real-time streaming
+consumer) now awaits `feed_async()` instead of calling `feed()`
+directly; `feed()` itself is unchanged and still synchronous, so every
+existing caller (tests, any offline/non-realtime processing) keeps
+identical behavior.
+
+Deliberately **not** a timeout/abandon/invalidate mechanism like PR
+#217's analogous STT fix: `transcribe()` is stateless per call, but
+Silero's model carries sequential recurrent state across windows via
+`reset_states()`, and abandoning an in-flight window while its
+background thread still runs risks that thread's eventual completion
+racing a fresh call against the same (not documented as thread-safe)
+model object. Plain thread offload alone already addresses the
+documented symptom -- other event-loop tasks (the web server's HTTP
+routes, the watchdog, TUI redraw) stay responsive while a slow/stuck
+window call runs in its own thread -- without introducing that new
+race.
+
+New test `test_feed_async_does_not_block_other_concurrent_work`
+(`tests/test_vad_segmenter.py`) proves the mechanism the same way PR
+#217's `test_timeout_does_not_block_other_concurrent_work` did: a
+model call blocked via `time.sleep()` inside a worker thread does not
+prevent concurrently-scheduled `asyncio.sleep()` ticks from firing on
+the event loop. Full suite green (1273 passed), `ruff`/`mypy` clean on
+the touched files.
+
+**Still needed before this can be marked resolved**: live
+re-verification against a real recurrence of the freeze (the same gap
+PR #217's own field note flagged for its STT-side fix) -- this is
+unit-proven-correct, not yet confirmed to actually prevent the next
+live Stop/Resume-button lockup.
 
 ---
 
