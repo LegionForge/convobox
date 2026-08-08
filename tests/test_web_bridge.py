@@ -145,6 +145,21 @@ async def test_live_broadcast_does_not_mutate_what_gets_persisted(db: HistoryDB)
 
     forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))
     await asyncio.sleep(0)
+    # Preemptive compatibility fix for PR #242 (B2, "offload history DB
+    # writes off the event loop", still open/unmerged as of this commit):
+    # that PR makes history writes asynchronous (queued + drained by a
+    # background task) instead of synchronous, adding a `_writer_task`
+    # attribute this branch doesn't have on its own -- getattr(), not a
+    # plain attribute access, so this stays correct BOTH standalone (no
+    # such attribute -> skip, matching today's synchronous behavior) and
+    # once merged with #242 (awaits the real write). Whichever of #230/
+    # #242 merges second, this test needs this either way -- added now on
+    # #230's own branch so it's correct regardless of merge order (found
+    # via a local, throwaway integration-merge check of the full open PR
+    # queue, not pushed).
+    writer_task = getattr(forwarder, "_writer_task", None)
+    if writer_task is not None:
+        await writer_task
 
     assert queue.get_nowait()["type"] == "response"
     stored = db.get_session_events(session_id)[0]
