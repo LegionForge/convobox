@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator
 
@@ -9,6 +11,23 @@ import torch
 from silero_vad import load_silero_vad
 
 from convobox.config import VADConfig
+
+logger = logging.getLogger(__name__)
+
+# A real Silero window call normally takes ~1-3ms. feed_async() below warns
+# once a call has run past _SLOW_CALL_FIRST_WARNING_S without returning
+# (comfortably above normal jitter, so this doesn't fire under ordinary
+# load), then again every _SLOW_CALL_REPEAT_WARNING_S while it's still
+# pending -- diagnostic only, does NOT time out or abandon the call (see
+# feed_async()'s own docstring for why abandoning isn't safe here). Added
+# 2026-08-07 after a live UAT recurrence of the freeze this fix targets
+# produced total log silence for its entire ~2-minute duration (docs/
+# KNOWN-ISSUES.md's "VAD segmenter's per-window model call is
+# synchronous..." entry, its live-UAT follow-up) -- this closes that gap
+# so the next occurrence's own log shows "still running, Ns in" instead of
+# nothing at all.
+_SLOW_CALL_FIRST_WARNING_S = 0.5
+_SLOW_CALL_REPEAT_WARNING_S = 5.0
 
 # Silero's 16kHz ONNX model only accepts 512-sample windows (32ms). Incoming
 # capture chunks may be any length, so they are buffered and consumed in
@@ -211,8 +230,40 @@ class UtteranceSegmenter:
         call runs -- without introducing that new race. `feed()` itself
         is left synchronous and unchanged: existing callers (tests, any
         non-realtime/offline processing) keep exact prior behavior.
+
+        Also logs a warning if the call is still pending past
+        `_SLOW_CALL_FIRST_WARNING_S`, then again every
+        `_SLOW_CALL_REPEAT_WARNING_S` while it remains pending -- see the
+        module-level comment on those constants for why. `asyncio.wait()`
+        (not `wait_for()`) is used specifically because it does NOT cancel
+        the awaited task on timeout; this only ever observes and reports,
+        never abandons.
         """
-        return await asyncio.to_thread(self.feed, chunk)
+        task: asyncio.Future[list[np.ndarray]] = asyncio.ensure_future(
+            asyncio.to_thread(self.feed, chunk)
+        )
+        start = time.monotonic()
+        stalled = False
+        interval = _SLOW_CALL_FIRST_WARNING_S
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=interval)
+            if done:
+                break
+            stalled = True
+            logger.warning(
+                "VAD feed_async() call still running after %.1fs (a normal "
+                "window call takes ~1-3ms) -- not abandoning it, just "
+                "reporting; see docs/KNOWN-ISSUES.md's VAD segmenter "
+                "freeze entry",
+                time.monotonic() - start,
+            )
+            interval = _SLOW_CALL_REPEAT_WARNING_S
+        if stalled:
+            logger.warning(
+                "VAD feed_async() call finally completed after %.1fs",
+                time.monotonic() - start,
+            )
+        return await task
 
     def flush(self) -> np.ndarray | None:
         """End any in-progress utterance and return it (e.g. on stream close).

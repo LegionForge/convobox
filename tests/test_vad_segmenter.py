@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any, AsyncIterator
 
@@ -612,3 +613,80 @@ async def test_feed_async_does_not_block_other_concurrent_work(
     await asyncio.gather(seg.feed_async(_windows(1)), ticker())
 
     assert len(ticks) == 3
+
+
+# --- feed_async's stalled-call warnings: diagnostic logging only (never
+# abandons the call) so a real freeze's own log shows "still running, Ns
+# in" instead of total silence -- live-hit 2026-08-07, see feed_async's
+# and the module-level threshold constants' own docstrings/comments.
+
+
+@pytest.mark.asyncio
+async def test_feed_async_does_not_warn_for_a_normal_fast_call(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    seg, _ = _make_segmenter(monkeypatch, [0.9])
+    caplog.set_level(logging.WARNING)
+
+    await seg.feed_async(_windows(1))
+
+    assert "still running" not in caplog.text
+    assert "finally completed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_feed_async_warns_when_a_call_runs_past_the_threshold(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Threshold constants patched down so this test exercises the real
+    # warn-then-repeat logic without needing to wait the real 0.5s/5.0s
+    # production thresholds.
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.05)
+    caplog.set_level(logging.WARNING)
+
+    class _SlowModel(FakeSileroModel):
+        def __call__(self, window: Any, sample_rate: int) -> _Prob:
+            time.sleep(0.2)
+            return super().__call__(window, sample_rate)
+
+    model = _SlowModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig())
+
+    await seg.feed_async(_windows(1))
+
+    assert "still running" in caplog.text
+    assert "finally completed" in caplog.text
+    # With a 0.05s repeat interval and a 0.2s call, more than one
+    # "still running" warning should have fired before completion.
+    assert caplog.text.count("still running") >= 2
+
+
+@pytest.mark.asyncio
+async def test_feed_async_never_abandons_a_stalled_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of using asyncio.wait() (not wait_for()): the
+    # diagnostic warnings must never cancel or abandon the underlying
+    # call, only report on it -- otherwise this would reintroduce the
+    # exact race feed_async's own docstring says this fix avoids.
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.05)
+
+    class _SlowModel(FakeSileroModel):
+        def __call__(self, window: Any, sample_rate: int) -> _Prob:
+            time.sleep(0.2)
+            return super().__call__(window, sample_rate)
+
+    model = _SlowModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig())
+
+    result = await seg.feed_async(_windows(1))
+
+    # The call ran to completion (a single non-speech-triggering window
+    # produces no completed utterance yet, same as feed()'s own behavior
+    # for this input) and the model was actually invoked, not abandoned.
+    assert result == []
+    assert model.calls == 1
