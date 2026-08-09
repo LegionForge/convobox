@@ -74,6 +74,7 @@ from convobox.approval import ApprovalDetector
 from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
     resolve_config_path,
@@ -1630,14 +1631,18 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
         await asyncio.sleep(0.1)
 
 
-def _check_backend_permission_mode(backend: object) -> None:
+def _check_backend_permission_mode(backend: object, interaction: object) -> None:
     """Enforce permission_mode as the single source of truth: reject a
-    conflicting command flag, warn where the mode can't be enforced, log
+    conflicting command flag, reject a claude-code approval hook with
+    nothing able to answer it, warn where the mode can't be enforced, log
     the effective posture. SystemExit on conflict (safety control -- fail
     closed rather than run with an ambiguous posture)."""
     conflict = detect_permission_conflict(backend)  # type: ignore[arg-type]
     if conflict is not None:
         raise SystemExit(conflict)
+    approval_gap = detect_claude_code_approval_gap(backend, interaction)  # type: ignore[arg-type]
+    if approval_gap is not None:
+        raise SystemExit(approval_gap)
     name = getattr(backend, "name", "")
     mode = getattr(backend, "permission_mode", "plan")
     if name == "opencode" and mode != "plan":
@@ -1787,12 +1792,13 @@ async def run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.permission_mode is not None:
         config.backend.permission_mode = args.permission_mode
-    _check_backend_permission_mode(config.backend)
+    _check_backend_permission_mode(config.backend, config.interaction)
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
     if args.web:
         config.web.enabled = True
+    adapter = create_backend_adapter(config.backend)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
     # a phrase to recognize, and does nothing if the active backend never
@@ -1802,17 +1808,18 @@ async def run(args: argparse.Namespace) -> None:
     # its own hook/channel wiring from permission_mode -- no separate flag
     # passed through here). There is no safe default phrase -- see
     # InteractionConfig.approval_phrase's own field comment for why.
-    approval_detector = (
-        ApprovalDetector(config.interaction.approval_phrase)
-        if config.interaction.approval_phrase
-        else None
-    )
+    # Built here, before Orchestrator, so Orchestrator.hard_stop() can be
+    # given the gate directly (to cancel a pending wait on hard-stop) --
+    # see Orchestrator's own approval_gate docstring/param.
     approval_gate = (
-        ApprovalPromptGate(approval_detector, config.interaction.approval_timeout_s)
-        if approval_detector is not None
+        ApprovalPromptGate(
+            ApprovalDetector(config.interaction.approval_phrase),
+            config.interaction.approval_timeout_s,
+        )
+        if config.interaction.approval_phrase is not None
         else None
     )
-    adapter = create_backend_adapter(config.backend)
+    adapter.set_interactive_approvals(approval_gate is not None)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
@@ -1971,17 +1978,9 @@ async def run(args: argparse.Namespace) -> None:
         on_event=_dispatch_event,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
+        approval_gate=approval_gate,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
-    approval_gate = (
-        ApprovalPromptGate(
-            ApprovalDetector(config.interaction.approval_phrase),
-            config.interaction.approval_timeout_s,
-        )
-        if config.interaction.approval_phrase is not None
-        else None
-    )
-    adapter.set_interactive_approvals(approval_gate is not None)
     if approval_bridge is not None:
         approval_bridge.set_targets(orchestrator, approval_gate)
     error_ladder = RecognitionErrorLadder()
