@@ -100,6 +100,8 @@ class _WhisperLikeModel(Protocol):
         hotwords: str | None = None,
         condition_on_previous_text: bool = True,
         temperature: float | None = None,
+        repetition_penalty: float | None = None,
+        no_repeat_ngram_size: int | None = None,
     ) -> tuple[Any, Any]: ...
 
 
@@ -280,6 +282,22 @@ class LocalTranscriber(STTEngine):
             return
         self.transcribe(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32))
 
+    def invalidate(self) -> None:
+        """Force the next transcribe() call to rebuild the model instead
+        of reusing self._model -- used by run_convobox.py's mic loop after
+        abandoning a transcribe() call that didn't return within
+        stt.transcribe_timeout_s.
+
+        Safe even if a background thread is still running the abandoned
+        call: that thread holds its own local reference to the old model
+        object (captured before this method runs), so dropping self._model
+        here doesn't pull the object out from under it -- Python's GC
+        keeps it alive until that thread's own reference goes away too.
+        Same reasoning _reload_model's own docstring already covers for
+        why dropping the reference before rebuilding is safe.
+        """
+        self._model = None
+
     def _build_model(self) -> _WhisperLikeModel:
         if self._custom_factory is not None:
             return self._custom_factory()
@@ -374,16 +392,21 @@ class LocalTranscriber(STTEngine):
             return self._empty_result(audio, start)
 
         try:
-            # temperature omitted entirely (not passed as None) when unset:
-            # faster-whisper's own transcribe() types it as
-            # Union[float, List[float], Tuple[float, ...]] -- no None in
-            # that union -- so passing None explicitly would override its
-            # real default (the [0.0, 0.2, ...] fallback ladder) with a
-            # value it likely doesn't handle, rather than actually leaving
-            # that default alone the way omitting the kwarg does.
+            # temperature/repetition_penalty/no_repeat_ngram_size are all
+            # omitted entirely (not passed as None) when unset: each has
+            # a real, non-None faster-whisper default (temperature's own
+            # [0.0, 0.2, ...] fallback ladder; repetition_penalty=1.0;
+            # no_repeat_ngram_size=0) that a literal None would override
+            # with a value the library likely doesn't handle, rather than
+            # actually leaving that default alone the way omitting the
+            # kwarg does.
             extra_kwargs: dict[str, Any] = {}
             if self._config.temperature is not None:
                 extra_kwargs["temperature"] = self._config.temperature
+            if self._config.repetition_penalty is not None:
+                extra_kwargs["repetition_penalty"] = self._config.repetition_penalty
+            if self._config.no_repeat_ngram_size is not None:
+                extra_kwargs["no_repeat_ngram_size"] = self._config.no_repeat_ngram_size
             segments, info = model.transcribe(
                 audio,
                 language=self._config.language,

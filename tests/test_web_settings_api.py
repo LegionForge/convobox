@@ -16,6 +16,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from convobox.web.app import create_app  # noqa: E402
 from convobox.web.history import HistoryDB  # noqa: E402
 
+# Required by app.py's require_csrf_header middleware on every mutating
+# request (see its own docstring, GitHub issue #235 finding A3) -- set as
+# this client's default headers so every test call carries it without
+# repeating it at each call site.
+_CSRF_HEADERS = {"X-ConvoBox-Client": "1"}
+
 
 @pytest.fixture
 def config_path(tmp_path: Path) -> Path:
@@ -25,7 +31,7 @@ def config_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def client(config_path: Path) -> TestClient:
     app = create_app(db=HistoryDB(Path(":memory:")), config_path=config_path)
-    return TestClient(app)
+    return TestClient(app, headers=_CSRF_HEADERS)
 
 
 def test_get_settings_defaults_when_no_file_exists(client: TestClient) -> None:
@@ -57,6 +63,32 @@ def test_schema_swaps_to_piper_fields_when_engine_is_piper(client: TestClient) -
     assert "speaker" in keys
     assert "volume" in keys
     assert "model_path" not in keys
+
+
+# --- restart_required (2026-08-07, JP asked directly): display is the
+# ONLY section not consumed by the mic-loop pipeline run_convobox.py
+# builds once at startup -- see SectionSpec.restart_required's own
+# docstring in scripts/settings_tui.py for how that was confirmed. ---
+
+
+def test_schema_marks_display_section_as_not_requiring_restart(
+    client: TestClient,
+) -> None:
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    sections = {s["key"]: s["restart_required"] for s in response.json()["sections"]}
+    assert sections["display"] is False
+
+
+def test_schema_marks_every_other_section_as_requiring_restart(
+    client: TestClient,
+) -> None:
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    sections = {s["key"]: s["restart_required"] for s in response.json()["sections"]}
+    del sections["display"]
+    assert sections, "expected at least one non-display section to check"
+    assert all(sections.values()), sections
 
 
 def test_schema_exposes_unset_sentinel_for_device_fields(client: TestClient) -> None:
@@ -121,6 +153,45 @@ def test_save_writes_backup_of_prior_config(client: TestClient, config_path: Pat
     assert backup is not None
     assert Path(backup).exists()
     assert "af_bella" in Path(backup).read_text(encoding="utf-8")
+
+
+# --- /api/settings/save's backend.command/web.bind_address escalation
+# guard (GitHub issue #235, finding A4): this web route shares the whole
+# no-auth, loopback-only web UI trust boundary, but these two fields are
+# categorically higher-stakes than the rest (arbitrary-command-execution-
+# on-next-start, and self-exposure of an unauthenticated server beyond
+# loopback) -- rejected here specifically, still fully editable via the
+# settings TUI.
+
+
+def test_save_rejects_a_changed_backend_command(client: TestClient, config_path: Path) -> None:
+    values = client.get("/api/settings").json()["values"]
+    values["backend"]["command"] = ["rm", "-rf", "/"]
+    response = client.post("/api/settings/save", json={"values": values})
+    assert response.status_code == 403
+    assert "backend.command" in response.json()["detail"]
+    assert not config_path.exists()
+
+
+def test_save_rejects_a_changed_bind_address(client: TestClient, config_path: Path) -> None:
+    values = client.get("/api/settings").json()["values"]
+    values["web"]["bind_address"] = "0.0.0.0"
+    response = client.post("/api/settings/save", json={"values": values})
+    assert response.status_code == 403
+    assert "bind_address" in response.json()["detail"]
+    assert not config_path.exists()
+
+
+def test_save_allows_an_unchanged_backend_command_to_pass_through(
+    client: TestClient, config_path: Path
+) -> None:
+    # The web UI's own save flow round-trips the full current config back
+    # with edits merged in -- backend.command is always PRESENT in a
+    # normal payload, so only a real attempted CHANGE should be rejected.
+    values = client.get("/api/settings").json()["values"]
+    values["tts"]["voice"] = "af_bella"  # an unrelated, allowed change
+    response = client.post("/api/settings/save", json={"values": values})
+    assert response.status_code == 200
 
 
 def test_test_endpoint_blocks_on_invalid_draft_without_probing(client: TestClient) -> None:

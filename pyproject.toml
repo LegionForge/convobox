@@ -158,31 +158,54 @@ asyncio_mode = "auto"
 # comment at each insert site), not by accident.
 "scripts/*.py" = ["E402"]
 
+[tool.mypy]
+# Pinned rather than left at its "defaults to sys.platform" behavior (D1,
+# the 2026-08-08 review): CI (dev-rig's lint.yml) runs on Linux, but
+# scripts/run_convobox.py has genuinely POSIX-only code (the TUI's raw-mode
+# terminal restore, gated behind `if sys.platform != "win32":` well before
+# it's used -- see tui_old_tty_settings). A contributor running plain
+# `mypy src/convobox scripts` on Windows would otherwise get 3 extra,
+# CI-invisible "Module has no attribute" errors on that termios call
+# (confirmed live: identical to CI's actual result once `--platform linux`
+# is passed explicitly) -- not a real bug, just a local platform mismatch
+# that made local runs untrustworthy against what CI actually checks.
+platform = "linux"
+
 [[tool.mypy.overrides]]
 # faster-whisper, sounddevice, and silero-vad ship no type stubs and no
 # py.typed marker -- no stub package exists to install for them (unlike
 # PyYAML, whose types-PyYAML stub package is a lint.yml default input).
 # Scoped here rather than a blanket --ignore-missing-imports CLI flag so
 # every other import stays checked; this is what makes plain `mypy
-# src/convobox` (dev-rig's lint.yml invocation, no flags) pass, matching
-# what `mypy ... --ignore-missing-imports` already did for the whole tree.
+# src/convobox scripts` (dev-rig's lint.yml invocation -- see D1, the
+# 2026-08-08 review, for why scripts/ is now part of that invocation too,
+# not just src/convobox) pass, matching what
+# `mypy ... --ignore-missing-imports` already did for the whole tree.
 #
-# aec_audio_processing, piper/piper.*, and fastapi/starlette/uvicorn are a
-# different reason for the same fix: all are opt-in extras (`uv sync
-# --extra aec`/`--extra piper`/`--extra web`) deliberately NOT installed by
-# CI's default lint job (see DEPENDENCY_LICENSE_AUDIT.md for why piper-tts
-# specifically must stay opt-in, not default -- it's GPL-3.0; web's own
-# reason is pyproject.toml's own comment on the `web` extra), so mypy can
-# never resolve them there regardless of whether stubs exist upstream.
+# aec_audio_processing, piper/piper.*, fastapi/starlette/uvicorn, and
+# matplotlib are a different reason for the same fix: all are opt-in
+# extras (`uv sync --extra aec`/`--extra piper`/`--extra web`/
+# `--extra analysis`) deliberately NOT installed by CI's default lint job
+# (see DEPENDENCY_LICENSE_AUDIT.md for why piper-tts specifically must
+# stay opt-in, not default -- it's GPL-3.0; web's own reason is
+# pyproject.toml's own comment on the `web` extra; matplotlib's is the
+# `analysis` extra's own comment -- plotting-only, scripts/
+# analyze_incident.py's --plot flag, never imported by the running
+# product), so mypy can never resolve them there regardless of whether
+# stubs exist upstream.
 #
-# voice_picker/audio_devices are a third reason again: real first-party
-# modules (scripts/voice_picker.py, scripts/audio_devices.py), but
-# scripts/settings_tui.py imports them the same way it runs standalone --
-# a bare `import voice_picker` relying on a runtime sys.path insert, not
-# `from scripts import voice_picker` -- so plain `mypy src/convobox` (no
-# scripts/ on its search path) can't resolve them statically. Only surfaced
-# once something under src/convobox first imported settings_tui.py
-# (web/settings_api.py, web UI v2 slice 3) and mypy started following it.
+# voice_picker/audio_devices/_console/run_convobox are a third reason
+# again: real first-party modules (scripts/voice_picker.py,
+# scripts/audio_devices.py, scripts/_console.py, scripts/run_convobox.py),
+# but other scripts/ modules import them the same way each runs
+# standalone -- a bare `import voice_picker` relying on a runtime sys.path
+# insert, not `from scripts import voice_picker` -- so even with scripts/
+# now included, mypy still resolves each such module independently rather
+# than seeing them as siblings on a shared search path. voice_picker/
+# audio_devices were only surfaced once something under src/convobox
+# first imported settings_tui.py (web/settings_api.py, web UI v2 slice 3)
+# and mypy started following it; _console/run_convobox are the same
+# pattern, surfaced by scripts/ itself joining this invocation (D1).
 module = [
     "faster_whisper",
     "faster_whisper.*",
@@ -198,8 +221,12 @@ module = [
     "starlette.*",
     "uvicorn",
     "uvicorn.*",
+    "matplotlib",
+    "matplotlib.*",
     "voice_picker",
     "audio_devices",
+    "_console",
+    "run_convobox",
 ]
 ignore_missing_imports = true
 

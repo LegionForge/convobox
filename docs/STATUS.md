@@ -411,7 +411,10 @@ it was constructed with (both optional; omitting them keeps the
 routing-only behavior from before), fired as a background task so a slow
 synthesis doesn't stall draining the next backend event, and a hard stop
 now also stops in-progress TTS/playback. 98 automated tests pass
-(`pytest tests/`), mypy is clean across the tree, and `scripts/spike.py`'s
+(`pytest tests/`), mypy is clean across the tree -- kept as-written for
+history; this meant CI's own `mypy src/convobox` invocation, which never
+actually covered `scripts/` at all until the 2026-08-08 review's D1 fix,
+not literally the whole repo -- and `scripts/spike.py`'s
 own async wiring (not just its components) has been run end-to-end with a
 faked mic feed of real synthesized speech. Playback has also now run
 against real speaker hardware, not just a mocked `OutputStream` — including

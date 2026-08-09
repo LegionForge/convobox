@@ -182,13 +182,13 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** diagnosed (2026-08-07) by reading the code after a live
-recurrence, **not fixed, not yet forensically confirmed the same way the
-related transcribe()-freeze finding was** (see
-docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md's
-addendum for the live incident this came from). We're still testing
-this one -- recorded now for transparency and so it isn't lost, not
-because a fix is ready.
+**Status:** fix implemented 2026-08-07, **partially live-validated the
+same day** -- the freeze itself still reproduces live, but the fix's
+actual claim (the rest of the app, including the web UI's Resume
+Listening button, stays responsive while it happens) held up under a
+real recurrence. See the "Follow-up (2026-08-07, live UAT with this fix
+applied)" note below for the full picture; root cause of the underlying
+hang is still unconfirmed.
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -233,6 +233,145 @@ window (the two are ~1:1 today given the blocksize match, but `feed()`
 is the natural async/sync boundary `segment()`'s generator already
 awaits at, and doesn't require reaching inside `_process_window()`) --
 proposed, not yet built or benchmarked for the added-overhead tradeoff.
+
+**Follow-up (2026-08-07, same day, later): recurred live a second time,
+with real-time confirmation it blocks BOTH safety-relevant control
+paths at once, and that it self-recovers.** JP hit this directly while
+paused, following a runaway-repetition hard-stop (see the field note's
+newest addendum for the full transcript): the "stop"/"eject" safeword
+phrases had no effect, the web Stop button had no effect, and the web
+Resume Listening button also had no effect -- reported live, in that
+order, while it was happening. `convobox-tui.log` confirms genuine,
+total silence for exactly 2m9.4s (18:41:50.939 -> 18:44:00.358), then a
+`resumed listening (web UI)` line with no process restart in between.
+**Two new findings this recurrence adds:**
+1. Voice safeword, the web `/api/stop` handler, and the web
+   `/api/listening` resume handler are THREE genuinely different code
+   paths (a mic-loop hook and two separate HTTP routes) -- all three
+   going unresponsive together is itself strong corroborating evidence
+   for the shared-event-loop-blocked hypothesis above, gathered in real
+   time while it was actively happening, not reconstructed from logs
+   after the fact. Raises this from "diagnosed by reading the code" to
+   "diagnosed by reading the code, with live behavioral confirmation
+   matching the prediction."
+2. **This instance was not permanent -- it self-recovered after
+   2m9.4s with no kill/restart.** Operational guidance until this is
+   actually fixed: waiting it out for a couple of minutes is a real,
+   confirmed-working option, not just "kill the process" (killing is
+   still reasonable if immediate control matters more than waiting on
+   an unconfirmed recovery -- this is one data point, not a guarantee
+   every recurrence resolves this fast).
+
+**Priority raised** given both control paths that exist specifically
+for safety (the safeword AND the web Stop button) failed simultaneously
+in a real session -- worth prioritizing the `feed()`-granularity
+offload fix proposed above over other STT/VAD polish work.
+
+**Fix implemented 2026-08-07 (schema/unit-level; not yet live-validated
+against a real recurrence).** New `UtteranceSegmenter.feed_async()`
+(`src/convobox/vad/segmenter.py`) wraps the existing synchronous
+`feed()` in `asyncio.to_thread()`, at exactly the `feed()`-granularity
+proposed above. `segment()` (the mic loop's only real-time streaming
+consumer) now awaits `feed_async()` instead of calling `feed()`
+directly; `feed()` itself is unchanged and still synchronous, so every
+existing caller (tests, any offline/non-realtime processing) keeps
+identical behavior.
+
+Deliberately **not** a timeout/abandon/invalidate mechanism like PR
+#217's analogous STT fix: `transcribe()` is stateless per call, but
+Silero's model carries sequential recurrent state across windows via
+`reset_states()`, and abandoning an in-flight window while its
+background thread still runs risks that thread's eventual completion
+racing a fresh call against the same (not documented as thread-safe)
+model object. Plain thread offload alone already addresses the
+documented symptom -- other event-loop tasks (the web server's HTTP
+routes, the watchdog, TUI redraw) stay responsive while a slow/stuck
+window call runs in its own thread -- without introducing that new
+race.
+
+New test `test_feed_async_does_not_block_other_concurrent_work`
+(`tests/test_vad_segmenter.py`) proves the mechanism the same way PR
+#217's `test_timeout_does_not_block_other_concurrent_work` did: a
+model call blocked via `time.sleep()` inside a worker thread does not
+prevent concurrently-scheduled `asyncio.sleep()` ticks from firing on
+the event loop. Full suite green (1273 passed), `ruff`/`mypy` clean on
+the touched files.
+
+**Still needed before this can be marked resolved**: live
+re-verification against a real recurrence of the freeze (the same gap
+PR #217's own field note flagged for its STT-side fix) -- this is
+unit-proven-correct, not yet confirmed to actually prevent the next
+live Stop/Resume-button lockup.
+
+**Follow-up (2026-08-07, live UAT with this fix applied): the freeze
+recurred, and the result is a genuine partial improvement, not a full
+fix -- worth being precise about which part actually changed.** JP ran
+a live voice UAT session on a branch combining this fix with PR #230's
+STT changes, deliberately stress-testing pause/resume cycling. The
+freeze recurred: real, active speech produced zero log activity
+(`convobox-tui.log`, 20:57:40 -> 20:59:32, ~1m52s) -- confirmed live by
+JP ("was hung for a few minutes... but had to manually resume
+listening"; "during the gap, I was trying some utterances[,] but
+stopped [trying] until a few minutes later"), i.e. this was not silence
+being mistaken for a freeze, it was real speech the mic pipeline never
+processed.
+
+**What's different from the original incident, and why it matters:**
+JP recovered by clicking the web UI's Resume Listening button, **and it
+worked** -- in the original 2026-08-07 incident this follow-up's
+sibling entry documents, all three recovery paths (voice safeword, web
+Stop, web Resume) were simultaneously unresponsive for the same
+2-minute-class duration. This time only the mic/voice path was stuck;
+the web route stayed alive and functional. That is exactly what this
+fix's own design claims -- offloading `feed()`'s Silero calls to a
+worker thread keeps the *rest of the event loop* (HTTP routes, the
+watchdog, TUI) responsive while a slow/stuck window call runs -- and
+this live recurrence is the first real evidence that claim holds, not
+just the unit test's proof of the mechanism in isolation.
+
+**What the fix was never going to solve, and didn't:** `segment()`'s
+own consumption of incoming mic chunks is still strictly sequential --
+`await self.feed_async(chunk)` blocks that specific async generator
+until the offloaded call returns, no matter which thread it runs in.
+If one window's Silero call genuinely hangs, no *later* audio can be
+processed until it returns, regardless of threading. This recurrence is
+consistent with that being exactly what happened: the mic pipeline
+itself stayed stuck for ~2 minutes while the rest of the app didn't.
+**Net: this fix contains the blast radius (proven, live, this session)
+but does not resolve the underlying hang (still reproduces, live, this
+session) -- "partially validated," not "validated" or "insufficient."**
+
+**Root cause of the underlying hang is still unconfirmed.** Not
+determined this pass: whether it's genuinely Silero's own ONNX
+inference stalling (OS scheduling, resource contention, a driver-level
+stall), or something else entirely that this fix's instrumentation
+can't currently distinguish from that. The immediate diagnostic gap:
+there is no logging of when a `feed_async()` call starts, how long it
+takes, or that it's still pending -- a future recurrence produces the
+same "silence, then it's back" signature regardless of what's actually
+stuck inside that await. Next concrete step, not done here: add
+start/elapsed timing around the `asyncio.to_thread(self.feed, chunk)`
+call in `feed_async()` (e.g. log a warning if a single call exceeds
+some multiple of the ~1-3ms Silero normally takes), so the next
+recurrence's own log distinguishes "one window call is still running,
+N seconds in" from the current signature's total silence.
+
+**JP's own real-time qualitative read, same session, worth recording
+verbatim-close:** "stop and resume listening seem to be significantly
+more reliable... assuming 1) I don't pound the paused client with lots
+of hotwords, and 2) I don't spam the client while paused with lots of
+conversation." Two things line up with this: the recurrence above
+happened during a deliberate rapid-fire pause-overload stress test
+(short repeated hotword-biased phrases, utterances arriving every few
+seconds), and both this fix and PR #217's now both offload onto
+`asyncio.to_thread()`'s shared default executor -- a real, untested
+hypothesis for a follow-up session: sustained high-rate utterances
+during a pause could be piling up VAD and/or STT thread submissions
+faster than they drain, which would produce exactly this "fine under
+normal use, hangs under rapid-fire stress" pattern without requiring
+Silero itself to ever actually stall. Not confirmed -- a concrete lead
+for whoever picks up the diagnostic-logging step above, not a
+diagnosis.
 
 ---
 
@@ -530,10 +669,20 @@ either predates this fallback-link code (same commit that shipped it,
 than the real pane UI. No fix needed; a richer PDF/CSV viewer remains a
 legitimate future v2 idea, not an open bug.
 
-**opencode/codex backends don't trigger the artifact pane at all.** Only
-the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
-(`src/convobox/adapters/claude_code.py`). See `docs/ARTIFACT-PANE-SCOPE.md`.
-(codex's half of this gap has a schema-verified fix in flight -- see PR #219.)
+**codex now has the same `ARTIFACT` wiring, schema-verified but NOT yet
+live-verified end-to-end.** (2026-08-07, `feat/codex-artifact-pane-wiring`
+branch, PR #219.) `CodexAdapter._resolve_artifact_writes`
+(`src/convobox/adapters/codex.py`) reads a completed `fileChange` item's
+`changes: [{path, kind, diff}]` array (confirmed via `codex app-server
+generate-json-schema`, codex-cli 0.146.1) and emits an `ARTIFACT` event
+per renderable, in-`working_dir` path -- same `ARTIFACT_MEDIA_TYPES`
+allowlist and `working_dir` fencing as `ClaudeCodeAdapter`. Unit-tested
+against a fake app-server, but **no live session has confirmed the real
+`codex app-server` actually reports paths in this shape at runtime** (the
+schema bundle and the module's other live probes were done in separate
+sessions) -- the first live codex+artifact-pane UAT pass should treat
+this as the thing to specifically confirm, not assume-working. See
+`docs/field-notes/2026-08-07-codex-artifact-pane-wiring.md`.
 
 **opencode's `file.edited` event: the payload shape is now known, and it
 turns out to be a bigger wiring job than "verify the format," not a
