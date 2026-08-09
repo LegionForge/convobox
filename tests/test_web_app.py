@@ -21,6 +21,12 @@ from convobox.web.app import create_app, sse_lines  # noqa: E402
 from convobox.web.history import HistoryDB, new_session_id  # noqa: E402
 from convobox.web.stream import EventBroadcaster  # noqa: E402
 
+# Required by app.py's require_csrf_header middleware on every mutating
+# request (see its own docstring, GitHub issue #235 finding A3) -- set as
+# this client's default headers so every test call carries it without
+# repeating it at each call site.
+_CSRF_HEADERS = {"X-ConvoBox-Client": "1"}
+
 
 @pytest.fixture
 def db(tmp_path: Path) -> HistoryDB:
@@ -32,15 +38,49 @@ def db(tmp_path: Path) -> HistoryDB:
 @pytest.fixture
 def client(db: HistoryDB) -> TestClient:
     app = create_app(db=db)
-    return TestClient(app)
+    return TestClient(app, headers=_CSRF_HEADERS)
 
 
 def test_health_check() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# --- require_csrf_header middleware (GitHub issue #235, finding A3): a
+# body-less mutating route (/api/quit, /api/stop, /api/sessions/{id}/
+# clear) is a CORS "simple request" without this -- no preflight, so
+# CORSMiddleware's loopback-only origin check never gets a chance to
+# reject it. These tests use a client WITHOUT the default header the
+# `client` fixture normally carries, to prove the rejection is real.
+
+
+def test_post_without_csrf_header_is_rejected() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app) as client:  # deliberately no default headers
+        response = client.post("/api/stop")
+    assert response.status_code == 403
+
+
+def test_post_with_csrf_header_is_not_rejected_by_the_middleware() -> None:
+    # "Not rejected by the middleware" specifically -- /api/stop with no
+    # safeword_bridge configured still 503s, a different check entirely;
+    # the point here is proving it's not a 403 anymore.
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/stop")
+    assert response.status_code != 403
+
+
+def test_get_requests_never_need_the_csrf_header() -> None:
+    # Safe methods are read-only by definition -- the middleware must
+    # only gate POST/PUT/PATCH/DELETE, never GET/HEAD/OPTIONS.
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app) as client:  # deliberately no default headers
+        response = client.get("/health")
+    assert response.status_code == 200
 
 
 def test_get_display_config_defaults_to_no_overrides(client: TestClient) -> None:
@@ -64,7 +104,7 @@ def test_get_display_config_returns_configured_colors_and_names() -> None:
             assistant_name="Athena",
         ),
     )
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/api/config")
     assert response.status_code == 200
     assert response.json() == {
@@ -368,7 +408,7 @@ def test_resolve_approval_with_no_bridge_returns_409(client: TestClient) -> None
 
 def test_resolve_approval_with_nothing_pending_returns_409() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=_FakeApprovalBridge(pending=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 409
 
@@ -376,7 +416,7 @@ def test_resolve_approval_with_nothing_pending_returns_409() -> None:
 def test_resolve_approval_approve_calls_the_bridge_and_returns_approved() -> None:
     bridge = _FakeApprovalBridge(pending=True)
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 200
     assert response.json() == {"status": "approved", "explanation": None}
@@ -386,7 +426,7 @@ def test_resolve_approval_approve_calls_the_bridge_and_returns_approved() -> Non
 def test_resolve_approval_deny_calls_the_bridge_and_returns_denied() -> None:
     bridge = _FakeApprovalBridge(pending=True)
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "deny"})
     assert response.status_code == 200
     assert response.json() == {"status": "denied", "explanation": None}
@@ -396,7 +436,7 @@ def test_resolve_approval_deny_calls_the_bridge_and_returns_denied() -> None:
 def test_resolve_approval_explain_extends_and_returns_the_explanation() -> None:
     bridge = _FakeApprovalBridge(pending=True, explanation="rm -rf .incident-captures/*.wav")
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "explain"})
     assert response.status_code == 200
     assert response.json() == {"status": "pending", "explanation": "rm -rf .incident-captures/*.wav"}
@@ -408,7 +448,7 @@ def test_resolve_approval_when_bridge_reports_it_could_not_deliver_returns_409()
     bridge = _FakeApprovalBridge(pending=True)
     bridge.decide_result = False  # e.g. resolved by voice in the same instant
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 409
 
@@ -433,7 +473,7 @@ def test_quit_with_no_handler_returns_503(client: TestClient) -> None:
 def test_quit_calls_the_handler_and_returns_quitting() -> None:
     handler = MagicMock()
     app = create_app(db=HistoryDB(Path(":memory:")), quit_handler=handler)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/quit")
     assert response.status_code == 200
     assert response.json() == {"status": "quitting"}
@@ -485,7 +525,7 @@ def test_get_listening_with_no_bridge_reports_not_paused(client: TestClient) -> 
 
 def test_get_listening_reflects_the_bridge_state() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(paused=True))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/api/listening")
     assert response.json() == {"is_paused": True}
 
@@ -497,7 +537,7 @@ def test_set_listening_with_no_bridge_returns_503(client: TestClient) -> None:
 
 def test_set_listening_with_a_not_ready_bridge_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(ready=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/listening", json={"action": "pause"})
     assert response.status_code == 503
 
@@ -505,7 +545,7 @@ def test_set_listening_with_a_not_ready_bridge_returns_503() -> None:
 def test_set_listening_pause_calls_the_bridge_and_returns_paused() -> None:
     bridge = _FakeListeningBridge(paused=False)
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/listening", json={"action": "pause"})
     assert response.status_code == 200
     assert response.json() == {"is_paused": True}
@@ -515,7 +555,7 @@ def test_set_listening_pause_calls_the_bridge_and_returns_paused() -> None:
 def test_set_listening_resume_calls_the_bridge_and_returns_listening() -> None:
     bridge = _FakeListeningBridge(paused=True)
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/listening", json={"action": "resume"})
     assert response.status_code == 200
     assert response.json() == {"is_paused": False}
@@ -557,7 +597,7 @@ def test_stop_with_no_bridge_returns_503(client: TestClient) -> None:
 
 def test_stop_with_a_not_ready_bridge_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), safeword_bridge=_FakeSafewordBridge(ready=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/stop")
     assert response.status_code == 503
 
@@ -565,7 +605,7 @@ def test_stop_with_a_not_ready_bridge_returns_503() -> None:
 def test_stop_calls_the_bridge_and_returns_stopped() -> None:
     bridge = _FakeSafewordBridge()
     app = create_app(db=HistoryDB(Path(":memory:")), safeword_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/stop")
     assert response.status_code == 200
     assert response.json() == {"stopped": True}
@@ -594,7 +634,7 @@ def test_submit_text_with_no_bridge_returns_503(client: TestClient) -> None:
 
 def test_submit_text_with_a_not_ready_bridge_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=_FakeTextBridge(ready=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/text", json={"text": "hello"})
     assert response.status_code == 503
 
@@ -602,7 +642,7 @@ def test_submit_text_with_a_not_ready_bridge_returns_503() -> None:
 def test_submit_text_forwards_to_the_bridge_and_returns_accepted() -> None:
     bridge = _FakeTextBridge()
     app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/text", json={"text": "what should I work on next"})
     assert response.status_code == 200
     assert response.json() == {"accepted": True}
@@ -614,6 +654,6 @@ def test_submit_text_rejected_by_the_bridge_returns_400() -> None:
     # "nothing sent" (e.g. blank after stripping), not a server error.
     bridge = _FakeTextBridge(accepts=False)
     app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/text", json={"text": "   "})
     assert response.status_code == 400
