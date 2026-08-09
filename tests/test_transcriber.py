@@ -149,6 +149,53 @@ def test_model_factory_called_once_at_construction() -> None:
     assert len(calls) == 1
 
 
+# --- invalidate(): the STTEngine.invalidate() hook LocalTranscriber
+# overrides, used by run_convobox.py's mic loop after abandoning a
+# transcribe() call that didn't return within stt.transcribe_timeout_s
+# (docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md).
+
+
+def test_invalidate_forces_a_fresh_model_on_the_next_call() -> None:
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        return _FakeModel()
+
+    transcriber = LocalTranscriber(_config(), model_factory=factory)
+    assert calls["count"] == 1
+
+    transcriber.invalidate()
+    assert transcriber._model is None
+
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert calls["count"] == 2
+
+
+def test_invalidate_before_any_transcribe_call_is_a_noop_on_next_use() -> None:
+    # Calling invalidate() when nothing is in flight (e.g. defensively,
+    # or twice in a row) must not raise or leave the transcriber unable
+    # to recover -- the next transcribe() call should just rebuild.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.invalidate()
+    transcriber.invalidate()
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert result.text == "hello world"
+
+
+def test_stt_engine_base_invalidate_defaults_to_a_noop() -> None:
+    # Any engine that doesn't override invalidate() (a stateless/remote
+    # one, e.g.) must not raise just because the mic loop calls it.
+    from convobox.stt.base import STTEngine, TranscriptResult
+
+    class _StatelessEngine(STTEngine):
+        def transcribe(self, audio: np.ndarray) -> TranscriptResult:
+            raise NotImplementedError
+
+    _StatelessEngine().invalidate()  # must not raise
+
+
 def test_native_allocator_failure_is_recovered_not_raised() -> None:
     # The real crash (SYSTRAN/faster-whisper#660/#390, live-confirmed
     # 2026-07-14): ctranslate2's native allocator fails after many

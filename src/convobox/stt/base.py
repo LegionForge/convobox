@@ -37,6 +37,20 @@ class STTEngine(ABC):
     @abstractmethod
     def transcribe(self, audio: np.ndarray) -> TranscriptResult: ...
 
+    def invalidate(self) -> None:
+        """Tells this engine the caller has given up on whatever it might
+        still be doing internally (e.g. a transcribe() call abandoned
+        after a timeout) and that the next transcribe() call should not
+        assume any in-progress state is still trustworthy.
+
+        Default no-op -- only meaningful for an engine that has real
+        internal state to reset (LocalTranscriber overrides this to force
+        a fresh model on the next call, same recovery path it already
+        uses after a native allocator failure). A stateless/remote engine
+        has nothing to invalidate.
+        """
+        return
+
     @property
     def resolved_device(self) -> str:
         """Best-effort compute device this engine actually runs on, e.g.

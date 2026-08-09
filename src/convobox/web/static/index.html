@@ -481,6 +481,27 @@
   </div>
 </div>
 <script>
+// Required on every mutating (POST/PUT/PATCH/DELETE) request -- the
+// backend's own middleware rejects any without it (src/convobox/web/
+// app.py). A custom header forces the browser to CORS-preflight even a
+// body-less POST, closing a real CSRF gap: without this, a cross-origin
+// page's `fetch(url, {method:"POST"})` reached routes like /api/quit,
+// /api/stop, and /api/sessions/{id}/clear with no preflight at all --
+// CORS only controls whether the ATTACKING page can read the response,
+// never whether the browser sends a "simple" request in the first
+// place. Found via autonomous codebase review, 2026-08-08 (GitHub
+// issue #235, finding A3).
+//
+// Declared here, OUTSIDE both of this page's IIFEs (this script block's
+// and the settings-modal script block's) -- true page-global scope, not
+// either IIFE's own module-like closure. A prior version of this fix
+// declared it INSIDE the first IIFE, which left every fetch() call in
+// the second one (fetchSchema/testSettings/saveSettings -- the entire
+// settings-save flow, i.e. exactly A4's own route) throwing
+// `ReferenceError: CSRF_HEADERS is not defined` at runtime -- caught
+// live via a real browser + console error check, not assumed.
+const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
+
 (function () {
   "use strict";
 
@@ -594,7 +615,7 @@
       try {
         res = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/approval`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
           body: JSON.stringify({ action }),
         });
         data = await res.json().catch(() => ({}));
@@ -650,6 +671,16 @@
   function renderEvent(ev) {
     const kind = ev.event_type || ev.type || "event";
     if (kind === "done") return;
+    if (kind === "dropped") {
+      // EventBroadcaster's bounded-queue backpressure marker (src/convobox/
+      // web/stream.py) -- this tab's SSE queue fell behind and some live
+      // events were evicted to make room for newer ones. No chat bubble
+      // (there's no transcript/response content to show, only a count) --
+      // logged so it's still discoverable if a session looks like it's
+      // missing turns.
+      console.warn(`live event stream dropped ${ev.count} event(s) -- this tab fell behind`);
+      return;
+    }
     if (kind === "artifact") {
       // No chat bubble for this one -- the pane IS the rendering, a
       // bubble would just be empty (nothing in the backend_response/
@@ -872,7 +903,7 @@
     try {
       const res = await fetch("/api/listening", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ action: isPaused ? "resume" : "pause" }),
       });
       if (res.ok) {
@@ -893,7 +924,7 @@
     const originalText = stopBtn.textContent;
     stopBtn.textContent = "Stopping…";
     try {
-      await fetch("/api/stop", { method: "POST" });
+      await fetch("/api/stop", { method: "POST", headers: CSRF_HEADERS });
     } catch (err) {
       console.error("stop failed", err);
     } finally {
@@ -924,7 +955,7 @@
     try {
       const res = await fetch("/api/text", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
       if (res.ok) {
@@ -953,7 +984,7 @@
     try {
       const res = await fetch(
         `/api/sessions/${encodeURIComponent(currentSessionId)}/clear`,
-        { method: "POST" }
+        { method: "POST", headers: CSRF_HEADERS }
       );
       if (!res.ok) throw new Error(`clear failed: HTTP ${res.status}`);
       await loadHistory(currentSessionId);
@@ -996,7 +1027,7 @@
     quitBtn.disabled = true;
     quitBtn.textContent = "Quitting…";
     try {
-      await fetch("/api/quit", { method: "POST" });
+      await fetch("/api/quit", { method: "POST", headers: CSRF_HEADERS });
     } catch (err) {
       // The connection dying mid-request is the expected shape of a
       // process actually quitting, not a real error.
@@ -1079,7 +1110,7 @@
   async function fetchSchema() {
     const res = await fetch("/api/settings/schema", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ values: draft }),
     });
     const data = await res.json();
@@ -1301,7 +1332,7 @@
     try {
       const res = await fetch("/api/settings/test", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ section, field: field || null, values: draft }),
         signal: controller.signal,
       });
@@ -1330,7 +1361,7 @@
     try {
       const res = await fetch("/api/settings/save", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ values: draft }),
       });
       const data = await res.json().catch(() => ({}));

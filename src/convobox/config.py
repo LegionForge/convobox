@@ -55,6 +55,24 @@ class VADConfig(BaseModel):
     # and no transcript at all until the speaker pauses; observed live as a
     # 30.5s single utterance whose transcript only arrived after it ended.
     max_utterance_s: float | None = None
+    # Off by default, deliberately separate from --verbose/DEBUG logging:
+    # logs every single Silero window call's duration (~31/s during active
+    # audio) at DEBUG level -- genuinely too noisy for normal --verbose use,
+    # even though DEBUG is the level it logs at. Added 2026-08-07 live, at
+    # JP's own suggestion, after a live UAT gap (~47s, no Processing audio
+    # lines) produced none of feed_async()'s existing >0.5s stall warnings
+    # either -- leaving it ambiguous whether that gap was genuine silence
+    # (VAD correctly saw nothing to process) or something stalled upstream
+    # of Silero entirely (mic capture, AEC) that never even reached a
+    # feed_async() call to warn about. Per-call tracing resolves that:
+    # a real freeze inside Silero shows continuous fast calls right up to
+    # a gap in the trace itself; a stalled call is caught by the existing
+    # feed_async() warnings; and genuine silence shows... also nothing,
+    # which is the point -- if it's on and NOTHING logs during a "frozen"
+    # period, the stall is upstream of the VAD windowing loop entirely, an
+    # entirely different investigation than this fix's own scope. See
+    # docs/KNOWN-ISSUES.md's VAD segmenter freeze entry.
+    trace_silero_calls: bool = False
 
 
 # ctranslate2's real supported precisions (verified against the installed
@@ -167,6 +185,24 @@ class STTConfig(BaseModel):
     # mechanism. Also not yet validated live -- opt-in, not a new default,
     # same reasoning as condition_on_previous_text above.
     temperature: float | None = None
+    # None (default) means no timeout: transcribe() is offloaded to a
+    # thread (see run_convobox.py's mic loop) but awaited indefinitely,
+    # same behavior as before this field existed. A real number caps how
+    # long any single utterance's transcribe() call is allowed to run
+    # before it's abandoned and treated as unheard -- live-hit 2026-08-06:
+    # a stuck transcribe() call, run synchronously on the main event loop
+    # with no offload at the time, froze the ENTIRE app (mic loop, web UI,
+    # TUI, even the once-a-second background watchdog) while mic capture
+    # kept running on its own separate thread, unaffected -- confirmed via
+    # AEC-dump frame-count forensic cross-check showing continuous capture
+    # straight through the "frozen" window. The thread-offload alone (see
+    # run_convobox.py) fixes the "everything else freezes too" half of
+    # that regardless of whether this timeout is set; this field additionally
+    # lets the mic loop itself recover and move on to the next utterance
+    # instead of waiting forever for a call that may never return (Python
+    # cannot force-kill a native thread, so an abandoned call's background
+    # thread may keep running -- see LocalTranscriber.invalidate()).
+    transcribe_timeout_s: float | None = None
 
     @field_validator("compute_type")
     @classmethod
@@ -512,6 +548,50 @@ def detect_permission_conflict(backend: BackendConfig) -> str | None:
 
 
 _CODEX_POSTURE_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
+
+
+def detect_claude_code_approval_gap(
+    backend: BackendConfig, interaction: InteractionConfig
+) -> str | None:
+    """Return an error message if claude-code's approval hook would be
+    wired with nothing able to ever answer it, else None.
+
+    Found via autonomous codebase review, 2026-08-08 (GitHub issue #235,
+    finding A1). `ClaudeCodeAdapter._interactive_approval` is set purely
+    from `permission_mode == "approve"` at construction -- independent of
+    whether an approval gate exists. `set_interactive_approvals()` is a
+    documented no-op for claude-code (its own module docstring: the hook
+    is baked in at construction, not toggleable at runtime), so
+    `scripts/run_convobox.py`'s `approval_gate` -- built only when
+    `interaction.approval_phrase` is set -- is the ONLY thing that ever
+    calls `resolve_pending_approval`. With the phrase unset, the hook still
+    blocks every tool call for its full 120s timeout (with a misleading
+    spoken "say your approval phrase" prompt substituting the literal
+    `None`), and the stuck pending-approval state then silently
+    auto-denies every subsequent tool call for the rest of the session --
+    with no log line either time. `settings_tui.validate_config` already
+    warns about this combination, but its warning text describes "denied
+    with no voice prompt (the safe fail-closed default)", which is not
+    what actually happens (a 120s hang with a broken prompt first, then
+    silent denials) -- promoted here to a hard error instead, same
+    fail-closed treatment `detect_permission_conflict` already gets for
+    the analogous command-flag conflict above.
+    """
+    if backend.name != "claude-code":
+        return None
+    if backend.permission_mode != "approve":
+        return None
+    if interaction.approval_phrase is not None:
+        return None
+    return (
+        "backend.permission_mode is \"approve\" for claude-code, but "
+        "interaction.approval_phrase is unset -- the approval hook would "
+        "be wired with nothing able to ever answer it: the first tool "
+        "call hangs for its full timeout with a broken spoken prompt, "
+        "then every later one is silently auto-denied for the rest of "
+        "the session. Set interaction.approval_phrase, or use a "
+        "different permission_mode (\"plan\"/\"permissive\")."
+    )
 
 
 class WebConfig(BaseModel):
