@@ -669,10 +669,20 @@ either predates this fallback-link code (same commit that shipped it,
 than the real pane UI. No fix needed; a richer PDF/CSV viewer remains a
 legitimate future v2 idea, not an open bug.
 
-**opencode/codex backends don't trigger the artifact pane at all.** Only
-the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
-(`src/convobox/adapters/claude_code.py`). See `docs/ARTIFACT-PANE-SCOPE.md`.
-(codex's half of this gap has a schema-verified fix in flight -- see PR #219.)
+**codex now has the same `ARTIFACT` wiring, schema-verified but NOT yet
+live-verified end-to-end.** (2026-08-07, `feat/codex-artifact-pane-wiring`
+branch, PR #219.) `CodexAdapter._resolve_artifact_writes`
+(`src/convobox/adapters/codex.py`) reads a completed `fileChange` item's
+`changes: [{path, kind, diff}]` array (confirmed via `codex app-server
+generate-json-schema`, codex-cli 0.146.1) and emits an `ARTIFACT` event
+per renderable, in-`working_dir` path -- same `ARTIFACT_MEDIA_TYPES`
+allowlist and `working_dir` fencing as `ClaudeCodeAdapter`. Unit-tested
+against a fake app-server, but **no live session has confirmed the real
+`codex app-server` actually reports paths in this shape at runtime** (the
+schema bundle and the module's other live probes were done in separate
+sessions) -- the first live codex+artifact-pane UAT pass should treat
+this as the thing to specifically confirm, not assume-working. See
+`docs/field-notes/2026-08-07-codex-artifact-pane-wiring.md`.
 
 **opencode's `file.edited` event: the payload shape is now known, and it
 turns out to be a bigger wiring job than "verify the format," not a
