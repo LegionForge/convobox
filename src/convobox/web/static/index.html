@@ -44,6 +44,16 @@
   }
   body { display: flex; flex-direction: column; }
 
+  /* Screen-reader-only label text -- visually hidden but still in the
+     accessibility tree, for controls (like the session picker below)
+     where a visible <label> doesn't fit this ribbon's compact layout.
+     Prefer a real <label> over aria-label alone wherever there's room
+     for one, even an off-screen one. */
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
   /* --- Top ribbon: branding, session nav, and controls. Stop/Resume
      listening, Settings, and Quit are all real control-plane actions now
      (each a deliberate, separately-confirmed extension of the no-auth
@@ -401,6 +411,13 @@
     animation: settings-spin 0.8s linear infinite; vertical-align: -0.1em;
   }
   @keyframes settings-spin { to { transform: rotate(360deg); } }
+  /* WCAG 2.3.3 -- never animate without checking this. An infinite spin
+     can be a genuine vestibular-disorder trigger, not just a preference;
+     the pending state is still fully conveyed by the text next to it
+     ("Testing… (Ns)"), so freezing the spinner loses no information. */
+  @media (prefers-reduced-motion: reduce) {
+    .settings-status.pending::before { animation: none; }
+  }
   .settings-footer button {
     font-size: 0.82rem; padding: 0.4rem 0.8rem; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
@@ -413,14 +430,15 @@
 <header class="ribbon">
   <img class="logo" src="img/legionforge-logo.svg" alt="LegionForge">
   <span class="brand">ConvoBox</span>
-  <span id="status" class="disconnected">connecting&hellip;</span>
-  <span id="activity-status"></span>
+  <span id="status" class="disconnected" role="status" aria-live="polite">connecting&hellip;</span>
+  <span id="activity-status" role="status" aria-live="polite"></span>
   <span class="spacer"></span>
-  <select id="session-select"></select>
-  <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
+  <label for="session-select" class="visually-hidden">Saved session</label>
+  <select id="session-select" title="Switch between saved conversation sessions -- only populated when Settings &gt; Web &gt; history tracking is on"></select>
+  <button id="clear-history-btn" title="Permanently deletes this session's saved history from disk. Cannot be undone -- does not affect the live conversation still on screen.">Clear history</button>
   <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead">Stop listening</button>
-  <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after.">&#9209; Stop</button>
-  <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
+  <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after."><span aria-hidden="true">&#9209;</span> Stop</button>
+  <button id="settings-btn" title="Open Settings -- edit convobox.yaml (audio devices, STT/TTS, safety phrases) without restarting">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
 <div class="body-row">
@@ -431,14 +449,15 @@
     </div>
   </div>
   <form id="composer">
+    <label for="composer-input" class="visually-hidden">Message to send</label>
     <textarea id="composer-input" placeholder="Type a message&hellip;" rows="1"></textarea>
-    <button id="composer-send-btn" type="submit">Send</button>
+    <button id="composer-send-btn" type="submit" title="Send this message to the backend (Enter also sends; Shift+Enter for a new line)">Send</button>
   </form>
 </main>
 <aside id="artifact-pane" hidden>
   <div class="artifact-pane-header">
     <span id="artifact-pane-title"></span>
-    <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane">&times;</button>
+    <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane" title="Close the artifact pane">&times;</button>
   </div>
   <div id="artifact-pane-body"></div>
 </aside>
@@ -447,17 +466,17 @@
   <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="settings-header">
       <h2 id="settings-title">Settings</h2>
-      <button id="settings-close-btn" type="button" aria-label="Close settings">&times;</button>
+      <button id="settings-close-btn" type="button" aria-label="Close settings" title="Close settings">&times;</button>
     </div>
     <div id="settings-tabs" class="settings-tabs"></div>
-    <div id="settings-errors" class="settings-errors" hidden></div>
+    <div id="settings-errors" class="settings-errors" role="alert" hidden></div>
     <div id="settings-body" class="settings-body"></div>
     <div class="settings-footer">
-      <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden>Test this section</button>
-      <button id="settings-cancel-test-btn" type="button" class="settings-test-btn" hidden>Cancel</button>
-      <span id="settings-status" class="settings-status"></span>
+      <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden title="Try this tab's current settings live without saving them to disk yet (e.g. downloads/tests an STT or TTS model)">Test this section</button>
+      <button id="settings-cancel-test-btn" type="button" class="settings-test-btn" hidden title="Stop waiting for the test -- the server keeps running it in the background regardless">Cancel</button>
+      <span id="settings-status" class="settings-status" role="status" aria-live="polite"></span>
       <span class="spacer"></span>
-      <button id="settings-save-btn" type="button" class="primary">Save</button>
+      <button id="settings-save-btn" type="button" class="primary" title="Save changes to convobox.yaml -- some settings need a restart to take effect">Save</button>
     </div>
   </div>
 </div>
@@ -760,14 +779,19 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   // actually resumes listening), not for validation or anything security-
   // relevant, so a plain fetch of the same /api/settings the Settings
   // modal already uses is fine (no need to widen /api/config's
-  // deliberately-scoped display-only response for this).
+  // deliberately-scoped display-only response for this). Also grabs
+  // web.history_tracking_enabled off the same response -- loadSessions()
+  // uses it to explain an empty session picker (default is OFF, so an
+  // empty dropdown there is the normal case, not obviously a bug).
   let resumeWord = null;
+  let historyTrackingEnabled = null;
 
   async function loadResumeWord() {
     try {
       const res = await fetch("/api/settings");
       const data = await res.json();
       resumeWord = data.values?.interaction?.resume_word || null;
+      historyTrackingEnabled = data.values?.web?.history_tracking_enabled ?? null;
     } catch (err) {
       console.error("failed to load resume word", err);
     }
@@ -777,6 +801,22 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     const res = await fetch("/api/sessions");
     const data = await res.json();
     sessionSelect.innerHTML = "";
+    if (data.sessions.length === 0) {
+      // An empty <select> with zero <option>s looks broken, not "there's
+      // nothing here yet" -- give it a real, disabled placeholder that
+      // explains WHY, since history tracking off (the default) is the
+      // most likely reason, not an error.
+      const placeholder = document.createElement("option");
+      placeholder.textContent = historyTrackingEnabled === false
+        ? "No saved sessions (history tracking is off in Settings)"
+        : "No saved sessions yet";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      sessionSelect.appendChild(placeholder);
+      sessionSelect.disabled = true;
+      return null;
+    }
+    sessionSelect.disabled = false;
     for (const s of data.sessions) {
       const opt = document.createElement("option");
       opt.value = s.id;
@@ -932,10 +972,31 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     }
   });
 
+  // Previously silent -- click did a fetch + reload with zero visible
+  // feedback, so it looked like it did nothing even when it worked (and
+  // gave no signal at all if the request failed). Same disable+relabel+
+  // finally-reset pattern as stop-btn/quit-btn above, not a new one.
   clearHistoryBtn.addEventListener("click", async () => {
     if (!currentSessionId) return;
-    await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/clear`, { method: "POST", headers: CSRF_HEADERS });
-    await loadHistory(currentSessionId);
+    clearHistoryBtn.disabled = true;
+    const originalText = clearHistoryBtn.textContent;
+    clearHistoryBtn.textContent = "Clearing…";
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(currentSessionId)}/clear`,
+        { method: "POST", headers: CSRF_HEADERS }
+      );
+      if (!res.ok) throw new Error(`clear failed: HTTP ${res.status}`);
+      await loadHistory(currentSessionId);
+      clearHistoryBtn.textContent = "Cleared";
+      setTimeout(() => { clearHistoryBtn.textContent = originalText; }, 1500);
+    } catch (err) {
+      console.error("clear history failed", err);
+      clearHistoryBtn.textContent = "Clear failed";
+      setTimeout(() => { clearHistoryBtn.textContent = originalText; }, 2500);
+    } finally {
+      clearHistoryBtn.disabled = false;
+    }
   });
 
   // Two clicks required: the first "arms" it (button restyles + relabels
@@ -1075,15 +1136,29 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     }
   }
 
+  // path (e.g. "audio.input_device") -> a valid, stable HTML id -- shared
+  // by buildInput() (sets it on the control) and buildFieldRow() (points
+  // its <label for> at it). Every settings field previously rendered a
+  // <label> with no for/id association at all -- programmatically
+  // invisible to a screen reader, same gap the inclusive-design lessons'
+  // forms section calls out explicitly ("every input needs a <label>,
+  // not a placeholder" -- true here for the missing ASSOCIATION too, not
+  // just placeholder-only inputs).
+  function fieldElementId(path) {
+    return `field-${path.replace(/\./g, "-")}`;
+  }
+
   // Kind -> control. Picker kinds (choice/device/kokoro_voice/piper_voice/
   // piper_speaker) share one <select> path: field.unset_value/
   // unavailable_value (from settings_api.py's _field_to_dict) are the
   // TUI's own sentinel strings, never hardcoded here.
   function buildInput(field, path) {
     const value = getPath(draft, path);
+    const fieldId = fieldElementId(path);
 
     if (field.kind === "bool") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "checkbox";
       input.checked = Boolean(value);
       input.addEventListener("change", () => {
@@ -1095,6 +1170,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
     if (["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"].includes(field.kind)) {
       const select = document.createElement("select");
+      select.id = fieldId;
       for (const choice of field.choices) {
         const opt = document.createElement("option");
         opt.value = choice;
@@ -1114,6 +1190,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
     if (field.kind === "list_str") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "text";
       input.value = (value || []).join(", ");
       input.addEventListener("change", () => {
@@ -1127,6 +1204,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
     if (field.kind === "command") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "text";
       input.value = (value || []).join(" ");
       input.addEventListener("change", () => {
@@ -1137,6 +1215,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
     if (["int", "optional_int", "float", "optional_float"].includes(field.kind)) {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "number";
       if (field.kind === "float" || field.kind === "optional_float") input.step = "any";
       input.value = value === null || value === undefined ? "" : String(value);
@@ -1153,6 +1232,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
     // str / optional_str
     const input = document.createElement("input");
+    input.id = fieldId;
     input.type = "text";
     input.value = value === null || value === undefined ? "" : String(value);
     input.addEventListener("change", () => {
@@ -1168,6 +1248,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
     const label = document.createElement("label");
     label.textContent = field.label;
+    label.htmlFor = fieldElementId(path);
     wrap.appendChild(label);
 
     // Input device/output device get their own [Test] button, same
@@ -1182,6 +1263,16 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       btn.type = "button";
       btn.className = "settings-test-btn";
       btn.textContent = "Test";
+      // Matches probe_audio()'s real, direction-specific behavior
+      // (scripts/settings_tui.py) -- input records-then-plays-back so you
+      // can hear whether the right mic is picking you up; output just
+      // plays a tone. Don't blur the two into one generic "plays a tone"
+      // claim -- that would be wrong for input_device.
+      btn.title = field.key === "input_device"
+        ? "Records a few seconds from this mic, then plays it back through your speaker so you can hear if it's the right one"
+        : field.key === "output_device"
+        ? "Plays a short test tone through this speaker/output"
+        : `Tests the audio device(s) relevant to ${field.label}`;
       btn.addEventListener("click", () => runTest(field.section, field.key));
       row.appendChild(btn);
       wrap.appendChild(row);
@@ -1305,9 +1396,14 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     closeArmed = false;
     clearTimeout(closeArmTimer);
     closeBtn.textContent = "×";
+    // Focus must never just vanish when a modal closes (WCAG 2.4.3) --
+    // settingsBtn is the only thing that ever opens this dialog, so
+    // there's no "previously focused element" to track, just send focus
+    // straight back to it.
+    settingsBtn.focus();
   }
 
-  closeBtn.addEventListener("click", () => {
+  function attemptClose() {
     if (!isDirty() || closeArmed) {
       doClose();
       return;
@@ -1320,6 +1416,39 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       closeBtn.textContent = "×";
       closeBtn.title = "Close settings";
     }, 4000);
+  }
+
+  closeBtn.addEventListener("click", attemptClose);
+
+  // Keyboard support a modal dialog is expected to have (WCAG 2.1.1/2.1.2):
+  // Esc closes it (same arm/discard-confirm as the × button, not a silent
+  // bypass of unsaved-changes protection), and Tab/Shift+Tab cycle only
+  // among the dialog's own focusable elements instead of escaping into the
+  // page underneath -- aria-modal="true" on its own does not enforce this
+  // in any browser; it has to be done by hand.
+  overlay.addEventListener("keydown", (e) => {
+    if (overlay.hidden) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      attemptClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(
+      overlay.querySelectorAll(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((el) => el.offsetParent !== null); // skip hidden (e.g. [hidden] ancestors, display:none)
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   });
 
   saveBtn.addEventListener("click", saveSettings);
@@ -1335,6 +1464,10 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     errorsEl.hidden = true;
     overlay.hidden = false;
     await fetchSchema();
+    // Send focus INTO the dialog now that it has real content -- a modal
+    // that opens without moving focus leaves a screen reader/keyboard
+    // user still "in" the page behind it, unaware anything changed.
+    closeBtn.focus();
   });
 })();
 </script>
