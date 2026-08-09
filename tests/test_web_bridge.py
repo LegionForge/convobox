@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from collections.abc import AsyncGenerator
@@ -179,6 +180,83 @@ async def test_broadcasts_to_a_subscriber_when_given() -> None:
 
     payload = queue.get_nowait()
     assert payload["content"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_live_broadcast_uses_the_translated_event_type_not_the_raw_enum_value(
+) -> None:
+    # Real bug, found live (2026-08-07): JP asked whether
+    # display.assistant_name was rendering at all in the web UI during a
+    # LIVE session -- it wasn't. event_to_dict()'s own "type" field is
+    # BackendEventType.TEXT.value ("text"), not the _EVENT_TYPE_NAMES-
+    # translated "response" the history row's event_type COLUMN already
+    # got correctly. index.html's renderEvent() reads
+    # `ev.event_type || ev.type` -- a replayed history row has
+    # event_type set (correct), but the live SSE broadcast never did,
+    # so every live response bubble fell through to the untranslated
+    # "text" label and displayNames.response (the configured assistant
+    # name) never applied. Only a page reload replaying persisted
+    # history (itself gated on web.history_tracking_enabled, off by
+    # default) could ever show it. This is the exact payload the
+    # frontend actually receives over SSE -- assert on "type" directly,
+    # not just "content" like the sibling test above already does.
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait()["type"] == "response"
+
+
+@pytest.mark.asyncio
+async def test_live_broadcast_translates_tool_call_and_tool_result_types_too() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TOOL_CALL, tool="Bash"))
+    forwarder(BackendEvent(type=BackendEventType.TOOL_RESULT, tool_output="ok"))
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait()["type"] == "tool_call"
+    assert queue.get_nowait()["type"] == "tool_result"
+
+
+@pytest.mark.asyncio
+async def test_live_broadcast_does_not_mutate_what_gets_persisted(db: HistoryDB) -> None:
+    # The fix overrides only the OUTGOING broadcast payload's "type" --
+    # confirms the persisted backend_event_json blob keeps its original,
+    # untranslated shape (event_to_dict()'s own raw "text"), matching
+    # every existing consumer of that column exactly as before this fix.
+    session_id = new_session_id()
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))
+    await asyncio.sleep(0)
+    # Preemptive compatibility fix for PR #242 (B2, "offload history DB
+    # writes off the event loop", still open/unmerged as of this commit):
+    # that PR makes history writes asynchronous (queued + drained by a
+    # background task) instead of synchronous, adding a `_writer_task`
+    # attribute this branch doesn't have on its own -- getattr(), not a
+    # plain attribute access, so this stays correct BOTH standalone (no
+    # such attribute -> skip, matching today's synchronous behavior) and
+    # once merged with #242 (awaits the real write). Whichever of #230/
+    # #242 merges second, this test needs this either way -- added now on
+    # #230's own branch so it's correct regardless of merge order (found
+    # via a local, throwaway integration-merge check of the full open PR
+    # queue, not pushed).
+    writer_task = getattr(forwarder, "_writer_task", None)
+    if writer_task is not None:
+        await writer_task
+
+    assert queue.get_nowait()["type"] == "response"
+    stored = db.get_session_events(session_id)[0]
+    assert stored["event_type"] == "response"
+    assert json.loads(stored["backend_event_json"])["type"] == "text"
 
 
 def test_broadcaster_none_skips_broadcast_but_does_not_raise() -> None:

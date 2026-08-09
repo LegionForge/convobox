@@ -234,6 +234,39 @@ is the natural async/sync boundary `segment()`'s generator already
 awaits at, and doesn't require reaching inside `_process_window()`) --
 proposed, not yet built or benchmarked for the added-overhead tradeoff.
 
+**Follow-up (2026-08-07, same day, later): recurred live a second time,
+with real-time confirmation it blocks BOTH safety-relevant control
+paths at once, and that it self-recovers.** JP hit this directly while
+paused, following a runaway-repetition hard-stop (see the field note's
+newest addendum for the full transcript): the "stop"/"eject" safeword
+phrases had no effect, the web Stop button had no effect, and the web
+Resume Listening button also had no effect -- reported live, in that
+order, while it was happening. `convobox-tui.log` confirms genuine,
+total silence for exactly 2m9.4s (18:41:50.939 -> 18:44:00.358), then a
+`resumed listening (web UI)` line with no process restart in between.
+**Two new findings this recurrence adds:**
+1. Voice safeword, the web `/api/stop` handler, and the web
+   `/api/listening` resume handler are THREE genuinely different code
+   paths (a mic-loop hook and two separate HTTP routes) -- all three
+   going unresponsive together is itself strong corroborating evidence
+   for the shared-event-loop-blocked hypothesis above, gathered in real
+   time while it was actively happening, not reconstructed from logs
+   after the fact. Raises this from "diagnosed by reading the code" to
+   "diagnosed by reading the code, with live behavioral confirmation
+   matching the prediction."
+2. **This instance was not permanent -- it self-recovered after
+   2m9.4s with no kill/restart.** Operational guidance until this is
+   actually fixed: waiting it out for a couple of minutes is a real,
+   confirmed-working option, not just "kill the process" (killing is
+   still reasonable if immediate control matters more than waiting on
+   an unconfirmed recovery -- this is one data point, not a guarantee
+   every recurrence resolves this fast).
+
+**Priority raised** given both control paths that exist specifically
+for safety (the safeword AND the web Stop button) failed simultaneously
+in a real session -- worth prioritizing the `feed()`-granularity
+offload fix proposed above over other STT/VAD polish work.
+
 **Fix implemented 2026-08-07 (schema/unit-level; not yet live-validated
 against a real recurrence).** New `UtteranceSegmenter.feed_async()`
 (`src/convobox/vad/segmenter.py`) wraps the existing synchronous

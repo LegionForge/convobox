@@ -100,6 +100,8 @@ class _WhisperLikeModel(Protocol):
         hotwords: str | None = None,
         condition_on_previous_text: bool = True,
         temperature: float | None = None,
+        repetition_penalty: float | None = None,
+        no_repeat_ngram_size: int | None = None,
     ) -> tuple[Any, Any]: ...
 
 
@@ -390,16 +392,21 @@ class LocalTranscriber(STTEngine):
             return self._empty_result(audio, start)
 
         try:
-            # temperature omitted entirely (not passed as None) when unset:
-            # faster-whisper's own transcribe() types it as
-            # Union[float, List[float], Tuple[float, ...]] -- no None in
-            # that union -- so passing None explicitly would override its
-            # real default (the [0.0, 0.2, ...] fallback ladder) with a
-            # value it likely doesn't handle, rather than actually leaving
-            # that default alone the way omitting the kwarg does.
+            # temperature/repetition_penalty/no_repeat_ngram_size are all
+            # omitted entirely (not passed as None) when unset: each has
+            # a real, non-None faster-whisper default (temperature's own
+            # [0.0, 0.2, ...] fallback ladder; repetition_penalty=1.0;
+            # no_repeat_ngram_size=0) that a literal None would override
+            # with a value the library likely doesn't handle, rather than
+            # actually leaving that default alone the way omitting the
+            # kwarg does.
             extra_kwargs: dict[str, Any] = {}
             if self._config.temperature is not None:
                 extra_kwargs["temperature"] = self._config.temperature
+            if self._config.repetition_penalty is not None:
+                extra_kwargs["repetition_penalty"] = self._config.repetition_penalty
+            if self._config.no_repeat_ngram_size is not None:
+                extra_kwargs["no_repeat_ngram_size"] = self._config.no_repeat_ngram_size
             segments, info = model.transcribe(
                 audio,
                 language=self._config.language,

@@ -89,16 +89,37 @@ class WebEventForwarder:
         self._writer_task: asyncio.Task[None] | None = None
 
     def __call__(self, event: BackendEvent) -> None:
+        event_type_name = _EVENT_TYPE_NAMES.get(event.type, event.type.value)
         if self._history is not None:
             self._queue_write(
                 functools.partial(
                     self._history.append_event,
                     self._session_id,
-                    _EVENT_TYPE_NAMES.get(event.type, event.type.value),
+                    event_type_name,
                     backend_event=event,
                 )
             )
-        self._broadcast(event_to_dict(event))
+        # Real bug, found live (2026-08-07, JP asked whether display.
+        # assistant_name was rendering at all -- it wasn't, and this is
+        # why): event_to_dict()'s own "type" field is the RAW enum value
+        # (event.type.value == "text" for BackendEventType.TEXT), not the
+        # _EVENT_TYPE_NAMES-translated one ("response") the history row's
+        # OWN event_type COLUMN gets two lines above. index.html's
+        # renderEvent() reads `ev.event_type || ev.type` -- a REPLAYED
+        # history row has event_type set (correct, "response"), so
+        # displayNames.response applied fine there; but the LIVE SSE
+        # broadcast has no event_type field at all, only type="text", so
+        # every live response bubble fell through to the "text" fallback
+        # label and NEVER showed the configured assistant name -- only a
+        # page reload replaying persisted history (itself gated on
+        # web.history_tracking_enabled, off by default) ever could.
+        # Overriding just the outgoing payload's "type" here -- not
+        # event_to_dict() itself -- keeps the persisted backend_event_json
+        # blob's own shape exactly as it already was (still the raw enum
+        # value), matching every existing consumer of that column.
+        payload = event_to_dict(event)
+        payload["type"] = event_type_name
+        self._broadcast(payload)
 
     def forward_transcript(self, text: str) -> None:
         """Called with the user's own recognized speech, separately from
