@@ -8,8 +8,10 @@ unit-testable without spinning up the whole voice loop.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
@@ -60,13 +62,41 @@ class WebEventForwarder:
         self._session_id = session_id
         self._history = history
         self._broadcaster = broadcaster
+        # See _broadcast()'s own comment for why this set exists.
+        self._broadcast_tasks: set[asyncio.Task[None]] = set()
+        # History writes (append_event) do a real sqlite3 INSERT + commit --
+        # disk/fsync-bound work that has no business running synchronously
+        # on the event loop that also handles mic capture, TTS playback, and
+        # every other backend event (B2, 2026-08-08 review). Funneled
+        # through ONE persistent-while-busy queue+worker task, not a plain
+        # `asyncio.to_thread()` per call: a per-call to_thread would let
+        # concurrent writes race onto DIFFERENT threads against the SAME
+        # sqlite3.Connection (HistoryDB's check_same_thread=False only
+        # promises that won't crash, not that writes land in the order
+        # they were queued -- append_event stamps `timestamp` from
+        # time.time() at EXECUTION time, so out-of-order execution would
+        # corrupt get_session_events()'s own `ORDER BY timestamp ASC`
+        # reading order). A single queue drained by a single worker keeps
+        # writes both off the event loop AND strictly ordered -- HistoryDB's
+        # own sqlite3.Connection must still only ever be touched from
+        # THIS worker (writes) and the FastAPI routes (reads, in app.py) --
+        # both stay confined to code that never blocks the loop for long,
+        # which is exactly why every FastAPI route here must stay
+        # `async def`: a route that did real blocking I/O synchronously
+        # would serialize behind (and stall) this same event loop the
+        # writer task also depends on.
+        self._write_queue: asyncio.Queue[Callable[[], object]] = asyncio.Queue()
+        self._writer_task: asyncio.Task[None] | None = None
 
     def __call__(self, event: BackendEvent) -> None:
         if self._history is not None:
-            self._history.append_event(
-                self._session_id,
-                _EVENT_TYPE_NAMES.get(event.type, event.type.value),
-                backend_event=event,
+            self._queue_write(
+                functools.partial(
+                    self._history.append_event,
+                    self._session_id,
+                    _EVENT_TYPE_NAMES.get(event.type, event.type.value),
+                    backend_event=event,
+                )
             )
         self._broadcast(event_to_dict(event))
 
@@ -78,8 +108,73 @@ class WebEventForwarder:
         run_convobox.py call site that invokes Orchestrator.handle_transcript
         (the main mic loop, --text mode, and queued-interjection delivery)."""
         if self._history is not None:
-            self._history.append_event(self._session_id, "transcript", user_transcript=text)
+            self._queue_write(
+                functools.partial(
+                    self._history.append_event,
+                    self._session_id,
+                    "transcript",
+                    user_transcript=text,
+                )
+            )
         self._broadcast({"type": "transcript", "content": text})
+
+    def _queue_write(self, write: Callable[[], object]) -> None:
+        """Enqueue one HistoryDB write, (re)starting the drain task if it
+        isn't already running. Safe to call repeatedly in a tight
+        synchronous burst (several BackendEvents processed back to back
+        with no `await` between them, e.g. a fast tool_call/tool_result
+        pair): asyncio's cooperative scheduling means _drain_writes() can
+        only observe self._writer_task as finished at a point where no
+        further code could have raced a new write past that check -- see
+        _drain_writes()'s own docstring."""
+        self._write_queue.put_nowait(write)
+        if self._writer_task is None or self._writer_task.done():
+            self._writer_task = asyncio.ensure_future(self._drain_writes())
+            self._writer_task.add_done_callback(self._on_writer_task_done)
+
+    async def _drain_writes(self) -> None:
+        """Drains self._write_queue until empty, then exits -- a fresh task
+        is spawned by the next _queue_write() call rather than this one
+        looping forever on an empty queue.get(). No race with that
+        respawn: this loop's exit condition (queue.empty()) and the
+        task's actual completion happen in the same, uninterrupted step
+        (a plain `return`, no further `await`) -- nothing else can run on
+        this single-threaded event loop in between, so _queue_write()'s
+        `self._writer_task.done()` check can never observe a stale
+        "still running" state for a task that's actually already
+        finished, nor miss a task that's about to finish.
+
+        Each write runs in a worker thread (asyncio.to_thread) so the
+        blocking sqlite3 call doesn't stall this coroutine's own turn on
+        the event loop -- but only ONE write is ever in flight at a time
+        (this loop awaits each to_thread call before starting the next),
+        preserving write order.
+        """
+        while not self._write_queue.empty():
+            write = await self._write_queue.get()
+            try:
+                await asyncio.to_thread(write)
+            except Exception:
+                logger.exception(
+                    "history write failed (session=%s) -- dropped, not retried",
+                    self._session_id,
+                )
+            finally:
+                self._write_queue.task_done()
+
+    def _on_writer_task_done(self, task: asyncio.Task[None]) -> None:
+        """The writer task exiting is normal (see _drain_writes()'s own
+        docstring -- it happens every time the queue catches up). Only
+        an actual crash escaping the loop (everything _drain_writes()
+        itself can anticipate is already caught per-item) is worth
+        logging here."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "history writer task crashed (session=%s)", self._session_id, exc_info=exc
+            )
 
     def forward_status(self, status: str, detail: str | None = None) -> None:
         """The mic loop's own activity state (listening/capturing/speaking/
@@ -105,7 +200,37 @@ class WebEventForwarder:
             # -- both contracts are sync, so the broadcast is scheduled
             # rather than awaited, same reasoning as _events.put_nowait()
             # elsewhere in the adapters.
-            asyncio.ensure_future(self._broadcaster.broadcast(payload))
+            #
+            # Found via autonomous codebase review, 2026-08-08 (GitHub
+            # issue #235, finding B1): a bare asyncio.ensure_future() with
+            # no reference retained used to be here. CPython holds only a
+            # WEAK reference to a running task with nothing else keeping
+            # it alive, so it can be garbage-collected mid-execution
+            # (dropped SSE frames under load, non-deterministically --
+            # see asyncio.create_task's own docs, "Save a reference to
+            # the result of this function"); and any exception inside
+            # broadcast() would vanish completely until GC eventually
+            # emits a generic "Task exception was never retrieved" with
+            # no context. Same fix shape as orchestrator.py's own
+            # _speak_task comment describes for the identical bug class
+            # ("an uncaught exception here previously vanished
+            # completely: no log line, no UI signal") -- that one wraps
+            # the work in try/except instead since only one speak task is
+            # ever in flight at a time (replaced, not accumulated); this
+            # one needs a set, since bursts of events legitimately have
+            # several broadcasts in flight concurrently and none should
+            # cancel any other.
+            task = asyncio.ensure_future(self._broadcaster.broadcast(payload))
+            self._broadcast_tasks.add(task)
+            task.add_done_callback(self._on_broadcast_task_done)
+
+    def _on_broadcast_task_done(self, task: asyncio.Task[None]) -> None:
+        self._broadcast_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("SSE broadcast failed", exc_info=exc)
 
 
 class ApprovalGateLike(Protocol):

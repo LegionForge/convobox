@@ -532,6 +532,50 @@ def detect_permission_conflict(backend: BackendConfig) -> str | None:
 _CODEX_POSTURE_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
 
 
+def detect_claude_code_approval_gap(
+    backend: BackendConfig, interaction: InteractionConfig
+) -> str | None:
+    """Return an error message if claude-code's approval hook would be
+    wired with nothing able to ever answer it, else None.
+
+    Found via autonomous codebase review, 2026-08-08 (GitHub issue #235,
+    finding A1). `ClaudeCodeAdapter._interactive_approval` is set purely
+    from `permission_mode == "approve"` at construction -- independent of
+    whether an approval gate exists. `set_interactive_approvals()` is a
+    documented no-op for claude-code (its own module docstring: the hook
+    is baked in at construction, not toggleable at runtime), so
+    `scripts/run_convobox.py`'s `approval_gate` -- built only when
+    `interaction.approval_phrase` is set -- is the ONLY thing that ever
+    calls `resolve_pending_approval`. With the phrase unset, the hook still
+    blocks every tool call for its full 120s timeout (with a misleading
+    spoken "say your approval phrase" prompt substituting the literal
+    `None`), and the stuck pending-approval state then silently
+    auto-denies every subsequent tool call for the rest of the session --
+    with no log line either time. `settings_tui.validate_config` already
+    warns about this combination, but its warning text describes "denied
+    with no voice prompt (the safe fail-closed default)", which is not
+    what actually happens (a 120s hang with a broken prompt first, then
+    silent denials) -- promoted here to a hard error instead, same
+    fail-closed treatment `detect_permission_conflict` already gets for
+    the analogous command-flag conflict above.
+    """
+    if backend.name != "claude-code":
+        return None
+    if backend.permission_mode != "approve":
+        return None
+    if interaction.approval_phrase is not None:
+        return None
+    return (
+        "backend.permission_mode is \"approve\" for claude-code, but "
+        "interaction.approval_phrase is unset -- the approval hook would "
+        "be wired with nothing able to ever answer it: the first tool "
+        "call hangs for its full timeout with a broken spoken prompt, "
+        "then every later one is silently auto-denied for the rest of "
+        "the session. Set interaction.approval_phrase, or use a "
+        "different permission_mode (\"plan\"/\"permissive\")."
+    )
+
+
 class WebConfig(BaseModel):
     # Off by default -- the web UI (docs/WEB-UI-ARCHITECTURE.md) is opt-in,
     # same posture as everything else security/privacy-relevant in this
