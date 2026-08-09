@@ -54,6 +54,47 @@ def _draft_config(values: dict[str, Any]) -> AppConfig:
         raise HTTPException(422, f"invalid settings payload: {exc}") from None
 
 
+def _detect_web_settings_escalation(current: AppConfig, draft: AppConfig) -> str | None:
+    """Return an error message if `draft` changes a field this route
+    must never be allowed to change, else None.
+
+    Found via autonomous codebase review, 2026-08-08 (GitHub issue #235,
+    finding A4). /api/settings/save shares this whole web UI's no-auth,
+    loopback-only trust boundary -- fine for most settings, but two
+    fields here are categorically higher-stakes than the rest:
+    backend.command is a list passed straight to
+    asyncio.create_subprocess_exec (arbitrary-command-execution-on-next-
+    start), and web.bind_address controls whether this same unauthenticated
+    server is reachable beyond loopback at all (self-escalation to LAN
+    exposure). Both stay fully editable via the TUI (scripts/
+    settings_tui.py), which requires real local console access -- this
+    restriction is specific to the web route, not the underlying config
+    model or the save mechanism itself.
+
+    Comparing against the currently-saved config, not just checking
+    whether the draft "contains" these fields: the web UI's own save
+    flow round-trips the FULL current config back with edits merged in
+    (see get_settings()), so the fields are always present in a normal
+    payload -- only a real attempted CHANGE should be rejected, not an
+    unmodified pass-through.
+    """
+    if draft.backend.command != current.backend.command:
+        return (
+            "backend.command cannot be changed via the web UI -- it's "
+            "passed directly to a subprocess call, and this server has no "
+            "authentication. Use the settings TUI (real local console "
+            "access) instead."
+        )
+    if draft.web.bind_address != current.web.bind_address:
+        return (
+            "web.bind_address cannot be changed via the web UI -- this "
+            "server has no authentication, so changing it could expose "
+            "an unauthenticated control surface beyond loopback. Use the "
+            "settings TUI (real local console access) instead."
+        )
+    return None
+
+
 def _field_to_dict(spec: Any, config: AppConfig, settings_tui: Any) -> dict[str, Any]:
     """`choices` come straight from the TUI's own live enumeration
     (real connected devices, real downloaded voices, ...). `unset_value`/
@@ -130,6 +171,10 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
         from scripts import settings_tui
 
         config = _draft_config(draft.values)
+        current = load_config(config_path)
+        escalation = _detect_web_settings_escalation(current, config)
+        if escalation is not None:
+            raise HTTPException(403, escalation)
         report = settings_tui.validate_config(config)
         if report.errors:
             raise HTTPException(422, {"errors": report.errors, "warnings": report.warnings})

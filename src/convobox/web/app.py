@@ -50,6 +50,14 @@ class TextSubmission(BaseModel):
 # "whatever port the dev server picked" needs the regex form instead.
 _LOCALHOST_ORIGIN_REGEX = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
 
+# CSRF: see require_csrf_header's own docstring/comment below for the
+# full reasoning. Any header name not on CORS' safelist works; this one
+# just self-documents which app it's for. Starlette's Headers mapping is
+# case-insensitive, so a literal lowercase key here matches any casing
+# the client actually sends.
+_CSRF_HEADER = "x-convobox-client"
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
 # The plain HTML/JS frontend (docs/WEB-UI-ARCHITECTURE.md's "Next Steps":
 # start minimal, not a React/Vite toolchain). Path relative to this file,
 # not the process cwd, so it resolves correctly regardless of where
@@ -116,6 +124,35 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_csrf_header(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # CSRF: the three routes below take no request body (/api/quit,
+        # /api/stop, /api/sessions/{id}/clear) -- a cross-origin page's
+        # `fetch(url, {method:"POST"})` is a CORS "simple request" for
+        # those (no body, no custom headers), which the browser sends
+        # WITHOUT a preflight. CORSMiddleware above only controls whether
+        # the attacking page can READ the response; it never stops the
+        # browser from sending a simple request in the first place, so
+        # those three routes' real side effects (kill the session,
+        # hard-stop, wipe history) were reachable from any tab, not just
+        # this app's own loopback origin. The JSON-bodied mutating routes
+        # were only protected INCIDENTALLY (a JSON content-type forces a
+        # preflight, which _LOCALHOST_ORIGIN_REGEX then rejects) -- an
+        # accident of body shape, not a designed control; a future
+        # body-less route would silently reopen the same gap. Found via
+        # autonomous codebase review, 2026-08-08 (GitHub issue #235,
+        # finding A3).
+        #
+        # Fix: require a header no CORS "simple request" is allowed to
+        # carry, uniformly on every mutating route -- this forces a real
+        # preflight every time, which the existing CORS middleware then
+        # correctly rejects for any non-loopback origin. index.html's own
+        # fetch() calls all send this (CSRF_HEADERS, defined once near
+        # the top of its script).
+        if request.method in _MUTATING_METHODS and _CSRF_HEADER not in request.headers:
+            return Response(status_code=403, content="missing required header")
+        return await call_next(request)
 
     add_settings_routes(app, config_path if config_path is not None else resolve_config_path())
     add_artifact_routes(app, working_dir)

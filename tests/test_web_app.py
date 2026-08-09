@@ -21,6 +21,12 @@ from convobox.web.app import create_app, sse_lines  # noqa: E402
 from convobox.web.history import HistoryDB, new_session_id  # noqa: E402
 from convobox.web.stream import EventBroadcaster  # noqa: E402
 
+# Required by app.py's require_csrf_header middleware on every mutating
+# request (see its own docstring, GitHub issue #235 finding A3) -- set as
+# this client's default headers so every test call carries it without
+# repeating it at each call site.
+_CSRF_HEADERS = {"X-ConvoBox-Client": "1"}
+
 
 @pytest.fixture
 def db(tmp_path: Path) -> HistoryDB:
@@ -32,15 +38,49 @@ def db(tmp_path: Path) -> HistoryDB:
 @pytest.fixture
 def client(db: HistoryDB) -> TestClient:
     app = create_app(db=db)
-    return TestClient(app)
+    return TestClient(app, headers=_CSRF_HEADERS)
 
 
 def test_health_check() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# --- require_csrf_header middleware (GitHub issue #235, finding A3): a
+# body-less mutating route (/api/quit, /api/stop, /api/sessions/{id}/
+# clear) is a CORS "simple request" without this -- no preflight, so
+# CORSMiddleware's loopback-only origin check never gets a chance to
+# reject it. These tests use a client WITHOUT the default header the
+# `client` fixture normally carries, to prove the rejection is real.
+
+
+def test_post_without_csrf_header_is_rejected() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app) as client:  # deliberately no default headers
+        response = client.post("/api/stop")
+    assert response.status_code == 403
+
+
+def test_post_with_csrf_header_is_not_rejected_by_the_middleware() -> None:
+    # "Not rejected by the middleware" specifically -- /api/stop with no
+    # safeword_bridge configured still 503s, a different check entirely;
+    # the point here is proving it's not a 403 anymore.
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/stop")
+    assert response.status_code != 403
+
+
+def test_get_requests_never_need_the_csrf_header() -> None:
+    # Safe methods are read-only by definition -- the middleware must
+    # only gate POST/PUT/PATCH/DELETE, never GET/HEAD/OPTIONS.
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app) as client:  # deliberately no default headers
+        response = client.get("/health")
+    assert response.status_code == 200
 
 
 def test_get_display_config_defaults_to_no_overrides(client: TestClient) -> None:
@@ -64,7 +104,7 @@ def test_get_display_config_returns_configured_colors_and_names() -> None:
             assistant_name="Athena",
         ),
     )
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/api/config")
     assert response.status_code == 200
     assert response.json() == {
@@ -303,6 +343,113 @@ async def test_broadcast_still_delivers_real_events_unaffected_by_close_all() ->
     assert event == {"type": "response", "content": "still works"}
 
 
+# --- EventBroadcaster: bounded queues + oldest-drop (B5, 2026-08-08 review):
+# an unbounded per-subscriber queue meant a stalled/backgrounded browser tab
+# (still connected, no longer draining) grew its queue for the rest of the
+# session. subscribe() now caps it; a full queue evicts its oldest item
+# instead of blocking broadcast()'s delivery to every OTHER subscriber. ---
+
+
+@pytest.mark.asyncio
+async def test_subscribe_returns_a_bounded_queue() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=3)
+    queue = broadcaster.subscribe()
+    assert queue.maxsize == 3
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_a_full_queue_evicts_the_oldest_event() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=2)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    await broadcaster.broadcast({"type": "response", "content": "3"})
+
+    # "1" was evicted to make room -- queue never exceeds its cap, and the
+    # newest events (not the oldest) are what a live UI most needs to see.
+    assert queue.qsize() == 2
+    assert await queue.get() == {"type": "response", "content": "2"}
+    assert await queue.get() == {"type": "response", "content": "3"}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_still_delivers_normally_below_capacity() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=200)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "a"})
+    await broadcaster.broadcast({"type": "response", "content": "b"})
+
+    assert await queue.get() == {"type": "response", "content": "a"}
+    assert await queue.get() == {"type": "response", "content": "b"}
+
+
+@pytest.mark.asyncio
+async def test_dropped_events_surface_as_a_marker_on_the_next_broadcast() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=1)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    # Evicts "1" (dropped count -> 1), queue now holds "2".
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    # Delivers the pending marker first, which itself evicts "2" to fit
+    # (maxsize=1 has no spare room) -- then the "3" payload evicts the
+    # marker in turn to fit. maxsize=1 is the pathological extreme where
+    # even the marker can't coexist with a real event in the same queue;
+    # broadcast() still ends this call holding the newest real payload,
+    # "3", with the evicted marker's own count rolled into whatever the
+    # NEXT marker eventually reports (see test_dropped_marker_reports_the_
+    # correct_count_with_room_to_spare below for the non-pathological case).
+    await broadcaster.broadcast({"type": "response", "content": "3"})
+
+    assert await queue.get() == {"type": "response", "content": "3"}
+
+
+@pytest.mark.asyncio
+async def test_dropped_marker_reports_the_correct_count_with_room_to_spare() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=2)
+    queue = broadcaster.subscribe()
+
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    # Queue is now full (["1", "2"]). This evicts "1" (dropped -> 1).
+    await broadcaster.broadcast({"type": "response", "content": "3"})
+    # Delivers the pending marker first (evicting "2" to fit it, since the
+    # queue is still full: ["2", "3"]), then "4" (evicting "3").
+    await broadcaster.broadcast({"type": "response", "content": "4"})
+
+    assert await queue.get() == {"type": "dropped", "count": 1}
+    assert await queue.get() == {"type": "response", "content": "4"}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_clears_pending_drop_count() -> None:
+    broadcaster = EventBroadcaster(max_queue_size=1)
+    queue = broadcaster.subscribe()
+    await broadcaster.broadcast({"type": "response", "content": "1"})
+    await broadcaster.broadcast({"type": "response", "content": "2"})
+    assert broadcaster._dropped.get(queue)
+
+    broadcaster.unsubscribe(queue)
+
+    assert queue not in broadcaster._dropped
+
+
+@pytest.mark.asyncio
+async def test_close_all_delivers_the_none_sentinel_even_when_the_queue_is_full() -> None:
+    # The original bug this whole method exists for: close_all() must
+    # actually reach every subscriber. A raw blocking `await queue.put(None)`
+    # against a full, undrained queue would hang this call forever.
+    broadcaster = EventBroadcaster(max_queue_size=1)
+    queue = broadcaster.subscribe()
+    await broadcaster.broadcast({"type": "response", "content": "still queued"})
+
+    await broadcaster.close_all()
+
+    assert await queue.get() is None
+
+
 # --- /api/events/stream: a real uvicorn server + a real socket, since
 # ASGITransport can't drive an infinite streaming response (see above). ---
 
@@ -396,7 +543,7 @@ def test_resolve_approval_with_no_bridge_returns_409(client: TestClient) -> None
 
 def test_resolve_approval_with_nothing_pending_returns_409() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=_FakeApprovalBridge(pending=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 409
 
@@ -404,7 +551,7 @@ def test_resolve_approval_with_nothing_pending_returns_409() -> None:
 def test_resolve_approval_approve_calls_the_bridge_and_returns_approved() -> None:
     bridge = _FakeApprovalBridge(pending=True)
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 200
     assert response.json() == {"status": "approved", "explanation": None}
@@ -414,7 +561,7 @@ def test_resolve_approval_approve_calls_the_bridge_and_returns_approved() -> Non
 def test_resolve_approval_deny_calls_the_bridge_and_returns_denied() -> None:
     bridge = _FakeApprovalBridge(pending=True)
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "deny"})
     assert response.status_code == 200
     assert response.json() == {"status": "denied", "explanation": None}
@@ -424,7 +571,7 @@ def test_resolve_approval_deny_calls_the_bridge_and_returns_denied() -> None:
 def test_resolve_approval_explain_extends_and_returns_the_explanation() -> None:
     bridge = _FakeApprovalBridge(pending=True, explanation="rm -rf .incident-captures/*.wav")
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "explain"})
     assert response.status_code == 200
     assert response.json() == {"status": "pending", "explanation": "rm -rf .incident-captures/*.wav"}
@@ -436,7 +583,7 @@ def test_resolve_approval_when_bridge_reports_it_could_not_deliver_returns_409()
     bridge = _FakeApprovalBridge(pending=True)
     bridge.decide_result = False  # e.g. resolved by voice in the same instant
     app = create_app(db=HistoryDB(Path(":memory:")), approval_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 409
 
@@ -461,7 +608,7 @@ def test_quit_with_no_handler_returns_503(client: TestClient) -> None:
 def test_quit_calls_the_handler_and_returns_quitting() -> None:
     handler = MagicMock()
     app = create_app(db=HistoryDB(Path(":memory:")), quit_handler=handler)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/quit")
     assert response.status_code == 200
     assert response.json() == {"status": "quitting"}
@@ -513,7 +660,7 @@ def test_get_listening_with_no_bridge_reports_not_paused(client: TestClient) -> 
 
 def test_get_listening_reflects_the_bridge_state() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(paused=True))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/api/listening")
     assert response.json() == {"is_paused": True}
 
@@ -525,7 +672,7 @@ def test_set_listening_with_no_bridge_returns_503(client: TestClient) -> None:
 
 def test_set_listening_with_a_not_ready_bridge_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=_FakeListeningBridge(ready=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/listening", json={"action": "pause"})
     assert response.status_code == 503
 
@@ -533,7 +680,7 @@ def test_set_listening_with_a_not_ready_bridge_returns_503() -> None:
 def test_set_listening_pause_calls_the_bridge_and_returns_paused() -> None:
     bridge = _FakeListeningBridge(paused=False)
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/listening", json={"action": "pause"})
     assert response.status_code == 200
     assert response.json() == {"is_paused": True}
@@ -543,7 +690,7 @@ def test_set_listening_pause_calls_the_bridge_and_returns_paused() -> None:
 def test_set_listening_resume_calls_the_bridge_and_returns_listening() -> None:
     bridge = _FakeListeningBridge(paused=True)
     app = create_app(db=HistoryDB(Path(":memory:")), listening_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/listening", json={"action": "resume"})
     assert response.status_code == 200
     assert response.json() == {"is_paused": False}
@@ -585,7 +732,7 @@ def test_stop_with_no_bridge_returns_503(client: TestClient) -> None:
 
 def test_stop_with_a_not_ready_bridge_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), safeword_bridge=_FakeSafewordBridge(ready=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/stop")
     assert response.status_code == 503
 
@@ -593,7 +740,7 @@ def test_stop_with_a_not_ready_bridge_returns_503() -> None:
 def test_stop_calls_the_bridge_and_returns_stopped() -> None:
     bridge = _FakeSafewordBridge()
     app = create_app(db=HistoryDB(Path(":memory:")), safeword_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/stop")
     assert response.status_code == 200
     assert response.json() == {"stopped": True}
@@ -622,7 +769,7 @@ def test_submit_text_with_no_bridge_returns_503(client: TestClient) -> None:
 
 def test_submit_text_with_a_not_ready_bridge_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=_FakeTextBridge(ready=False))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/text", json={"text": "hello"})
     assert response.status_code == 503
 
@@ -630,7 +777,7 @@ def test_submit_text_with_a_not_ready_bridge_returns_503() -> None:
 def test_submit_text_forwards_to_the_bridge_and_returns_accepted() -> None:
     bridge = _FakeTextBridge()
     app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/text", json={"text": "what should I work on next"})
     assert response.status_code == 200
     assert response.json() == {"accepted": True}
@@ -642,6 +789,6 @@ def test_submit_text_rejected_by_the_bridge_returns_400() -> None:
     # "nothing sent" (e.g. blank after stripping), not a server error.
     bridge = _FakeTextBridge(accepts=False)
     app = create_app(db=HistoryDB(Path(":memory:")), text_bridge=bridge)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/text", json={"text": "   "})
     assert response.status_code == 400

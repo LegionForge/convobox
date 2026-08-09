@@ -53,6 +53,7 @@ from convobox.config import (
     BackendProfileConfig,
     TTSConfig,
     TTSProfileConfig,
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
     load_config_lenient,
@@ -296,6 +297,8 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("stt", "hotwords", "Hotwords", "optional_str", help_text="Space-separated words/phrases faster-whisper should be biased toward recognizing. Live UAT finding: a short resume/wake word got repeatedly hallucinated as unrelated fluent sentences instead of misheard as something similar -- Whisper's known failure mode on short/low-signal clips. Put your resume word, safeword phrases, and approval phrase here to bias toward exactly the short critical phrases most likely to hit this. Accuracy nudge only, not a safety mechanism -- the safeword/resume-word checks still run on the raw transcript regardless."),
             FieldSpec("stt", "condition_on_previous_text", "Condition on previous text", "bool", help_text="faster-whisper default: on. Disabling stops a low-signal/short utterance's decode from being biased by whatever fluent text the PREVIOUS segment produced -- a documented contributor to the same short-clip hallucination pattern hotwords addresses. A real tradeoff, not yet live-validated -- worth testing if hotwords alone doesn't fully fix a short resume/wake word, not a default recommendation."),
             FieldSpec("stt", "temperature", "Temperature", "optional_float", help_text="Leave unset (recommended) for faster-whisper's own fallback ladder (0.0, 0.2, 0.4, ... up to 1.0, each retried on a low-confidence decode). Pin to a single value -- 0.0 for fully deterministic, no-fallback decoding -- to test whether the ladder's own higher-temperature retries are contributing to hallucination on an already-short/low-signal clip. Not yet live-validated -- worth testing, not a default recommendation."),
+            FieldSpec("stt", "repetition_penalty", "Repetition penalty", "optional_float", help_text="Leave unset for faster-whisper's own default (1.0, no penalty). Real live incident, 2026-08-07: a 1.056s clip of a single 'That's right.' decoded as that phrase repeated 8 times -- a genuine decoder repetition-loop pathology, not an app bug (one transcribe() call, one already-corrupted output). Values above 1.0 penalize the decoder for repeating tokens it's already produced -- try 1.1-1.3 first. Not yet live-validated -- worth testing if you're hitting runaway repetition, not a default recommendation (an untested value could make normal decodes worse, not just fix the rare case)."),
+            FieldSpec("stt", "no_repeat_ngram_size", "No-repeat n-gram size", "optional_int", help_text="Leave unset for faster-whisper's own default (0, disabled). The blunter sibling to repetition_penalty above, for the same runaway-repetition failure mode: blocks the decoder from repeating any run of this many tokens twice in one decode. 3 is a reasonable first value to try. Not yet live-validated -- worth testing alongside or instead of repetition_penalty, not a default recommendation."),
         ),
     ),
     SectionSpec(
@@ -356,6 +359,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("vad", "min_silence_ms", "Min silence ms", "int", help_text="Trailing silence needed to end an utterance."),
             FieldSpec("vad", "min_speech_ms", "Min speech ms", "int", help_text="Minimum speech burst to keep as a real utterance."),
             FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
+            FieldSpec("vad", "trace_silero_calls", "Trace Silero calls", "bool", help_text="Diagnostic only, off by default -- logs every single Silero window call's duration (~31/s during active audio) at DEBUG level. Deliberately separate from --verbose: too noisy for normal use even at DEBUG. Turn on only when actively chasing the live-hit VAD-freeze issue (see docs/KNOWN-ISSUES.md)."),
         ),
     ),
     SectionSpec(
@@ -1054,7 +1058,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
     conflict = detect_permission_conflict(config.backend)
     if conflict is not None:
         report.errors.append(conflict)
-    if config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
+    # claude-code specifically: this combination doesn't fail safe the way
+    # the general warning below describes for other backends (codex denies
+    # cleanly with no pending state) -- the hook still gets wired at
+    # construction time and nothing can ever answer it, so it's a hard
+    # error here, not a warning. See detect_claude_code_approval_gap's own
+    # docstring (GitHub issue #235, finding A1) for the full mechanism.
+    approval_gap = detect_claude_code_approval_gap(config.backend, config.interaction)
+    if approval_gap is not None:
+        report.errors.append(approval_gap)
+    elif config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
         report.warnings.append(
             "backend.permission_mode is 'approve' but interaction.approval_phrase is "
             "unset -- every approval request will be denied automatically with no "

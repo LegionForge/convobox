@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import sqlite3
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -35,11 +38,18 @@ def test_both_none_is_a_harmless_noop(db: HistoryDB) -> None:
     forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))  # must not raise
 
 
-def test_forwards_to_history_when_given(db: HistoryDB) -> None:
+@pytest.mark.asyncio
+async def test_forwards_to_history_when_given(db: HistoryDB) -> None:
     session_id = new_session_id()
     forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
 
     forwarder(BackendEvent(type=BackendEventType.TEXT, content="it works"))
+    # B2: history writes are queued and drained by a background task, not
+    # written synchronously in-line -- await the forwarder's own tracked
+    # writer task so the write is actually durable before asserting on it,
+    # rather than guessing at a timing.
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
 
     events = db.get_session_events(session_id)
     assert len(events) == 1
@@ -47,25 +57,108 @@ def test_forwards_to_history_when_given(db: HistoryDB) -> None:
     assert events[0]["backend_response"] == "it works"
 
 
-def test_tool_call_event_type_is_not_folded_into_response(db: HistoryDB) -> None:
+@pytest.mark.asyncio
+async def test_tool_call_event_type_is_not_folded_into_response(db: HistoryDB) -> None:
     session_id = new_session_id()
     forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
 
     forwarder(BackendEvent(type=BackendEventType.TOOL_CALL, tool="Bash", tool_input="ls"))
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
 
     stored = db.get_session_events(session_id)[0]
     assert stored["event_type"] == "tool_call"
     assert stored["tool_name"] == "Bash"
 
 
-def test_approval_request_gets_its_own_event_type(db: HistoryDB) -> None:
+@pytest.mark.asyncio
+async def test_approval_request_gets_its_own_event_type(db: HistoryDB) -> None:
     session_id = new_session_id()
     forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
 
     forwarder(BackendEvent(type=BackendEventType.APPROVAL_REQUEST, tool="Bash"))
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
 
     stored = db.get_session_events(session_id)[0]
     assert stored["event_type"] == "approval_request"
+
+
+# --- B2 (2026-08-08 review): history writes are queued and drained by a
+# background task rather than written synchronously in-line on the event
+# loop (see WebEventForwarder.__init__'s own comment for why a per-call
+# asyncio.to_thread() wasn't used instead). ---
+
+
+@pytest.mark.asyncio
+async def test_write_is_not_synchronous_the_row_is_not_there_until_awaited(
+    db: HistoryDB,
+) -> None:
+    session_id = new_session_id()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="deferred"))
+    # No await at all yet -- the write is queued, not yet executed. This is
+    # the behavior change B2 exists for: append_event() used to run
+    # in-line, so this assertion would have failed on the OLD code (the
+    # row would already be there).
+    assert db.get_session_events(session_id) == []
+
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
+    assert len(db.get_session_events(session_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_writes_land_in_the_order_they_were_queued(db: HistoryDB) -> None:
+    # Real risk B2's design guards against: append_event() stamps its own
+    # `timestamp` from time.time() at EXECUTION time, not queue time -- if
+    # writes ran on separate, independently-scheduled threads (a naive
+    # per-call asyncio.to_thread()), a later-queued write could execute
+    # and land BEFORE an earlier one, corrupting get_session_events()'s own
+    # `ORDER BY timestamp ASC` reading order. A single queue + one worker
+    # (this test fires several events back to back, synchronously, with no
+    # await between them -- the same shape a fast tool_call/tool_result
+    # pair from a real backend arrives in) must still preserve order.
+    session_id = new_session_id()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
+
+    for i in range(10):
+        forwarder(BackendEvent(type=BackendEventType.TEXT, content=f"event {i}"))
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
+
+    stored = db.get_session_events(session_id)
+    assert [row["backend_response"] for row in stored] == [f"event {i}" for i in range(10)]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_is_logged_and_does_not_block_the_next_one(
+    db: HistoryDB, caplog: pytest.LogCaptureFixture
+) -> None:
+    session_id = new_session_id()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
+    real_append_event = db.append_event
+    calls = {"n": 0}
+
+    def flaky_append_event(*args: object, **kwargs: object) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("simulated write failure")
+        return real_append_event(*args, **kwargs)  # type: ignore[arg-type]
+
+    db.append_event = flaky_append_event  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.ERROR):
+        forwarder(BackendEvent(type=BackendEventType.TEXT, content="dropped"))
+        forwarder(BackendEvent(type=BackendEventType.TEXT, content="survives"))
+        assert forwarder._writer_task is not None
+        await forwarder._writer_task
+
+    stored = db.get_session_events(session_id)
+    assert len(stored) == 1
+    assert stored[0]["backend_response"] == "survives"
+    assert "history write failed" in caplog.text
 
 
 def test_history_none_skips_persistence_but_does_not_raise() -> None:
@@ -89,6 +182,83 @@ async def test_broadcasts_to_a_subscriber_when_given() -> None:
     assert payload["content"] == "live"
 
 
+@pytest.mark.asyncio
+async def test_live_broadcast_uses_the_translated_event_type_not_the_raw_enum_value(
+) -> None:
+    # Real bug, found live (2026-08-07): JP asked whether
+    # display.assistant_name was rendering at all in the web UI during a
+    # LIVE session -- it wasn't. event_to_dict()'s own "type" field is
+    # BackendEventType.TEXT.value ("text"), not the _EVENT_TYPE_NAMES-
+    # translated "response" the history row's event_type COLUMN already
+    # got correctly. index.html's renderEvent() reads
+    # `ev.event_type || ev.type` -- a replayed history row has
+    # event_type set (correct), but the live SSE broadcast never did,
+    # so every live response bubble fell through to the untranslated
+    # "text" label and displayNames.response (the configured assistant
+    # name) never applied. Only a page reload replaying persisted
+    # history (itself gated on web.history_tracking_enabled, off by
+    # default) could ever show it. This is the exact payload the
+    # frontend actually receives over SSE -- assert on "type" directly,
+    # not just "content" like the sibling test above already does.
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait()["type"] == "response"
+
+
+@pytest.mark.asyncio
+async def test_live_broadcast_translates_tool_call_and_tool_result_types_too() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TOOL_CALL, tool="Bash"))
+    forwarder(BackendEvent(type=BackendEventType.TOOL_RESULT, tool_output="ok"))
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait()["type"] == "tool_call"
+    assert queue.get_nowait()["type"] == "tool_result"
+
+
+@pytest.mark.asyncio
+async def test_live_broadcast_does_not_mutate_what_gets_persisted(db: HistoryDB) -> None:
+    # The fix overrides only the OUTGOING broadcast payload's "type" --
+    # confirms the persisted backend_event_json blob keeps its original,
+    # untranslated shape (event_to_dict()'s own raw "text"), matching
+    # every existing consumer of that column exactly as before this fix.
+    session_id = new_session_id()
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))
+    await asyncio.sleep(0)
+    # Preemptive compatibility fix for PR #242 (B2, "offload history DB
+    # writes off the event loop", still open/unmerged as of this commit):
+    # that PR makes history writes asynchronous (queued + drained by a
+    # background task) instead of synchronous, adding a `_writer_task`
+    # attribute this branch doesn't have on its own -- getattr(), not a
+    # plain attribute access, so this stays correct BOTH standalone (no
+    # such attribute -> skip, matching today's synchronous behavior) and
+    # once merged with #242 (awaits the real write). Whichever of #230/
+    # #242 merges second, this test needs this either way -- added now on
+    # #230's own branch so it's correct regardless of merge order (found
+    # via a local, throwaway integration-merge check of the full open PR
+    # queue, not pushed).
+    writer_task = getattr(forwarder, "_writer_task", None)
+    if writer_task is not None:
+        await writer_task
+
+    assert queue.get_nowait()["type"] == "response"
+    stored = db.get_session_events(session_id)[0]
+    assert stored["event_type"] == "response"
+    assert json.loads(stored["backend_event_json"])["type"] == "text"
+
+
 def test_broadcaster_none_skips_broadcast_but_does_not_raise() -> None:
     forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=None)
     forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))  # must not raise
@@ -103,9 +273,88 @@ async def test_forwards_to_both_history_and_broadcaster_together(db: HistoryDB) 
 
     forwarder(BackendEvent(type=BackendEventType.TEXT, content="both"))
     await asyncio.sleep(0)
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
 
     assert db.get_session_events(session_id)[0]["backend_response"] == "both"
     assert queue.get_nowait()["content"] == "both"
+
+
+# --- _broadcast's task tracking (GitHub issue #235, finding B1): a bare
+# asyncio.ensure_future() with no reference retained used to be here --
+# CPython holds only a weak reference to a running task, so it can be
+# garbage-collected mid-execution, and any exception inside it vanished
+# completely until GC eventually emitted a generic, contextless warning.
+
+
+async def _settle(forwarder: WebEventForwarder) -> None:
+    """Wait for every currently-tracked broadcast task to actually finish
+    AND for their done-callbacks to run. Awaiting the tasks directly
+    guarantees the real work is done; add_done_callback's own callback is
+    separately scheduled via loop.call_soon() at completion, so one more
+    scheduling round (a bare `await asyncio.sleep(0)`) is needed after
+    that before the set is guaranteed to reflect it -- found live writing
+    this test (a single sleep(0) alone left the just-finished task still
+    in the set)."""
+    tasks = list(forwarder._broadcast_tasks)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_task_is_tracked_then_removed_once_done() -> None:
+    broadcaster = EventBroadcaster()
+    broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="tracked"))
+    assert len(forwarder._broadcast_tasks) == 1  # scheduled, not yet run
+
+    await _settle(forwarder)
+
+    assert len(forwarder._broadcast_tasks) == 0  # done-callback removed it
+
+
+@pytest.mark.asyncio
+async def test_multiple_concurrent_broadcasts_are_all_tracked_independently() -> None:
+    # The whole reason this is a set, not a single replaceable slot like
+    # orchestrator.py's _speak_task: a burst of events legitimately has
+    # several broadcasts in flight concurrently, and none should cancel
+    # or replace any other.
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="one"))
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="two"))
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="three"))
+    assert len(forwarder._broadcast_tasks) == 3
+
+    await _settle(forwarder)
+
+    assert len(forwarder._broadcast_tasks) == 0
+    delivered = {queue.get_nowait()["content"] for _ in range(3)}
+    assert delivered == {"one", "two", "three"}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_exception_is_logged_not_silently_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _BrokenBroadcaster(EventBroadcaster):
+        async def broadcast(self, payload: dict[str, object]) -> None:  # type: ignore[override]
+            raise RuntimeError("simulated broadcast failure")
+
+    caplog.set_level(logging.WARNING)
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=_BrokenBroadcaster())
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="will fail"))
+    await _settle(forwarder)
+
+    assert len(forwarder._broadcast_tasks) == 0  # still cleaned up despite the failure
+    assert "SSE broadcast failed" in caplog.text
+    assert "simulated broadcast failure" in caplog.text
 
 
 # --- Integration: a real Orchestrator wired with WebEventForwarder as its
@@ -152,6 +401,8 @@ async def test_orchestrator_wired_with_web_forwarder_persists_and_broadcasts(
 
     await orch._consume_events()
     await asyncio.sleep(0)  # let the forwarder's scheduled broadcast task run
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task  # let the queued history write actually land
 
     stored = db.get_session_events(session_id)
     assert len(stored) == 1
@@ -166,11 +417,14 @@ async def test_orchestrator_wired_with_web_forwarder_persists_and_broadcasts(
 # Orchestrator.handle_transcript() also call this directly. ---
 
 
-def test_forward_transcript_persists_to_history_when_given(db: HistoryDB) -> None:
+@pytest.mark.asyncio
+async def test_forward_transcript_persists_to_history_when_given(db: HistoryDB) -> None:
     session_id = new_session_id()
     forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
 
     forwarder.forward_transcript("what should I work on next")
+    assert forwarder._writer_task is not None
+    await forwarder._writer_task
 
     stored = db.get_session_events(session_id)
     assert len(stored) == 1

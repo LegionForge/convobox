@@ -138,6 +138,47 @@ def test_temperature_passed_through_when_set() -> None:
     assert model.last_kwargs.get("temperature") == 0.0
 
 
+# --- repetition_penalty/no_repeat_ngram_size (2026-08-07): the actual fix
+# for the runaway-repetition decoder pathology found live the same day --
+# same "must NOT pass a literal None" reasoning as temperature above,
+# faster-whisper types both as plain non-Optional float/int with real
+# defaults (1.0/0), not Optional. ---
+
+
+def test_repetition_penalty_unset_omits_the_kwarg_entirely() -> None:
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert "repetition_penalty" not in model.last_kwargs
+
+
+def test_repetition_penalty_passed_through_when_set() -> None:
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", repetition_penalty=1.2
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_kwargs.get("repetition_penalty") == 1.2
+
+
+def test_no_repeat_ngram_size_unset_omits_the_kwarg_entirely() -> None:
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert "no_repeat_ngram_size" not in model.last_kwargs
+
+
+def test_no_repeat_ngram_size_passed_through_when_set() -> None:
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", no_repeat_ngram_size=3
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_kwargs.get("no_repeat_ngram_size") == 3
+
+
 def test_model_factory_called_once_at_construction() -> None:
     calls = []
 
@@ -147,6 +188,53 @@ def test_model_factory_called_once_at_construction() -> None:
 
     LocalTranscriber(_config(), model_factory=factory)
     assert len(calls) == 1
+
+
+# --- invalidate(): the STTEngine.invalidate() hook LocalTranscriber
+# overrides, used by run_convobox.py's mic loop after abandoning a
+# transcribe() call that didn't return within stt.transcribe_timeout_s
+# (docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md).
+
+
+def test_invalidate_forces_a_fresh_model_on_the_next_call() -> None:
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        return _FakeModel()
+
+    transcriber = LocalTranscriber(_config(), model_factory=factory)
+    assert calls["count"] == 1
+
+    transcriber.invalidate()
+    assert transcriber._model is None
+
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert calls["count"] == 2
+
+
+def test_invalidate_before_any_transcribe_call_is_a_noop_on_next_use() -> None:
+    # Calling invalidate() when nothing is in flight (e.g. defensively,
+    # or twice in a row) must not raise or leave the transcriber unable
+    # to recover -- the next transcribe() call should just rebuild.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.invalidate()
+    transcriber.invalidate()
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert result.text == "hello world"
+
+
+def test_stt_engine_base_invalidate_defaults_to_a_noop() -> None:
+    # Any engine that doesn't override invalidate() (a stateless/remote
+    # one, e.g.) must not raise just because the mic loop calls it.
+    from convobox.stt.base import STTEngine, TranscriptResult
+
+    class _StatelessEngine(STTEngine):
+        def transcribe(self, audio: np.ndarray) -> TranscriptResult:
+            raise NotImplementedError
+
+    _StatelessEngine().invalidate()  # must not raise
 
 
 def test_native_allocator_failure_is_recovered_not_raised() -> None:

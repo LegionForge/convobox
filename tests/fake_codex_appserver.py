@@ -14,6 +14,15 @@ text to script this by, since it happens before any turn is ever sent.
 Turn behavior is scripted by the prompt text:
 
   contains "use a tool" -> commandExecution item + agentMessage + completed
+  contains "write a file" -> fileChange item (status completed, one
+                            renderable + one non-renderable + one outside
+                            working_dir path) + agentMessage + completed
+  contains "write a broken file" -> fileChange item with status
+                            "failed" -- must NOT produce an ARTIFACT event
+                            (checked before "write a file" -- see below;
+                            deliberately not named with "fail", which the
+                            unrelated "fail" -> turn/completed(status=
+                            "failed") scenario above already claims)
   contains "hang"       -> turn/started only; completes on turn/interrupt
   contains "hang and vanish on interrupt" -> like "hang", but exits without
                             responding to turn/interrupt (checked before the
@@ -224,6 +233,40 @@ def main() -> None:
                              "aggregatedOutput": "file1\nfile2", "status": "completed"},
                 })
                 agent_message("the tool ran")
+                turn_completed(turn_id)
+                continue
+            if "write a broken file" in text:
+                notify("item/started", {
+                    "threadId": THREAD_ID,
+                    "item": {"type": "fileChange", "id": "fc_1", "status": "inProgress",
+                             "changes": [{"path": "notes.md", "kind": "add", "diff": "+hi"}]},
+                })
+                notify("item/completed", {
+                    "threadId": THREAD_ID,
+                    "item": {"type": "fileChange", "id": "fc_1", "status": "failed",
+                             "changes": [{"path": "notes.md", "kind": "add", "diff": "+hi"}]},
+                })
+                agent_message("the write failed")
+                turn_completed(turn_id)
+                continue
+            if "write a file" in text:
+                notify("item/started", {
+                    "threadId": THREAD_ID,
+                    "item": {"type": "fileChange", "id": "fc_1", "status": "inProgress",
+                             "changes": [{"path": "notes.md", "kind": "add", "diff": "+hi"}]},
+                })
+                notify("item/completed", {
+                    "threadId": THREAD_ID,
+                    "item": {
+                        "type": "fileChange", "id": "fc_1", "status": "completed",
+                        "changes": [
+                            {"path": "notes.md", "kind": "add", "diff": "+hi"},
+                            {"path": "script.py", "kind": "add", "diff": "+print(1)"},
+                            {"path": "../outside.md", "kind": "add", "diff": "+x"},
+                        ],
+                    },
+                })
+                agent_message("the file is written")
                 turn_completed(turn_id)
                 continue
             agent_message(f"echo: {text}")
