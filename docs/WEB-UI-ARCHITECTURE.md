@@ -414,6 +414,34 @@ Decoupling is optional; can also embed in run_convobox.py with asyncio backgroun
 - Config validator warns if attempting 0.0.0.0 without explicit acknowledgment
 - No authentication (local device trust model)
 
+### CSRF (added 2026-08-08, GitHub issue #235 finding A3)
+"Loopback-only" is a control against *remote* attackers -- it is not a
+control against the operator's own browser, which is the one client this
+UI is actually built for. Any page the operator has open in another tab
+could otherwise reach this server. Body-less mutating routes
+(`/api/quit`, `/api/stop`, `/api/sessions/{id}/clear`) are CORS "simple
+requests" without a custom header: a cross-origin page's
+`fetch(url, {method:"POST"})` reaches them with no preflight at all --
+CORS only controls whether the *attacking page* can read the response,
+never whether the browser sends a simple request in the first place.
+Every mutating route (`app.py`'s `require_csrf_header` middleware) now
+requires a custom header (`X-ConvoBox-Client`) that forces a real
+preflight, which the existing loopback-only origin check then correctly
+rejects for any non-local origin. `index.html`'s own `fetch()` calls all
+send it.
+
+### Settings-write surface (added 2026-08-08, GitHub issue #235 finding A4)
+`/api/settings/save` shares this same no-auth trust boundary, but its
+write surface is categorically higher-stakes than the rest: it can set
+`backend.command` (a list passed straight to a subprocess call --
+arbitrary command execution on next start) and `web.bind_address`
+(self-escalation to expose this same unauthenticated server beyond
+loopback). Both fields are rejected specifically by this web route
+(`settings_api.py`'s `_detect_web_settings_escalation`) if a save
+attempts to change them from their currently-saved value; both remain
+fully editable via the settings TUI, which requires real local console
+access rather than this server's implicit trust model.
+
 ### Data at Rest
 - SQLite in `.convobox-history/` (gitignored by default)
 - File permissions: 600 on Unix/macOS (owner-readable only)
@@ -570,6 +598,16 @@ duplicated here.
    actually work (`CORSMiddleware.allow_origins` does an exact string
    match, no mid-string wildcard) -- use `allow_origin_regex` instead,
    confirmed live against both a matching and a rejected Origin header.
+   Follow-up (2026-08-08, B5 in the overnight codebase review): each
+   subscriber's `asyncio.Queue` is now bounded (`EventBroadcaster`'s
+   `max_queue_size`, default 200) -- unbounded meant a subscriber that
+   stopped draining (a backgrounded/suspended browser tab, still TCP-
+   connected) grew its queue for the rest of the session. A full queue
+   evicts its oldest item (not the newest) rather than blocking
+   `broadcast()`'s delivery to every other subscriber; the evicted
+   subscriber gets a `{"type": "dropped", "count": N}` marker on its next
+   delivery so the frontend can surface that it missed events, instead of
+   silently falling behind with no signal.
 
 3. **Integrate with run_convobox.py** -- DONE (2026-07-25).
    `WebEventForwarder` (convobox/web/bridge.py) is a callable that plugs

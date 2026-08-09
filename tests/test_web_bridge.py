@@ -202,6 +202,83 @@ async def test_forwards_to_both_history_and_broadcaster_together(db: HistoryDB) 
     assert queue.get_nowait()["content"] == "both"
 
 
+# --- _broadcast's task tracking (GitHub issue #235, finding B1): a bare
+# asyncio.ensure_future() with no reference retained used to be here --
+# CPython holds only a weak reference to a running task, so it can be
+# garbage-collected mid-execution, and any exception inside it vanished
+# completely until GC eventually emitted a generic, contextless warning.
+
+
+async def _settle(forwarder: WebEventForwarder) -> None:
+    """Wait for every currently-tracked broadcast task to actually finish
+    AND for their done-callbacks to run. Awaiting the tasks directly
+    guarantees the real work is done; add_done_callback's own callback is
+    separately scheduled via loop.call_soon() at completion, so one more
+    scheduling round (a bare `await asyncio.sleep(0)`) is needed after
+    that before the set is guaranteed to reflect it -- found live writing
+    this test (a single sleep(0) alone left the just-finished task still
+    in the set)."""
+    tasks = list(forwarder._broadcast_tasks)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_task_is_tracked_then_removed_once_done() -> None:
+    broadcaster = EventBroadcaster()
+    broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="tracked"))
+    assert len(forwarder._broadcast_tasks) == 1  # scheduled, not yet run
+
+    await _settle(forwarder)
+
+    assert len(forwarder._broadcast_tasks) == 0  # done-callback removed it
+
+
+@pytest.mark.asyncio
+async def test_multiple_concurrent_broadcasts_are_all_tracked_independently() -> None:
+    # The whole reason this is a set, not a single replaceable slot like
+    # orchestrator.py's _speak_task: a burst of events legitimately has
+    # several broadcasts in flight concurrently, and none should cancel
+    # or replace any other.
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="one"))
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="two"))
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="three"))
+    assert len(forwarder._broadcast_tasks) == 3
+
+    await _settle(forwarder)
+
+    assert len(forwarder._broadcast_tasks) == 0
+    delivered = {queue.get_nowait()["content"] for _ in range(3)}
+    assert delivered == {"one", "two", "three"}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_exception_is_logged_not_silently_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _BrokenBroadcaster(EventBroadcaster):
+        async def broadcast(self, payload: dict[str, object]) -> None:  # type: ignore[override]
+            raise RuntimeError("simulated broadcast failure")
+
+    caplog.set_level(logging.WARNING)
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=_BrokenBroadcaster())
+
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="will fail"))
+    await _settle(forwarder)
+
+    assert len(forwarder._broadcast_tasks) == 0  # still cleaned up despite the failure
+    assert "SSE broadcast failed" in caplog.text
+    assert "simulated broadcast failure" in caplog.text
+
+
 # --- Integration: a real Orchestrator wired with WebEventForwarder as its
 # on_event hook (the actual run_convobox.py wiring shape), not just the
 # forwarder in isolation -- proves the two really compose, since

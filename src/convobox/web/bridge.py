@@ -62,6 +62,8 @@ class WebEventForwarder:
         self._session_id = session_id
         self._history = history
         self._broadcaster = broadcaster
+        # See _broadcast()'s own comment for why this set exists.
+        self._broadcast_tasks: set[asyncio.Task[None]] = set()
         # History writes (append_event) do a real sqlite3 INSERT + commit --
         # disk/fsync-bound work that has no business running synchronously
         # on the event loop that also handles mic capture, TTS playback, and
@@ -198,7 +200,37 @@ class WebEventForwarder:
             # -- both contracts are sync, so the broadcast is scheduled
             # rather than awaited, same reasoning as _events.put_nowait()
             # elsewhere in the adapters.
-            asyncio.ensure_future(self._broadcaster.broadcast(payload))
+            #
+            # Found via autonomous codebase review, 2026-08-08 (GitHub
+            # issue #235, finding B1): a bare asyncio.ensure_future() with
+            # no reference retained used to be here. CPython holds only a
+            # WEAK reference to a running task with nothing else keeping
+            # it alive, so it can be garbage-collected mid-execution
+            # (dropped SSE frames under load, non-deterministically --
+            # see asyncio.create_task's own docs, "Save a reference to
+            # the result of this function"); and any exception inside
+            # broadcast() would vanish completely until GC eventually
+            # emits a generic "Task exception was never retrieved" with
+            # no context. Same fix shape as orchestrator.py's own
+            # _speak_task comment describes for the identical bug class
+            # ("an uncaught exception here previously vanished
+            # completely: no log line, no UI signal") -- that one wraps
+            # the work in try/except instead since only one speak task is
+            # ever in flight at a time (replaced, not accumulated); this
+            # one needs a set, since bursts of events legitimately have
+            # several broadcasts in flight concurrently and none should
+            # cancel any other.
+            task = asyncio.ensure_future(self._broadcaster.broadcast(payload))
+            self._broadcast_tasks.add(task)
+            task.add_done_callback(self._on_broadcast_task_done)
+
+    def _on_broadcast_task_done(self, task: asyncio.Task[None]) -> None:
+        self._broadcast_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("SSE broadcast failed", exc_info=exc)
 
 
 class ApprovalGateLike(Protocol):
