@@ -2431,6 +2431,35 @@ def test_validate_does_not_warn_when_approve_mode_has_an_approval_phrase() -> No
     assert not any("approval_phrase is unset" in w for w in report.warnings)
 
 
+def test_validate_errors_not_warns_when_claude_code_approve_has_no_phrase() -> None:
+    # claude-code specifically doesn't fail safe the way codex does (see
+    # detect_claude_code_approval_gap's docstring, GitHub issue #235
+    # finding A1) -- this is a hard error, not the general warning above.
+    config = _make_config(
+        **{
+            "backend.name": "claude-code",
+            "backend.command": ["claude"],
+            "backend.permission_mode": "approve",
+        }
+    )
+    report = validate_config(config)
+    assert any("nothing able to ever answer it" in e for e in report.errors)
+    assert not any("approval_phrase is unset" in w for w in report.warnings)
+
+
+def test_validate_does_not_error_when_claude_code_approve_has_a_phrase() -> None:
+    config = _make_config(
+        **{
+            "backend.name": "claude-code",
+            "backend.command": ["claude"],
+            "backend.permission_mode": "approve",
+            "interaction.approval_phrase": "juliette papa charlie",
+        }
+    )
+    report = validate_config(config)
+    assert not any("nothing able to ever answer it" in e for e in report.errors)
+
+
 def test_validate_rejects_permission_mode_conflicting_with_raw_command_flag() -> None:
     # detect_permission_conflict (convobox.config) is the single source of
     # truth for this check; wiring it into validate_config() means a

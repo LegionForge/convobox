@@ -19,7 +19,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
 
-from convobox.config import DisplayConfig, resolve_config_path
+from convobox.config import DisplayConfig, load_config, resolve_config_path
 from convobox.web.artifacts import add_artifact_routes
 from convobox.web.bridge import (
     WebApprovalBridge,
@@ -49,6 +49,14 @@ class TextSubmission(BaseModel):
 # allow_origins=["http://127.0.0.1:*"] entry might suggest), so matching
 # "whatever port the dev server picked" needs the regex form instead.
 _LOCALHOST_ORIGIN_REGEX = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
+
+# CSRF: see require_csrf_header's own docstring/comment below for the
+# full reasoning. Any header name not on CORS' safelist works; this one
+# just self-documents which app it's for. Starlette's Headers mapping is
+# case-insensitive, so a literal lowercase key here matches any casing
+# the client actually sends.
+_CSRF_HEADER = "x-convobox-client"
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # The plain HTML/JS frontend (docs/WEB-UI-ARCHITECTURE.md's "Next Steps":
 # start minimal, not a React/Vite toolchain). Path relative to this file,
@@ -116,6 +124,35 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_csrf_header(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # CSRF: the three routes below take no request body (/api/quit,
+        # /api/stop, /api/sessions/{id}/clear) -- a cross-origin page's
+        # `fetch(url, {method:"POST"})` is a CORS "simple request" for
+        # those (no body, no custom headers), which the browser sends
+        # WITHOUT a preflight. CORSMiddleware above only controls whether
+        # the attacking page can READ the response; it never stops the
+        # browser from sending a simple request in the first place, so
+        # those three routes' real side effects (kill the session,
+        # hard-stop, wipe history) were reachable from any tab, not just
+        # this app's own loopback origin. The JSON-bodied mutating routes
+        # were only protected INCIDENTALLY (a JSON content-type forces a
+        # preflight, which _LOCALHOST_ORIGIN_REGEX then rejects) -- an
+        # accident of body shape, not a designed control; a future
+        # body-less route would silently reopen the same gap. Found via
+        # autonomous codebase review, 2026-08-08 (GitHub issue #235,
+        # finding A3).
+        #
+        # Fix: require a header no CORS "simple request" is allowed to
+        # carry, uniformly on every mutating route -- this forces a real
+        # preflight every time, which the existing CORS middleware then
+        # correctly rejects for any non-loopback origin. index.html's own
+        # fetch() calls all send this (CSRF_HEADERS, defined once near
+        # the top of its script).
+        if request.method in _MUTATING_METHODS and _CSRF_HEADER not in request.headers:
+            return Response(status_code=403, content="missing required header")
+        return await call_next(request)
 
     add_settings_routes(app, config_path if config_path is not None else resolve_config_path())
     add_artifact_routes(app, working_dir)
@@ -206,6 +243,29 @@ def create_app(
         # model as everything else here), and AppConfig carries fields
         # (backend.working_dir, backend.command, ...) that shouldn't be
         # handed to any page this browser happens to load.
+        #
+        # Re-reads config_path fresh on every call (2026-08-07, fixed
+        # live after JP hit this directly): unlike every other section,
+        # display.* is never consumed by the mic-loop pipeline
+        # run_convobox.py builds once at startup (see
+        # scripts/settings_tui.py's SectionSpec.restart_required for the
+        # grep confirming that) -- it exists purely to answer THIS route.
+        # There was never a real reason to only read it once at
+        # create_app() time; that was just an unexamined default, not a
+        # deliberate choice, and it's what made a color/name change need
+        # a full backend restart instead of a page refresh. Falls back
+        # to the closure-captured `display` param when config_path is
+        # None (tests that construct DisplayConfig directly, with no
+        # real file backing it -- same shape resolve_config_path()
+        # itself can't help with).
+        if config_path is not None:
+            live_display = load_config(config_path).display
+            return {
+                "user_color": live_display.user_color,
+                "assistant_color": live_display.assistant_color,
+                "user_name": live_display.user_name,
+                "assistant_name": live_display.assistant_name,
+            }
         return {
             "user_color": display.user_color,
             "assistant_color": display.assistant_color,
