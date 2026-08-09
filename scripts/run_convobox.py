@@ -74,6 +74,7 @@ from convobox.approval import ApprovalDetector
 from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
     resolve_config_path,
@@ -84,10 +85,11 @@ from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.response_tiering import ContinueDetector
 from convobox.safeword.detector import SafewordDetector
+from convobox.stt.base import STTEngine, TranscriptResult
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
-from convobox.tui import ConversationTuiState, render_conversation_frame
+from convobox.tui import ConversationTuiState, TuiStatus, render_conversation_frame
 from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
 from convobox.audio.ack_tones import generate_ack_tone
 from convobox.resumeword import ResumeWordDetector
@@ -1094,21 +1096,41 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     continue_gate: ContinuePromptGate | None = None,
     approval_gate: ApprovalPromptGate | None = None,
     web_forwarder: WebEventForwarder | None = None,
+    vad_max_utterance_s: float | None = None,
 ) -> None:
     """Heartbeat: remind the user a silently-busy backend is still alive.
     Also flushes any Axis-2 ``queue``-preset interjection once the backend
     is fully idle (docs/DESIGN-barge-in.md's "patient" preset), derives
-    the TUI's status label when a TUI is active, and starts/expires the
-    response-tiering continue-prompt wait -- all sharing one 1s poll
-    rather than each growing its own timer: unrelated jobs piggybacking
-    on the SAME tick as the original heartbeat, not one job growing new
-    responsibilities. The status label and continue-wait start are both
-    poll-based rather than threaded through every call site in the main
-    loop because of a real constraint, not laziness: transcriber.transcribe()
-    blocks the event loop synchronously today (no asyncio.to_thread
-    offload), so nothing can react DURING that decode regardless of
-    whether it's poll- or event-driven; polling is the lower-risk
-    mechanism either way.
+    the TUI's status label when a TUI is active, starts/expires the
+    response-tiering continue-prompt wait, and surfaces VAD forced-cap
+    discards (below) -- all sharing one 1s poll rather than each growing
+    its own timer: unrelated jobs piggybacking on the SAME tick as the
+    original heartbeat, not one job growing new responsibilities. The
+    status label and continue-wait start are both poll-based rather than
+    threaded through every call site in the main loop because of a real
+    constraint, not laziness: transcriber.transcribe() runs inside
+    asyncio.to_thread() (see the mic loop below), so THIS coroutine keeps
+    ticking normally even during a slow/stuck decode -- but the mic loop
+    coroutine itself is still blocked awaiting that decode (or its
+    stt.transcribe_timeout_s timeout) regardless, so threading a live
+    value through every call site there would still lag behind a stuck
+    call the same way; polling from here, which is NOT blocked, stays the
+    lower-risk mechanism either way. Live-hit 2026-08-06, before the
+    to_thread offload existed: a stuck transcribe() call froze this
+    watchdog too (it ran on the same event loop, no offload at the time),
+    which is exactly what motivated adding the offload -- see
+    docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md.
+
+    VAD forced-cap discards (live incident, 2026-08-05: docs/field-notes/
+    2026-08-05-vad-segmenter-silent-unbounded-lockup.md): with
+    ``vad.max_utterance_s`` set, ``UtteranceSegmenter`` no longer locks up
+    permanently, but a run that hits the cap without ever accumulating
+    ``min_speech_ms`` of confident speech (audio hovering in the VAD's
+    exit-hysteresis band) is discarded with zero other observable effect
+    -- no transcript, no log line, indistinguishable from genuine silence.
+    Polling ``segmenter.discarded_forced_runs`` here and logging on
+    increase is the same "poll a pure counter, log the delta" pattern
+    already used for the heartbeat/status/continue-wait jobs above.
 
     Runs for the process lifetime; asyncio.run() cancels and awaits it on
     shutdown, so no explicit teardown is needed here.
@@ -1131,9 +1153,22 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         os.system("")  # nosec B605 B607
     interval = 1.0
     was_playing = False
-    last_broadcast_status: str | None = None
+    last_broadcast: tuple[str | None, str | None] = (None, None)
+    last_discarded_forced_runs = segmenter.discarded_forced_runs if segmenter is not None else 0
     while True:
         await asyncio.sleep(interval)
+        if segmenter is not None:
+            discarded_now = segmenter.discarded_forced_runs
+            newly_discarded = discarded_now - last_discarded_forced_runs
+            if newly_discarded > 0:
+                log.warning(
+                    "VAD discarded %d forced-cap run(s) (~%.0fs of audio each) with no "
+                    "confident speech -- nothing was transcribed. If this repeats, "
+                    "background noise may be sitting near vad.threshold; see "
+                    "docs/field-notes/2026-08-05-vad-segmenter-silent-unbounded-lockup.md",
+                    newly_discarded, vad_max_utterance_s or 0.0,
+                )
+                last_discarded_forced_runs = discarded_now
         busy, playing = adapter.is_busy(), player.is_playing()
         elapsed = indicator.observe(busy, playing, interval)
         if tui_state is not None:
@@ -1211,7 +1246,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         # than a poll.
         waiting_hint: str | None = None
         if listening_gate is not None and listening_gate.is_paused:
-            status = "paused"
+            status: TuiStatus = "paused"
         elif approval_gate is not None and approval_gate.is_waiting:
             status = "waiting"
             waiting_hint = "approval needed — say your approval phrase or 'no'"
@@ -1237,9 +1272,16 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         if tui_state is not None:
             tui_state.status = status
             tui_state.waiting_hint = waiting_hint
-        if web_forwarder is not None and status != last_broadcast_status:
-            web_forwarder.forward_status(status)
-            last_broadcast_status = status
+        # Same current_activity the TUI's heartbeat log line already shows
+        # (a tool name, or None for "thinking, no tool call yet") -- only
+        # meaningful while status == "working", otherwise it's stale from
+        # a previous busy stretch (WorkingIndicator.observe() only clears
+        # it when busy AND not playing; "working" is the one status where
+        # that's guaranteed to be current).
+        detail = indicator.current_activity if status == "working" else None
+        if web_forwarder is not None and (status, detail) != last_broadcast:
+            web_forwarder.forward_status(status, detail)
+            last_broadcast = (status, detail)
 
 
 def _render_approval_explanation_verbose(
@@ -1598,14 +1640,18 @@ async def _tui_render_loop(tui_state: ConversationTuiState) -> None:
         await asyncio.sleep(0.1)
 
 
-def _check_backend_permission_mode(backend: object) -> None:
+def _check_backend_permission_mode(backend: object, interaction: object) -> None:
     """Enforce permission_mode as the single source of truth: reject a
-    conflicting command flag, warn where the mode can't be enforced, log
+    conflicting command flag, reject a claude-code approval hook with
+    nothing able to answer it, warn where the mode can't be enforced, log
     the effective posture. SystemExit on conflict (safety control -- fail
     closed rather than run with an ambiguous posture)."""
     conflict = detect_permission_conflict(backend)  # type: ignore[arg-type]
     if conflict is not None:
         raise SystemExit(conflict)
+    approval_gap = detect_claude_code_approval_gap(backend, interaction)  # type: ignore[arg-type]
+    if approval_gap is not None:
+        raise SystemExit(approval_gap)
     name = getattr(backend, "name", "")
     mode = getattr(backend, "permission_mode", "plan")
     if name == "opencode" and mode != "plan":
@@ -1749,18 +1795,65 @@ def _cancel_main_task(main_task: "asyncio.Task[None]") -> None:
         main_task.cancel()
 
 
+async def _transcribe_with_timeout(
+    transcriber: STTEngine, utterance: np.ndarray, timeout_s: float | None
+) -> TranscriptResult | None:
+    """Runs transcriber.transcribe() in a thread, with an optional cap on
+    how long the mic loop will wait for it, returning None (after logging
+    and invalidating the engine) if it doesn't return in time.
+
+    Offloaded to a thread unconditionally, not just when timeout_s is
+    set: a slow/stuck transcribe() call must not freeze the rest of the
+    app (web UI, TUI, the heartbeat watchdog) even with no timeout
+    configured -- live-hit 2026-08-06: transcribe() ran synchronously on
+    the main event loop with no offload at the time, and a single stuck
+    call froze EVERYTHING, including the once-a-second background
+    watchdog, while mic capture (a separate thread) kept running the
+    whole time -- confirmed via AEC-dump frame-count forensic cross-check.
+    See docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md.
+
+    timeout_s=None (the default) makes wait_for behave exactly like a
+    plain await -- waits indefinitely, zero behavior change from before
+    this existed beyond the (strictly beneficial, no behavior change to
+    the result itself) thread offload, same opt-in-tuning convention as
+    STTConfig's other knobs (temperature, condition_on_previous_text).
+
+    A real timeout can only ABANDON a stuck call, not kill it -- Python
+    cannot force-terminate a native thread. transcriber.invalidate() (see
+    STTEngine's own docstring) tells the engine not to trust whatever
+    that abandoned call's background thread might still be doing, so the
+    NEXT call gets a fresh model rather than racing the old one.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(transcriber.transcribe, utterance), timeout=timeout_s
+        )
+    except TimeoutError:
+        log.warning(
+            "STT transcribe() did not return within %.0fs -- abandoning this "
+            "utterance as unheard. If this was a genuine native-level hang "
+            "(not just slow), the background thread running it may still be "
+            "alive (Python cannot force-kill a native call) -- the STT model "
+            "will be reloaded before the next utterance either way.",
+            timeout_s,
+        )
+        transcriber.invalidate()
+        return None
+
+
 async def run(args: argparse.Namespace) -> None:
     main_task = asyncio.current_task()
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
     if args.permission_mode is not None:
         config.backend.permission_mode = args.permission_mode
-    _check_backend_permission_mode(config.backend)
+    _check_backend_permission_mode(config.backend, config.interaction)
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)
     if args.web:
         config.web.enabled = True
+    adapter = create_backend_adapter(config.backend)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
     # a phrase to recognize, and does nothing if the active backend never
@@ -1770,17 +1863,18 @@ async def run(args: argparse.Namespace) -> None:
     # its own hook/channel wiring from permission_mode -- no separate flag
     # passed through here). There is no safe default phrase -- see
     # InteractionConfig.approval_phrase's own field comment for why.
-    approval_detector = (
-        ApprovalDetector(config.interaction.approval_phrase)
-        if config.interaction.approval_phrase
-        else None
-    )
+    # Built here, before Orchestrator, so Orchestrator.hard_stop() can be
+    # given the gate directly (to cancel a pending wait on hard-stop) --
+    # see Orchestrator's own approval_gate docstring/param.
     approval_gate = (
-        ApprovalPromptGate(approval_detector, config.interaction.approval_timeout_s)
-        if approval_detector is not None
+        ApprovalPromptGate(
+            ApprovalDetector(config.interaction.approval_phrase),
+            config.interaction.approval_timeout_s,
+        )
+        if config.interaction.approval_phrase is not None
         else None
     )
-    adapter = create_backend_adapter(config.backend)
+    adapter.set_interactive_approvals(approval_gate is not None)
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
@@ -1838,6 +1932,10 @@ async def run(args: argparse.Namespace) -> None:
     # route closures before any of those are built.
     listening_bridge = None
     # Same staging reasoning as approval_bridge/listening_bridge above --
+    # populated below once the real Orchestrator exists
+    # (WebSafewordBridge.set_targets).
+    safeword_bridge = None
+    # Same staging reasoning as approval_bridge/listening_bridge above --
     # populated below once the real Orchestrator/TranscriptCorrector exist
     # (WebTextInputBridge.set_targets).
     text_bridge = None
@@ -1857,6 +1955,7 @@ async def run(args: argparse.Namespace) -> None:
             from convobox.web.bridge import (
                 WebApprovalBridge,
                 WebListeningBridge,
+                WebSafewordBridge,
                 WebTextInputBridge,
             )
         except ImportError as e:
@@ -1878,6 +1977,7 @@ async def run(args: argparse.Namespace) -> None:
         )
         approval_bridge = WebApprovalBridge()
         listening_bridge = WebListeningBridge()
+        safeword_bridge = WebSafewordBridge()
         text_bridge = WebTextInputBridge()
         web_app = create_app(
             db=web_app_history,
@@ -1885,6 +1985,7 @@ async def run(args: argparse.Namespace) -> None:
             display=config.display,
             approval_bridge=approval_bridge,
             listening_bridge=listening_bridge,
+            safeword_bridge=safeword_bridge,
             text_bridge=text_bridge,
             quit_handler=lambda: _cancel_main_task(main_task),
             config_path=config_path,
@@ -1932,17 +2033,9 @@ async def run(args: argparse.Namespace) -> None:
         on_event=_dispatch_event,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
+        approval_gate=approval_gate,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
-    approval_gate = (
-        ApprovalPromptGate(
-            ApprovalDetector(config.interaction.approval_phrase),
-            config.interaction.approval_timeout_s,
-        )
-        if config.interaction.approval_phrase is not None
-        else None
-    )
-    adapter.set_interactive_approvals(approval_gate is not None)
     if approval_bridge is not None:
         approval_bridge.set_targets(orchestrator, approval_gate)
     error_ladder = RecognitionErrorLadder()
@@ -2065,8 +2158,17 @@ async def run(args: argparse.Namespace) -> None:
         # right; don't silently override a configured value here.
         _INITIAL_AEC_DELAY_MS = 100
         delay_explicit = config.audio.aec_delay_ms is not None
+        # config.audio.aec_delay_ms's own `is not None` check (not the
+        # delay_explicit bool derived from it) is what mypy can actually
+        # narrow on -- a bool captured from an earlier statement doesn't
+        # propagate that narrowing to a later expression.
+        initial_delay_ms: int = (
+            config.audio.aec_delay_ms
+            if config.audio.aec_delay_ms is not None
+            else _INITIAL_AEC_DELAY_MS
+        )
         canceller = EchoCanceller(
-            delay_ms=config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
+            delay_ms=initial_delay_ms,
             dump=aec_dump,
         )
         delay_estimated = False
@@ -2105,7 +2207,7 @@ async def run(args: argparse.Namespace) -> None:
         player.on_block_played = _feed_reference
         log.info(
             "acoustic echo cancellation ON (delay hint %dms%s)",
-            config.audio.aec_delay_ms if delay_explicit else _INITIAL_AEC_DELAY_MS,
+            initial_delay_ms,
             " explicit" if delay_explicit else ", will auto-estimate from stream latencies",
         )
     elif incident_capture is not None:
@@ -2152,7 +2254,14 @@ async def run(args: argparse.Namespace) -> None:
         config.interaction.resume_word,
     )
     if listening_bridge is not None:
-        listening_bridge.set_targets(listening_gate, player, tts, adapter)
+        listening_bridge.set_targets(
+            listening_gate, player, tts, adapter, orchestrator,
+            config.interaction.pause_resume_ack,
+            tui_state=tui_state,
+            resume_word=config.interaction.resume_word,
+        )
+    if safeword_bridge is not None:
+        safeword_bridge.set_targets(orchestrator)
     if text_bridge is not None:
         text_bridge.set_targets(orchestrator, transcript_corrector, web_forwarder)
 
@@ -2305,7 +2414,7 @@ async def run(args: argparse.Namespace) -> None:
         _working_watchdog(
             adapter, player, indicator, orchestrator, interject_queue,
             segmenter, listening_gate, tui_state, continue_gate, approval_gate,
-            web_forwarder,
+            web_forwarder, config.vad.max_utterance_s,
         )
     )
     tui_render_task: asyncio.Task[None] | None = None
@@ -2339,7 +2448,11 @@ async def run(args: argparse.Namespace) -> None:
         with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
             mic_holder["mic"] = mic  # lets the AEC delay estimator read input latency
             async for utterance in segmenter.segment(_mic_chunks(mic)):
-                result = transcriber.transcribe(utterance)
+                result = await _transcribe_with_timeout(
+                    transcriber, utterance, config.stt.transcribe_timeout_s
+                )
+                if result is None:
+                    continue
                 text = result.text
                 is_hard_stop = safeword.check(text) is not None
                 if is_hard_stop and incident_capture is not None:
@@ -2353,13 +2466,25 @@ async def run(args: argparse.Namespace) -> None:
                 barged_in, barge_in_pending = barge_in_pending, False
                 if tui_state is not None:
                     tui_state.barge_in_active = False
-                    if text.strip():
-                        # Every utterance ConvoBox actually heard, even
-                        # ones later dropped by a gate below -- "what was
-                        # heard" per the design doc's scope, and a real
-                        # debugging aid ("did it hear me right") distinct
-                        # from "what got forwarded."
+                if text.strip():
+                    # Every utterance ConvoBox actually heard, even ones
+                    # later dropped by a gate below -- "what was heard"
+                    # per the design doc's scope, and a real debugging aid
+                    # ("did it hear me right") distinct from "what got
+                    # forwarded." TUI and web now both get this the same
+                    # way (live incident, 2026-08-05: a dropped utterance
+                    # -- paused/not-the-resume-word, low-confidence, etc.
+                    # -- showed in the TUI transcript pane but was
+                    # invisible in the web UI, since forward_transcript()
+                    # used to fire only much later, right before a
+                    # SURVIVING utterance reached the backend). Sends the
+                    # raw heard text, same as the TUI -- correction/
+                    # barge-in-marking further down changes what's
+                    # forwarded to the backend, not what was heard.
+                    if tui_state is not None:
                         tui_state.add_turn("user", text)
+                    if web_forwarder is not None:
+                        web_forwarder.forward_transcript(text)
 
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
@@ -2710,8 +2835,11 @@ async def run(args: argparse.Namespace) -> None:
                     # before this point, correctly: neither delivers a fresh
                     # response right now.
                     tui_state.full_detail = ""
-                if web_forwarder is not None:
-                    web_forwarder.forward_transcript(text)
+                # web_forwarder.forward_transcript() already ran earlier
+                # (unconditionally, on the raw heard text) alongside
+                # tui_state.add_turn() above -- not repeated here, which
+                # would otherwise double up an already-forwarded
+                # utterance in the web history/SSE feed.
                 try:
                     await orchestrator.handle_transcript(text)
                 except Exception as exc:  # noqa: BLE001

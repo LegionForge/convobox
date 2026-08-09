@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator
 
@@ -8,6 +11,23 @@ import torch
 from silero_vad import load_silero_vad
 
 from convobox.config import VADConfig
+
+logger = logging.getLogger(__name__)
+
+# A real Silero window call normally takes ~1-3ms. feed_async() below warns
+# once a call has run past _SLOW_CALL_FIRST_WARNING_S without returning
+# (comfortably above normal jitter, so this doesn't fire under ordinary
+# load), then again every _SLOW_CALL_REPEAT_WARNING_S while it's still
+# pending -- diagnostic only, does NOT time out or abandon the call (see
+# feed_async()'s own docstring for why abandoning isn't safe here). Added
+# 2026-08-07 after a live UAT recurrence of the freeze this fix targets
+# produced total log silence for its entire ~2-minute duration (docs/
+# KNOWN-ISSUES.md's "VAD segmenter's per-window model call is
+# synchronous..." entry, its live-UAT follow-up) -- this closes that gap
+# so the next occurrence's own log shows "still running, Ns in" instead of
+# nothing at all.
+_SLOW_CALL_FIRST_WARNING_S = 0.5
+_SLOW_CALL_REPEAT_WARNING_S = 5.0
 
 # Silero's 16kHz ONNX model only accepts 512-sample windows (32ms). Incoming
 # capture chunks may be any length, so they are buffered and consumed in
@@ -95,6 +115,7 @@ class UtteranceSegmenter:
         self._speech_windows = 0
         self._trailing_silence_windows = 0
         self._last_forced = False
+        self._discarded_forced_runs = 0
         # Read-only diagnostic observability.  The acoustic calibration
         # harness records the exact probability that drove each production
         # VAD decision; normal segmentation behavior does not depend on it.
@@ -135,6 +156,25 @@ class UtteranceSegmenter:
         return self._last_forced
 
     @property
+    def discarded_forced_runs(self) -> int:
+        """Count of `max_utterance_s`-forced runs discarded because they
+        never accumulated `min_speech_ms` of confidently-classified speech
+        (see `_finish_run`) -- the cap fired and reset `_triggered`, but
+        there was nothing worth emitting as an utterance. Distinct from a
+        normal short/noise run ending naturally on silence: this only
+        counts the forced-cap case, live-confirmed (2026-08-05 field note:
+        docs/field-notes/2026-08-05-vad-segmenter-silent-unbounded-lockup.md)
+        as a real, repeatable failure mode even with the cap enabled --
+        audio hovering in the exit-hysteresis band for a full
+        `max_utterance_s` window produces total silence (no transcript, no
+        log line) every cycle, indistinguishable from "nobody is talking"
+        without this counter. Monotonically increasing for the segmenter's
+        lifetime; callers poll and diff against their own last-seen value
+        to detect new occurrences, same pattern as `was_forced`.
+        """
+        return self._discarded_forced_runs
+
+    @property
     def last_probability(self) -> float | None:
         """Silero probability for the most recently processed 512-sample window."""
         return self._last_probability
@@ -162,6 +202,69 @@ class UtteranceSegmenter:
         self._carry = buffer[offset:].copy()
         return completed
 
+    async def feed_async(self, chunk: np.ndarray) -> list[np.ndarray]:
+        """Same as ``feed()``, but runs the underlying Silero calls in a
+        worker thread instead of blocking the caller's event loop.
+
+        `segment()` (the real mic loop's only streaming consumer) calls
+        this instead of `feed()` directly. Live-hit 2026-08-06/07
+        (docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md,
+        docs/KNOWN-ISSUES.md "VAD segmenter's per-window model call is
+        synchronous..."): `_process_window()` makes a synchronous Silero
+        ONNX inference call ~31x/second (every 512-sample/32ms window)
+        inside an async loop with no offload -- a single slow/stuck call
+        blocks the WHOLE single-threaded event loop, not just VAD, which
+        live evidence showed taking out the safeword check, the web
+        server's HTTP routes (Stop/Resume buttons going unresponsive
+        together), and the once-a-second watchdog simultaneously.
+
+        Deliberately NOT a new timeout/abandon/invalidate mechanism like
+        PR #217's analogous STT fix: unlike `transcribe()` (stateless per
+        call), Silero's model carries sequential recurrent state across
+        windows via `reset_states()`, and abandoning an in-flight window
+        while a background thread still holds it risks that thread's
+        eventual completion racing a fresh call against the same
+        (non-thread-safe) model object. Plain thread offload alone
+        already fixes the documented symptom -- other event-loop tasks
+        (HTTP routes, watchdog, TUI) stay responsive while a slow window
+        call runs -- without introducing that new race. `feed()` itself
+        is left synchronous and unchanged: existing callers (tests, any
+        non-realtime/offline processing) keep exact prior behavior.
+
+        Also logs a warning if the call is still pending past
+        `_SLOW_CALL_FIRST_WARNING_S`, then again every
+        `_SLOW_CALL_REPEAT_WARNING_S` while it remains pending -- see the
+        module-level comment on those constants for why. `asyncio.wait()`
+        (not `wait_for()`) is used specifically because it does NOT cancel
+        the awaited task on timeout; this only ever observes and reports,
+        never abandons.
+        """
+        task: asyncio.Future[list[np.ndarray]] = asyncio.ensure_future(
+            asyncio.to_thread(self.feed, chunk)
+        )
+        start = time.monotonic()
+        stalled = False
+        interval = _SLOW_CALL_FIRST_WARNING_S
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=interval)
+            if done:
+                break
+            stalled = True
+            logger.warning(
+                "VAD feed_async() call still running after %.1fs (a normal "
+                "window call takes ~1-3ms) -- not abandoning it, just "
+                "reporting; see docs/KNOWN-ISSUES.md's VAD segmenter "
+                "freeze entry",
+                time.monotonic() - start,
+            )
+            interval = _SLOW_CALL_REPEAT_WARNING_S
+        if stalled:
+            logger.warning(
+                "VAD feed_async() call finally completed after %.1fs",
+                time.monotonic() - start,
+            )
+        return await task
+
     def flush(self) -> np.ndarray | None:
         """End any in-progress utterance and return it (e.g. on stream close).
 
@@ -179,7 +282,14 @@ class UtteranceSegmenter:
         return utterance
 
     def _process_window(self, window: np.ndarray) -> np.ndarray | None:
-        prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
+        if self._config.trace_silero_calls:
+            call_start = time.monotonic()
+            prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
+            logger.debug(
+                "VAD Silero call took %.1fms", (time.monotonic() - call_start) * 1000
+            )
+        else:
+            prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
         self._last_probability = prob
         is_speech = prob >= self._threshold
         is_silence = prob < self._threshold - _EXIT_HYSTERESIS
@@ -229,6 +339,8 @@ class UtteranceSegmenter:
 
     def _finish_run(self, forced: bool) -> np.ndarray | None:
         emit = self._speech_windows >= self._min_speech_windows
+        if forced and not emit:
+            self._discarded_forced_runs += 1
         utterance = np.concatenate(self._speech) if emit else None
         # Set before _reset_run() clears _speech, but that's irrelevant here
         # -- was_forced only describes WHY this run ended, not its content.
@@ -248,7 +360,7 @@ class UtteranceSegmenter:
     ) -> AsyncIterator[np.ndarray]:
         """Consume an async chunk stream, yielding one array per utterance."""
         async for chunk in chunks:
-            for utterance in self.feed(chunk):
+            for utterance in await self.feed_async(chunk):
                 yield utterance
         tail = self.flush()
         if tail is not None:

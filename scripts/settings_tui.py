@@ -53,8 +53,10 @@ from convobox.config import (
     BackendProfileConfig,
     TTSConfig,
     TTSProfileConfig,
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
+    load_config_lenient,
     read_aec_estimate,
     resolve_config_path,
 )
@@ -193,6 +195,20 @@ class SectionSpec:
     key: str
     label: str
     fields: tuple[FieldSpec, ...]
+    # True for every section except "display" -- confirmed by reading
+    # every call site (2026-08-07, JP asked live after hitting the
+    # restart-to-see-a-color-change friction firsthand): run_convobox.py's
+    # main() reads load_config() exactly once at startup and constructs
+    # the whole mic-loop pipeline (audio streams, STT/TTS engines, the
+    # backend subprocess, VAD, safeword/interaction state) from that one
+    # snapshot -- none of it re-reads the file live, so every section
+    # genuinely needs a restart today. display.* is the one exception:
+    # grepped for every read of config.display and it's ONLY ever passed
+    # into web/app.py's create_app() to serve GET /api/config -- nothing
+    # in the mic loop touches it. Per-SECTION, not per-field, because
+    # that's the real granularity the current architecture has -- would
+    # need updating if a future section gets split hot/cold internally.
+    restart_required: bool = True
 
 
 @dataclass
@@ -214,10 +230,23 @@ class TuiState:
     dirty: bool = False
     status: str = "BIOS style: Left/Right tabs, Up/Down fields, Enter edit"
     last_report: ValidationReport | None = None
+    # Populated at startup only, when load_config_lenient() had to fall a
+    # section back to defaults because the on-disk value failed validation
+    # (docs/field-notes/2026-08-06-settings-tui-cannot-open-invalid-config.md).
+    # Each entry is "section: message" -- see load_config_lenient's own
+    # docstring. Cleared the moment the operator saves or restores a backup,
+    # not on every ordinary edit -- it describes what happened at LOAD, not
+    # the current validity of state.working (validate_config/_save already
+    # covers that separately).
+    load_problems: list[str] = field(default_factory=list)
 
     @property
     def sections(self) -> tuple[SectionSpec, ...]:
         return SECTION_SPECS
+
+    @property
+    def flagged_sections(self) -> set[str]:
+        return {p.split(":", 1)[0].strip() for p in self.load_problems}
 
     def current_section(self) -> SectionSpec:
         return self.sections[self.selected_section]
@@ -265,6 +294,11 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("stt", "compute_type", "Compute type", "choice", _CHOICE_STT_COMPUTE_TYPES, help_text="Precision/quantization tradeoff: lower precision = faster + less memory, higher = more accurate. default (recommended): int8 on cpu, float16 on cuda. float32 is the ceiling -- the model itself was trained in float32, so nothing more precise exists to recover accuracy from (no float64). int8: smallest/fastest, most quantization loss. int8_float32 (cpu) / int8_float16, int8_bfloat16 (cuda): quantized weights with higher-precision math -- a real middle ground, more accurate than plain int8 while still lighter than full precision. int16: cpu-only quantized alternative to int8. float16/bfloat16 (cuda only): near-float32 accuracy, much faster than float32 -- ctranslate2's own recommended GPU default is float16; bfloat16 trades a little precision for better numerical stability on newer GPUs. Not every value works on every device (e.g. bfloat16 needs cuda) -- an incompatible pairing fails clearly at [t] Test, not silently."),
             FieldSpec("stt", "language", "Language", "optional_str", help_text="Pin a language code like en, or leave unset for auto-detect."),
             FieldSpec("stt", "min_language_probability", "Min language probability", "float", help_text="Drop auto-detected transcripts below this confidence threshold."),
+            FieldSpec("stt", "hotwords", "Hotwords", "optional_str", help_text="Space-separated words/phrases faster-whisper should be biased toward recognizing. Live UAT finding: a short resume/wake word got repeatedly hallucinated as unrelated fluent sentences instead of misheard as something similar -- Whisper's known failure mode on short/low-signal clips. Put your resume word, safeword phrases, and approval phrase here to bias toward exactly the short critical phrases most likely to hit this. Accuracy nudge only, not a safety mechanism -- the safeword/resume-word checks still run on the raw transcript regardless."),
+            FieldSpec("stt", "condition_on_previous_text", "Condition on previous text", "bool", help_text="faster-whisper default: on. Disabling stops a low-signal/short utterance's decode from being biased by whatever fluent text the PREVIOUS segment produced -- a documented contributor to the same short-clip hallucination pattern hotwords addresses. A real tradeoff, not yet live-validated -- worth testing if hotwords alone doesn't fully fix a short resume/wake word, not a default recommendation."),
+            FieldSpec("stt", "temperature", "Temperature", "optional_float", help_text="Leave unset (recommended) for faster-whisper's own fallback ladder (0.0, 0.2, 0.4, ... up to 1.0, each retried on a low-confidence decode). Pin to a single value -- 0.0 for fully deterministic, no-fallback decoding -- to test whether the ladder's own higher-temperature retries are contributing to hallucination on an already-short/low-signal clip. Not yet live-validated -- worth testing, not a default recommendation."),
+            FieldSpec("stt", "repetition_penalty", "Repetition penalty", "optional_float", help_text="Leave unset for faster-whisper's own default (1.0, no penalty). Real live incident, 2026-08-07: a 1.056s clip of a single 'That's right.' decoded as that phrase repeated 8 times -- a genuine decoder repetition-loop pathology, not an app bug (one transcribe() call, one already-corrupted output). Values above 1.0 penalize the decoder for repeating tokens it's already produced -- try 1.1-1.3 first. Not yet live-validated -- worth testing if you're hitting runaway repetition, not a default recommendation (an untested value could make normal decodes worse, not just fix the rare case)."),
+            FieldSpec("stt", "no_repeat_ngram_size", "No-repeat n-gram size", "optional_int", help_text="Leave unset for faster-whisper's own default (0, disabled). The blunter sibling to repetition_penalty above, for the same runaway-repetition failure mode: blocks the decoder from repeating any run of this many tokens twice in one decode. 3 is a reasonable first value to try. Not yet live-validated -- worth testing alongside or instead of repetition_penalty, not a default recommendation."),
         ),
     ),
     SectionSpec(
@@ -325,11 +359,16 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("vad", "min_silence_ms", "Min silence ms", "int", help_text="Trailing silence needed to end an utterance."),
             FieldSpec("vad", "min_speech_ms", "Min speech ms", "int", help_text="Minimum speech burst to keep as a real utterance."),
             FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
+            FieldSpec("vad", "trace_silero_calls", "Trace Silero calls", "bool", help_text="Diagnostic only, off by default -- logs every single Silero window call's duration (~31/s during active audio) at DEBUG level. Deliberately separate from --verbose: too noisy for normal use even at DEBUG. Turn on only when actively chasing the live-hit VAD-freeze issue (see docs/KNOWN-ISSUES.md)."),
         ),
     ),
     SectionSpec(
         key="display",
         label="Display",
+        # The one section a plain browser refresh picks up -- see
+        # SectionSpec.restart_required's own docstring for how this was
+        # confirmed, not assumed.
+        restart_required=False,
         fields=(
             FieldSpec("display", "user_color", "User bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #2e7dfb) for your own speech bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
             FieldSpec("display", "assistant_color", "Assistant bubble color", "optional_str", help_text="Hex color (#RGB or #RRGGBB, e.g. #f0f0f2) for the AI's response bubbles in the web UI. Applies in both light and dark mode alike. Leave unset for the built-in theme default. Type - to clear back to the default."),
@@ -846,6 +885,16 @@ def backup_config(path: Path) -> Path | None:
     return backup
 
 
+def list_config_backups(path: Path) -> list[Path]:
+    """Every backup_config()-written convobox.yaml.backup-* next to path,
+    newest first. Filenames are that function's own <name>.backup-
+    <YYYYMMDD-HHMMSS> stamp, which sorts lexicographically = chronologically
+    -- a hand-renamed one (e.g. a trailing custom suffix) still sorts
+    correctly by its date/time prefix, since glob only matches names that
+    already start with that stamp."""
+    return sorted(path.parent.glob(f"{path.name}.backup-*"), reverse=True)
+
+
 def write_config(path: Path, config: AppConfig) -> None:
     header = _read_leading_header(path)
     body = _dump_config(config)
@@ -1009,7 +1058,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
     conflict = detect_permission_conflict(config.backend)
     if conflict is not None:
         report.errors.append(conflict)
-    if config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
+    # claude-code specifically: this combination doesn't fail safe the way
+    # the general warning below describes for other backends (codex denies
+    # cleanly with no pending state) -- the hook still gets wired at
+    # construction time and nothing can ever answer it, so it's a hard
+    # error here, not a warning. See detect_claude_code_approval_gap's own
+    # docstring (GitHub issue #235, finding A1) for the full mechanism.
+    approval_gap = detect_claude_code_approval_gap(config.backend, config.interaction)
+    if approval_gap is not None:
+        report.errors.append(approval_gap)
+    elif config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
         report.warnings.append(
             "backend.permission_mode is 'approve' but interaction.approval_phrase is "
             "unset -- every approval request will be denied automatically with no "
@@ -1405,9 +1463,11 @@ def _section_summary(config: AppConfig) -> list[str]:
 
 
 def _section_tabs(state: TuiState, width: int) -> str:
+    flagged = state.flagged_sections
     tabs: list[str] = []
     for idx, section in enumerate(state.sections):
-        label = f" {section.label} "
+        marker = "! " if section.key in flagged else ""
+        label = f" {marker}{section.label} "
         if idx == state.selected_section:
             tabs.append(f"{_REVERSE}[{label}]{_RESET}")
         else:
@@ -2282,6 +2342,17 @@ def _prompt_edit(state: TuiState) -> None:
     if not accepted:
         state.status = "edit cancelled"
         return
+    if new_value == current:
+        # Live UAT, 2026-08-02: pressing Enter to confirm a picker without
+        # cycling to a different choice (a natural way to back out, short
+        # of knowing Esc is the actual cancel key) is "accepted" with the
+        # SAME value -- previously fell through to _field_updated_status
+        # below, which said "{label} updated" (state.dirty came back False
+        # because nothing in the whole config changed) even though this
+        # field was never actually touched. Distinct message, and skips
+        # the pointless _set_value/_switch_* calls below.
+        state.status = f"{spec.label} unchanged"
+        return
     if spec.section == "backend" and spec.key == "name":
         # backend.name is always a "choice" field (never one of the
         # picker kinds above that can return None), so this is a real
@@ -2302,6 +2373,42 @@ def _restore_original(state: TuiState) -> None:
     state.dirty = False
     state.last_report = None
     state.status = "staged changes reverted"
+
+
+def _restore_from_backup(state: TuiState) -> None:
+    backups = list_config_backups(state.path)
+    if not backups:
+        state.status = f"no backups found next to {state.path}"
+        return
+    latest = backups[0]
+    if not _confirm_modal(
+        "Restore From Backup",
+        f"Load {latest.name} into the working copy?",
+        [
+            f"This replaces every staged value with {latest.name}'s contents.",
+            "Nothing is written to disk until you press [S] to save.",
+            f"({len(backups)} backup(s) available next to this config; "
+            "restoring the most recent.)",
+        ],
+    ):
+        state.status = "restore cancelled"
+        return
+    try:
+        restored = load_config(latest)
+    except ValidationError as exc:
+        # A backup should always have been a previously-valid save -- if
+        # one somehow isn't, say so loudly rather than silently falling
+        # back to defaults the way load_config_lenient does for the
+        # startup case; this path is meant to recover known-good state,
+        # not manufacture a new fallback.
+        state.status = f"backup {latest.name} itself failed to load: {exc}"
+        return
+    state.working = restored
+    state.dirty = state.working.model_dump(mode="python") != state.original.model_dump(
+        mode="python"
+    )
+    state.load_problems = []
+    state.status = f"restored from {latest.name} -- [S] to save, or keep editing"
 
 
 def _save(state: TuiState) -> None:
@@ -2334,6 +2441,7 @@ def _save(state: TuiState) -> None:
         return
     state.original = state.working.model_copy(deep=True)
     state.dirty = False
+    state.load_problems = []
     # Explicit that quitting is now safe -- the operator just watched the
     # dirty-state header/save hint tell them to press [S]; closing the
     # loop here means they don't have to separately notice the header
@@ -2499,6 +2607,8 @@ def _handle_browse(state: TuiState, key: str) -> bool:
             state.status = "revert cancelled"
     elif lowered == "s":
         _save(state)
+    elif lowered == "b":
+        _restore_from_backup(state)
     elif lowered == "t":
         _run_with_spinner(state, lambda: asyncio.run(_test_state(state)))
     elif lowered == "c":
@@ -2508,10 +2618,41 @@ def _handle_browse(state: TuiState, key: str) -> bool:
     return True
 
 
+def _apply_load_recovery(state: TuiState, problems: list[str]) -> None:
+    """Reflects load_config_lenient()'s problems list (if any) onto a
+    freshly constructed TuiState: flags it dirty, jumps to the first
+    affected section, and sets a status banner naming what happened and
+    how to respond. No-op when problems is empty (the ordinary case).
+
+    Split out from run_tui() so this logic -- which is the whole point of
+    load_config_lenient existing -- is unit-testable without driving the
+    real interactive read_key()/draw() loop.
+    """
+    if not problems:
+        return
+    # Section(s) on disk failed validation and were loaded as defaults
+    # instead of crashing (load_config_lenient's docstring has the full
+    # incident). Marked dirty even though working == original here --
+    # "clean" would wrongly claim this matches the file that's still
+    # sitting on disk with the rejected value in it.
+    state.load_problems = problems
+    state.dirty = True
+    for idx, section in enumerate(state.sections):
+        if section.key in state.flagged_sections:
+            state.selected_section = idx
+            break
+    state.status = (
+        f"{len(problems)} setting(s) on disk were invalid and reset to "
+        f"defaults ({', '.join(sorted(state.flagged_sections))}) -- "
+        "review and [S] save, or [B] restore last backup"
+    )
+
+
 def run_tui(config_path: Path | None = None) -> None:
     path = config_path or default_config_path()
-    config = load_config(path)
+    config, _raw, problems = load_config_lenient(path)
     state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
+    _apply_load_recovery(state, problems)
     _enable_ansi()
     sys.stdout.write("\x1b[?25l\x1b[2J")
     sys.stdout.flush()

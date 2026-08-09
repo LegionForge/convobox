@@ -8,16 +8,24 @@ unit-testable without spinning up the whole voice loop.
 from __future__ import annotations
 
 import asyncio
+import functools
+import logging
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
+from convobox.audio.ack_tones import generate_ack_tone
 from convobox.audio.playback import AudioPlayer
 from convobox.orchestrator.orchestrator import Orchestrator
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
+from convobox.tui.state import ConversationTuiState
 from convobox.web.history import HistoryDB, event_to_dict
 from convobox.web.stream import EventBroadcaster
+
+logger = logging.getLogger(__name__)
 
 # Mirrors WEB-UI-ARCHITECTURE.md's event_type vocabulary ("tool_call",
 # "response", etc.) for the history row's own event_type column.
@@ -54,15 +62,64 @@ class WebEventForwarder:
         self._session_id = session_id
         self._history = history
         self._broadcaster = broadcaster
+        # See _broadcast()'s own comment for why this set exists.
+        self._broadcast_tasks: set[asyncio.Task[None]] = set()
+        # History writes (append_event) do a real sqlite3 INSERT + commit --
+        # disk/fsync-bound work that has no business running synchronously
+        # on the event loop that also handles mic capture, TTS playback, and
+        # every other backend event (B2, 2026-08-08 review). Funneled
+        # through ONE persistent-while-busy queue+worker task, not a plain
+        # `asyncio.to_thread()` per call: a per-call to_thread would let
+        # concurrent writes race onto DIFFERENT threads against the SAME
+        # sqlite3.Connection (HistoryDB's check_same_thread=False only
+        # promises that won't crash, not that writes land in the order
+        # they were queued -- append_event stamps `timestamp` from
+        # time.time() at EXECUTION time, so out-of-order execution would
+        # corrupt get_session_events()'s own `ORDER BY timestamp ASC`
+        # reading order). A single queue drained by a single worker keeps
+        # writes both off the event loop AND strictly ordered -- HistoryDB's
+        # own sqlite3.Connection must still only ever be touched from
+        # THIS worker (writes) and the FastAPI routes (reads, in app.py) --
+        # both stay confined to code that never blocks the loop for long,
+        # which is exactly why every FastAPI route here must stay
+        # `async def`: a route that did real blocking I/O synchronously
+        # would serialize behind (and stall) this same event loop the
+        # writer task also depends on.
+        self._write_queue: asyncio.Queue[Callable[[], object]] = asyncio.Queue()
+        self._writer_task: asyncio.Task[None] | None = None
 
     def __call__(self, event: BackendEvent) -> None:
+        event_type_name = _EVENT_TYPE_NAMES.get(event.type, event.type.value)
         if self._history is not None:
-            self._history.append_event(
-                self._session_id,
-                _EVENT_TYPE_NAMES.get(event.type, event.type.value),
-                backend_event=event,
+            self._queue_write(
+                functools.partial(
+                    self._history.append_event,
+                    self._session_id,
+                    event_type_name,
+                    backend_event=event,
+                )
             )
-        self._broadcast(event_to_dict(event))
+        # Real bug, found live (2026-08-07, JP asked whether display.
+        # assistant_name was rendering at all -- it wasn't, and this is
+        # why): event_to_dict()'s own "type" field is the RAW enum value
+        # (event.type.value == "text" for BackendEventType.TEXT), not the
+        # _EVENT_TYPE_NAMES-translated one ("response") the history row's
+        # OWN event_type COLUMN gets two lines above. index.html's
+        # renderEvent() reads `ev.event_type || ev.type` -- a REPLAYED
+        # history row has event_type set (correct, "response"), so
+        # displayNames.response applied fine there; but the LIVE SSE
+        # broadcast has no event_type field at all, only type="text", so
+        # every live response bubble fell through to the "text" fallback
+        # label and NEVER showed the configured assistant name -- only a
+        # page reload replaying persisted history (itself gated on
+        # web.history_tracking_enabled, off by default) ever could.
+        # Overriding just the outgoing payload's "type" here -- not
+        # event_to_dict() itself -- keeps the persisted backend_event_json
+        # blob's own shape exactly as it already was (still the raw enum
+        # value), matching every existing consumer of that column.
+        payload = event_to_dict(event)
+        payload["type"] = event_type_name
+        self._broadcast(payload)
 
     def forward_transcript(self, text: str) -> None:
         """Called with the user's own recognized speech, separately from
@@ -72,17 +129,89 @@ class WebEventForwarder:
         run_convobox.py call site that invokes Orchestrator.handle_transcript
         (the main mic loop, --text mode, and queued-interjection delivery)."""
         if self._history is not None:
-            self._history.append_event(self._session_id, "transcript", user_transcript=text)
+            self._queue_write(
+                functools.partial(
+                    self._history.append_event,
+                    self._session_id,
+                    "transcript",
+                    user_transcript=text,
+                )
+            )
         self._broadcast({"type": "transcript", "content": text})
 
-    def forward_status(self, status: str) -> None:
+    def _queue_write(self, write: Callable[[], object]) -> None:
+        """Enqueue one HistoryDB write, (re)starting the drain task if it
+        isn't already running. Safe to call repeatedly in a tight
+        synchronous burst (several BackendEvents processed back to back
+        with no `await` between them, e.g. a fast tool_call/tool_result
+        pair): asyncio's cooperative scheduling means _drain_writes() can
+        only observe self._writer_task as finished at a point where no
+        further code could have raced a new write past that check -- see
+        _drain_writes()'s own docstring."""
+        self._write_queue.put_nowait(write)
+        if self._writer_task is None or self._writer_task.done():
+            self._writer_task = asyncio.ensure_future(self._drain_writes())
+            self._writer_task.add_done_callback(self._on_writer_task_done)
+
+    async def _drain_writes(self) -> None:
+        """Drains self._write_queue until empty, then exits -- a fresh task
+        is spawned by the next _queue_write() call rather than this one
+        looping forever on an empty queue.get(). No race with that
+        respawn: this loop's exit condition (queue.empty()) and the
+        task's actual completion happen in the same, uninterrupted step
+        (a plain `return`, no further `await`) -- nothing else can run on
+        this single-threaded event loop in between, so _queue_write()'s
+        `self._writer_task.done()` check can never observe a stale
+        "still running" state for a task that's actually already
+        finished, nor miss a task that's about to finish.
+
+        Each write runs in a worker thread (asyncio.to_thread) so the
+        blocking sqlite3 call doesn't stall this coroutine's own turn on
+        the event loop -- but only ONE write is ever in flight at a time
+        (this loop awaits each to_thread call before starting the next),
+        preserving write order.
+        """
+        while not self._write_queue.empty():
+            write = await self._write_queue.get()
+            try:
+                await asyncio.to_thread(write)
+            except Exception:
+                logger.exception(
+                    "history write failed (session=%s) -- dropped, not retried",
+                    self._session_id,
+                )
+            finally:
+                self._write_queue.task_done()
+
+    def _on_writer_task_done(self, task: asyncio.Task[None]) -> None:
+        """The writer task exiting is normal (see _drain_writes()'s own
+        docstring -- it happens every time the queue catches up). Only
+        an actual crash escaping the loop (everything _drain_writes()
+        itself can anticipate is already caught per-item) is worth
+        logging here."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "history writer task crashed (session=%s)", self._session_id, exc_info=exc
+            )
+
+    def forward_status(self, status: str, detail: str | None = None) -> None:
         """The mic loop's own activity state (listening/capturing/speaking/
         working/waiting/paused -- the same vocabulary _working_watchdog
         already computes for a TUI's status line), broadcast to the web UI
         too. Never persisted to history -- this is live/ephemeral, not a
         conversation event; a page reload gets it fresh from the next
-        broadcast, not from replayed history."""
-        self._broadcast({"type": "status", "status": status})
+        broadcast, not from replayed history.
+
+        detail is WorkingIndicator.current_activity (a tool name, or None
+        for "thinking, no tool call yet") -- the TUI's heartbeat log line
+        has shown this since PR #190; the web UI's own status line never
+        did, a gap noted at the time and left for its own PR. Only
+        meaningful when status == "working"; every other status ignores it.
+        """
+        self._broadcast({"type": "status", "status": status, "detail": detail})
 
     def _broadcast(self, payload: dict[str, object]) -> None:
         if self._broadcaster is not None:
@@ -92,7 +221,37 @@ class WebEventForwarder:
             # -- both contracts are sync, so the broadcast is scheduled
             # rather than awaited, same reasoning as _events.put_nowait()
             # elsewhere in the adapters.
-            asyncio.ensure_future(self._broadcaster.broadcast(payload))
+            #
+            # Found via autonomous codebase review, 2026-08-08 (GitHub
+            # issue #235, finding B1): a bare asyncio.ensure_future() with
+            # no reference retained used to be here. CPython holds only a
+            # WEAK reference to a running task with nothing else keeping
+            # it alive, so it can be garbage-collected mid-execution
+            # (dropped SSE frames under load, non-deterministically --
+            # see asyncio.create_task's own docs, "Save a reference to
+            # the result of this function"); and any exception inside
+            # broadcast() would vanish completely until GC eventually
+            # emits a generic "Task exception was never retrieved" with
+            # no context. Same fix shape as orchestrator.py's own
+            # _speak_task comment describes for the identical bug class
+            # ("an uncaught exception here previously vanished
+            # completely: no log line, no UI signal") -- that one wraps
+            # the work in try/except instead since only one speak task is
+            # ever in flight at a time (replaced, not accumulated); this
+            # one needs a set, since bursts of events legitimately have
+            # several broadcasts in flight concurrently and none should
+            # cancel any other.
+            task = asyncio.ensure_future(self._broadcaster.broadcast(payload))
+            self._broadcast_tasks.add(task)
+            task.add_done_callback(self._on_broadcast_task_done)
+
+    def _on_broadcast_task_done(self, task: asyncio.Task[None]) -> None:
+        self._broadcast_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("SSE broadcast failed", exc_info=exc)
 
 
 class ApprovalGateLike(Protocol):
@@ -192,15 +351,22 @@ class WebListeningBridge:
 
     Constructed with no targets (create_app() needs something to hand its
     route closures at server-startup time, before the real ListeningGate/
-    player/tts/adapter exist), wired via set_targets() once they're built
-    -- same pattern as WebApprovalBridge. Every method degrades to "did
-    nothing" (returns False) if called before set_targets() runs, rather
-    than raising.
+    player/tts/adapter/orchestrator exist), wired via set_targets() once
+    they're built -- same pattern as WebApprovalBridge. Every method
+    degrades to "did nothing" (returns False) if called before
+    set_targets() runs, rather than raising.
 
-    Deliberately does NOT touch a TUI's ConversationTuiState (unlike the
-    voice path, which logs a system-turn line there) -- that's a
-    terminal-only nicety, and wiring it in here would need yet another
-    script-local Protocol for a cosmetic gap, not a functional one.
+    Also logs and (if a TUI is attached) appends a system turn on every
+    pause/resume, same as the voice path in run_convobox.py -- REVERSED
+    2026-08-05 from an earlier "deliberately cosmetic-only" scoping
+    decision. Live incident (docs/field-notes/2026-08-05-web-resume-
+    desyncs-tui-display.md): an operator resumed via this button after
+    voice resume kept failing, which worked, but the TUI's transcript pane
+    kept showing the stale "paused -- say the resume word to resume"
+    system turn forever (nothing ever told it otherwise) and the session
+    read as hung even though it wasn't. ConversationTuiState now lives in
+    the installed package (convobox.tui.state), not scripts/, so this no
+    longer needs a script-local Protocol to reach it.
     """
 
     def __init__(self) -> None:
@@ -208,6 +374,10 @@ class WebListeningBridge:
         self._player: AudioPlayer | None = None
         self._tts: TTSEngine | None = None
         self._adapter: BackendAdapter | None = None
+        self._orchestrator: Orchestrator | None = None
+        self._pause_resume_ack: str = "none"
+        self._tui_state: ConversationTuiState | None = None
+        self._resume_word: str = ""
 
     def set_targets(
         self,
@@ -215,11 +385,19 @@ class WebListeningBridge:
         player: AudioPlayer,
         tts: TTSEngine,
         adapter: BackendAdapter,
+        orchestrator: Orchestrator,
+        pause_resume_ack: str = "none",
+        tui_state: ConversationTuiState | None = None,
+        resume_word: str = "",
     ) -> None:
         self._gate = gate
         self._player = player
         self._tts = tts
         self._adapter = adapter
+        self._orchestrator = orchestrator
+        self._pause_resume_ack = pause_resume_ack
+        self._tui_state = tui_state
+        self._resume_word = resume_word
 
     @property
     def is_ready(self) -> bool:
@@ -234,26 +412,99 @@ class WebListeningBridge:
         (no live session) or already paused -- a second pause is a no-op,
         matching ListeningGate.observe()'s own behavior: once is_paused is
         true, it only ever checks for the resume word, it never re-enters
-        the "pause" branch to re-run these side effects."""
-        if self._gate is None or self._player is None or self._tts is None or self._adapter is None:
+        the "pause" branch to re-run these side effects.
+
+        Mirrors run_convobox.py's voice-triggered "pause" branch exactly,
+        including the stop_event_loop() call -- live UAT, 2026-07-31
+        (PR #191, safety-critical): hard-stopping the adapter alone still
+        let an already-in-flight turn's trailing TEXT event reach
+        _on_event() and get spoken after the pause. That fix originally
+        only covered the two voice call sites; this button was a third,
+        unfixed one until now.
+
+        Delegates the actual stop sequence to Orchestrator.hard_stop() (the
+        same method the voice-triggered safeword and the web UI's Stop
+        button use) rather than repeating it inline a third time -- one
+        already-safety-verified sequence, not three hand-copied ones.
+        """
+        if (
+            self._gate is None
+            or self._player is None
+            or self._tts is None
+            or self._adapter is None
+            or self._orchestrator is None
+        ):
             return False
         if self._gate.is_paused:
             return False
         self._gate.is_paused = True
-        self._player.stop()
-        self._tts.stop()
-        await self._adapter.send_hard_stop()
+        await self._orchestrator.hard_stop()
+        if self._pause_resume_ack == "tone":
+            self._player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
+        logger.info(
+            "paused listening (web UI) -- hard-stopped in-flight work; say %r to resume",
+            self._resume_word,
+        )
+        if self._tui_state is not None:
+            self._tui_state.add_turn(
+                "system",
+                f"paused listening (web) -- say {self._resume_word!r} to resume",
+            )
         return True
 
     def resume(self) -> bool:
         """Voice resume only clears the flag (ListeningGate.observe()'s
         "resume" branch) -- nothing was hard-stopped to undo, so nothing
-        to redo here either."""
+        to redo here either, beyond the same ack tone the voice path
+        plays."""
         if self._gate is None:
             return False
         if not self._gate.is_paused:
             return False
         self._gate.is_paused = False
+        if self._pause_resume_ack == "tone" and self._player is not None:
+            self._player.play(generate_ack_tone("listening"), ACK_TONE_SAMPLE_RATE_HZ)
+        logger.info("resumed listening (web UI)")
+        if self._tui_state is not None:
+            self._tui_state.add_turn("system", "resumed listening (web)")
+        return True
+
+
+class WebSafewordBridge:
+    """Lets the web UI's Stop button do exactly what saying a safeword
+    phrase ("stop stop stop") does -- Orchestrator.hard_stop() -- as a
+    distinct action from WebListeningBridge.pause().
+
+    Deliberately separate from pause: the spoken safeword aborts the
+    current turn and the session immediately keeps listening normally
+    afterward, it does NOT enter ListeningGate's paused-until-resume-word
+    state the way "stop listening" does. A button that only ever called
+    WebListeningBridge.pause() would give the web UI no way to do the
+    plain "abort and keep going" action voice already has -- this is that
+    button's own bridge, not a WebListeningBridge alias.
+
+    Constructed with no target (create_app() needs something to hand its
+    route closure at server-startup time), wired via set_targets() once
+    the real Orchestrator exists -- same pattern as the other bridges.
+    """
+
+    def __init__(self) -> None:
+        self._orchestrator: Orchestrator | None = None
+
+    def set_targets(self, orchestrator: Orchestrator) -> None:
+        self._orchestrator = orchestrator
+
+    @property
+    def is_ready(self) -> bool:
+        return self._orchestrator is not None
+
+    async def trigger(self) -> bool:
+        """Returns False (nothing done) if called before set_targets()
+        (no live session). Never raises -- Orchestrator.hard_stop() itself
+        already guards on tts/player being None (e.g. --mute)."""
+        if self._orchestrator is None:
+            return False
+        await self._orchestrator.hard_stop()
         return True
 
 

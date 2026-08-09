@@ -21,6 +21,17 @@ adapter was written. Key facts:
 - Text arrives as `item/completed` notifications whose item has
   `type: "agentMessage"` and the full `text` (deltas exist too;
   ignored, same policy as OpenCode's text.ended-not-text.delta).
+- **ARTIFACT wiring (2026-08-07, schema-only -- not yet live-probed).**
+  Re-ran `codex app-server generate-json-schema` against codex-cli
+  0.146.1 specifically to check the artifact-pane gap
+  docs/KNOWN-ISSUES.md flagged ("codex hasn't been looked at"): a
+  completed `FileChangeThreadItem` (`item.type == "fileChange"`, one of
+  `_TOOL_ITEM_TYPES` below) is `{type, id, status, changes: [{path,
+  kind, diff}]}` -- every changed file's final path in one
+  `item/completed` notification, confirmed from the schema bundle, NOT
+  from a live authenticated session (unlike everything else in this
+  docstring). See `_resolve_artifact_writes` for the wiring and its own
+  status caveat.
 - The server can ask the CLIENT questions mid-turn (JSON-RPC server
   requests like `item/commandExecution/requestApproval`) and the turn
   hangs until answered. This adapter auto-declines them all with a
@@ -97,9 +108,15 @@ import logging
 import os
 import shutil
 from collections.abc import AsyncGenerator, Sequence
+from pathlib import Path
 from typing import Any
 
-from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.adapters.base import (
+    ARTIFACT_MEDIA_TYPES,
+    BackendAdapter,
+    BackendEvent,
+    BackendEventType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -581,9 +598,67 @@ class CodexAdapter(BackendAdapter):
                             )[:500],
                         )
                     )
+                    if item_type == "fileChange":
+                        for artifact in self._resolve_artifact_writes(item):
+                            self._events.put_nowait(artifact)
         # Everything else (reasoning items, deltas, token usage, MCP
         # startup, rate limits, ...) is deliberately unmapped -- same
         # narrow-on-purpose policy as the other two adapters.
+
+    def _resolve_artifact_writes(self, item: dict[str, Any]) -> list[BackendEvent]:
+        """codex/ARTIFACT wiring, closing the gap docs/KNOWN-ISSUES.md
+        flagged ("codex hasn't been looked at"). Schema confirmed via
+        `codex app-server generate-json-schema` (codex-cli 0.146.1, not
+        live-probed against a real running session -- see this method's
+        own status note in the accompanying field note): a completed
+        `FileChangeThreadItem` is `{type: "fileChange", id, status,
+        changes: [{path, kind, diff}]}` -- every changed path's FINAL
+        diff/status in one `item/completed` notification, unlike
+        claude_code.py's Write/Edit tool_use, which only names a path
+        and needs a separate tool_result to confirm success. So there's
+        nothing to stage across two messages here -- just filter the
+        completed changes down to renderable paths and resolve them.
+        `status` is one of inProgress/completed/failed/declined per the
+        schema; only "completed" changes actually landed on disk.
+        """
+        if item.get("status") != "completed":
+            return []
+        events: list[BackendEvent] = []
+        for change in item.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            file_path = change.get("path")
+            if not isinstance(file_path, str):
+                continue
+            if Path(file_path).suffix.lower() not in ARTIFACT_MEDIA_TYPES:
+                continue
+            artifact_path = self._resolve_artifact_path(file_path)
+            if artifact_path is not None:
+                events.append(
+                    BackendEvent(type=BackendEventType.ARTIFACT, artifact_path=artifact_path)
+                )
+        return events
+
+    def _resolve_artifact_path(self, file_path: str) -> str | None:
+        """Same fencing as ClaudeCodeAdapter._resolve_artifact_path
+        (src/convobox/adapters/claude_code.py): file_path -> a path
+        relative to working_dir, the same base convobox.web.artifacts'
+        serving route resolves against -- or None if working_dir isn't
+        configured, or file_path doesn't actually resolve inside it.
+        Independent, redundant fencing on top of that route's own check
+        (defense in depth), duplicated per-adapter rather than shared
+        since each adapter's own event shape feeding it differs enough
+        that a shared helper would need its own indirection layer for a
+        ~10-line method."""
+        if self._working_dir is None:
+            return None
+        base = Path(self._working_dir).resolve()
+        raw = Path(file_path)
+        absolute = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
+        try:
+            return str(absolute.relative_to(base))
+        except ValueError:
+            return None
 
 
 class _RpcError(RuntimeError):

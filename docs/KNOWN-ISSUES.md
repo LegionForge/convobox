@@ -131,6 +131,248 @@ See `docs/field-notes/2026-07-22-native-allocator-leak-also-surfaces-as-numpy-me
 for the full writeup; `tests/test_transcriber.py::test_numpy_array_memory_error_is_recovered_not_raised`
 covers it the same way the RuntimeError case already was.
 
+**Follow-up (2026-08-02): the "recurring often enough to be disruptive"
+condition this entry already flagged as worth revisiting -- now actually
+hit live, on `large-v3`.** A `convobox-UAT` session (CPU fallback after a
+separate CUDA-extra-not-installed gap, unrelated) hit the allocator
+failure after ~9 successful transcriptions (~15 minutes) -- faster than
+the original 2026-07-14 baseline (~20 transcriptions/13 minutes),
+plausibly because `large-v3`'s much larger per-call native memory
+footprint exhausts the leaking arena sooner than the smaller model that
+first surfaced this bug. The mitigation above worked exactly as designed
+(no crash, no unhandled traceback) -- but the reload it triggers **never
+recovered**: every retry over the following 4+ minutes hit the identical
+`mkl_malloc` failure, `self._model` stayed `None` for the rest of the
+session, and every subsequent utterance was silently treated as unheard.
+The mitigation's job was "don't crash," not "always recover," and it did
+exactly that -- but this is the first live confirmation that once the
+native allocator gets into this state, it can stay broken for the rest
+of a session rather than self-healing on a later retry, which is worth
+knowing before assuming "no crash" means "still working."
+
+**Follow-up (2026-08-03, SOTA STT research pass): no upstream fix
+exists, and this specific leak looks abandoned even though ctranslate2
+itself is not.** ctranslate2's most recent GitHub release is **v4.8.1,
+dated 2026-07-03** -- about a month old as of this research, one of five
+releases in the preceding six months (v4.7.0 2026-02-03, v4.7.1
+2026-02-04, v4.7.2 2026-05-19, v4.8.0 2026-06-06, v4.8.1 2026-07-03 --
+the latest adding Gemma4 12B dense model support). The project itself is
+actively maintained; what's missing across all of those releases is any
+evidence of a fix for *this* leak specifically. faster-whisper issue
+#390 is closed via PR #448, but that fix
+could not be confirmed to specifically cover the MKL allocator leak
+(vs. a narrower SageMaker-specific OOM); #660 shows no confirmed
+resolution; a related, still-open issue (**#992**, "Memory on GPU not
+cleared after transcription") suggests this is an ongoing pattern in the
+library, not a one-off bug that got fixed. Community-circulated
+workarounds (pinning to older ctranslate2 versions, e.g. 3.24.0 for
+CUDA11/cuDNN8) were reported in the context of a *different* GPU-
+allocation bug, not confirmed for this specific leak -- not a verified
+fix. Practical implication: keep treating this as permanently unfixed
+upstream rather than "unfixed for now" -- the reload mitigation (and
+accepting that it can leave STT dead for the rest of a session once
+triggered, per the follow-up above) is likely the durable state of
+things, not a stopgap. The clean long-term fix, if this becomes worth
+real effort, is moving off ctranslate2 entirely (see ROADMAP.md's
+"Alternative local STT engines" -- the NVIDIA Parakeet TDT / `onnx-asr`
+candidate runs on ONNX Runtime instead, sidestepping this whole class of
+bug rather than working around it).
+
+---
+
+## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
+
+**Status:** fix implemented 2026-08-07, **partially live-validated the
+same day** -- the freeze itself still reproduces live, but the fix's
+actual claim (the rest of the app, including the web UI's Resume
+Listening button, stays responsive while it happens) held up under a
+real recurrence. See the "Follow-up (2026-08-07, live UAT with this fix
+applied)" note below for the full picture; root cause of the underlying
+hang is still unconfirmed.
+
+**Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
+fix, PR #217, was already merged into the checkout): the app went
+completely unresponsive -- multiple confirmed voice attempts produced
+not even a `dropped (...)` log line, and the web UI's Stop-listening
+button (a completely separate code path, an HTTP handler via uvicorn,
+not the mic loop) also produced no log line and no effect. Zero
+`Processing audio` lines appeared for the entire stuck window, meaning
+the freeze happened *before* any utterance was ever handed to
+`transcriber.transcribe()`.
+
+**Why this is a different bug than the transcribe() freeze PR #217
+already fixed:** that fix offloads `transcriber.transcribe()` to a
+thread with an optional timeout -- it only helps once an utterance has
+already been segmented. This incident's total absence of `Processing
+audio` lines means the STT call was never reached at all.
+
+**Root-cause candidate.** `UtteranceSegmenter._process_window()`
+(`src/convobox/vad/segmenter.py`) calls `self._model(torch.from_numpy
+(window), _SAMPLE_RATE).item()` -- a synchronous Silero VAD (ONNX)
+inference call, made once per 512-sample (32ms) window, directly inside
+`async def segment()`'s consumption loop (via `feed()`), with no thread
+offload and no timeout. Same architectural shape as the transcribe()
+bug PR #217 fixed -- a synchronous ML inference call that can freeze the
+whole single-threaded event loop if it ever hangs -- just upstream of
+it and far more frequent (~31 calls/second of audio vs. once per
+completed utterance). `MicrophoneStream`'s own `blocksize: int = 512`
+(`src/convobox/audio/capture.py`) matches `_WINDOW_SAMPLES` exactly, so
+every mic chunk feeds exactly one VAD window through this same
+synchronous path -- there's no batching that would reduce call
+frequency at the chunk-consumption layer.
+
+**Why not fixed yet, and the design wrinkle that makes this harder than
+PR #217:** `transcribe()` is called once per completed utterance;
+offloading it to `asyncio.to_thread()` per call is cheap relative to
+its own cost. This model call happens ~31x/second -- offloading every
+individual window call the same way would add real per-call thread-pool
+overhead at that frequency, potentially comparable in magnitude to
+Silero's own (very fast) inference time. The likely right fix is
+offloading at the `feed()` (per-chunk) granularity rather than per-
+window (the two are ~1:1 today given the blocksize match, but `feed()`
+is the natural async/sync boundary `segment()`'s generator already
+awaits at, and doesn't require reaching inside `_process_window()`) --
+proposed, not yet built or benchmarked for the added-overhead tradeoff.
+
+**Follow-up (2026-08-07, same day, later): recurred live a second time,
+with real-time confirmation it blocks BOTH safety-relevant control
+paths at once, and that it self-recovers.** JP hit this directly while
+paused, following a runaway-repetition hard-stop (see the field note's
+newest addendum for the full transcript): the "stop"/"eject" safeword
+phrases had no effect, the web Stop button had no effect, and the web
+Resume Listening button also had no effect -- reported live, in that
+order, while it was happening. `convobox-tui.log` confirms genuine,
+total silence for exactly 2m9.4s (18:41:50.939 -> 18:44:00.358), then a
+`resumed listening (web UI)` line with no process restart in between.
+**Two new findings this recurrence adds:**
+1. Voice safeword, the web `/api/stop` handler, and the web
+   `/api/listening` resume handler are THREE genuinely different code
+   paths (a mic-loop hook and two separate HTTP routes) -- all three
+   going unresponsive together is itself strong corroborating evidence
+   for the shared-event-loop-blocked hypothesis above, gathered in real
+   time while it was actively happening, not reconstructed from logs
+   after the fact. Raises this from "diagnosed by reading the code" to
+   "diagnosed by reading the code, with live behavioral confirmation
+   matching the prediction."
+2. **This instance was not permanent -- it self-recovered after
+   2m9.4s with no kill/restart.** Operational guidance until this is
+   actually fixed: waiting it out for a couple of minutes is a real,
+   confirmed-working option, not just "kill the process" (killing is
+   still reasonable if immediate control matters more than waiting on
+   an unconfirmed recovery -- this is one data point, not a guarantee
+   every recurrence resolves this fast).
+
+**Priority raised** given both control paths that exist specifically
+for safety (the safeword AND the web Stop button) failed simultaneously
+in a real session -- worth prioritizing the `feed()`-granularity
+offload fix proposed above over other STT/VAD polish work.
+
+**Fix implemented 2026-08-07 (schema/unit-level; not yet live-validated
+against a real recurrence).** New `UtteranceSegmenter.feed_async()`
+(`src/convobox/vad/segmenter.py`) wraps the existing synchronous
+`feed()` in `asyncio.to_thread()`, at exactly the `feed()`-granularity
+proposed above. `segment()` (the mic loop's only real-time streaming
+consumer) now awaits `feed_async()` instead of calling `feed()`
+directly; `feed()` itself is unchanged and still synchronous, so every
+existing caller (tests, any offline/non-realtime processing) keeps
+identical behavior.
+
+Deliberately **not** a timeout/abandon/invalidate mechanism like PR
+#217's analogous STT fix: `transcribe()` is stateless per call, but
+Silero's model carries sequential recurrent state across windows via
+`reset_states()`, and abandoning an in-flight window while its
+background thread still runs risks that thread's eventual completion
+racing a fresh call against the same (not documented as thread-safe)
+model object. Plain thread offload alone already addresses the
+documented symptom -- other event-loop tasks (the web server's HTTP
+routes, the watchdog, TUI redraw) stay responsive while a slow/stuck
+window call runs in its own thread -- without introducing that new
+race.
+
+New test `test_feed_async_does_not_block_other_concurrent_work`
+(`tests/test_vad_segmenter.py`) proves the mechanism the same way PR
+#217's `test_timeout_does_not_block_other_concurrent_work` did: a
+model call blocked via `time.sleep()` inside a worker thread does not
+prevent concurrently-scheduled `asyncio.sleep()` ticks from firing on
+the event loop. Full suite green (1273 passed), `ruff`/`mypy` clean on
+the touched files.
+
+**Still needed before this can be marked resolved**: live
+re-verification against a real recurrence of the freeze (the same gap
+PR #217's own field note flagged for its STT-side fix) -- this is
+unit-proven-correct, not yet confirmed to actually prevent the next
+live Stop/Resume-button lockup.
+
+**Follow-up (2026-08-07, live UAT with this fix applied): the freeze
+recurred, and the result is a genuine partial improvement, not a full
+fix -- worth being precise about which part actually changed.** JP ran
+a live voice UAT session on a branch combining this fix with PR #230's
+STT changes, deliberately stress-testing pause/resume cycling. The
+freeze recurred: real, active speech produced zero log activity
+(`convobox-tui.log`, 20:57:40 -> 20:59:32, ~1m52s) -- confirmed live by
+JP ("was hung for a few minutes... but had to manually resume
+listening"; "during the gap, I was trying some utterances[,] but
+stopped [trying] until a few minutes later"), i.e. this was not silence
+being mistaken for a freeze, it was real speech the mic pipeline never
+processed.
+
+**What's different from the original incident, and why it matters:**
+JP recovered by clicking the web UI's Resume Listening button, **and it
+worked** -- in the original 2026-08-07 incident this follow-up's
+sibling entry documents, all three recovery paths (voice safeword, web
+Stop, web Resume) were simultaneously unresponsive for the same
+2-minute-class duration. This time only the mic/voice path was stuck;
+the web route stayed alive and functional. That is exactly what this
+fix's own design claims -- offloading `feed()`'s Silero calls to a
+worker thread keeps the *rest of the event loop* (HTTP routes, the
+watchdog, TUI) responsive while a slow/stuck window call runs -- and
+this live recurrence is the first real evidence that claim holds, not
+just the unit test's proof of the mechanism in isolation.
+
+**What the fix was never going to solve, and didn't:** `segment()`'s
+own consumption of incoming mic chunks is still strictly sequential --
+`await self.feed_async(chunk)` blocks that specific async generator
+until the offloaded call returns, no matter which thread it runs in.
+If one window's Silero call genuinely hangs, no *later* audio can be
+processed until it returns, regardless of threading. This recurrence is
+consistent with that being exactly what happened: the mic pipeline
+itself stayed stuck for ~2 minutes while the rest of the app didn't.
+**Net: this fix contains the blast radius (proven, live, this session)
+but does not resolve the underlying hang (still reproduces, live, this
+session) -- "partially validated," not "validated" or "insufficient."**
+
+**Root cause of the underlying hang is still unconfirmed.** Not
+determined this pass: whether it's genuinely Silero's own ONNX
+inference stalling (OS scheduling, resource contention, a driver-level
+stall), or something else entirely that this fix's instrumentation
+can't currently distinguish from that. The immediate diagnostic gap:
+there is no logging of when a `feed_async()` call starts, how long it
+takes, or that it's still pending -- a future recurrence produces the
+same "silence, then it's back" signature regardless of what's actually
+stuck inside that await. Next concrete step, not done here: add
+start/elapsed timing around the `asyncio.to_thread(self.feed, chunk)`
+call in `feed_async()` (e.g. log a warning if a single call exceeds
+some multiple of the ~1-3ms Silero normally takes), so the next
+recurrence's own log distinguishes "one window call is still running,
+N seconds in" from the current signature's total silence.
+
+**JP's own real-time qualitative read, same session, worth recording
+verbatim-close:** "stop and resume listening seem to be significantly
+more reliable... assuming 1) I don't pound the paused client with lots
+of hotwords, and 2) I don't spam the client while paused with lots of
+conversation." Two things line up with this: the recurrence above
+happened during a deliberate rapid-fire pause-overload stress test
+(short repeated hotword-biased phrases, utterances arriving every few
+seconds), and both this fix and PR #217's now both offload onto
+`asyncio.to_thread()`'s shared default executor -- a real, untested
+hypothesis for a follow-up session: sustained high-rate utterances
+during a pause could be piling up VAD and/or STT thread submissions
+faster than they drain, which would produce exactly this "fine under
+normal use, hangs under rapid-fire stress" pattern without requiring
+Silero itself to ever actually stall. Not confirmed -- a concrete lead
+for whoever picks up the diagnostic-logging step above, not a
+diagnosis.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")
@@ -371,6 +613,32 @@ in `GET /api/model` (the Zen catalog: grok-code, kimi-k2.5-free,
 minimax-m3-free, qwen3.6-plus-free, ...). Config default `"model"` is
 also ignored for API sessions (always Zen `hy3-free`).
 
+**Follow-up (2026-08-07): a real upstream fix for the root cause
+described above appears to exist, but this is diagnosed from opencode's
+own changelog, NOT live-reverified against ConvoBox -- do not treat as
+resolved without re-running the curl matrix above first.** opencode has
+shipped 12 releases since 1.18.3 (up to v1.18.15 as of this check,
+`gh release list -R sst/opencode`). Two changes in that range look like
+they fix exactly this mechanism ("the server's API path never loads the
+OAuth-credentialed provider"): **`fix(app): refresh V1 providers after
+auth` (sst/opencode#38786, merged 2026-07-25)** -- its own root-cause
+description: "V1 provider state is instance-cached... the refetch kept
+returning the pre-auth connected-provider list," i.e. a newly
+OAuth-authenticated provider's catalog never got rebuilt, which is the
+same symptom as `GET /api/model` never listing `openai` here -- and
+**`fix(app): refresh global provider state` (sst/opencode#39220, merged
+2026-07-28)**, a closely related follow-up. Both predate the locally
+installed v1.18.13 by several releases. **Not done, deliberately:** no
+live opencode session was run to confirm `GET /api/model` now lists an
+OAuth-authenticated provider, or that a `backend.model` pin against it
+actually generates -- that would need a real API round-trip against a
+live-authenticated provider, out of scope for an unattended research
+pass. **Next step, concrete:** re-run the exact curl matrix this entry
+already documents (pin `openai/*`, check `GET /api/model`, watch for a
+generated reply) against the currently-installed opencode version before
+re-enabling `backend.model` in any config -- if it passes, this whole
+entry can move to a changelog/fixed note instead of KNOWN-ISSUES.md.
+
 ---
 
 ## Web UI: artifact pane gaps (0.3.0)
@@ -378,22 +646,85 @@ also ignored for API sessions (always Zen `hy3-free`).
 **Status:** diagnosed/scoped, deferred. The web UI (docs/WEB-UI-USAGE.md)
 is new in 0.3.0 -- these are known rough edges, not silently-missed bugs.
 
-**PDF doesn't render in the artifact pane.** Live-confirmed 2026-07-28: a
-PDF renders correctly in a standalone browser tab (BrowserOS's own
-PDFium, no plugin needed) but shows nothing when opened through
-`GET /api/artifacts/{path}` inside the pane's frame. Root cause not yet
-inspected (frontend content-type dispatch most likely assumes HTML/
-image and gives `.pdf` no `<iframe>`/`<embed>` treatment, or the
-artifacts route isn't setting `Content-Type: application/pdf`) --
-`docs/ARTIFACT-PANE-SCOPE.md` only documents image/plot/HTML as in-scope
-today, so this may end up a documented exclusion rather than a fix; JP's
-call, not yet made.
+**PDF doesn't render inline in the artifact pane -- confirmed intentional
+v1 design, not a bug (resolved as a non-issue, per the ConvoBox quickref's
+PR #176 entry, 2026-07-29; this entry itself never got updated to say
+so).** The original 2026-07-28 report observed a PDF opened via
+`GET /api/artifacts/{path}` showing nothing inside the pane's frame.
+Re-checked directly against current code: `src/convobox/adapters/base.py`'s
+`ARTIFACT_MEDIA_TYPES` already maps `.pdf` -> `application/pdf`, so the
+serving route (`src/convobox/web/artifacts.py`) sets the correct
+`Content-Type` via `FileResponse` -- the backend was never the gap. The
+frontend (`index.html`'s `renderArtifact()`) deliberately does NOT put
+PDFs (or CSV/txt/md) in an `<iframe>`, by design: only
+`_ARTIFACT_IMAGE_EXTENSIONS` get an `<img>` and `_ARTIFACT_HTML_EXTENSIONS`
+get a sandboxed `<iframe>`; everything else in the allowlist renders a
+plain "Download {filename}" link instead, exactly matching
+`docs/ARTIFACT-PANE-SCOPE.md`'s own documented v1 rendering scope ("PDF/
+CSV/plain text -> punt to a simple embed/pre fallback or a download link;
+not worth [building rich viewers for] v1"). So today's real behavior is a
+working download link, not a blank frame -- the "shows nothing" symptom
+either predates this fallback-link code (same commit that shipped it,
+`b40146e`, 2026-07-28) or was testing the raw API URL directly rather
+than the real pane UI. No fix needed; a richer PDF/CSV viewer remains a
+legitimate future v2 idea, not an open bug.
 
-**opencode/codex backends don't trigger the artifact pane at all.** Only
-the Claude Code adapter has the `Write`/`Edit` -> `ARTIFACT` event wiring
-(`src/convobox/adapters/claude_code.py`). opencode's `file.edited` event
-path format hasn't been live-verified yet (blocks wiring it up); codex
-hasn't been looked at. See `docs/ARTIFACT-PANE-SCOPE.md`.
+**codex now has the same `ARTIFACT` wiring, schema-verified but NOT yet
+live-verified end-to-end.** (2026-08-07, `feat/codex-artifact-pane-wiring`
+branch, PR #219.) `CodexAdapter._resolve_artifact_writes`
+(`src/convobox/adapters/codex.py`) reads a completed `fileChange` item's
+`changes: [{path, kind, diff}]` array (confirmed via `codex app-server
+generate-json-schema`, codex-cli 0.146.1) and emits an `ARTIFACT` event
+per renderable, in-`working_dir` path -- same `ARTIFACT_MEDIA_TYPES`
+allowlist and `working_dir` fencing as `ClaudeCodeAdapter`. Unit-tested
+against a fake app-server, but **no live session has confirmed the real
+`codex app-server` actually reports paths in this shape at runtime** (the
+schema bundle and the module's other live probes were done in separate
+sessions) -- the first live codex+artifact-pane UAT pass should treat
+this as the thing to specifically confirm, not assume-working. See
+`docs/field-notes/2026-08-07-codex-artifact-pane-wiring.md`.
+
+**opencode's `file.edited` event: the payload shape is now known, and it
+turns out to be a bigger wiring job than "verify the format," not a
+smaller one.** (2026-08-07, schema-checked against a real local
+`opencode serve` instance, v1.18.13 -- `GET /doc`'s OpenAPI 3.1 spec
+fetched live, no prompt sent, no LLM call made, zero cost.) Two real
+findings:
+
+1. **The payload is trivial**: `FileEdited`/`EventFileEdited`'s schema is
+   just `{type: "file.edited", data: {file: <path string>}}` (or
+   `properties: {file: ...}` on the older `/event` variant) -- no
+   status/confirmation field at all, unlike codex's `fileChange` (which
+   has `inProgress`/`completed`/`failed`/`declined`). If it arrived on
+   the adapter's existing stream, wiring it would be close to trivial.
+2. **It does NOT arrive on the adapter's existing stream, though --
+   confirmed from the schema, not guessed.** `OpenCodeAdapter.events()`
+   subscribes to `GET /api/session/{sessionID}/event`, whose SSE payload
+   is typed `SessionDurableEvent` -- a 28-member union (`SessionNext*`
+   only: prompted, step/tool/text/reasoning lifecycle, compaction,
+   revert). `file.edited` is NOT one of those 28 members. It only
+   appears in the broader `Event` (`/event`, 89 members) and `V2Event`
+   (`/api/event`, 88 members) unions -- i.e. it's a **global,
+   not session-scoped** event. Wiring it up means a SECOND, separate SSE
+   subscription (`/api/event` most likely, matching the versioned `/api/`
+   surface the rest of this adapter already uses) running alongside the
+   existing session-scoped one, not just a new case in the current event
+   parser. There's also a real correlation question the schema alone
+   doesn't answer: `file.edited`'s `data` has no session ID, only a bare
+   path, so multiple concurrent opencode sessions (if that's ever a real
+   ConvoBox scenario) would be indistinguishable on this stream --
+   `GlobalEvent`'s own envelope carries `directory`/`project`/`workspace`
+   fields that might be enough to scope it to "this adapter's own
+   server," but that's an architecture question, not confirmed here.
+
+**Not done, deliberately:** no code was written for this. This is schema
+evidence clarifying scope, the same discipline as the codex investigation
+(PR #219). The follow-up design call this entry originally asked for is
+now written up: `docs/DESIGN-opencode-artifact-pane-wiring.md` (a second
+concurrent `/api/event` subscription, `working_dir` fencing as the
+correlation mechanism in place of a session ID the payload doesn't carry,
+sliced into a log-only step before a real `ARTIFACT`-emitting one) -- not
+implemented, still a design note, not a blind port of the codex pattern.
 
 ---
 

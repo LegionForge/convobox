@@ -42,9 +42,22 @@ class _FakeModel:
     def __init__(self, fail_times: int = 0) -> None:
         self.fail_times = fail_times
         self.calls = 0
+        self.last_hotwords: str | None = None
+        self.last_condition_on_previous_text: bool | None = None
+        self.last_kwargs: dict = {}
 
-    def transcribe(self, audio: np.ndarray, language: str | None = None):
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        language: str | None = None,
+        hotwords: str | None = None,
+        condition_on_previous_text: bool = True,
+        **kwargs,
+    ):
         self.calls += 1
+        self.last_hotwords = hotwords
+        self.last_condition_on_previous_text = condition_on_previous_text
+        self.last_kwargs = kwargs
         if self.calls <= self.fail_times:
             raise RuntimeError("could not create a memory object")
         segments = [_FakeSegment(text="hello world", avg_logprob=-0.2)]
@@ -66,6 +79,106 @@ def test_normal_transcription_returns_expected_result() -> None:
     assert result.avg_logprob == pytest.approx(-0.2)
 
 
+def test_hotwords_defaults_to_none() -> None:
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_hotwords is None
+
+
+def test_hotwords_passed_through_to_the_model() -> None:
+    # Live UAT, 2026-08-02: a short resume_word was repeatedly hallucinated
+    # as unrelated fluent sentences -- faster-whisper's own hotwords param
+    # exists to bias exactly this case; confirm STTConfig.hotwords actually
+    # reaches the real transcribe() call.
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", hotwords="Athena stop stop stop"
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_hotwords == "Athena stop stop stop"
+
+
+def test_condition_on_previous_text_defaults_to_true() -> None:
+    # Matches faster-whisper's own default -- zero behavior change for
+    # anyone who hasn't touched this new field.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_condition_on_previous_text is True
+
+
+def test_condition_on_previous_text_passed_through_when_disabled() -> None:
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", condition_on_previous_text=False
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_condition_on_previous_text is False
+
+
+def test_temperature_unset_omits_the_kwarg_entirely() -> None:
+    # Must NOT pass temperature=None -- faster-whisper's own transcribe()
+    # types it as Union[float, List[float], Tuple[float, ...]], no None in
+    # that union, so passing None explicitly would override its real
+    # default (the fallback ladder) instead of actually leaving it alone.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert "temperature" not in model.last_kwargs
+
+
+def test_temperature_passed_through_when_set() -> None:
+    model = _FakeModel()
+    config = STTConfig(model="tiny.en", device="cpu", compute_type="int8", temperature=0.0)
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_kwargs.get("temperature") == 0.0
+
+
+# --- repetition_penalty/no_repeat_ngram_size (2026-08-07): the actual fix
+# for the runaway-repetition decoder pathology found live the same day --
+# same "must NOT pass a literal None" reasoning as temperature above,
+# faster-whisper types both as plain non-Optional float/int with real
+# defaults (1.0/0), not Optional. ---
+
+
+def test_repetition_penalty_unset_omits_the_kwarg_entirely() -> None:
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert "repetition_penalty" not in model.last_kwargs
+
+
+def test_repetition_penalty_passed_through_when_set() -> None:
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", repetition_penalty=1.2
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_kwargs.get("repetition_penalty") == 1.2
+
+
+def test_no_repeat_ngram_size_unset_omits_the_kwarg_entirely() -> None:
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert "no_repeat_ngram_size" not in model.last_kwargs
+
+
+def test_no_repeat_ngram_size_passed_through_when_set() -> None:
+    model = _FakeModel()
+    config = STTConfig(
+        model="tiny.en", device="cpu", compute_type="int8", no_repeat_ngram_size=3
+    )
+    transcriber = LocalTranscriber(config, model_factory=lambda: model)
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert model.last_kwargs.get("no_repeat_ngram_size") == 3
+
+
 def test_model_factory_called_once_at_construction() -> None:
     calls = []
 
@@ -75,6 +188,53 @@ def test_model_factory_called_once_at_construction() -> None:
 
     LocalTranscriber(_config(), model_factory=factory)
     assert len(calls) == 1
+
+
+# --- invalidate(): the STTEngine.invalidate() hook LocalTranscriber
+# overrides, used by run_convobox.py's mic loop after abandoning a
+# transcribe() call that didn't return within stt.transcribe_timeout_s
+# (docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md).
+
+
+def test_invalidate_forces_a_fresh_model_on_the_next_call() -> None:
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        return _FakeModel()
+
+    transcriber = LocalTranscriber(_config(), model_factory=factory)
+    assert calls["count"] == 1
+
+    transcriber.invalidate()
+    assert transcriber._model is None
+
+    transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert calls["count"] == 2
+
+
+def test_invalidate_before_any_transcribe_call_is_a_noop_on_next_use() -> None:
+    # Calling invalidate() when nothing is in flight (e.g. defensively,
+    # or twice in a row) must not raise or leave the transcriber unable
+    # to recover -- the next transcribe() call should just rebuild.
+    model = _FakeModel()
+    transcriber = LocalTranscriber(_config(), model_factory=lambda: model)
+    transcriber.invalidate()
+    transcriber.invalidate()
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.float32))
+    assert result.text == "hello world"
+
+
+def test_stt_engine_base_invalidate_defaults_to_a_noop() -> None:
+    # Any engine that doesn't override invalidate() (a stateless/remote
+    # one, e.g.) must not raise just because the mic loop calls it.
+    from convobox.stt.base import STTEngine, TranscriptResult
+
+    class _StatelessEngine(STTEngine):
+        def transcribe(self, audio: np.ndarray) -> TranscriptResult:
+            raise NotImplementedError
+
+    _StatelessEngine().invalidate()  # must not raise
 
 
 def test_native_allocator_failure_is_recovered_not_raised() -> None:
@@ -106,7 +266,14 @@ def test_numpy_array_memory_error_is_recovered_not_raised() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def transcribe(self, audio: np.ndarray, language: str | None = None):
+        def transcribe(
+            self,
+            audio: np.ndarray,
+            language: str | None = None,
+            hotwords: str | None = None,
+            condition_on_previous_text: bool = True,
+            **kwargs,
+        ):
             self.calls += 1
             if self.calls == 1:
                 raise MemoryError("Unable to allocate 1.15 MiB for an array with shape (1, 376, 400)")

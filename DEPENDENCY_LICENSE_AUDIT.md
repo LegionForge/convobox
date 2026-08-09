@@ -126,7 +126,7 @@ model weights, genuinely permissive, no GPL entanglement.
    happened as originally written.** This audit recommended removing
    `PiperTTSEngine` from the codebase entirely. What shipped instead:
    Piper stays in the codebase but moves to an explicit opt-in extra
-   (`uv sync --extra piper` / `pip install convobox[piper]`), matching
+   (`uv sync --extra piper` / `pip install legionforge-convobox[piper]`), matching
    the existing `[aec]`/`[cuda]` extra pattern -- not a main dependency,
    so a plain `uv sync`/`pip install .` never pulls in GPL-3.0 code.
    This resolves the concern this audit actually led with (a *default*

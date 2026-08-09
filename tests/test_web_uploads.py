@@ -16,6 +16,11 @@ from convobox.web.app import create_app  # noqa: E402
 from convobox.web.history import HistoryDB  # noqa: E402
 from convobox.web.uploads import _MAX_UPLOAD_BYTES  # noqa: E402
 
+# app.py's CSRF middleware (require_csrf_header) 403s any mutating request
+# missing this header -- added after this test file was first written, same
+# fix already applied to every other TestClient(app) in test_web_app.py.
+_CSRF_HEADERS = {"X-ConvoBox-Client": "1"}
+
 
 @pytest.fixture
 def working_dir(tmp_path: Path) -> Path:
@@ -26,14 +31,14 @@ def working_dir(tmp_path: Path) -> Path:
 
 def test_upload_with_no_working_dir_returns_503() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")))
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/upload", files={"file": ("photo.png", b"fake-bytes")})
     assert response.status_code == 503
 
 
 def test_upload_writes_the_file_into_working_dir(working_dir: Path) -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post(
             "/api/upload", files={"file": ("report.pdf", b"%PDF-fake-content")}
         )
@@ -48,7 +53,7 @@ def test_upload_creates_working_dir_if_it_does_not_exist_yet(tmp_path: Path) -> 
     # coding agent's own first write into it would.
     not_yet_created = tmp_path / "new-workspace"
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=not_yet_created)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/upload", files={"file": ("note.txt", b"hi")})
     assert response.status_code == 200
     assert (not_yet_created / "note.txt").read_text() == "hi"
@@ -60,7 +65,7 @@ def test_upload_rejects_no_filename(working_dir: Path) -> None:
     # `if not file.filename` guard would raise) -- still confirms the
     # security property (nothing gets written), just at a layer above ours.
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/upload", files={"file": ("", b"stuff")})
     assert response.status_code == 422
     assert list(working_dir.iterdir()) == []
@@ -68,7 +73,7 @@ def test_upload_rejects_no_filename(working_dir: Path) -> None:
 
 def test_upload_rejects_a_blocked_extension(working_dir: Path) -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post(
             "/api/upload", files={"file": ("payload.exe", b"MZfake")}
         )
@@ -82,7 +87,7 @@ def test_upload_neutralizes_path_traversal_in_the_filename(working_dir: Path) ->
     # the bare filename, so this can only ever land INSIDE working_dir,
     # never at the traversed location.
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post(
             "/api/upload", files={"file": ("../../evil.txt", b"gotcha")}
         )
@@ -95,7 +100,7 @@ def test_upload_neutralizes_path_traversal_in_the_filename(working_dir: Path) ->
 def test_upload_never_overwrites_an_existing_file(working_dir: Path) -> None:
     (working_dir / "photo.png").write_bytes(b"original")
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/upload", files={"file": ("photo.png", b"new-upload")})
     assert response.status_code == 200
     assert response.json() == {"filename": "photo (2).png"}
@@ -106,7 +111,7 @@ def test_upload_never_overwrites_an_existing_file(working_dir: Path) -> None:
 def test_upload_rejects_a_file_over_the_size_limit(working_dir: Path) -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
     oversized = b"x" * (_MAX_UPLOAD_BYTES + 1)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/upload", files={"file": ("huge.bin", oversized)})
     assert response.status_code == 413
     # The partial write must not be left behind on disk.
@@ -119,6 +124,6 @@ def test_upload_with_no_text_bridge_still_succeeds(working_dir: Path) -> None:
     # upload itself fail. The "backend actually gets told" half of this
     # is covered in test_web_app.py, alongside the other bridge fakes.
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/upload", files={"file": ("note.txt", b"hi")})
     assert response.status_code == 200

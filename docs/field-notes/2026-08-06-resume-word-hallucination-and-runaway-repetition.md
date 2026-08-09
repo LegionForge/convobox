@@ -1,0 +1,396 @@
+---
+title: A biased hotword can trap the STT decoder into a runaway repetition loop on short audio, and it reliably falls through into a real safeword hard-stop
+status: validated-live
+date: 2026-08-06
+project: ConvoBox (github.com/LegionForge/convobox)
+versions: ConvoBox main + PR #210/#213/#215 (fix/web-transcript-forwarding-parity branch), faster-whisper 1.2.1, ctranslate2 4.8.1, stt.device=cuda, stt.temperature=0.0, stt.hotwords="stop brake eject mayday listening resume alpha bravo delta"
+evidence:
+  - convobox-tui.log, 2026-08-06 22:37:10-23:08:xx session (D:\LegionForge\convobox-UAT, live PR #213 UAT)
+  - convobox-tui.log, 2026-08-06 23:52:03 / 2026-08-07 00:11-00:20 sessions (same checkout, stt.device: cpu, PR #217 merged locally)
+  - .aec-dumps/20260806-223710/mic-raw.wav (continuous raw mic capture, forensic cross-check)
+  - src/convobox/stt/transcriber.py (transcribe() call site, confirms repetition_penalty/no_repeat_ngram_size are never passed)
+  - PR #217 (fix(stt): offload transcribe() to a thread and add an optional timeout -- fixes Problem 3's original manifestation, confirmed NOT sufficient for the addendum's freeze recurrence)
+  - src/convobox/vad/segmenter.py (UtteranceSegmenter._process_window()/feed(), the addendum's root-cause candidate)
+  - src/convobox/audio/capture.py (MicrophoneStream blocksize=512, confirmed to match _WINDOW_SAMPLES)
+  - convobox-tui.log, 2026-08-07 18:33:56-18:45:51 (D:\LegionForge\convobox-UAT, live JP UAT session on PR #213 sync, non-hotword recurrence + a live freeze recurrence with confirmed self-recovery)
+provenance:
+  authors:
+    - JP Cruz <jp@legionforge.org> (operator; live UAT session, triggered every incident below)
+    - Claude Code (Anthropic claude-sonnet-5) -- live log investigation, forensic AEC-dump cross-check, root-cause analysis, writing
+  org: https://legionforge.org
+  created: 2026-08-06T23:09:55-05:00
+  revised: 2026-08-07T19:00:00-05:00
+license: CC BY 4.0 (intent; repo code MIT)
+---
+
+# A biased hotword can trap the STT decoder into a runaway repetition loop, and it reliably fires the safeword
+
+**Context for outsiders.** ConvoBox biases faster-whisper's decoder toward a
+small vocabulary of safety-critical short phrases (`stt.hotwords`) so they
+transcribe more reliably. This session found a real cost to that bias: on
+short, low-signal audio, the decoder can get trapped repeating a biased
+word tens of times instead of producing a normal (even if wrong) short
+guess -- and because the safeword match is a substring check, a runaway
+repeat of a hotword-listed safe phrase reliably fires a real hard-stop,
+even when nothing dangerous was said. This note also resolves a separate,
+recurring "is it frozen?" concern from the same session -- it wasn't, and
+here's the forensic proof.
+
+## Problem 1: runaway repetition hallucination on hotword vocabulary
+
+Three times in one session, a very short utterance (0.9-1.6s of audio)
+transcribed as the same hotword repeated 70+ times:
+
+```
+22:48:42,696 Processing audio with duration 00:00.928
+22:48:43,247 transcript='stop brake brake brake ... [repeated ~70x] ... brake' lang=en (0.63) dec=0.84  [HARD STOP]
+22:48:43,247 hard stop matched safeword 'brake brake brake'
+
+22:52:08,536 Processing audio with duration 00:01.408
+22:52:08,986 transcript='brake brake brake ... [repeated ~70x] ... brake' lang=en (0.69) dec=0.83  [HARD STOP]
+22:52:08,986 hard stop matched safeword 'brake brake brake'
+
+23:03:55,045 Processing audio with duration 00:01.472
+23:03:55,615 transcript='brake brake brake ... [repeated ~70x] ... brake' lang=en (0.64) dec=0.87  [HARD STOP]
+23:03:55,615 hard stop matched safeword 'brake brake brake'
+```
+
+**Proof this is a decoder pathology, not mis-heard real speech**: each
+instance's captured audio is under 1.5 seconds. No human speaks a single
+word ~70 times in that span (would require ~20ms per repetition, far
+faster than natural speech). The audio duration and transcript length are
+inconsistent by roughly two orders of magnitude.
+
+**The hallucinated word is always a configured hotword.** `stt.hotwords`
+for this session: `stop brake eject mayday listening resume alpha bravo
+delta`. All three runaway instances repeat `brake`; two shorter,
+plausibly-genuine repeats earlier in the session (`'brake brake brake
+brake'` at 22:40:07, dec=0.75; `'stop stop stop stop'` at 22:40:13,
+dec=0.65) are consistent with real repeated testing speech (normal
+decode confidence, normal ~4s-repetition timing) and are NOT counted as
+hallucinations here -- the distinguishing evidence is the audio-duration
+mismatch, not the repeated word alone.
+
+**Timing correlation with pause/hard-stop events**: two of the three
+runaway instances fired within 4-5 seconds of a preceding hard-stop or
+pause trigger (23:03:51 `'stop stop stop stop'` hard-stop -> 23:03:55
+runaway `brake`; 22:52:03 `paused listening (matched 'stop listening')`
+-> 22:52:08 runaway `brake`). Plausible but NOT confirmed as causal --
+could also reflect that pause/resume cycling produces more short,
+low-signal utterances in general (background noise, partial words,
+mic-open artifacts), which is the known trigger class for this failure
+mode regardless of the preceding event.
+
+## Mechanism
+
+Hotwords bias the decoder toward specific vocabulary
+(`transcribe(hotwords=...)`). On short/ambiguous audio the decoder has
+little real signal to anchor on; combined with `hotwords` heavily
+weighting a small set of short words, the decoder can enter a repetition
+loop reinforcing the same biased token instead of terminating normally.
+This is a documented Whisper/faster-whisper failure class independent of
+this project.
+
+**Root gap, confirmed by reading the code**: faster-whisper's
+`WhisperModel.transcribe()` exposes `repetition_penalty` (default `1.0`,
+no penalty) and `no_repeat_ngram_size` (default `0`, disabled) --
+parameters that exist specifically to prevent this failure mode.
+`src/convobox/stt/transcriber.py`'s `transcribe()` call only passes
+`hotwords` and `condition_on_previous_text`; neither
+`repetition_penalty` nor `no_repeat_ngram_size` is set anywhere in this
+codebase, so both stay at faster-whisper's permissive defaults.
+
+**Consequence for safety UX**: because `ApprovalDetector`/safeword
+matching is a normalized-substring check (by design, so real variation
+in how an operator says a hard-stop phrase still matches), a runaway
+repeat of any hotword-listed safeword phrase will *always* also satisfy
+the substring match. This session's hard-stops at 22:48:43, 22:52:08,
+and 23:03:55 were all real, correctly-triggered hard-stops from the
+safeword detector's point of view -- the bug is upstream, in what the
+STT handed it, not in the safeword logic itself.
+
+## Problem 2: resume-word recognition is unreliable enough to need the web-UI fallback repeatedly
+
+Configured `interaction.resume_word: "resume listening"`. At least three
+separate pause->stuck->web-button-resume cycles in this session, each
+with multiple genuine voice attempts that failed to match:
+
+- 22:42:51-22:42:57: `'resume resume resume resume'`, `'and then listen'`
+  -- neither contains the substring `"resume listening"`. Resumed via
+  web UI at 22:43:55.
+- 22:51:26-22:51:39: `'please turn this end'`, `'this is your last
+  name.'`, then `'resume listening'` finally matched cleanly at
+  22:51:39,467 (dec=0.53) -- voice recovery worked this time.
+- 23:05:57-23:07:33: six consecutive failed attempts (`'\u0440\u0430\u0437\u044a\u0435\u043c
+  \u043d\u0430 \u0441\u0442\u043e\u043b'` [Russian, low confidence 0.86 lang-id but
+  garbled], `'was him listening'`, `'is your must'`, `"please don't miss
+  that"`, `'and then listen'`, `"trying to stay the week where it's
+  going to soon listen"`, and finally `'\u043c\u0430\u0441\u0442\u0435\u0440'` [Russian
+  "master", lang-id probability only 0.33]) before falling back to the
+  web UI resume button at 23:07:33.
+
+The Cyrillic mis-transcriptions are the same short/low-signal hallucination
+class already documented for this project's *original* resume word
+("Athena" hallucinated as Cyrillic text and unrelated fluent sentences,
+per commit `c7a84f3`'s own message) -- switching the resume word from
+"Athena" to "resume listening" did not eliminate this failure class, only
+changed its surface. The operator is now considering a further change
+(candidate: "pineapple", already sanity-tested earlier the same day at
+15:47:45-15:47:57 with clean high-confidence transcriptions each time).
+
+## Problem 3: none of this was ever a frozen pipeline -- forensically confirmed
+
+Every one of the above incidents *felt* like a hang to the operator in
+the moment (multiple "still stuck" / "locked up" reports through the
+session). None were. Two independent checks rule out an actual pipeline
+freeze:
+
+1. **Decode latency, every instance, zero exceptions**: every
+   `Processing audio` -> `transcript`/`dropped` pair in the entire
+   session completed in under one second, including the runaway
+   repetition instances themselves (22:48:42,696 -> 22:48:43,247 =
+   551ms for the ~70-word hallucinated transcript). The decoder was
+   never slow; it was fast and wrong.
+2. **Raw mic capture, forensic cross-check independent of the app's own
+   logging**: `.aec-dumps/20260806-223710/mic-raw.wav` -- 21,985,280
+   frames @ 16000Hz = 1374.1s of continuously captured audio, consistent
+   with the session's real elapsed wall-clock length. Per-checkpoint
+   arithmetic across the specific window that felt most "stuck"
+   (22:53:02 -> 22:56:48, capture frames 95001 -> 117628): 226.3s of
+   audio captured against 226s of real elapsed time. If mic capture had
+   actually died mid-session, the file would show a permanent shortfall
+   against real elapsed time from that point forward; it doesn't. Same
+   diagnostic method as the project's own earlier VAD-lockup finding
+   (`docs/field-notes/2026-08-05-vad-segmenter-silent-unbounded-lockup.md`).
+
+**What actually produced the "stuck" perception**: paused state (from a
+real or hallucinated hard-stop) + several failed voice resume attempts +
+alarming leftover hallucinated text (the 70-word "brake" wall) still
+visible on screen from a few minutes earlier, with nothing distinguishing
+"quietly waiting for you to speak" from "processing" from "frozen" at a
+glance. A genuine UX gap, not a technical one.
+
+## What transfers
+
+- **Hotword/prompt-bias parameters and repetition-guard parameters are a
+  package deal for short-phrase-vocabulary use cases** -- biasing a
+  decoder toward a small set of short words without also capping
+  repetition is a real, live-reproduced failure mode, not a theoretical
+  risk. (validated-live)
+- **A safeword/hard-stop detector built on substring matching inherits
+  every upstream STT hallucination that happens to contain the matched
+  substring** -- this is a deliberate, correct tradeoff (real phrase
+  variation must still match), but it means STT reliability work IS
+  safety-relevant work for a voice-native safety mechanism, not a
+  separate accuracy concern. (validated-live, this instance)
+- **Changing a short problem phrase (resume word, safeword, hotword) to
+  a different short phrase does not by itself close the short-phrase
+  hallucination failure class** -- it just moves where it surfaces.
+  (validated-live: "Athena" -> "resume listening", same failure class,
+  different symptom)
+- **"Feels frozen" and "is frozen" require different evidence** -- log
+  silence during a real freeze and log silence during genuine quiet are
+  indistinguishable after the fact from the log alone; an independent,
+  continuously-written artifact (here, the AEC raw-capture dump) is what
+  actually resolves the ambiguity. Worth keeping `--aec-dump` (or an
+  equivalent always-on liveness artifact) enabled for exactly this kind
+  of live-UAT triage, not just its originally-documented delay-tuning
+  purpose. (validated-live)
+
+## Fix, implemented 2026-08-07 (schema-level; not yet live-validated)
+
+Added `stt.repetition_penalty: float | None` and
+`stt.no_repeat_ngram_size: int | None` to `STTConfig`, same opt-in
+pattern as `condition_on_previous_text`/`temperature` (None/unset =
+faster-whisper's own default, zero behavior change until explicitly
+set), wired through `transcriber.py`'s `transcribe()` call and exposed
+in both the Settings TUI and web Settings modal
+(`scripts/settings_tui.py`'s STT section). Unit-tested (both "unset
+omits the kwarg entirely" and "set passes through correctly", mirroring
+the existing `temperature` tests exactly) -- full suite green. **Not
+yet live-tested with real audio** -- these are new knobs someone needs
+to actually turn during a live session and confirm the repetition stops
+without degrading normal decodes. Community-cited starting values for
+this failure class: `repetition_penalty` around `1.1-1.3`,
+`no_repeat_ngram_size` around `2-3` -- not yet validated against this
+project's own real audio, worth live-testing before assuming those
+numbers transfer.
+
+## Addendum, 2026-08-07 (later, PR #213 live UAT sync): the same failure reproduces WITHOUT a hotword involved -- broader than originally scoped
+
+JP hit this again live, this time while syncing and testing PR #213
+(unrelated to the fix above, which was still only proposed at the
+time). Real log evidence:
+
+```
+18:33:56,777 Processing audio with duration 00:01.056
+18:33:57,208 Detected language 'en' with probability 0.93
+18:33:57,884 transcript="that's right that's right that's right that's right that's right that's right that's right that's right" lang=en (0.93) dec=0.61 busy=False  [BARGE-IN]
+18:34:41,415 transcript="so i only said that confirmation once i said the words that's right once but for some reason it's getting repeated and i can't figure out why" lang=en (1.00) dec=0.80 busy=False
+```
+
+Same signature as every instance above -- one `Processing audio` call,
+one already-corrupted transcript, audio duration (1.056s) two orders of
+magnitude too short for 8 real repetitions of a 3-word phrase. JP's own
+immediate follow-up utterance (captured verbatim above, dec=0.80,
+clean) independently confirms this from the human side too: he said
+"that's right" exactly once.
+
+**The new part: `stt.hotwords` for this session was `stop brake eject
+mayday listening resume alpha bravo delta` -- "that's right"/"right"/
+"that's" is not in it.** Every instance in Problem 1 above repeated a
+*configured hotword* specifically, which was the note's own working
+hypothesis for *why* the decoder latched onto that particular
+token. This incident repeats an entirely unbiased phrase, which means
+hotword-biasing is a real *contributing* factor (it clearly makes
+`brake` a likelier hallucination target) but not a *necessary*
+precondition for the underlying decoder pathology -- the failure class
+is short/low-signal audio in general, not "hotword vocabulary"
+specifically. Doesn't change the proposed fix (repetition_penalty/
+no_repeat_ngram_size address the decoder behavior directly, regardless
+of what triggered it) -- raises its priority, since it's not a niche
+hotword-tuning edge case.
+
+An AI assistant JP separately consulted about this symptom (not this
+project's own tooling) offered a plausible-*sounding* but wrong theory
+for THIS codebase specifically: streaming/interim-result duplication,
+overlapping chunk reprocessing, or out-of-order chunk arrival. Worth
+recording explicitly why that doesn't fit here, since it's a reasonable
+default assumption for a general ASR system: ConvoBox's STT path is
+not streaming at the transcription level at all -- `UtteranceSegmenter`
+buffers a complete VAD-bounded utterance, then calls `transcribe()`
+exactly once on the whole buffer. The log above shows exactly one
+`Processing audio`/`transcript=` pair; the repeated text was already
+present inside that single decode's own output string before it ever
+reached any of ConvoBox's own event-forwarding or UI code. The
+duplication-layer theory would require an architecture (interim
+results, overlapping windows, concurrent chunk dispatch) this codebase
+doesn't have for STT specifically.
+
+**Rapid cluster, minutes later, escalating into a real safeword
+hard-stop:** four attempts in under a minute, all while paused and
+trying to say the resume word:
+
+```
+18:40:57,821 paused listening (matched 'pause listening')
+18:41:16,624 dropped (paused, not the resume word): 'test test test ...' (x34)
+18:41:38,434 dropped (paused, not the resume word): 'is your listening'
+18:41:42,913 dropped (paused, not the resume word): 'please please please please please please please' (x7)
+18:41:50,939 transcript='stop brake brake brake ...' (x70) [HARD STOP]
+```
+
+`test` (x34) is the same pathology as `that's right` above -- another
+non-hotword. The `brake` instance (x70) matched the safeword and
+genuinely hard-stopped, reproducing Problem 1's original safety
+consequence live a second time, on a different day. Recorded as
+further evidence the problem is real and current, not that the fix
+above does or doesn't help -- this cluster happened before the fix
+could be pulled into a live session.
+
+## Addendum, 2026-08-07 (same session, continued): the runaway-repetition hallucination reproduces on CPU too, and the freeze bug's real location is upstream of transcribe()
+
+Two follow-ups from continued live testing after the fix work above was
+already in flight.
+
+**1. Runaway hotword repetition confirmed device-independent.** After
+switching `stt.device` to `cpu` (see the freeze section below for why),
+the same "brake" repeated ~70 times on a ~1.2s audio clip reproduced
+again: `23:59[Processing audio with duration 00:01.248] -> [transcript
+'stop brake brake ... brake' x~70, dec=0.81] [HARD STOP]`, decoded in
+under 2 seconds. This rules out GPU-memory pressure (faster-whisper
+#992) as the sole or root cause of the *repetition* bug specifically --
+it is a decoder-level pathology from hotword biasing on short/ambiguous
+audio, independent of compute device. The proposed fix above (
+`repetition_penalty`/`no_repeat_ngram_size`) is unaffected by this --
+still the right fix, now with stronger justification for prioritizing
+it (not a CUDA-only edge case).
+
+**2. The freeze bug is real, reproduces on CPU too, was NOT fixed by
+offloading transcribe() -- because it doesn't happen there.** A
+same-night follow-up PR (#217, `fix(stt): offload transcribe() to a
+thread and add an optional timeout`) was built and merged into this
+live UAT checkout specifically to address the freeze first documented
+above (Problem 3). The freeze then reproduced AGAIN after that fix was
+in place, on CPU, with these distinguishing symptoms:
+- Multiple confirmed voice attempts after a pause, zero effect -- not
+  even a `dropped (...)` log line, unlike every prior "stuck" report
+  this session (which always had SOME trailing log activity).
+- The web UI's Stop-listening button also produced no log line and no
+  effect -- a *different* code path (an HTTP request handler via
+  uvicorn) than the mic loop entirely, evidence the whole event loop
+  was blocked, not just STT.
+- **Zero `Processing audio` log lines for the entire stuck window** --
+  meaning the freeze happens *before* an utterance is ever handed to
+  `transcriber.transcribe()`. #217's fix only wraps that call, so it
+  correctly did not (and could not) fix this.
+
+Root cause candidate, found by reading the code (not yet proven the
+same way #217's diagnosis was): `src/convobox/vad/segmenter.py`'s
+`UtteranceSegmenter._process_window()` calls `self._model(torch.
+from_numpy(window), _SAMPLE_RATE).item()` -- a synchronous Silero VAD
+(ONNX) inference call, made once per 512-sample (32ms) window, directly
+inside `async def segment()`'s consumption loop, with no thread offload
+and no timeout. Same architectural shape as the bug #217 just fixed
+(a synchronous native/ML call with no offload, able to freeze the whole
+event loop if it ever hangs), just upstream of it and far more
+frequent (~31 calls/second of audio vs. once per completed utterance
+for STT) -- confirmed via `MicrophoneStream`'s own `blocksize: int =
+512`, which matches `_WINDOW_SAMPLES` exactly, so each mic chunk feeds
+exactly one VAD window through this same synchronous path.
+
+**Not yet fixed.** Not yet proven with the same rigor as the transcribe()
+freeze (no AEC-dump-style forensic cross-check was run specifically
+against this new hypothesis before the session ended) -- filed as a
+`KNOWN-ISSUES.md` entry (status: diagnosed, not fixed) rather than
+claimed here as fully validated-live, since the code-reading diagnosis,
+while strong, has not itself been forensically confirmed the way the
+original transcribe()-freeze finding was.
+
+## Addendum, 2026-08-07 (same session, minutes later): the freeze recurred live, both the safeword AND the web Stop/Resume buttons were unresponsive together, and it self-recovered after ~2m9s
+
+Directly following the rapid repetition cluster above (the 70x `brake`
+hard-stop at 18:41:50), JP reported live, in order: saying the "stop"/
+"eject" safeword phrases had no effect, clicking the web Stop button
+had no effect, and clicking Resume Listening also had no effect.
+`convobox-tui.log` confirms genuine, total silence for the whole
+window -- not just STT being uncooperative:
+
+```
+18:41:50,939 hard stop matched safeword 'brake brake brake'
+                                        [2m 9.4s of ZERO log lines]
+18:44:00,358 resumed listening (web UI)
+```
+
+**All three control paths failing together (voice safeword check, the
+web server's `/api/stop` handler, the web server's `/api/listening`
+resume handler) is itself the evidence**: those are three genuinely
+different code paths (mic-loop hook, two separate HTTP route handlers)
+that only fail SIMULTANEOUSLY if something upstream of all three is
+blocked -- exactly the shared-event-loop freeze this addendum's own
+earlier section already named as its root-cause candidate
+(`UtteranceSegmenter`'s synchronous, unoffloaded Silero VAD call). This
+is now real-time, first-hand corroborating evidence for that hypothesis
+gathered WHILE it was actively happening, not reconstructed after the
+fact from logs alone.
+
+**New finding: this instance was not permanent -- it self-recovered
+after exactly 2m9.4s**, with no process restart. Whatever was
+blocking the event loop eventually returned control on its own; the
+`resumed listening (web UI)` line means the click that landed was the
+LAST of several JP made during the frozen window, once the handler
+finally became live again. JP exited the session cleanly (`INFO
+exiting`, `18:45:51`) shortly after regaining control -- confirmed no
+process was killed/orphaned; this was a real, clean shutdown once he
+chose to stop. This changes the operational guidance for a future
+recurrence: **waiting it out for a couple of minutes is a real option,
+not just "kill and restart"** -- though killing is still reasonable if
+someone wants control back immediately rather than waiting on an
+unconfirmed recovery.
+
+**Priority raised.** Two live recurrences in one session (this one and
+the original Problem 3 finding), now with confirmed simultaneous
+failure of BOTH safety-relevant control paths (safeword AND the web
+Stop button) at once, is a stronger safety argument for fixing the VAD
+segmenter's synchronous call than the original diagnosis had on its
+own -- moved into `KNOWN-ISSUES.md` with this addendum's evidence
+folded in.

@@ -6,6 +6,14 @@
 <title>ConvoBox</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#1a1a1a">
+<!-- highlight.js themes, vendored (see vendor/highlightjs/NOTICE.md) --
+     only the one matching the OS color-scheme preference actually
+     applies, same mechanism the rest of this page's own dark/light
+     theming already uses (:root's own prefers-color-scheme block
+     above). Loaded unconditionally (small, ~1.3KB each) even though the
+     JS highlighter itself only loads on demand -- see renderArtifact(). -->
+<link rel="stylesheet" href="vendor/highlightjs/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="vendor/highlightjs/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
 <style>
   :root {
     color-scheme: light dark;
@@ -43,6 +51,16 @@
     color: var(--fg);
   }
   body { display: flex; flex-direction: column; }
+
+  /* Screen-reader-only label text -- visually hidden but still in the
+     accessibility tree, for controls (like the session picker below)
+     where a visible <label> doesn't fit this ribbon's compact layout.
+     Prefer a real <label> over aria-label alone wherever there's room
+     for one, even an off-screen one. */
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
 
   /* --- Top ribbon: branding, session nav, and controls. Stop/Resume
      listening, Settings, and Quit are all real control-plane actions now
@@ -104,6 +122,25 @@
     border-color: #b00020;
     color: #ffffff;
   }
+  /* Stop button: always red, no arm/confirm step -- it mirrors the spoken
+     safeword ("stop stop stop"), which also acts on the first utterance,
+     not a two-step confirm. Same fixed #b00020/white pairing as quit-btn's
+     armed state (chosen there for the same 4.5:1-contrast reason). */
+  .ribbon button.stop-btn {
+    background: #b00020;
+    border-color: #b00020;
+    color: #ffffff;
+  }
+  .ribbon button.stop-btn:hover:not(:disabled) {
+    background: #8f0019;
+    border-color: #8f0019;
+  }
+  /* Decorative only (aria-hidden) -- the button's own text/aria-label
+     already carries the real accessible name and state (WCAG 1.1.1: a
+     glyph is never the sole carrier of meaning). Purely a faster visual
+     at-a-glance cue for sighted users switching between "click to pause"
+     and "click to resume". */
+  #listening-btn-icon { margin-right: 0.3em; }
 
   /* --- Row below the ribbon: chat on the left, the artifact pane (when
      open) on the right. min-height: 0 on both the row and its scrolling
@@ -192,6 +229,22 @@
     background: var(--tool-bg);
     font-family: ui-monospace, monospace;
     font-size: 0.85rem;
+  }
+  /* Tool call/result bodies default to collapsed (a busy tool-using turn
+     can otherwise dump a wall of raw input/output into the transcript) --
+     <details>/<summary> gets click-to-expand, keyboard access, and the
+     disclosure triangle for free, no custom JS state needed. */
+  .bubble.tool_call summary, .bubble.tool_result summary {
+    cursor: pointer;
+  }
+  .bubble.tool_call summary:hover, .bubble.tool_result summary:hover {
+    opacity: 0.8;
+  }
+  .tool-detail {
+    margin-top: 0.4rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    opacity: 0.9;
   }
   .bubble.approval_request { background: var(--assistant-bg); border: 1px solid #e0a030; }
   .bubble.error { background: var(--assistant-bg); color: var(--error-fg); }
@@ -318,6 +371,13 @@
     flex: 0 0 auto;
   }
   .artifact-pane-header button:hover { background: var(--assistant-bg); }
+  #artifact-pane-editor-link {
+    font-size: 0.72rem; color: var(--fg); text-decoration: none;
+    padding: 0.25rem 0.5rem; border-radius: 6px; border: 1px solid var(--border);
+    flex: 0 0 auto; white-space: nowrap;
+  }
+  #artifact-pane-editor-link:hover { border-color: var(--dim); }
+  #artifact-pane-editor-link[hidden] { display: none; }
   #artifact-pane-body {
     flex: 1 1 auto; min-height: 0; overflow: auto;
     display: flex; align-items: center; justify-content: center;
@@ -367,8 +427,20 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
   }
   .settings-tabs button.active { background: var(--assistant-bg); font-weight: 600; }
+  /* Restart-required marker: a distinct GLYPH (not just a color dot --
+     WCAG 1.4.1, color is never the only signal), aria-hidden since the
+     tab's own title attribute and the always-visible banner in
+     .settings-section-note below are what actually carry the meaning to
+     assistive tech, not this decorative mark. */
+  .settings-tabs button .restart-mark { margin-left: 0.3rem; opacity: 0.75; }
   .settings-errors { font-size: 0.78rem; color: var(--error-fg); padding: 0.5rem 1rem 0; }
   .settings-body { flex: 1 1 auto; overflow-y: auto; padding: 0.8rem 1rem; }
+  .settings-section-note {
+    font-size: 0.78rem; padding: 0.5rem 0.7rem; margin-bottom: 0.8rem;
+    border-radius: 6px; border: 1px solid var(--border);
+  }
+  .settings-section-note.restart { border-color: #e0a030; }
+  .settings-section-note.live { border-color: #2e7d32; }
   .settings-field { margin-bottom: 0.9rem; }
   .settings-field label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.25rem; }
   .settings-field .help { font-size: 0.72rem; color: var(--dim); margin-top: 0.25rem; }
@@ -399,6 +471,13 @@
     animation: settings-spin 0.8s linear infinite; vertical-align: -0.1em;
   }
   @keyframes settings-spin { to { transform: rotate(360deg); } }
+  /* WCAG 2.3.3 -- never animate without checking this. An infinite spin
+     can be a genuine vestibular-disorder trigger, not just a preference;
+     the pending state is still fully conveyed by the text next to it
+     ("Testing… (Ns)"), so freezing the spinner loses no information. */
+  @media (prefers-reduced-motion: reduce) {
+    .settings-status.pending::before { animation: none; }
+  }
   .settings-footer button {
     font-size: 0.82rem; padding: 0.4rem 0.8rem; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
@@ -411,13 +490,15 @@
 <header class="ribbon">
   <img class="logo" src="img/legionforge-logo.svg" alt="LegionForge">
   <span class="brand">ConvoBox</span>
-  <span id="status" class="disconnected">connecting&hellip;</span>
-  <span id="activity-status"></span>
+  <span id="status" class="disconnected" role="status" aria-live="polite">connecting&hellip;</span>
+  <span id="activity-status" role="status" aria-live="polite"></span>
   <span class="spacer"></span>
-  <select id="session-select"></select>
-  <button id="clear-history-btn" title="Clear this session's history">Clear history</button>
-  <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead">Stop listening</button>
-  <button id="settings-btn" title="Edit convobox.yaml settings">Settings</button>
+  <label for="session-select" class="visually-hidden">Saved session</label>
+  <select id="session-select" title="Switch between saved conversation sessions -- only populated when Settings &gt; Web &gt; history tracking is on"></select>
+  <button id="clear-history-btn" title="Permanently deletes this session's saved history from disk. Cannot be undone -- does not affect the live conversation still on screen.">Clear history</button>
+  <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead" aria-label="Pause listening"><span id="listening-btn-icon" aria-hidden="true">&#9208;</span><span id="listening-btn-label">Stop listening</span></button>
+  <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after."><span aria-hidden="true">&#9209;</span> Stop</button>
+  <button id="settings-btn" title="Open Settings -- edit convobox.yaml (audio devices, STT/TTS, safety phrases) without restarting">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
 <div class="body-row">
@@ -429,14 +510,17 @@
   </div>
   <div id="drop-overlay" hidden>Drop to upload &mdash; goes into the backend's working directory</div>
   <form id="composer">
+    <label for="composer-input" class="visually-hidden">Message to send</label>
     <textarea id="composer-input" placeholder="Type a message&hellip;" rows="1"></textarea>
-    <button id="composer-send-btn" type="submit">Send</button>
+    <button id="composer-send-btn" type="submit" title="Send this message to the backend (Enter also sends; Shift+Enter for a new line)">Send</button>
   </form>
 </main>
 <aside id="artifact-pane" hidden>
   <div class="artifact-pane-header">
     <span id="artifact-pane-title"></span>
-    <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane">&times;</button>
+    <a id="artifact-pane-editor-link" href="#" target="_blank" rel="noopener noreferrer" hidden
+       title="Open this file in VS Code (requires VS Code installed with its vscode:// URI handler registered -- the default on a normal install)">Open in editor</a>
+    <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane" title="Close the artifact pane">&times;</button>
   </div>
   <div id="artifact-pane-body"></div>
 </aside>
@@ -445,21 +529,42 @@
   <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="settings-header">
       <h2 id="settings-title">Settings</h2>
-      <button id="settings-close-btn" type="button" aria-label="Close settings">&times;</button>
+      <button id="settings-close-btn" type="button" aria-label="Close settings" title="Close settings">&times;</button>
     </div>
     <div id="settings-tabs" class="settings-tabs"></div>
-    <div id="settings-errors" class="settings-errors" hidden></div>
+    <div id="settings-errors" class="settings-errors" role="alert" hidden></div>
     <div id="settings-body" class="settings-body"></div>
     <div class="settings-footer">
-      <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden>Test this section</button>
-      <button id="settings-cancel-test-btn" type="button" class="settings-test-btn" hidden>Cancel</button>
-      <span id="settings-status" class="settings-status"></span>
+      <button id="settings-test-section-btn" type="button" class="settings-test-btn" hidden title="Try this tab's current settings live without saving them to disk yet (e.g. downloads/tests an STT or TTS model)">Test this section</button>
+      <button id="settings-cancel-test-btn" type="button" class="settings-test-btn" hidden title="Stop waiting for the test -- the server keeps running it in the background regardless">Cancel</button>
+      <span id="settings-status" class="settings-status" role="status" aria-live="polite"></span>
       <span class="spacer"></span>
-      <button id="settings-save-btn" type="button" class="primary">Save</button>
+      <button id="settings-save-btn" type="button" class="primary" title="Save changes to convobox.yaml -- some settings need a restart to take effect">Save</button>
     </div>
   </div>
 </div>
 <script>
+// Required on every mutating (POST/PUT/PATCH/DELETE) request -- the
+// backend's own middleware rejects any without it (src/convobox/web/
+// app.py). A custom header forces the browser to CORS-preflight even a
+// body-less POST, closing a real CSRF gap: without this, a cross-origin
+// page's `fetch(url, {method:"POST"})` reached routes like /api/quit,
+// /api/stop, and /api/sessions/{id}/clear with no preflight at all --
+// CORS only controls whether the ATTACKING page can read the response,
+// never whether the browser sends a "simple" request in the first
+// place. Found via autonomous codebase review, 2026-08-08 (GitHub
+// issue #235, finding A3).
+//
+// Declared here, OUTSIDE both of this page's IIFEs (this script block's
+// and the settings-modal script block's) -- true page-global scope, not
+// either IIFE's own module-like closure. A prior version of this fix
+// declared it INSIDE the first IIFE, which left every fetch() call in
+// the second one (fetchSchema/testSettings/saveSettings -- the entire
+// settings-save flow, i.e. exactly A4's own route) throwing
+// `ReferenceError: CSRF_HEADERS is not defined` at runtime -- caught
+// live via a real browser + console error check, not assumed.
+const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
+
 (function () {
   "use strict";
 
@@ -468,6 +573,9 @@
   const statusEl = document.getElementById("status");
   const activityStatusEl = document.getElementById("activity-status");
   const listeningBtn = document.getElementById("listening-btn");
+  const listeningBtnIcon = document.getElementById("listening-btn-icon");
+  const listeningBtnLabel = document.getElementById("listening-btn-label");
+  const stopBtn = document.getElementById("stop-btn");
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
   const quitBtn = document.getElementById("quit-btn");
@@ -475,6 +583,7 @@
   const artifactTitleEl = document.getElementById("artifact-pane-title");
   const artifactBodyEl = document.getElementById("artifact-pane-body");
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
+  const artifactEditorLink = document.getElementById("artifact-pane-editor-link");
   const composerForm = document.getElementById("composer");
   const composerInput = document.getElementById("composer-input");
   const composerSendBtn = document.getElementById("composer-send-btn");
@@ -485,11 +594,89 @@
   // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
   // directly, HTML renders sandboxed (agent-generated content, not this
   // page's own trusted UI -- never drop the sandbox attribute without a
-  // real reason), everything else in the serving route's own allowlist
-  // (pdf/csv/txt) falls back to a plain download link.
+  // real reason), source code renders syntax-highlighted (2026-08-07,
+  // JP asked directly -- see _ARTIFACT_CODE_LANGUAGES below), everything
+  // else in the serving route's own allowlist (pdf/csv/txt) falls back
+  // to a plain download link.
   const _ARTIFACT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp"]);
   const _ARTIFACT_HTML_EXTENSIONS = new Set(["html", "htm"]);
+  // ext -> the highlight.js grammar name each vendored
+  // vendor/highlightjs/languages/*.min.js file self-registers as (see
+  // that directory's own NOTICE.md). Must stay in sync with
+  // ARTIFACT_MEDIA_TYPES (src/convobox/adapters/base.py) -- that dict is
+  // what actually gates whether an ARTIFACT event for a given extension
+  // ever reaches this pane at all; this map only decides HOW to render
+  // an already-allowed one, never whether it's allowed. .h defaults to
+  // the cpp grammar rather than c -- close enough for most real-world
+  // C headers and handles the (now-common) mixed C/C++ codebase case
+  // better than the reverse choice would.
+  const _ARTIFACT_CODE_LANGUAGES = new Map([
+    ["js", "javascript"], ["mjs", "javascript"], ["cjs", "javascript"], ["jsx", "javascript"],
+    ["ts", "typescript"], ["tsx", "typescript"],
+    ["yaml", "yaml"], ["yml", "yaml"],
+    ["java", "java"],
+    ["c", "c"],
+    ["h", "cpp"], ["cpp", "cpp"], ["cc", "cpp"], ["cxx", "cpp"], ["hpp", "cpp"], ["hh", "cpp"],
+    ["cs", "csharp"],
+    ["json", "json"],
+    ["xml", "xml"],
+    ["md", "markdown"],
+  ]);
   let artifactLoadCounter = 0;
+
+  // Lazy-loaded on first real use, not at page load -- most sessions
+  // never open a code artifact, and the vendored bundle (core + every
+  // language grammar) is real weight (~170KB uncompressed) not worth
+  // paying for pages that only ever show images. Each URL loads and
+  // executes at most once; concurrent renders share the same in-flight
+  // promise instead of racing duplicate <script> tags.
+  const _scriptLoadPromises = new Map();
+  function loadScriptOnce(src) {
+    if (!_scriptLoadPromises.has(src)) {
+      _scriptLoadPromises.set(src, new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = src;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`failed to load ${src}`));
+        document.head.appendChild(script);
+      }));
+    }
+    return _scriptLoadPromises.get(src);
+  }
+
+  async function ensureHighlighter(lang) {
+    // Core must load (and RUN) before any language file -- each
+    // languages/*.min.js self-registers against the global `hljs` the
+    // core script creates when it executes. Loading ORDER matters here,
+    // not just eventual presence, which is why this awaits core first
+    // rather than kicking off both loads in parallel.
+    await loadScriptOnce("vendor/highlightjs/highlight.min.js");
+    await loadScriptOnce(`vendor/highlightjs/languages/${lang}.min.js`);
+  }
+
+  async function renderCodeArtifact(url, filename, lang) {
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.className = `language-${lang}`;
+    pre.appendChild(code);
+    artifactBodyEl.appendChild(pre);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      // textContent, never innerHTML -- this is agent-generated content,
+      // not trusted markup (same reasoning as the HTML iframe's sandbox
+      // attribute below). highlight.js's highlightElement() reads the
+      // already-set textContent and wraps it in ITS OWN generated
+      // markup; it never re-parses this text as HTML itself.
+      code.textContent = text;
+      await ensureHighlighter(lang);
+      window.hljs.highlightElement(code);
+    } catch (err) {
+      console.error("code artifact render failed", err);
+      code.textContent = `Failed to load ${filename}: ${err}`;
+    }
+  }
 
   function renderArtifact(path) {
     // Cache-bust on EVERY render, same path or not -- "a later ARTIFACT
@@ -497,8 +684,8 @@
     // means the underlying file changed, so a stale cached image/iframe
     // must never be what's shown.
     artifactLoadCounter += 1;
-    const url = `/api/artifacts/${path.split("/").map(encodeURIComponent).join("/")}` +
-      `?t=${Date.now()}_${artifactLoadCounter}`;
+    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    const url = `/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`;
     const filename = path.split("/").pop() || path;
     const dot = filename.lastIndexOf(".");
     const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
@@ -506,6 +693,7 @@
     artifactTitleEl.textContent = filename;
     artifactTitleEl.title = path;
     artifactBodyEl.innerHTML = "";
+    artifactEditorLink.hidden = true;
 
     if (_ARTIFACT_IMAGE_EXTENSIONS.has(ext)) {
       const img = document.createElement("img");
@@ -518,6 +706,8 @@
       iframe.title = filename;
       iframe.sandbox = "allow-scripts";
       artifactBodyEl.appendChild(iframe);
+    } else if (_ARTIFACT_CODE_LANGUAGES.has(ext)) {
+      renderCodeArtifact(url, filename, _ARTIFACT_CODE_LANGUAGES.get(ext));
     } else {
       const link = document.createElement("a");
       link.className = "artifact-fallback-link";
@@ -527,6 +717,19 @@
       link.textContent = `Download ${filename}`;
       artifactBodyEl.appendChild(link);
     }
+
+    // "Open in editor" (best-effort): offered for every artifact type,
+    // not just code -- VS Code opens images/PDFs fine too. Stays hidden
+    // on any failure (e.g. a future no-working_dir edge case) rather
+    // than showing a dead link; failure here is never fatal to the pane
+    // itself, which is why this isn't awaited before showing the pane.
+    fetch(`/api/artifacts/${encodedPath}/editor-uri`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data) => {
+        artifactEditorLink.href = data.uri;
+        artifactEditorLink.hidden = false;
+      })
+      .catch((err) => console.error("editor-uri fetch failed", err));
 
     artifactPaneEl.hidden = false;
   }
@@ -574,7 +777,7 @@
       try {
         res = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/approval`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
           body: JSON.stringify({ action }),
         });
         data = await res.json().catch(() => ({}));
@@ -630,6 +833,16 @@
   function renderEvent(ev) {
     const kind = ev.event_type || ev.type || "event";
     if (kind === "done") return;
+    if (kind === "dropped") {
+      // EventBroadcaster's bounded-queue backpressure marker (src/convobox/
+      // web/stream.py) -- this tab's SSE queue fell behind and some live
+      // events were evicted to make room for newer ones. No chat bubble
+      // (there's no transcript/response content to show, only a count) --
+      // logged so it's still discoverable if a session looks like it's
+      // missing turns.
+      console.warn(`live event stream dropped ${ev.count} event(s) -- this tab fell behind`);
+      return;
+    }
     if (kind === "artifact") {
       // No chat bubble for this one -- the pane IS the rendering, a
       // bubble would just be empty (nothing in the backend_response/
@@ -654,15 +867,35 @@
     meta.textContent = displayNames[kind] || kind.replace(/_/g, " ");
     bubble.appendChild(meta);
 
-    const body = document.createElement("div");
-    // textContent, never innerHTML -- transcripts/tool output/backend
-    // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
-    // XSS-prevention note), so no HTML in them is ever interpreted.
-    body.textContent =
-      ev.backend_response || ev.content || ev.user_transcript ||
-      (ev.tool_name ? `${ev.tool_name}(${ev.tool_input || ""})` : "") ||
-      (ev.tool_output || "");
-    bubble.appendChild(body);
+    if (kind === "tool_call" || kind === "tool_result") {
+      // Collapsed by default (a tool-heavy turn can otherwise dump a wall
+      // of raw input/output into the transcript) -- <details> handles the
+      // click-to-expand itself, no click handler needed here.
+      // ev.tool (live SSE shape, event_to_dict) vs ev.tool_name (persisted
+      // history row shape) name the same field -- same reasoning as
+      // kind's own event_type/type fallback above.
+      const toolName = ev.tool_name || ev.tool || "tool";
+      const detail = kind === "tool_call"
+        ? (ev.tool_input || "(no input)")
+        : (ev.backend_response || ev.tool_output || "(no output)");
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = kind === "tool_call" ? toolName : `${toolName} result`;
+      details.appendChild(summary);
+      const pre = document.createElement("div");
+      pre.className = "tool-detail";
+      // textContent, never innerHTML -- see the note below.
+      pre.textContent = detail;
+      details.appendChild(pre);
+      bubble.appendChild(details);
+    } else {
+      const body = document.createElement("div");
+      // textContent, never innerHTML -- transcripts/tool output/backend
+      // responses are untrusted content (docs/WEB-UI-ARCHITECTURE.md's own
+      // XSS-prevention note), so no HTML in them is ever interpreted.
+      body.textContent = ev.backend_response || ev.content || ev.user_transcript || "";
+      bubble.appendChild(body);
+    }
 
     if (kind === "approval_request") {
       if (pendingApprovalActions) {
@@ -708,14 +941,19 @@
   // actually resumes listening), not for validation or anything security-
   // relevant, so a plain fetch of the same /api/settings the Settings
   // modal already uses is fine (no need to widen /api/config's
-  // deliberately-scoped display-only response for this).
+  // deliberately-scoped display-only response for this). Also grabs
+  // web.history_tracking_enabled off the same response -- loadSessions()
+  // uses it to explain an empty session picker (default is OFF, so an
+  // empty dropdown there is the normal case, not obviously a bug).
   let resumeWord = null;
+  let historyTrackingEnabled = null;
 
   async function loadResumeWord() {
     try {
       const res = await fetch("/api/settings");
       const data = await res.json();
       resumeWord = data.values?.interaction?.resume_word || null;
+      historyTrackingEnabled = data.values?.web?.history_tracking_enabled ?? null;
     } catch (err) {
       console.error("failed to load resume word", err);
     }
@@ -725,6 +963,22 @@
     const res = await fetch("/api/sessions");
     const data = await res.json();
     sessionSelect.innerHTML = "";
+    if (data.sessions.length === 0) {
+      // An empty <select> with zero <option>s looks broken, not "there's
+      // nothing here yet" -- give it a real, disabled placeholder that
+      // explains WHY, since history tracking off (the default) is the
+      // most likely reason, not an error.
+      const placeholder = document.createElement("option");
+      placeholder.textContent = historyTrackingEnabled === false
+        ? "No saved sessions (history tracking is off in Settings)"
+        : "No saved sessions yet";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      sessionSelect.appendChild(placeholder);
+      sessionSelect.disabled = true;
+      return null;
+    }
+    sessionSelect.disabled = false;
     for (const s of data.sessions) {
       const opt = document.createElement("option");
       opt.value = s.id;
@@ -758,15 +1012,31 @@
 
   function setListeningButton(paused) {
     isPaused = paused;
-    listeningBtn.textContent = paused ? "Resume listening" : "Stop listening";
+    // Icon is aria-hidden and purely decorative -- the label span's text
+    // and the button's own aria-label are what a screen reader announces
+    // and what carries the real state (WCAG 1.1.1: never icon-only).
+    // ⏸ (pause bars) = "click to pause" (currently listening); ▶
+    // (play triangle) = "click to resume" (currently paused) -- the same
+    // convention as a media player's own play/pause button.
+    listeningBtnIcon.textContent = paused ? "▶" : "⏸";
+    listeningBtnLabel.textContent = paused ? "Resume listening" : "Stop listening";
+    listeningBtn.setAttribute("aria-label", paused ? "Resume listening" : "Pause listening");
     listeningBtn.title = paused
       ? "Resume listening -- say the resume word to do this by voice instead"
       : "Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead";
   }
 
-  function renderActivityStatus(status) {
-    activityStatusEl.textContent =
-      status === "paused" && resumeWord ? `paused (say "${resumeWord}" to resume)` : status;
+  function renderActivityStatus(status, detail) {
+    // detail is WorkingIndicator.current_activity (a tool name, or null
+    // for "thinking, no tool call yet") -- only meaningful for "working",
+    // same as the TUI's own [TOOL x]/[THINKING] heartbeat tag.
+    let text = status;
+    if (status === "paused" && resumeWord) {
+      text = `paused (say "${resumeWord}" to resume)`;
+    } else if (status === "working") {
+      text = detail ? `working (${detail})` : "working (thinking)";
+    }
+    activityStatusEl.textContent = text;
     activityStatusEl.className = status === "paused" ? "paused" : "";
     setListeningButton(status === "paused");
   }
@@ -785,7 +1055,7 @@
       try {
         const payload = JSON.parse(e.data);
         if (payload.type === "status") {
-          renderActivityStatus(payload.status);
+          renderActivityStatus(payload.status, payload.detail);
         } else {
           renderEvent(payload);
         }
@@ -803,7 +1073,7 @@
     try {
       const res = await fetch("/api/listening", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ action: isPaused ? "resume" : "pause" }),
       });
       if (res.ok) {
@@ -814,6 +1084,22 @@
       console.error("listening toggle failed", err);
     } finally {
       listeningBtn.disabled = false;
+    }
+  });
+
+  // No arm/confirm step -- mirrors the spoken safeword, which also acts
+  // the instant it's heard, not on a second repetition.
+  stopBtn.addEventListener("click", async () => {
+    stopBtn.disabled = true;
+    const originalText = stopBtn.textContent;
+    stopBtn.textContent = "Stopping…";
+    try {
+      await fetch("/api/stop", { method: "POST", headers: CSRF_HEADERS });
+    } catch (err) {
+      console.error("stop failed", err);
+    } finally {
+      stopBtn.disabled = false;
+      stopBtn.textContent = originalText;
     }
   });
 
@@ -839,7 +1125,7 @@
     try {
       const res = await fetch("/api/text", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
       if (res.ok) {
@@ -893,7 +1179,12 @@
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      // CSRF_HEADERS only -- no Content-Type here, the browser must set
+      // multipart/form-data's own boundary param itself; setting it
+      // manually breaks the upload (app.py's CSRF middleware landed
+      // after this feature was first written -- every mutating route
+      // needs this header now, see require_csrf_header's own docstring).
+      const res = await fetch("/api/upload", { method: "POST", headers: CSRF_HEADERS, body: formData });
       if (!res.ok) {
         console.error("upload failed", file.name, res.status, await res.text());
       }
@@ -906,10 +1197,31 @@
     }
   }
 
+  // Previously silent -- click did a fetch + reload with zero visible
+  // feedback, so it looked like it did nothing even when it worked (and
+  // gave no signal at all if the request failed). Same disable+relabel+
+  // finally-reset pattern as stop-btn/quit-btn above, not a new one.
   clearHistoryBtn.addEventListener("click", async () => {
     if (!currentSessionId) return;
-    await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/clear`, { method: "POST" });
-    await loadHistory(currentSessionId);
+    clearHistoryBtn.disabled = true;
+    const originalText = clearHistoryBtn.textContent;
+    clearHistoryBtn.textContent = "Clearing…";
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(currentSessionId)}/clear`,
+        { method: "POST", headers: CSRF_HEADERS }
+      );
+      if (!res.ok) throw new Error(`clear failed: HTTP ${res.status}`);
+      await loadHistory(currentSessionId);
+      clearHistoryBtn.textContent = "Cleared";
+      setTimeout(() => { clearHistoryBtn.textContent = originalText; }, 1500);
+    } catch (err) {
+      console.error("clear history failed", err);
+      clearHistoryBtn.textContent = "Clear failed";
+      setTimeout(() => { clearHistoryBtn.textContent = originalText; }, 2500);
+    } finally {
+      clearHistoryBtn.disabled = false;
+    }
   });
 
   // Two clicks required: the first "arms" it (button restyles + relabels
@@ -940,7 +1252,7 @@
     quitBtn.disabled = true;
     quitBtn.textContent = "Quitting…";
     try {
-      await fetch("/api/quit", { method: "POST" });
+      await fetch("/api/quit", { method: "POST", headers: CSRF_HEADERS });
     } catch (err) {
       // The connection dying mid-request is the expected shape of a
       // process actually quitting, not a real error.
@@ -1023,7 +1335,7 @@
   async function fetchSchema() {
     const res = await fetch("/api/settings/schema", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ values: draft }),
     });
     const data = await res.json();
@@ -1038,7 +1350,22 @@
     for (const section of sections) {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = section.label;
+      btn.append(section.label);
+      // Glyph, not color alone (WCAG 1.4.1) -- restart_required comes
+      // straight from scripts/settings_tui.py's SectionSpec, confirmed
+      // per-section against what run_convobox.py's mic-loop pipeline
+      // actually reads at startup vs. what only ever feeds a web route
+      // (see that dataclass field's own docstring). aria-hidden: the
+      // title below and the section-body banner (renderBody) are what
+      // actually carry this to assistive tech, not this decoration.
+      const mark = document.createElement("span");
+      mark.className = "restart-mark";
+      mark.setAttribute("aria-hidden", "true");
+      mark.textContent = section.restart_required ? "⟳" : "✓";
+      btn.appendChild(mark);
+      btn.title = section.restart_required
+        ? `${section.label}: changes here need ConvoBox restarted to take effect`
+        : `${section.label}: changes here apply on your next page refresh -- no restart needed`;
       btn.className = section.key === activeKey ? "active" : "";
       btn.addEventListener("click", () => {
         activeKey = section.key;
@@ -1049,15 +1376,29 @@
     }
   }
 
+  // path (e.g. "audio.input_device") -> a valid, stable HTML id -- shared
+  // by buildInput() (sets it on the control) and buildFieldRow() (points
+  // its <label for> at it). Every settings field previously rendered a
+  // <label> with no for/id association at all -- programmatically
+  // invisible to a screen reader, same gap the inclusive-design lessons'
+  // forms section calls out explicitly ("every input needs a <label>,
+  // not a placeholder" -- true here for the missing ASSOCIATION too, not
+  // just placeholder-only inputs).
+  function fieldElementId(path) {
+    return `field-${path.replace(/\./g, "-")}`;
+  }
+
   // Kind -> control. Picker kinds (choice/device/kokoro_voice/piper_voice/
   // piper_speaker) share one <select> path: field.unset_value/
   // unavailable_value (from settings_api.py's _field_to_dict) are the
   // TUI's own sentinel strings, never hardcoded here.
   function buildInput(field, path) {
     const value = getPath(draft, path);
+    const fieldId = fieldElementId(path);
 
     if (field.kind === "bool") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "checkbox";
       input.checked = Boolean(value);
       input.addEventListener("change", () => {
@@ -1069,6 +1410,7 @@
 
     if (["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"].includes(field.kind)) {
       const select = document.createElement("select");
+      select.id = fieldId;
       for (const choice of field.choices) {
         const opt = document.createElement("option");
         opt.value = choice;
@@ -1088,6 +1430,7 @@
 
     if (field.kind === "list_str") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "text";
       input.value = (value || []).join(", ");
       input.addEventListener("change", () => {
@@ -1101,6 +1444,7 @@
 
     if (field.kind === "command") {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "text";
       input.value = (value || []).join(" ");
       input.addEventListener("change", () => {
@@ -1111,6 +1455,7 @@
 
     if (["int", "optional_int", "float", "optional_float"].includes(field.kind)) {
       const input = document.createElement("input");
+      input.id = fieldId;
       input.type = "number";
       if (field.kind === "float" || field.kind === "optional_float") input.step = "any";
       input.value = value === null || value === undefined ? "" : String(value);
@@ -1127,6 +1472,7 @@
 
     // str / optional_str
     const input = document.createElement("input");
+    input.id = fieldId;
     input.type = "text";
     input.value = value === null || value === undefined ? "" : String(value);
     input.addEventListener("change", () => {
@@ -1142,6 +1488,7 @@
 
     const label = document.createElement("label");
     label.textContent = field.label;
+    label.htmlFor = fieldElementId(path);
     wrap.appendChild(label);
 
     // Input device/output device get their own [Test] button, same
@@ -1156,6 +1503,16 @@
       btn.type = "button";
       btn.className = "settings-test-btn";
       btn.textContent = "Test";
+      // Matches probe_audio()'s real, direction-specific behavior
+      // (scripts/settings_tui.py) -- input records-then-plays-back so you
+      // can hear whether the right mic is picking you up; output just
+      // plays a tone. Don't blur the two into one generic "plays a tone"
+      // claim -- that would be wrong for input_device.
+      btn.title = field.key === "input_device"
+        ? "Records a few seconds from this mic, then plays it back through your speaker so you can hear if it's the right one"
+        : field.key === "output_device"
+        ? "Plays a short test tone through this speaker/output"
+        : `Tests the audio device(s) relevant to ${field.label}`;
       btn.addEventListener("click", () => runTest(field.section, field.key));
       row.appendChild(btn);
       wrap.appendChild(row);
@@ -1176,6 +1533,16 @@
     bodyEl.innerHTML = "";
     const section = sections.find((s) => s.key === activeKey);
     if (!section) return;
+    // Always-visible text, not just the tab's hover title -- this is
+    // what actually carries the restart-required meaning to a screen
+    // reader or anyone who never hovers a tab (WCAG: don't gate
+    // important state behind a hover-only tooltip).
+    const note = document.createElement("div");
+    note.className = "settings-section-note " + (section.restart_required ? "restart" : "live");
+    note.textContent = section.restart_required
+      ? "⟳ Changes here need ConvoBox restarted to take effect."
+      : "✓ Changes here apply on your next page refresh -- no restart needed.";
+    bodyEl.appendChild(note);
     for (const field of section.fields) bodyEl.appendChild(buildFieldRow(field));
     testSectionBtn.hidden = !TESTABLE_SECTIONS.includes(activeKey);
   }
@@ -1215,7 +1582,7 @@
     try {
       const res = await fetch("/api/settings/test", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ section, field: field || null, values: draft }),
         signal: controller.signal,
       });
@@ -1244,7 +1611,7 @@
     try {
       const res = await fetch("/api/settings/save", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ values: draft }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1279,9 +1646,14 @@
     closeArmed = false;
     clearTimeout(closeArmTimer);
     closeBtn.textContent = "×";
+    // Focus must never just vanish when a modal closes (WCAG 2.4.3) --
+    // settingsBtn is the only thing that ever opens this dialog, so
+    // there's no "previously focused element" to track, just send focus
+    // straight back to it.
+    settingsBtn.focus();
   }
 
-  closeBtn.addEventListener("click", () => {
+  function attemptClose() {
     if (!isDirty() || closeArmed) {
       doClose();
       return;
@@ -1294,6 +1666,39 @@
       closeBtn.textContent = "×";
       closeBtn.title = "Close settings";
     }, 4000);
+  }
+
+  closeBtn.addEventListener("click", attemptClose);
+
+  // Keyboard support a modal dialog is expected to have (WCAG 2.1.1/2.1.2):
+  // Esc closes it (same arm/discard-confirm as the × button, not a silent
+  // bypass of unsaved-changes protection), and Tab/Shift+Tab cycle only
+  // among the dialog's own focusable elements instead of escaping into the
+  // page underneath -- aria-modal="true" on its own does not enforce this
+  // in any browser; it has to be done by hand.
+  overlay.addEventListener("keydown", (e) => {
+    if (overlay.hidden) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      attemptClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(
+      overlay.querySelectorAll(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((el) => el.offsetParent !== null); // skip hidden (e.g. [hidden] ancestors, display:none)
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   });
 
   saveBtn.addEventListener("click", saveSettings);
@@ -1309,6 +1714,10 @@
     errorsEl.hidden = true;
     overlay.hidden = false;
     await fetchSchema();
+    // Send focus INTO the dialog now that it has real content -- a modal
+    // that opens without moving focus leaves a screen reader/keyboard
+    // user still "in" the page behind it, unaware anything changed.
+    closeBtn.focus();
   });
 })();
 </script>

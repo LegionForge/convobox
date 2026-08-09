@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from typing import Any, AsyncIterator
 
 import numpy as np
@@ -280,6 +283,67 @@ def test_was_forced_true_only_for_the_capped_utterance_not_the_next_natural_one(
     assert seg.was_forced is False
 
 
+# --- discarded_forced_runs: live incident, 2026-08-05 (docs/field-notes/
+# 2026-08-05-vad-segmenter-silent-unbounded-lockup.md) -- max_utterance_s
+# stops a PERMANENT lockup, but a run that hits the cap without ever
+# accumulating min_speech_ms of confident speech (audio sitting in the
+# exit-hysteresis band) is discarded with zero other observable effect: no
+# utterance, no log line, indistinguishable from genuine silence. This
+# counter is the fix's own visibility mechanism. ---
+
+
+def test_discarded_forced_runs_zero_initially(monkeypatch: pytest.MonkeyPatch) -> None:
+    seg, _ = _make_capped_segmenter(monkeypatch, [0.9] * 5, max_utterance_s=1.0)
+    assert seg.discarded_forced_runs == 0
+
+
+def test_discarded_forced_runs_increments_when_cap_fires_without_enough_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One confident-speech window triggers the run, then hysteresis-band
+    # windows (0.35-0.5, neither >= threshold nor < threshold - 0.15) fill
+    # the rest of the 1s cap -- speech_windows never reaches
+    # _MIN_SPEECH_WINDOWS, so the forced run must be discarded, not emitted.
+    cap_windows = 31
+    probs = [0.9] + [0.4] * (cap_windows - 1)
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    utterances = seg.feed(_windows(cap_windows))
+
+    assert utterances == []
+    assert seg.discarded_forced_runs == 1
+    # The cap still resets state either way -- a discarded run is not stuck.
+    assert seg.in_speech is False
+
+
+def test_discarded_forced_runs_not_incremented_when_cap_emits_normally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probs = [0.9] * 70
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=1.0)
+
+    utterances = seg.feed(_windows(70))
+
+    assert len(utterances) == 2
+    assert seg.discarded_forced_runs == 0
+
+
+def test_discarded_forced_runs_not_incremented_for_a_natural_short_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A short run that ends NATURALLY (silence, not the cap) and gets
+    # dropped for being under min_speech_ms is a different, pre-existing
+    # code path (forced=False) -- must not be counted here.
+    speech_windows = _MIN_SPEECH_WINDOWS - 1
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg, _ = _make_capped_segmenter(monkeypatch, probs, max_utterance_s=60.0)
+
+    utterances = seg.feed(_windows(speech_windows + _MIN_SILENCE_WINDOWS))
+
+    assert utterances == []
+    assert seg.discarded_forced_runs == 0
+
+
 def test_no_cap_preserves_unbounded_behavior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -494,3 +558,167 @@ async def test_segment_yields_nothing_for_empty_stream(
     utterances = [u async for u in seg.segment(_achunks([]))]
 
     assert utterances == []
+
+
+# --- feed_async: offloads feed()'s Silero model calls to a worker thread
+# (asyncio.to_thread) so a slow/stuck window can't freeze the caller's
+# event loop -- the same shape of fix as PR #217's _transcribe_with_timeout,
+# applied to the VAD segmenter. See feed_async's own docstring for the
+# live incident and why this is a plain offload with no timeout/abandon.
+
+
+@pytest.mark.asyncio
+async def test_feed_async_returns_the_same_result_as_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    speech_windows = 10
+    probs = [0.9] * speech_windows + [0.0] * _MIN_SILENCE_WINDOWS
+    seg_sync, _ = _make_segmenter(monkeypatch, probs)
+    seg_async, _ = _make_segmenter(monkeypatch, probs)
+
+    total_windows = speech_windows + _MIN_SILENCE_WINDOWS
+    audio = _windows(total_windows)
+
+    sync_result = seg_sync.feed(audio)
+    async_result = await seg_async.feed_async(audio)
+
+    assert len(async_result) == len(sync_result) == 1
+    assert np.array_equal(async_result[0], sync_result[0])
+
+
+@pytest.mark.asyncio
+async def test_feed_async_does_not_block_other_concurrent_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of the offload: a slow/stuck model call must not
+    # freeze the event loop for anything else running concurrently (HTTP
+    # routes, the watchdog, TUI redraw) -- live-hit 2026-08-06/07, see
+    # feed_async's docstring.
+    class _SlowModel(FakeSileroModel):
+        def __call__(self, window: Any, sample_rate: int) -> _Prob:
+            time.sleep(0.2)
+            return super().__call__(window, sample_rate)
+
+    model = _SlowModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig())
+
+    ticks: list[float] = []
+
+    async def ticker() -> None:
+        for _ in range(3):
+            await asyncio.sleep(0.02)
+            ticks.append(time.monotonic())
+
+    await asyncio.gather(seg.feed_async(_windows(1)), ticker())
+
+    assert len(ticks) == 3
+
+
+# --- feed_async's stalled-call warnings: diagnostic logging only (never
+# abandons the call) so a real freeze's own log shows "still running, Ns
+# in" instead of total silence -- live-hit 2026-08-07, see feed_async's
+# and the module-level threshold constants' own docstrings/comments.
+
+
+@pytest.mark.asyncio
+async def test_feed_async_does_not_warn_for_a_normal_fast_call(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    seg, _ = _make_segmenter(monkeypatch, [0.9])
+    caplog.set_level(logging.WARNING)
+
+    await seg.feed_async(_windows(1))
+
+    assert "still running" not in caplog.text
+    assert "finally completed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_feed_async_warns_when_a_call_runs_past_the_threshold(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Threshold constants patched down so this test exercises the real
+    # warn-then-repeat logic without needing to wait the real 0.5s/5.0s
+    # production thresholds.
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.05)
+    caplog.set_level(logging.WARNING)
+
+    class _SlowModel(FakeSileroModel):
+        def __call__(self, window: Any, sample_rate: int) -> _Prob:
+            time.sleep(0.2)
+            return super().__call__(window, sample_rate)
+
+    model = _SlowModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig())
+
+    await seg.feed_async(_windows(1))
+
+    assert "still running" in caplog.text
+    assert "finally completed" in caplog.text
+    # With a 0.05s repeat interval and a 0.2s call, more than one
+    # "still running" warning should have fired before completion.
+    assert caplog.text.count("still running") >= 2
+
+
+@pytest.mark.asyncio
+async def test_feed_async_never_abandons_a_stalled_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of using asyncio.wait() (not wait_for()): the
+    # diagnostic warnings must never cancel or abandon the underlying
+    # call, only report on it -- otherwise this would reintroduce the
+    # exact race feed_async's own docstring says this fix avoids.
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.05)
+
+    class _SlowModel(FakeSileroModel):
+        def __call__(self, window: Any, sample_rate: int) -> _Prob:
+            time.sleep(0.2)
+            return super().__call__(window, sample_rate)
+
+    model = _SlowModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig())
+
+    result = await seg.feed_async(_windows(1))
+
+    # The call ran to completion (a single non-speech-triggering window
+    # produces no completed utterance yet, same as feed()'s own behavior
+    # for this input) and the model was actually invoked, not abandoned.
+    assert result == []
+    assert model.calls == 1
+
+
+# --- trace_silero_calls: opt-in, off-by-default per-window Silero call
+# timing, deliberately separate from --verbose/DEBUG -- see VADConfig's
+# own field docstring for the live incident this was added to help
+# diagnose.
+
+
+def test_trace_silero_calls_off_by_default_logs_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = FakeSileroModel([0.9])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig(trace_silero_calls=False))
+    caplog.set_level(logging.DEBUG)
+
+    seg.feed(_windows(1))
+
+    assert "VAD Silero call took" not in caplog.text
+
+
+def test_trace_silero_calls_when_enabled_logs_one_line_per_window(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = FakeSileroModel([0.9, 0.9, 0.0, 0.0])
+    monkeypatch.setattr(segmenter_module, "load_silero_vad", lambda **kwargs: model)
+    seg = UtteranceSegmenter(VADConfig(trace_silero_calls=True))
+    caplog.set_level(logging.DEBUG)
+
+    seg.feed(_windows(4))
+
+    assert caplog.text.count("VAD Silero call took") == 4

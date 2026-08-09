@@ -97,6 +97,85 @@ package (Python-native, WebSocket streaming support), so a prototype
 would be straightforward to wire up as a second STTEngine implementation
 if the numbers ever check out.
 
+**Second candidate, added 2026-08-03 (SOTA STT research pass, prompted by
+a real live UAT finding -- see below):** **NVIDIA Parakeet TDT (0.6B v3)**
+via the `onnx-asr` PyPI package (not NVIDIA's full NeMo toolkit --
+heavy, Linux/CUDA-centric, painful on Windows; `onnx-asr` runs on plain
+ONNX Runtime, closer in shape to how faster-whisper already gets used
+here). Meaningfully more credible evidence than the FunASR thread above:
+- Open ASR Leaderboard (a real, third-party benchmark, not a self-
+  reported number from an interested party): WER 6.32% vs. large-v3's
+  7.44%, and ~3,300x realtime throughput -- trivial headroom on an 8GB
+  consumer GPU.
+- Trained specifically on 36,000+ hours of *noisy and non-speech* audio,
+  and multiple independent 2026 comparison sources report it rarely
+  hallucinates on silence/low-signal input -- directly relevant to this
+  project's own live finding (2026-08-02 UAT): a short `resume_word`
+  ("Athena") got repeatedly hallucinated by faster-whisper as unrelated
+  *fluent* sentences (and once as Cyrillic text) across every model/
+  compute_type/device combination tried (base/large-v3, int8/float16/
+  float32, cpu/cuda) -- the well-documented Whisper failure mode on
+  short/low-signal clips, confirmed to sit upstream of model choice
+  within the faster-whisper family specifically.
+- Tradeoff: 25 languages vs. Whisper's 99 -- a real cost if ConvoBox
+  ever needs more than English, a non-issue if it doesn't.
+- A different runtime dependency than today's ctranslate2 (see the
+  allocator-leak entry above this one in KNOWN-ISSUES.md) -- moving to
+  ONNX Runtime would sidestep that whole class of bug, not just work
+  around it, which is a real argument in its favor beyond raw accuracy.
+
+**A third, architecturally different option, same research pass:**
+rather than (or in addition to) swapping the general-purpose STT model,
+route short/critical phrases (the resume word, safewords, approval
+phrase) through a **dedicated wake-word classifier** in front of
+faster-whisper -- the standard architecture elsewhere (Home Assistant's
+Assist pipeline: mic -> wake-word engine -> full STT only after
+activation). **openWakeWord** (Apache/MIT-family, trained on Google's
+audio embedding model + Piper-synthesized data, ships a built-in
+Silero-VAD gate) is a closed-set classifier, not a generative decoder --
+it structurally cannot hallucinate a fluent unrelated sentence the way
+Whisper can, sidestepping the failure mode above rather than tuning
+around it. This is the same idea as the already-on-hold Sherpa-ONNX
+keyword-spotting entry in the ConvoBox quickref's "Interesting Ideas"
+(2026-08-01, JP's call: real accuracy against ConvoBox's actual phrases
+unevaluated, `MicrophoneStream` is single-consumer so a parallel spotter
+needs real broadcast/tee plumbing, and it's in tension with the safety
+path's deliberate no-ML design) -- openWakeWord is a concrete alternative
+*engine* for that same architectural idea, not a new idea on its own.
+Same reasoning for staying on hold: revisit only if `stt.hotwords`
+(shipped 2026-08-03, a much smaller change already in flight) turns out
+not to be enough on its own.
+
+**Cheaper, do-first candidates from the same research pass, already
+shipped 2026-08-03** (not a roadmap item -- small enough to just build):
+`stt.hotwords` (faster-whisper's own prompt-biasing param, direct
+mitigation for the failure mode above), plus opt-in
+`stt.condition_on_previous_text: false` and a pinned `stt.temperature`
+-- see `STTConfig` in `src/convobox/config.py` for the live rationale on
+each. Worth exhausting these first (near-zero cost, already built) before
+spending real effort on either alternative-engine option above.
+
+**One-month follow-up (2026-08-07, no live hardware -- a status check, not
+a re-test):** the ctranslate2 allocator leak (see KNOWN-ISSUES.md) is
+still open upstream with no fix, and one issue previously read as "closed,
+unclear if it covers the leak" turns out to have closed over a live,
+unaddressed new leak report -- read as no material change. `onnx-asr`
+(the Parakeet TDT vehicle) looks healthier than it did a month ago:
+active monthly releases, explicit Windows+CUDA+DirectML support, and a
+previously-open GPU-slowness issue now closed -- strengthens the case for
+a real prototype, still not started. `openWakeWord`'s maintenance has
+visibly slowed (no tagged release since 2024-02) with an open, unresolved
+Windows error on this project's own dev platform -- new reason for
+caution beyond the already-known integration cost. New candidate spotted:
+**Moonshine** (`moonshine-ai/moonshine`) -- very actively developed,
+English models cleanly MIT-licensed, but its hallucination-control claims
+are currently blog-sourced and unverified (same category of claim that
+burned this project once already with FunASR); worth a real look later,
+not acted on now. Full sourcing and reasoning:
+`docs/field-notes/2026-08-07-stt-engine-continued-investment-research.md`.
+Net recommendation: keep faster-whisper shipped, treat a real `onnx-asr`
+prototype as "when, not if" rather than urgent.
+
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)
@@ -134,6 +213,30 @@ this is real, non-trivial work for the one platform where it's hardest
 to get right, with no CI/automated way to exercise real mouse events
 either way. Worth doing once the keyboard controls have had a live UAT
 pass and mouse support is still wanted -- not blocking today's fix.
+
+### Web UI transcript timestamps, user-configurable on/off (proposed, scoped)
+The TUI's transcript pane has always shown a per-line timestamp; the web
+UI never has, in either its live SSE stream or its history replay --
+raised directly by JP during a live UAT session (2026-08-06) after
+needing timestamps to correlate what he said against the log while
+diagnosing an unrelated STT freeze (docs/field-notes/
+2026-08-06-resume-word-hallucination-and-runaway-repetition.md).
+
+Scoped, not yet built:
+- `history.py`'s `events` table already stores a `timestamp REAL`
+  (epoch seconds) column per row, and `get_session_events()`'s
+  `SELECT *` already returns it -- history replay has the data today,
+  the frontend just never renders it.
+- The **live** SSE stream is the actual gap: `WebEventForwarder.
+  __call__`'s broadcast (via `event_to_dict()`) and `forward_transcript
+  ()`'s `{"type": "transcript", ...}` payload carry no timestamp field
+  at all today. Adding one (`time.time()`, matching the DB column's own
+  epoch-seconds shape so both paths can share one frontend formatter)
+  closes that gap.
+- JP wants this **user-configurable on/off**, not always-on (unlike the
+  TUI, which has no such toggle) -- needs a new `display.*` (or
+  `web.*`) boolean setting, exposed in both Settings surfaces, not just
+  a frontend-only visual tweak.
 
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response

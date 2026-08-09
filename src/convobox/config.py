@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from convobox.approval import ApprovalDetector
 from convobox.interrupt_presets import resolve_preset
@@ -48,6 +55,24 @@ class VADConfig(BaseModel):
     # and no transcript at all until the speaker pauses; observed live as a
     # 30.5s single utterance whose transcript only arrived after it ended.
     max_utterance_s: float | None = None
+    # Off by default, deliberately separate from --verbose/DEBUG logging:
+    # logs every single Silero window call's duration (~31/s during active
+    # audio) at DEBUG level -- genuinely too noisy for normal --verbose use,
+    # even though DEBUG is the level it logs at. Added 2026-08-07 live, at
+    # JP's own suggestion, after a live UAT gap (~47s, no Processing audio
+    # lines) produced none of feed_async()'s existing >0.5s stall warnings
+    # either -- leaving it ambiguous whether that gap was genuine silence
+    # (VAD correctly saw nothing to process) or something stalled upstream
+    # of Silero entirely (mic capture, AEC) that never even reached a
+    # feed_async() call to warn about. Per-call tracing resolves that:
+    # a real freeze inside Silero shows continuous fast calls right up to
+    # a gap in the trace itself; a stalled call is caught by the existing
+    # feed_async() warnings; and genuine silence shows... also nothing,
+    # which is the point -- if it's on and NOTHING logs during a "frozen"
+    # period, the stall is upstream of the VAD windowing loop entirely, an
+    # entirely different investigation than this fix's own scope. See
+    # docs/KNOWN-ISSUES.md's VAD segmenter freeze entry.
+    trace_silero_calls: bool = False
 
 
 # ctranslate2's real supported precisions (verified against the installed
@@ -70,6 +95,25 @@ STT_COMPUTE_TYPES: tuple[str, ...] = (
     "float16",
     "bfloat16",
     "float32",
+)
+
+# Per-device breakdown of the same real ctranslate2 4.8.1 precisions, from
+# the same verification method (ctranslate2.get_supported_compute_types(...)),
+# so an incompatible device/compute_type pairing (e.g. compute_type: float16
+# with device: cpu) can be rejected with a clear config-level error instead
+# of a raw ValueError three layers deep inside ctranslate2's Whisper
+# constructor. "default" is deliberately excluded from both -- it's a
+# sentinel resolved internally (int8 on cpu, float16 on cuda), never a real
+# compute type passed to ctranslate2 directly, so it's valid on any device.
+STT_COMPUTE_TYPES_CPU: tuple[str, ...] = ("float32", "int16", "int8", "int8_float32")
+STT_COMPUTE_TYPES_CUDA: tuple[str, ...] = (
+    "bfloat16",
+    "float16",
+    "float32",
+    "int8",
+    "int8_bfloat16",
+    "int8_float16",
+    "int8_float32",
 )
 
 
@@ -102,6 +146,90 @@ class STTConfig(BaseModel):
     # glossary in config makes every rewrite inspectable and portable, rather
     # than silently training on a user's voice data.
     corrections: dict[str, str] = Field(default_factory=dict)
+    # Passed straight through to faster-whisper's own transcribe(hotwords=...)
+    # -- a free-text prompt bias toward words/phrases the model should
+    # recognize more readily. Live UAT, 2026-08-02: a short, out-of-vocabulary
+    # word (a configured resume_word) was repeatedly hallucinated as unrelated
+    # fluent sentences ("We'll see you on the other side.", Cyrillic text)
+    # rather than being misheard as something similar -- the well-documented
+    # Whisper failure mode on short/low-signal clips. Operators should
+    # include their resume_word, safeword.hard_stop_phrases, and
+    # interaction.approval_phrase here (space-separated) to bias toward the
+    # exact short phrases most likely to hit this failure mode. Deliberately
+    # not auto-derived from those configs: STTConfig has no dependency on
+    # InteractionConfig/SafewordConfig today, and hotwords is a real-word
+    # accuracy nudge, not a safety mechanism -- the safeword/resume-word
+    # checks themselves still run on the raw transcript regardless of
+    # whether this helped or not.
+    hotwords: str | None = None
+    # None (default) leaves faster-whisper's own condition_on_previous_text
+    # default (True) untouched -- zero behavior change unless explicitly
+    # set. False is the second of the three related levers flagged
+    # alongside hotwords (SOTA STT research pass, 2026-08-03): disabling it
+    # stops a low-signal/short utterance's decode from being biased by
+    # whatever fluent text the PREVIOUS segment produced, which is one
+    # documented contributor to the hallucinate-a-fluent-unrelated-sentence
+    # failure mode this project hit live with a short resume_word. Unlike
+    # hotwords (a clear, low-risk accuracy nudge), this is a real tradeoff
+    # -- worth testing, not yet validated live -- so it stays opt-in rather
+    # than a new default.
+    condition_on_previous_text: bool = True
+    # None (default) leaves faster-whisper's own temperature fallback
+    # ladder ([0.0, 0.2, 0.4, ... 1.0]) untouched -- zero behavior change
+    # unless explicitly set. A float pins decoding to that single
+    # temperature instead -- 0.0 (fully deterministic, no higher-randomness
+    # retries) is the specific value the same research pass flagged: on an
+    # already-short/low-signal clip, the fallback ladder's higher-
+    # temperature retries are themselves a plausible source of the
+    # hallucinated-fluent-sentence failure mode, not just a recovery
+    # mechanism. Also not yet validated live -- opt-in, not a new default,
+    # same reasoning as condition_on_previous_text above.
+    temperature: float | None = None
+    # None (default) leaves faster-whisper's own repetition_penalty=1.0
+    # (no penalty) untouched -- zero behavior change unless explicitly
+    # set. Real bug, found live (2026-08-07, JP's own UAT session): a
+    # 1.056s clip of "That's right." (once) decoded as "that's right"
+    # repeated 8 times -- a single transcribe() call, one audio buffer,
+    # the repetition was already baked into the decoder's own output,
+    # not an app-level duplication bug (see
+    # docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-
+    # repetition.md for the first, hotword-specific instance of this same
+    # failure class -- this incident proves it's not hotword-specific).
+    # faster-whisper exposes this exact parameter to penalize repeated
+    # tokens during decoding; > 1.0 discourages repetition. Not yet
+    # validated live -- opt-in, same reasoning as temperature above, not
+    # a new default (an untested penalty value could make normal decodes
+    # worse, not just fix the rare repetition case).
+    repetition_penalty: float | None = None
+    # None (default) leaves faster-whisper's own no_repeat_ngram_size=0
+    # (disabled) untouched -- zero behavior change unless explicitly set.
+    # The second lever for the same repetition-loop failure mode above:
+    # blocks the decoder from repeating any n-gram of this length twice
+    # in one decode (e.g. blocks "that's right that's" from recurring).
+    # A blunter, more mechanical guard than repetition_penalty's soft
+    # scoring nudge -- worth having both available to test independently
+    # rather than assuming one subsumes the other. Not yet validated
+    # live -- opt-in, not a new default, same reasoning throughout this
+    # section.
+    no_repeat_ngram_size: int | None = None
+    # None (default) means no timeout: transcribe() is offloaded to a
+    # thread (see run_convobox.py's mic loop) but awaited indefinitely,
+    # same behavior as before this field existed. A real number caps how
+    # long any single utterance's transcribe() call is allowed to run
+    # before it's abandoned and treated as unheard -- live-hit 2026-08-06:
+    # a stuck transcribe() call, run synchronously on the main event loop
+    # with no offload at the time, froze the ENTIRE app (mic loop, web UI,
+    # TUI, even the once-a-second background watchdog) while mic capture
+    # kept running on its own separate thread, unaffected -- confirmed via
+    # AEC-dump frame-count forensic cross-check showing continuous capture
+    # straight through the "frozen" window. The thread-offload alone (see
+    # run_convobox.py) fixes the "everything else freezes too" half of
+    # that regardless of whether this timeout is set; this field additionally
+    # lets the mic loop itself recover and move on to the next utterance
+    # instead of waiting forever for a call that may never return (Python
+    # cannot force-kill a native thread, so an abandoned call's background
+    # thread may keep running -- see LocalTranscriber.invalidate()).
+    transcribe_timeout_s: float | None = None
 
     @field_validator("compute_type")
     @classmethod
@@ -122,6 +250,32 @@ class STTConfig(BaseModel):
 
         TranscriptCorrector(v)
         return v
+
+    @model_validator(mode="after")
+    def _validate_compute_type_matches_device(self) -> STTConfig:
+        # Only device: cpu/cuda are checked -- device: auto (or anything
+        # else) resolves its real target at construction time, so there's
+        # nothing to validate against here. compute_type: default is always
+        # valid on any device (see STT_COMPUTE_TYPES_CPU/CUDA's docstring).
+        # Without this, an incompatible pairing (e.g. float16 on cpu) passes
+        # config validation cleanly and only fails three layers deep inside
+        # ctranslate2's Whisper constructor with a raw traceback -- live-hit
+        # 2026-08-03 hand-editing convobox.yaml after a device swap.
+        if self.compute_type == "default":
+            return self
+        if self.device == "cpu" and self.compute_type not in STT_COMPUTE_TYPES_CPU:
+            raise ValueError(
+                f"compute_type {self.compute_type!r} is not supported on "
+                f"device 'cpu' -- use one of {STT_COMPUTE_TYPES_CPU} "
+                "or 'default'"
+            )
+        if self.device == "cuda" and self.compute_type not in STT_COMPUTE_TYPES_CUDA:
+            raise ValueError(
+                f"compute_type {self.compute_type!r} is not supported on "
+                f"device 'cuda' -- use one of {STT_COMPUTE_TYPES_CUDA} "
+                "or 'default'"
+            )
+        return self
 
 
 class TTSConfig(BaseModel):
@@ -423,6 +577,50 @@ def detect_permission_conflict(backend: BackendConfig) -> str | None:
 _CODEX_POSTURE_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
 
 
+def detect_claude_code_approval_gap(
+    backend: BackendConfig, interaction: InteractionConfig
+) -> str | None:
+    """Return an error message if claude-code's approval hook would be
+    wired with nothing able to ever answer it, else None.
+
+    Found via autonomous codebase review, 2026-08-08 (GitHub issue #235,
+    finding A1). `ClaudeCodeAdapter._interactive_approval` is set purely
+    from `permission_mode == "approve"` at construction -- independent of
+    whether an approval gate exists. `set_interactive_approvals()` is a
+    documented no-op for claude-code (its own module docstring: the hook
+    is baked in at construction, not toggleable at runtime), so
+    `scripts/run_convobox.py`'s `approval_gate` -- built only when
+    `interaction.approval_phrase` is set -- is the ONLY thing that ever
+    calls `resolve_pending_approval`. With the phrase unset, the hook still
+    blocks every tool call for its full 120s timeout (with a misleading
+    spoken "say your approval phrase" prompt substituting the literal
+    `None`), and the stuck pending-approval state then silently
+    auto-denies every subsequent tool call for the rest of the session --
+    with no log line either time. `settings_tui.validate_config` already
+    warns about this combination, but its warning text describes "denied
+    with no voice prompt (the safe fail-closed default)", which is not
+    what actually happens (a 120s hang with a broken prompt first, then
+    silent denials) -- promoted here to a hard error instead, same
+    fail-closed treatment `detect_permission_conflict` already gets for
+    the analogous command-flag conflict above.
+    """
+    if backend.name != "claude-code":
+        return None
+    if backend.permission_mode != "approve":
+        return None
+    if interaction.approval_phrase is not None:
+        return None
+    return (
+        "backend.permission_mode is \"approve\" for claude-code, but "
+        "interaction.approval_phrase is unset -- the approval hook would "
+        "be wired with nothing able to ever answer it: the first tool "
+        "call hangs for its full timeout with a broken spoken prompt, "
+        "then every later one is silently auto-denied for the rest of "
+        "the session. Set interaction.approval_phrase, or use a "
+        "different permission_mode (\"plan\"/\"permissive\")."
+    )
+
+
 class WebConfig(BaseModel):
     # Off by default -- the web UI (docs/WEB-UI-ARCHITECTURE.md) is opt-in,
     # same posture as everything else security/privacy-relevant in this
@@ -541,6 +739,61 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     with candidate.open() as f:
         raw = yaml.safe_load(f) or {}
     return AppConfig.model_validate(raw)
+
+
+def load_config_lenient(
+    path: str | Path | None = None,
+) -> tuple[AppConfig, dict[str, Any], list[str]]:
+    """Like load_config, but never raises on a bad on-disk value: any
+    top-level section that fails its own validation (e.g. an incompatible
+    stt.compute_type/stt.device pairing) falls back to that section's
+    defaults instead of failing the whole file, and the caller gets back
+    which section(s) were rejected and why.
+
+    Exists for settings_tui.py's own startup load -- the one tool meant to
+    let an operator FIX a bad convobox.yaml previously couldn't open at
+    all if the file already had one (live UAT, 2026-08-06: a leftover
+    stt.compute_type: float16 with stt.device: cpu, from PR #210's own
+    live-test, crashed both run_convobox.py -- correctly, that one should
+    refuse to start a voice session on an unvalidated config -- AND
+    settings_tui.py, which shouldn't, since recovering from exactly this
+    is its entire purpose). run_convobox.py intentionally keeps using
+    plain load_config()/model_validate() and still hard-fails on a bad
+    config; only the settings editor gets the forgiving path in.
+
+    Returns (config, raw, problems): config is always a fully valid
+    AppConfig (bad sections reset to their defaults); raw is the
+    as-parsed YAML dict, unchanged, so a caller can still show what the
+    rejected value actually was; problems is a list of human-readable
+    "section.field: message" strings (pydantic's own error locations/
+    messages), empty when the whole file validated cleanly.
+    """
+    candidate = resolve_config_path(path)
+    if not candidate.exists():
+        return AppConfig(), {}, []
+    with candidate.open() as f:
+        raw = yaml.safe_load(f) or {}
+    try:
+        return AppConfig.model_validate(raw), raw, []
+    except ValidationError as exc:
+        problems = [
+            f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}" for err in exc.errors()
+        ]
+        kwargs: dict[str, Any] = {}
+        for name, model_field in AppConfig.model_fields.items():
+            section_raw = raw.get(name)
+            if section_raw is None:
+                kwargs[name] = model_field.get_default(call_default_factory=True)
+                continue
+            try:
+                # TypeAdapter handles both plain-BaseModel sections (stt,
+                # tts, ...) and the dict[str, ...] profile maps
+                # (tts_profiles/backend_profiles) through the same call --
+                # no need to special-case the two shapes.
+                kwargs[name] = TypeAdapter(model_field.annotation).validate_python(section_raw)
+            except ValidationError:
+                kwargs[name] = model_field.get_default(call_default_factory=True)
+        return AppConfig(**kwargs), raw, problems
 
 
 def aec_estimate_path(config_path: Path) -> Path:

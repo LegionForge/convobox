@@ -132,12 +132,28 @@ class FakePlayer(AudioPlayer):
         return False
 
 
+class FakeApprovalGate:
+    """Minimal stand-in for run_convobox.py's ApprovalPromptGate, covering
+    only the one method Orchestrator.hard_stop() needs (see
+    ApprovalWaitCanceler in orchestrator.py). Real hard_stop()-vs-
+    approval-gate coverage lives here rather than in run_convobox.py's own
+    tests since this is a pure Orchestrator behavior, independent of any
+    particular caller's wiring."""
+
+    def __init__(self) -> None:
+        self.cancel_wait_calls = 0
+
+    def cancel_wait(self) -> None:
+        self.cancel_wait_calls += 1
+
+
 def make_orchestrator(
     busy: bool,
     with_tts: bool = False,
     on_event: Callable[[BackendEvent], None] | None = None,
     tier_responses: bool = False,
     approval_phrase: str | None = None,
+    approval_gate: object | None = None,
 ) -> tuple[Orchestrator, FakeBackendAdapter, FakeTTSEngine | None, FakePlayer | None]:
     adapter = FakeBackendAdapter(busy=busy)
     safeword = SafewordDetector(["stop stop stop"])
@@ -145,7 +161,7 @@ def make_orchestrator(
         return (
             Orchestrator(
                 adapter, safeword, on_event=on_event, tier_responses=tier_responses,
-                approval_phrase=approval_phrase,
+                approval_phrase=approval_phrase, approval_gate=approval_gate,
             ),
             adapter,
             None,
@@ -157,6 +173,7 @@ def make_orchestrator(
         Orchestrator(
             adapter, safeword, tts=tts, player=player, on_event=on_event,
             tier_responses=tier_responses, approval_phrase=approval_phrase,
+            approval_gate=approval_gate,
         ),
         adapter,
         tts,
@@ -219,6 +236,81 @@ async def test_hard_stop_wins_over_busy_interject() -> None:
     assert adapter.hard_stops == 1
     assert adapter.sent_interject == []
     assert adapter.sent_text == []
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_method_runs_the_same_sequence_directly() -> None:
+    # hard_stop() is what handle_transcript()'s safeword branch delegates
+    # to (see test_hard_stop_when_idle above) -- this exercises it as a
+    # standalone entry point, the shape a non-transcript trigger (e.g. the
+    # web UI's Stop button) needs: no matching text, just call it.
+    orch, adapter, tts, player = make_orchestrator(busy=False, with_tts=True)
+    await orch.hard_stop()
+    assert adapter.hard_stops == 1
+    assert tts.stop_calls == 1
+    assert player.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_method_without_tts_or_player_does_not_raise() -> None:
+    # Matches handle_transcript()'s own None-guards on self._tts/self._player
+    # (Orchestrator is constructible without either, e.g. --text --mute).
+    orch, adapter, _, _ = make_orchestrator(busy=False, with_tts=False)
+    await orch.hard_stop()
+    assert adapter.hard_stops == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_method_cancels_the_event_loop() -> None:
+    # PR #191 (2026-07-31, safety-critical): hard-stopping the adapter
+    # alone still let an already-in-flight turn's trailing TEXT event
+    # reach _on_event() and get spoken after the stop -- stop_event_loop()
+    # (cancelling _events_task) is what actually prevents that. Direct
+    # coverage on hard_stop() itself, not just through handle_transcript()'s
+    # safeword branch, now that other callers (the web UI's Pause/Stop
+    # buttons) delegate to it too.
+    orch, adapter, _, _ = make_orchestrator(busy=False)
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch.hard_stop()
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_cancels_a_pending_approval_gate_wait() -> None:
+    # B4: a safeword/web-Stop firing while a voice approval was pending
+    # used to leave approval_gate.is_waiting True until its own timeout
+    # (up to approval_timeout_s later) -- hard_stop() now cancels it
+    # immediately, same as it already resets everything else (playback,
+    # TTS, event consumption) on this exact "stop stop stop" path.
+    gate = FakeApprovalGate()
+    orch, _, _, _ = make_orchestrator(busy=False, approval_gate=gate)
+    await orch.hard_stop()
+    assert gate.cancel_wait_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_without_an_approval_gate_does_not_raise() -> None:
+    # Matches the existing without-tts-or-player coverage above --
+    # approval_gate is optional (most sessions have no approval_phrase
+    # configured at all, see InteractionConfig.approval_phrase), and
+    # hard_stop() must stay a no-op-safe call in that case.
+    orch, adapter, _, _ = make_orchestrator(busy=False)
+    await orch.hard_stop()
+    assert adapter.hard_stops == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_via_safeword_also_cancels_the_approval_gate() -> None:
+    # Same behavior reached through handle_transcript()'s safeword branch,
+    # not just the direct hard_stop() entry point -- both delegate to the
+    # identical sequence (see hard_stop()'s own docstring), so both must
+    # cancel the gate.
+    gate = FakeApprovalGate()
+    orch, adapter, _, _ = make_orchestrator(busy=False, approval_gate=gate)
+    await orch.handle_transcript("stop stop stop")
+    assert adapter.hard_stops == 1
+    assert gate.cancel_wait_calls == 1
 
 
 @pytest.mark.asyncio
