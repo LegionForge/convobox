@@ -53,6 +53,7 @@ from convobox.config import (
     BackendProfileConfig,
     TTSConfig,
     TTSProfileConfig,
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
     load_config_lenient,
@@ -1037,7 +1038,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
     conflict = detect_permission_conflict(config.backend)
     if conflict is not None:
         report.errors.append(conflict)
-    if config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
+    # claude-code specifically: this combination doesn't fail safe the way
+    # the general warning below describes for other backends (codex denies
+    # cleanly with no pending state) -- the hook still gets wired at
+    # construction time and nothing can ever answer it, so it's a hard
+    # error here, not a warning. See detect_claude_code_approval_gap's own
+    # docstring (GitHub issue #235, finding A1) for the full mechanism.
+    approval_gap = detect_claude_code_approval_gap(config.backend, config.interaction)
+    if approval_gap is not None:
+        report.errors.append(approval_gap)
+    elif config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
         report.warnings.append(
             "backend.permission_mode is 'approve' but interaction.approval_phrase is "
             "unset -- every approval request will be denied automatically with no "
