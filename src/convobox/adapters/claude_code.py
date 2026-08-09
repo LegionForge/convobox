@@ -340,6 +340,10 @@ class ClaudeCodeAdapter(BackendAdapter):
         # at a time (see module docstring, point 4 of the mechanism
         # paragraph).
         self._pending_approval_writer: asyncio.StreamWriter | None = None
+        # The task watching that connection for EOF (see
+        # _watch_approval_connection_eof) -- kept so aclose() can cancel
+        # it cleanly rather than leaving it dangling at shutdown.
+        self._pending_approval_watcher_task: asyncio.Task[None] | None = None
         # tool_use id -> file_path, staged when a Write/Edit tool_use block
         # names a renderable file, consumed when the MATCHING tool_result
         # arrives (see _to_backend_events) -- an ARTIFACT event only fires
@@ -402,6 +406,14 @@ class ClaudeCodeAdapter(BackendAdapter):
                 self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))
                 self._reader_task = asyncio.create_task(self._read_loop(self._proc))
                 self._pending = 0
+                # A respawn means the OLD process (and whatever hook
+                # connection it may have had open) is gone -- any writer
+                # left over from it can never be answered. Same reasoning
+                # as codex.py's own respawn reset of _pending_approval
+                # (:276); found via autonomous codebase review, 2026-08-08
+                # (GitHub issue #235, finding A2) -- claude-code was
+                # missing this while codex already had it.
+                self._pending_approval_writer = None
             return self._proc
 
     async def _ensure_approval_server(self) -> int:
@@ -538,6 +550,22 @@ class ClaudeCodeAdapter(BackendAdapter):
             await self._reject_connection(writer, "another approval already pending")
             return
         self._pending_approval_writer = writer
+        # Watch for the hook connection dying before a decision arrives
+        # (the claude subprocess crashing, the hook script being killed,
+        # a network-level reset) -- without this, nothing ever noticed,
+        # and _pending_approval_writer stayed set forever, silently
+        # auto-denying every later tool call for the rest of the session
+        # (see the "another approval already pending" rejection above).
+        # Reference kept (not asyncio.ensure_future-and-forget) with a
+        # done-callback that surfaces an unexpected exception instead of
+        # letting it vanish until GC -- same fix shape as this review's
+        # own B1 finding, applied here too. Found via autonomous codebase
+        # review, 2026-08-08 (GitHub issue #235, finding A2).
+        watcher = asyncio.create_task(
+            self._watch_approval_connection_eof(reader, writer)
+        )
+        watcher.add_done_callback(self._on_approval_watcher_done)
+        self._pending_approval_watcher_task = watcher
         tool_name = request.get("tool_name")
         tool_input = request.get("tool_input")
         self._events.put_nowait(
@@ -547,6 +575,29 @@ class ClaudeCodeAdapter(BackendAdapter):
                 tool_input=json.dumps(tool_input) if tool_input is not None else None,
             )
         )
+
+    async def _watch_approval_connection_eof(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        with contextlib.suppress(OSError, ConnectionError):
+            await reader.read()  # blocks until EOF (b"") or an unexpected send
+        # Only clear/deny if THIS connection is still the pending one --
+        # by the time EOF fires, a real resolve_pending_approval() call
+        # may already have cleared it (the normal case: it closes the
+        # writer itself, which is exactly what wakes this read()), or a
+        # newer approval may have taken its place. Never touch either.
+        if self._pending_approval_writer is writer:
+            await self.resolve_pending_approval(False)
+
+    def _on_approval_watcher_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "approval-connection EOF watcher failed unexpectedly",
+                exc_info=exc,
+            )
 
     async def _reject_connection(self, writer: asyncio.StreamWriter, reason: str) -> None:
         with contextlib.suppress(OSError):
@@ -632,6 +683,19 @@ class ClaudeCodeAdapter(BackendAdapter):
         await self._send_user_message(text)
 
     async def send_hard_stop(self) -> None:
+        # A pending approval must never survive a hard-stop -- the whole
+        # point of a hard-stop is "abort what's happening now," and the
+        # tool call that's awaiting approval is exactly that. Without
+        # this, a safeword or web Stop during a pending approval left the
+        # hook blocked (and every later tool call in the session silently
+        # auto-denied) until the gate's own 30s timeout, independent of
+        # whatever the hard-stop itself did. Same denial aclose() already
+        # does on full teardown; unconditional (checked before the
+        # early-return below) so a writer orphaned across an unrelated
+        # process restart still gets cleared. Found via autonomous
+        # codebase review, 2026-08-08 (GitHub issue #235, finding A2/B4).
+        if self._pending_approval_writer is not None:
+            await self.resolve_pending_approval(False)
         if self._proc is None or self._proc.returncode is not None:
             # Nothing running; a stray safeword before any send must be a
             # safe no-op (and must not spawn a process just to stop it).
@@ -679,6 +743,14 @@ class ClaudeCodeAdapter(BackendAdapter):
         # coming.
         if self._pending_approval_writer is not None:
             await self.resolve_pending_approval(False)
+        watcher_task, self._pending_approval_watcher_task = (
+            self._pending_approval_watcher_task,
+            None,
+        )
+        if watcher_task is not None:
+            watcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher_task
         server, self._approval_server = self._approval_server, None
         if server is not None:
             server.close()

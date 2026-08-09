@@ -282,6 +282,22 @@ class LocalTranscriber(STTEngine):
             return
         self.transcribe(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32))
 
+    def invalidate(self) -> None:
+        """Force the next transcribe() call to rebuild the model instead
+        of reusing self._model -- used by run_convobox.py's mic loop after
+        abandoning a transcribe() call that didn't return within
+        stt.transcribe_timeout_s.
+
+        Safe even if a background thread is still running the abandoned
+        call: that thread holds its own local reference to the old model
+        object (captured before this method runs), so dropping self._model
+        here doesn't pull the object out from under it -- Python's GC
+        keeps it alive until that thread's own reference goes away too.
+        Same reasoning _reload_model's own docstring already covers for
+        why dropping the reference before rebuilding is safe.
+        """
+        self._model = None
+
     def _build_model(self) -> _WhisperLikeModel:
         if self._custom_factory is not None:
             return self._custom_factory()

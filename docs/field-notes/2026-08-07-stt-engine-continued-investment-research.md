@@ -1,5 +1,5 @@
 ---
-title: faster-whisper/ctranslate2's core reliability problems are still unfixed a month later -- onnx-asr/Parakeet TDT remains the strongest concrete alternative, Moonshine (English) is a new credible second option
+title: faster-whisper/ctranslate2's core reliability problems are still unfixed a month later -- onnx-asr/Parakeet TDT has no hotword/biasing support and is not viable for the safety path; the safeword mechanism needs decoupling from the transcriber, not a transcriber swap
 status: diagnosed
 date: 2026-08-07
 project: ConvoBox (github.com/LegionForge/convobox)
@@ -13,13 +13,21 @@ evidence:
   - docs/KNOWN-ISSUES.md's existing ctranslate2 allocator-leak entry (this repo)
   - docs/ROADMAP.md's "Alternative local STT engines" section, 2026-08-03 pass (this repo)
   - Open ASR Leaderboard summary via web search (secondary source, not fetched directly from Hugging Face Spaces)
+  - "Follow-up, 2026-08-07 later pass" evidence, all fetched live via `gh`:
+    istupakov/onnx-asr code+issue search for hotword/biasing/"context word"/boost
+    (zero results); k2-fsa/sherpa-onnx issue #3267 and its fix PR #3657
+    (open, unmerged as checked); NVIDIA-NeMo/Speech issue #15757;
+    k2-fsa/sherpa-onnx repo metadata and python/csrc keyword-spotter
+    bindings (code search); SYSTRAN/faster-whisper issue #1076 and its
+    maintainer comment thread; k2-fsa/sherpa-onnx open-issue count (615)
+    as a maintenance-load signal
 provenance:
   authors:
     - JP Cruz <jp@legionforge.org> (project owner; did not operate this pass -- unattended autonomous research)
     - Claude Code (Anthropic claude-sonnet-5) -- investigation and writing, no code changes
   org: https://legionforge.org
   created: 2026-08-07T02:15:00-05:00
-  revised: 2026-08-07T02:15:00-05:00
+  revised: 2026-08-07T20:35:00-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -228,7 +236,105 @@ wrong conclusion.
   other-language models are not -- a summary based on the top-line
   license badge alone would have missed this. (diagnosed, this instance)
 
-## Recommendation for JP
+## Follow-up (2026-08-07, later the same day): the "strongest concrete alternative" call above has a safety-critical blind spot -- this pass never checked hotword/biasing support, and Parakeet TDT specifically has a confirmed bug on exactly ConvoBox's utterance shape
+
+This pass was triggered by a live-hit incident earlier the same day (the
+runaway-repetition-hallucination/false-hard-stop failure documented in
+`docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-
+repetition.md`), which raised a question the original 2026-08-07T02:15
+pass above never asked: **does the recommended alternative actually
+support the safety-critical mechanism (hotword/vocabulary biasing)
+ConvoBox's safeword detection depends on?** Checked directly this pass,
+all primary sources:
+
+1. **`istupakov/onnx-asr` -- the specific library recommended above --
+   appears to have zero hotword/keyword-biasing support.** A GitHub code
+   search and issue search across the repo for "hotword", "biasing", and
+   "context word" returned **0 results each**, and the README's own
+   feature list never mentions the capability. This wasn't checked in
+   the original pass (which evaluated WER, speed, Windows/CUDA support,
+   and licensing -- not this). Without independent verification of an
+   undocumented API, the safe read is: **onnx-asr likely cannot do what
+   ConvoBox's safeword mechanism needs at all**, not just "does it worse
+   than faster-whisper's hotwords."
+
+2. **Parakeet TDT's own biasing-capable decode mode is independently
+   confirmed broken, and unfixed, in the delivery vehicle that DOES
+   expose it.** `k2-fsa/sherpa-onnx` issue **#3267** ("modified_beam_search
+   with NeMo TDT (Parakeet) hallucinates or returns empty text ~20% of
+   the time; greedy_search works," filed 2026-03-07, still open): the
+   biasing-capable decode mode (`modified_beam_search`) produces
+   hallucinated ("Yeah.") or empty output roughly 1 in 5 times, while the
+   non-biasing `greedy_search` mode is reliable. A fix has been proposed
+   (**PR #3657**, three root-cause bugs identified in the beam-search
+   decoder) but **is still open/unmerged as of this check** -- confirmed
+   directly via `gh pr view`, not inferred from the issue thread. Net:
+   biasing and reliability are currently mutually exclusive for Parakeet
+   TDT across the two projects that expose it.
+
+3. **Parakeet TDT has a separate, confirmed bug that reproduces on
+   ConvoBox's own utterance shape by construction.**
+   `NVIDIA-NeMo/Speech` issue **#15757** ("Parakeet TDT decodes empty
+   when short utterance has trailing silence treated as valid audio,"
+   filed 2026-06-05, still open): a short speech segment decodes
+   correctly, but the *same segment with trailing silence appended*
+   decodes to an **empty transcript**. `UtteranceSegmenter`
+   (`src/convobox/vad/segmenter.py`)'s own docstring states this is not
+   an edge case for ConvoBox, it's the *normal* shape of every emitted
+   utterance: "Emitted utterances include the trailing `min_silence_ms`
+   of silence that triggered end-of-speech detection... each utterance
+   [runs] ~`min_silence_ms` longer than the actual speech" -- deliberate,
+   because it helps STT avoid clipping the last phoneme. If this bug
+   generalizes the way its own repro suggests, Parakeet TDT could
+   silently produce empty transcripts on a large fraction of ConvoBox's
+   real utterances, not just an unlucky edge case.
+
+**This does not reopen the case for faster-whisper** -- section 1's
+finding (repetition hallucination is a Whisper-family decoder pathology,
+not fixable by switching Whisper runtimes) still stands, and transducer
+architectures like Parakeet's remain structurally immune to that specific
+failure mode. What it does is **downgrade Parakeet TDT specifically from
+"the strongest concrete alternative" to "not currently viable for the
+safety-critical path, still plausible for a non-safety dictation-only
+role"** -- the same architectural split this pass's earlier reasoning
+(section 3, the openWakeWord discussion) already gestured at without a
+concrete replacement candidate.
+
+**One candidate worth naming, at hypothesis strength (real and
+maintained, not independently stress-tested this pass):**
+`k2-fsa/sherpa-onnx` ships a genuinely separate, small **keyword-spotting
+(KWS)** module (`sherpa_onnx/keyword_spotter.py`, real Python bindings,
+confirmed via code search, not just C++ internals) -- open-vocabulary,
+per-keyword tunable, architecturally the same "dedicated small classifier
+instead of biasing a general transcriber" idea the original pass flagged
+as sound-but-unfulfilled when it ruled out `openWakeWord`. The parent
+repo is active (pushed 2026-08-07, same day as this check) but carries
+615 open issues, a real maintenance-load signal that cuts against it
+somewhat -- this needs the same "prove it on our own hardware" bar as
+Moonshine's hallucination-control claim in section 4, not a decision
+based on this note alone.
+
+## Recommendation for JP (updated 2026-08-07, later pass)
+
+**Keep faster-whisper as the shipped default for dictation.** For the
+safety-critical safeword path specifically, the original recommendation
+below to prototype `onnx-asr`/Parakeet TDT as a like-for-like
+replacement no longer holds -- it has no biasing support at all, and
+Parakeet TDT's biasing-capable decode mode is independently confirmed
+broken elsewhere. The lower-risk, higher-leverage move for safety is
+architectural, not a transcriber swap: **decouple hard-stop detection
+from the free-form transcript entirely**, via a small dedicated
+keyword-spotter (sherpa-onnx's KWS module is a real, currently-live
+candidate, not independently stress-tested yet) running in parallel with
+whatever transcriber handles dictation. That also removes the actual
+trigger for the runaway-repetition incident this pass followed from:
+`hotwords` biasing a general transcriber toward short safety phrases is
+what made the decoder loop in the first place.
+
+The original 2026-08-07T02:15 recommendation below is preserved
+unedited for the record; treat items 2 and 5 as superseded by this
+follow-up specifically on the safety-path question, not on faster-
+whisper's general dictation viability.
 
 **Keep faster-whisper as the shipped default; start a real, small,
 hands-on `onnx-asr`/Parakeet TDT prototype next time there's a live

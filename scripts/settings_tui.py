@@ -53,6 +53,7 @@ from convobox.config import (
     BackendProfileConfig,
     TTSConfig,
     TTSProfileConfig,
+    detect_claude_code_approval_gap,
     detect_permission_conflict,
     load_config,
     load_config_lenient,
@@ -344,6 +345,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("vad", "min_silence_ms", "Min silence ms", "int", help_text="Trailing silence needed to end an utterance."),
             FieldSpec("vad", "min_speech_ms", "Min speech ms", "int", help_text="Minimum speech burst to keep as a real utterance."),
             FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
+            FieldSpec("vad", "trace_silero_calls", "Trace Silero calls", "bool", help_text="Diagnostic only, off by default -- logs every single Silero window call's duration (~31/s during active audio) at DEBUG level. Deliberately separate from --verbose: too noisy for normal use even at DEBUG. Turn on only when actively chasing the live-hit VAD-freeze issue (see docs/KNOWN-ISSUES.md)."),
         ),
     ),
     SectionSpec(
@@ -1038,7 +1040,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
     conflict = detect_permission_conflict(config.backend)
     if conflict is not None:
         report.errors.append(conflict)
-    if config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
+    # claude-code specifically: this combination doesn't fail safe the way
+    # the general warning below describes for other backends (codex denies
+    # cleanly with no pending state) -- the hook still gets wired at
+    # construction time and nothing can ever answer it, so it's a hard
+    # error here, not a warning. See detect_claude_code_approval_gap's own
+    # docstring (GitHub issue #235, finding A1) for the full mechanism.
+    approval_gap = detect_claude_code_approval_gap(config.backend, config.interaction)
+    if approval_gap is not None:
+        report.errors.append(approval_gap)
+    elif config.backend.permission_mode == "approve" and not config.interaction.approval_phrase:
         report.warnings.append(
             "backend.permission_mode is 'approve' but interaction.approval_phrase is "
             "unset -- every approval request will be denied automatically with no "
