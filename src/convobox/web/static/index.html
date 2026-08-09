@@ -379,8 +379,20 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
   }
   .settings-tabs button.active { background: var(--assistant-bg); font-weight: 600; }
+  /* Restart-required marker: a distinct GLYPH (not just a color dot --
+     WCAG 1.4.1, color is never the only signal), aria-hidden since the
+     tab's own title attribute and the always-visible banner in
+     .settings-section-note below are what actually carry the meaning to
+     assistive tech, not this decorative mark. */
+  .settings-tabs button .restart-mark { margin-left: 0.3rem; opacity: 0.75; }
   .settings-errors { font-size: 0.78rem; color: var(--error-fg); padding: 0.5rem 1rem 0; }
   .settings-body { flex: 1 1 auto; overflow-y: auto; padding: 0.8rem 1rem; }
+  .settings-section-note {
+    font-size: 0.78rem; padding: 0.5rem 0.7rem; margin-bottom: 0.8rem;
+    border-radius: 6px; border: 1px solid var(--border);
+  }
+  .settings-section-note.restart { border-color: #e0a030; }
+  .settings-section-note.live { border-color: #2e7d32; }
   .settings-field { margin-bottom: 0.9rem; }
   .settings-field label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.25rem; }
   .settings-field .help { font-size: 0.72rem; color: var(--dim); margin-top: 0.25rem; }
@@ -1125,7 +1137,22 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     for (const section of sections) {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = section.label;
+      btn.append(section.label);
+      // Glyph, not color alone (WCAG 1.4.1) -- restart_required comes
+      // straight from scripts/settings_tui.py's SectionSpec, confirmed
+      // per-section against what run_convobox.py's mic-loop pipeline
+      // actually reads at startup vs. what only ever feeds a web route
+      // (see that dataclass field's own docstring). aria-hidden: the
+      // title below and the section-body banner (renderBody) are what
+      // actually carry this to assistive tech, not this decoration.
+      const mark = document.createElement("span");
+      mark.className = "restart-mark";
+      mark.setAttribute("aria-hidden", "true");
+      mark.textContent = section.restart_required ? "⟳" : "✓";
+      btn.appendChild(mark);
+      btn.title = section.restart_required
+        ? `${section.label}: changes here need ConvoBox restarted to take effect`
+        : `${section.label}: changes here apply on your next page refresh -- no restart needed`;
       btn.className = section.key === activeKey ? "active" : "";
       btn.addEventListener("click", () => {
         activeKey = section.key;
@@ -1293,6 +1320,16 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     bodyEl.innerHTML = "";
     const section = sections.find((s) => s.key === activeKey);
     if (!section) return;
+    // Always-visible text, not just the tab's hover title -- this is
+    // what actually carries the restart-required meaning to a screen
+    // reader or anyone who never hovers a tab (WCAG: don't gate
+    // important state behind a hover-only tooltip).
+    const note = document.createElement("div");
+    note.className = "settings-section-note " + (section.restart_required ? "restart" : "live");
+    note.textContent = section.restart_required
+      ? "⟳ Changes here need ConvoBox restarted to take effect."
+      : "✓ Changes here apply on your next page refresh -- no restart needed.";
+    bodyEl.appendChild(note);
     for (const field of section.fields) bodyEl.appendChild(buildFieldRow(field));
     testSectionBtn.hidden = !TESTABLE_SECTIONS.includes(activeKey);
   }

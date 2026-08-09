@@ -115,6 +115,34 @@ def test_get_display_config_returns_configured_colors_and_names() -> None:
     }
 
 
+# --- /api/config re-reads config_path fresh on every call (2026-08-07,
+# fixed live after JP hit the restart-to-see-a-color-change friction
+# firsthand) -- unlike the two tests above (no config_path at all, or a
+# display= override with none), this proves the actual production
+# behavior: a color/name change on disk shows up on the NEXT request,
+# no backend restart, matching every other section's genuine need for
+# one (scripts/settings_tui.py's SectionSpec.restart_required). ---
+
+
+def test_get_display_config_re_reads_a_changed_file_without_restart(
+    tmp_path: Path,
+) -> None:
+    import yaml
+
+    config_path = tmp_path / "convobox.yaml"
+    config_path.write_text(yaml.safe_dump({"display": {"assistant_color": "#00ff00"}}))
+    app = create_app(db=HistoryDB(Path(":memory:")), config_path=config_path)
+    with TestClient(app) as client:
+        first = client.get("/api/config").json()
+        assert first["assistant_color"] == "#00ff00"
+
+        # Simulates a real Settings-modal save landing on disk while this
+        # same app instance keeps running -- no restart, no new create_app().
+        config_path.write_text(yaml.safe_dump({"display": {"assistant_color": "#448844"}}))
+        second = client.get("/api/config").json()
+        assert second["assistant_color"] == "#448844"
+
+
 def test_list_sessions_empty(client: TestClient) -> None:
     response = client.get("/api/sessions")
     assert response.status_code == 200

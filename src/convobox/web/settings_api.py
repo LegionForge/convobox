@@ -152,6 +152,7 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
                 {
                     "key": section.key,
                     "label": section.label,
+                    "restart_required": section.restart_required,
                     "fields": [_field_to_dict(spec, config, settings_tui) for spec in fields],
                 }
             )
