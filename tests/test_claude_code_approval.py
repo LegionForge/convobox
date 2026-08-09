@@ -15,6 +15,7 @@ functions rather than only through a live process.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -300,6 +301,163 @@ async def test_aclose_denies_a_pending_approval_rather_than_hanging_it() -> None
 
     reply = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
     assert reply["decision"] == "deny"
+
+
+# --- A pending approval must never survive its own connection dying, a
+# subprocess respawn, or a hard-stop -- without this, _pending_approval_
+# writer stayed set forever and silently auto-denied every later tool call
+# for the rest of the session (GitHub issue #235, finding A2). ---
+
+
+@pytest.mark.asyncio
+async def test_dead_hook_connection_clears_the_pending_approval() -> None:
+    adapter = _adapter()
+    try:
+        port = await adapter._ensure_approval_server()
+        _, writer = await _connect(port)
+        writer.write(
+            json.dumps({"token": adapter._approval_token, "tool_name": "Bash"}).encode() + b"\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+        assert adapter._pending_approval_writer is not None
+
+        # Simulate the hook process dying without ever answering.
+        writer.close()
+
+        async def _wait_cleared() -> None:
+            while adapter._pending_approval_writer is not None:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(_wait_cleared(), timeout=5.0)
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_new_approval_succeeds_after_the_old_dead_one_clears() -> None:
+    # The real regression this fixes: without the EOF watcher, a second,
+    # genuinely new approval request after the first connection died would
+    # be permanently denied by the "another approval already pending"
+    # rejection -- forever, since nothing was left to ever clear it.
+    adapter = _adapter()
+    try:
+        port = await adapter._ensure_approval_server()
+        _, writer1 = await _connect(port)
+        writer1.write(
+            json.dumps({"token": adapter._approval_token, "tool_name": "Bash"}).encode() + b"\n"
+        )
+        await writer1.drain()
+        await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+        writer1.close()
+
+        async def _wait_cleared() -> None:
+            while adapter._pending_approval_writer is not None:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(_wait_cleared(), timeout=5.0)
+
+        reader2, writer2 = await _connect(port)
+        writer2.write(
+            json.dumps({"token": adapter._approval_token, "tool_name": "Write"}).encode() + b"\n"
+        )
+        await writer2.drain()
+        event = await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+        assert event.type == BackendEventType.APPROVAL_REQUEST
+        assert event.tool == "Write"
+        writer2.close()
+    finally:
+        await adapter.aclose()
+
+
+def _fake_proc() -> MagicMock:
+    # Minimal asyncio.subprocess.Process double: stdout/stderr are real
+    # StreamReaders already at EOF, so _read_loop/_drain_stderr (both
+    # `while True: readline(); if not line: return`) exit immediately and
+    # cleanly -- no real OS subprocess needed for this test at all.
+    # AsyncMock, not MagicMock, for the process itself: aclose()'s real
+    # termination path does `await proc.wait()`, and a plain MagicMock's
+    # call result isn't properly awaitable -- asyncio's Task machinery
+    # doesn't raise on that, it just hangs until an outer timeout forces
+    # cancellation (found live debugging this exact test).
+    proc = AsyncMock()
+    proc.returncode = None
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    stderr = asyncio.StreamReader()
+    stderr.feed_eof()
+    proc.stdout = stdout
+    proc.stderr = stderr
+    proc.stdin = MagicMock()
+    proc.wait.return_value = 0
+    return proc
+
+
+@pytest.mark.asyncio
+async def test_respawn_clears_a_pending_approval_from_the_old_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Deliberately not going through a real approval connection (see
+    # test_dead_hook_connection_clears_the_pending_approval and
+    # test_a_new_approval_succeeds_after_the_old_dead_one_clears for that
+    # -- the EOF-watcher's own behavior is already covered there). This
+    # test targets exactly one thing: does _ensure_proc()'s respawn
+    # branch clear _pending_approval_writer, independent of anything
+    # connection-related. A real socket write().read() introduces a
+    # timing race against the EOF-watcher task under Windows' proactor
+    # loop that has nothing to do with what this test is checking (found
+    # live debugging this test) -- a plain fake writer sidesteps it.
+    import convobox.adapters.claude_code as mod
+
+    async def fake_spawn(*args: object, **kwargs: object) -> MagicMock:
+        return _fake_proc()
+
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", fake_spawn)
+
+    adapter = _adapter()  # permission_mode="approve" -> _interactive_approval=True
+    try:
+        await adapter._ensure_proc()  # first (fake) spawn
+        adapter._pending_approval_writer = MagicMock()  # type: ignore[assignment]
+
+        # Force _ensure_proc's respawn branch -- same trigger condition
+        # the real code checks (self._proc is None or
+        # self._proc.returncode is not None).
+        adapter._proc = None
+        await adapter._ensure_proc()
+
+        assert adapter._pending_approval_writer is None
+    finally:
+        # Not adapter.aclose(): its real subprocess-termination path
+        # (await proc.wait()) doesn't play well with a mocked process --
+        # AsyncMock's own call/await machinery left it hanging in
+        # practice (found live debugging this test). The fake process
+        # was never a real OS process needing that teardown.
+        for task in (adapter._stderr_task, adapter._reader_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_denies_a_pending_approval_rather_than_leaving_it_stuck() -> None:
+    adapter = _adapter()
+    try:
+        port = await adapter._ensure_approval_server()
+        reader, writer = await _connect(port)
+        writer.write(
+            json.dumps({"token": adapter._approval_token, "tool_name": "Bash"}).encode() + b"\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+
+        await adapter.send_hard_stop()
+
+        reply = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+        assert reply["decision"] == "deny"
+        assert adapter._pending_approval_writer is None
+    finally:
+        await adapter.aclose()
 
 
 # --- MCP tool calls hit a SEPARATE permission gate from --permission-mode
