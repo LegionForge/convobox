@@ -85,6 +85,7 @@ from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.response_tiering import ContinueDetector
 from convobox.safeword.detector import SafewordDetector
+from convobox.stt.base import STTEngine, TranscriptResult
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
@@ -1107,10 +1108,18 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
     original heartbeat, not one job growing new responsibilities. The
     status label and continue-wait start are both poll-based rather than
     threaded through every call site in the main loop because of a real
-    constraint, not laziness: transcriber.transcribe() blocks the event
-    loop synchronously today (no asyncio.to_thread offload), so nothing
-    can react DURING that decode regardless of whether it's poll- or
-    event-driven; polling is the lower-risk mechanism either way.
+    constraint, not laziness: transcriber.transcribe() runs inside
+    asyncio.to_thread() (see the mic loop below), so THIS coroutine keeps
+    ticking normally even during a slow/stuck decode -- but the mic loop
+    coroutine itself is still blocked awaiting that decode (or its
+    stt.transcribe_timeout_s timeout) regardless, so threading a live
+    value through every call site there would still lag behind a stuck
+    call the same way; polling from here, which is NOT blocked, stays the
+    lower-risk mechanism either way. Live-hit 2026-08-06, before the
+    to_thread offload existed: a stuck transcribe() call froze this
+    watchdog too (it ran on the same event loop, no offload at the time),
+    which is exactly what motivated adding the offload -- see
+    docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md.
 
     VAD forced-cap discards (live incident, 2026-08-05: docs/field-notes/
     2026-08-05-vad-segmenter-silent-unbounded-lockup.md): with
@@ -1786,6 +1795,52 @@ def _cancel_main_task(main_task: "asyncio.Task[None]") -> None:
         main_task.cancel()
 
 
+async def _transcribe_with_timeout(
+    transcriber: STTEngine, utterance: np.ndarray, timeout_s: float | None
+) -> TranscriptResult | None:
+    """Runs transcriber.transcribe() in a thread, with an optional cap on
+    how long the mic loop will wait for it, returning None (after logging
+    and invalidating the engine) if it doesn't return in time.
+
+    Offloaded to a thread unconditionally, not just when timeout_s is
+    set: a slow/stuck transcribe() call must not freeze the rest of the
+    app (web UI, TUI, the heartbeat watchdog) even with no timeout
+    configured -- live-hit 2026-08-06: transcribe() ran synchronously on
+    the main event loop with no offload at the time, and a single stuck
+    call froze EVERYTHING, including the once-a-second background
+    watchdog, while mic capture (a separate thread) kept running the
+    whole time -- confirmed via AEC-dump frame-count forensic cross-check.
+    See docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-repetition.md.
+
+    timeout_s=None (the default) makes wait_for behave exactly like a
+    plain await -- waits indefinitely, zero behavior change from before
+    this existed beyond the (strictly beneficial, no behavior change to
+    the result itself) thread offload, same opt-in-tuning convention as
+    STTConfig's other knobs (temperature, condition_on_previous_text).
+
+    A real timeout can only ABANDON a stuck call, not kill it -- Python
+    cannot force-terminate a native thread. transcriber.invalidate() (see
+    STTEngine's own docstring) tells the engine not to trust whatever
+    that abandoned call's background thread might still be doing, so the
+    NEXT call gets a fresh model rather than racing the old one.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(transcriber.transcribe, utterance), timeout=timeout_s
+        )
+    except TimeoutError:
+        log.warning(
+            "STT transcribe() did not return within %.0fs -- abandoning this "
+            "utterance as unheard. If this was a genuine native-level hang "
+            "(not just slow), the background thread running it may still be "
+            "alive (Python cannot force-kill a native call) -- the STT model "
+            "will be reloaded before the next utterance either way.",
+            timeout_s,
+        )
+        transcriber.invalidate()
+        return None
+
+
 async def run(args: argparse.Namespace) -> None:
     main_task = asyncio.current_task()
     config_path = resolve_config_path(args.config)
@@ -2393,7 +2448,11 @@ async def run(args: argparse.Namespace) -> None:
         with MicrophoneStream(sample_rate=config.audio.sample_rate, device=device) as mic:
             mic_holder["mic"] = mic  # lets the AEC delay estimator read input latency
             async for utterance in segmenter.segment(_mic_chunks(mic)):
-                result = transcriber.transcribe(utterance)
+                result = await _transcribe_with_timeout(
+                    transcriber, utterance, config.stt.transcribe_timeout_s
+                )
+                if result is None:
+                    continue
                 text = result.text
                 is_hard_stop = safeword.check(text) is not None
                 if is_hard_stop and incident_capture is not None:
