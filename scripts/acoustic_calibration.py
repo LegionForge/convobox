@@ -415,7 +415,13 @@ def _run_trial(
         vad_config,
         sample_rate,
     )
-    np.savez_compressed(diagnostics_path, **trace)
+    # mypy's numpy stub for savez_compressed has a named `allow_pickle: bool`
+    # keyword ahead of its `**kwds: ArrayLike` catch-all -- unpacking a plain
+    # dict[str, np.ndarray] makes it flag every key as a POSSIBLE collision
+    # with that one named param (trace's keys are diagnostic signal names,
+    # never "allow_pickle"). A known, standard false positive for this
+    # stub shape, not a real type error.
+    np.savez_compressed(diagnostics_path, **trace)  # type: ignore[arg-type]
 
     result = TrialResult(
         label=label,
