@@ -6,6 +6,14 @@
 <title>ConvoBox</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#1a1a1a">
+<!-- highlight.js themes, vendored (see vendor/highlightjs/NOTICE.md) --
+     only the one matching the OS color-scheme preference actually
+     applies, same mechanism the rest of this page's own dark/light
+     theming already uses (:root's own prefers-color-scheme block
+     above). Loaded unconditionally (small, ~1.3KB each) even though the
+     JS highlighter itself only loads on demand -- see renderArtifact(). -->
+<link rel="stylesheet" href="vendor/highlightjs/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="vendor/highlightjs/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
 <style>
   :root {
     color-scheme: light dark;
@@ -336,6 +344,13 @@
     flex: 0 0 auto;
   }
   .artifact-pane-header button:hover { background: var(--assistant-bg); }
+  #artifact-pane-editor-link {
+    font-size: 0.72rem; color: var(--fg); text-decoration: none;
+    padding: 0.25rem 0.5rem; border-radius: 6px; border: 1px solid var(--border);
+    flex: 0 0 auto; white-space: nowrap;
+  }
+  #artifact-pane-editor-link:hover { border-color: var(--dim); }
+  #artifact-pane-editor-link[hidden] { display: none; }
   #artifact-pane-body {
     flex: 1 1 auto; min-height: 0; overflow: auto;
     display: flex; align-items: center; justify-content: center;
@@ -475,6 +490,8 @@
 <aside id="artifact-pane" hidden>
   <div class="artifact-pane-header">
     <span id="artifact-pane-title"></span>
+    <a id="artifact-pane-editor-link" href="#" target="_blank" rel="noopener noreferrer" hidden
+       title="Open this file in VS Code (requires VS Code installed with its vscode:// URI handler registered -- the default on a normal install)">Open in editor</a>
     <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane" title="Close the artifact pane">&times;</button>
   </div>
   <div id="artifact-pane-body"></div>
@@ -538,6 +555,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const artifactTitleEl = document.getElementById("artifact-pane-title");
   const artifactBodyEl = document.getElementById("artifact-pane-body");
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
+  const artifactEditorLink = document.getElementById("artifact-pane-editor-link");
   const composerForm = document.getElementById("composer");
   const composerInput = document.getElementById("composer-input");
   const composerSendBtn = document.getElementById("composer-send-btn");
@@ -546,11 +564,89 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
   // directly, HTML renders sandboxed (agent-generated content, not this
   // page's own trusted UI -- never drop the sandbox attribute without a
-  // real reason), everything else in the serving route's own allowlist
-  // (pdf/csv/txt) falls back to a plain download link.
+  // real reason), source code renders syntax-highlighted (2026-08-07,
+  // JP asked directly -- see _ARTIFACT_CODE_LANGUAGES below), everything
+  // else in the serving route's own allowlist (pdf/csv/txt) falls back
+  // to a plain download link.
   const _ARTIFACT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp"]);
   const _ARTIFACT_HTML_EXTENSIONS = new Set(["html", "htm"]);
+  // ext -> the highlight.js grammar name each vendored
+  // vendor/highlightjs/languages/*.min.js file self-registers as (see
+  // that directory's own NOTICE.md). Must stay in sync with
+  // ARTIFACT_MEDIA_TYPES (src/convobox/adapters/base.py) -- that dict is
+  // what actually gates whether an ARTIFACT event for a given extension
+  // ever reaches this pane at all; this map only decides HOW to render
+  // an already-allowed one, never whether it's allowed. .h defaults to
+  // the cpp grammar rather than c -- close enough for most real-world
+  // C headers and handles the (now-common) mixed C/C++ codebase case
+  // better than the reverse choice would.
+  const _ARTIFACT_CODE_LANGUAGES = new Map([
+    ["js", "javascript"], ["mjs", "javascript"], ["cjs", "javascript"], ["jsx", "javascript"],
+    ["ts", "typescript"], ["tsx", "typescript"],
+    ["yaml", "yaml"], ["yml", "yaml"],
+    ["java", "java"],
+    ["c", "c"],
+    ["h", "cpp"], ["cpp", "cpp"], ["cc", "cpp"], ["cxx", "cpp"], ["hpp", "cpp"], ["hh", "cpp"],
+    ["cs", "csharp"],
+    ["json", "json"],
+    ["xml", "xml"],
+    ["md", "markdown"],
+  ]);
   let artifactLoadCounter = 0;
+
+  // Lazy-loaded on first real use, not at page load -- most sessions
+  // never open a code artifact, and the vendored bundle (core + every
+  // language grammar) is real weight (~170KB uncompressed) not worth
+  // paying for pages that only ever show images. Each URL loads and
+  // executes at most once; concurrent renders share the same in-flight
+  // promise instead of racing duplicate <script> tags.
+  const _scriptLoadPromises = new Map();
+  function loadScriptOnce(src) {
+    if (!_scriptLoadPromises.has(src)) {
+      _scriptLoadPromises.set(src, new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = src;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`failed to load ${src}`));
+        document.head.appendChild(script);
+      }));
+    }
+    return _scriptLoadPromises.get(src);
+  }
+
+  async function ensureHighlighter(lang) {
+    // Core must load (and RUN) before any language file -- each
+    // languages/*.min.js self-registers against the global `hljs` the
+    // core script creates when it executes. Loading ORDER matters here,
+    // not just eventual presence, which is why this awaits core first
+    // rather than kicking off both loads in parallel.
+    await loadScriptOnce("vendor/highlightjs/highlight.min.js");
+    await loadScriptOnce(`vendor/highlightjs/languages/${lang}.min.js`);
+  }
+
+  async function renderCodeArtifact(url, filename, lang) {
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.className = `language-${lang}`;
+    pre.appendChild(code);
+    artifactBodyEl.appendChild(pre);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      // textContent, never innerHTML -- this is agent-generated content,
+      // not trusted markup (same reasoning as the HTML iframe's sandbox
+      // attribute below). highlight.js's highlightElement() reads the
+      // already-set textContent and wraps it in ITS OWN generated
+      // markup; it never re-parses this text as HTML itself.
+      code.textContent = text;
+      await ensureHighlighter(lang);
+      window.hljs.highlightElement(code);
+    } catch (err) {
+      console.error("code artifact render failed", err);
+      code.textContent = `Failed to load ${filename}: ${err}`;
+    }
+  }
 
   function renderArtifact(path) {
     // Cache-bust on EVERY render, same path or not -- "a later ARTIFACT
@@ -558,8 +654,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     // means the underlying file changed, so a stale cached image/iframe
     // must never be what's shown.
     artifactLoadCounter += 1;
-    const url = `/api/artifacts/${path.split("/").map(encodeURIComponent).join("/")}` +
-      `?t=${Date.now()}_${artifactLoadCounter}`;
+    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    const url = `/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`;
     const filename = path.split("/").pop() || path;
     const dot = filename.lastIndexOf(".");
     const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
@@ -567,6 +663,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTitleEl.textContent = filename;
     artifactTitleEl.title = path;
     artifactBodyEl.innerHTML = "";
+    artifactEditorLink.hidden = true;
 
     if (_ARTIFACT_IMAGE_EXTENSIONS.has(ext)) {
       const img = document.createElement("img");
@@ -579,6 +676,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       iframe.title = filename;
       iframe.sandbox = "allow-scripts";
       artifactBodyEl.appendChild(iframe);
+    } else if (_ARTIFACT_CODE_LANGUAGES.has(ext)) {
+      renderCodeArtifact(url, filename, _ARTIFACT_CODE_LANGUAGES.get(ext));
     } else {
       const link = document.createElement("a");
       link.className = "artifact-fallback-link";
@@ -588,6 +687,19 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       link.textContent = `Download ${filename}`;
       artifactBodyEl.appendChild(link);
     }
+
+    // "Open in editor" (best-effort): offered for every artifact type,
+    // not just code -- VS Code opens images/PDFs fine too. Stays hidden
+    // on any failure (e.g. a future no-working_dir edge case) rather
+    // than showing a dead link; failure here is never fatal to the pane
+    // itself, which is why this isn't awaited before showing the pane.
+    fetch(`/api/artifacts/${encodedPath}/editor-uri`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data) => {
+        artifactEditorLink.href = data.uri;
+        artifactEditorLink.hidden = false;
+      })
+      .catch((err) => console.error("editor-uri fetch failed", err));
 
     artifactPaneEl.hidden = false;
   }

@@ -52,6 +52,32 @@ ARTIFACT_MEDIA_TYPES: dict[str, str] = {
     ".csv": "text/csv",
     ".txt": "text/plain",
     ".md": "text/markdown",
+    # Source code -- served as text/plain regardless of language (the
+    # frontend fetches the raw text itself and syntax-highlights it
+    # client-side; browsers have no native rendering for these anyway,
+    # unlike images/HTML/PDF above, so there's no reason to invent
+    # non-standard MIME types per language). See index.html's
+    # _ARTIFACT_CODE_LANGUAGES for the extension -> highlight.js grammar
+    # mapping this list must stay in sync with.
+    ".js": "text/plain",
+    ".mjs": "text/plain",
+    ".cjs": "text/plain",
+    ".jsx": "text/plain",
+    ".ts": "text/plain",
+    ".tsx": "text/plain",
+    ".yaml": "text/plain",
+    ".yml": "text/plain",
+    ".java": "text/plain",
+    ".c": "text/plain",
+    ".h": "text/plain",
+    ".cpp": "text/plain",
+    ".cc": "text/plain",
+    ".cxx": "text/plain",
+    ".hpp": "text/plain",
+    ".hh": "text/plain",
+    ".cs": "text/plain",
+    ".json": "text/plain",
+    ".xml": "text/plain",
 }
 
 
