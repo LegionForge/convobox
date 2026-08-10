@@ -113,10 +113,18 @@ voice pipeline has already been through. See
 
 | Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
 |-------------|----------------------------------------------------------------------|---------------------------------------|
-| **Platform**| Windows 11                                                            | Linux, macOS                         |
+| **Platform**| Windows 11                                                            | Linux, macOS<sup>†</sup>              |
 | **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
 | **STT**     | faster-whisper                                                        | —                                     |
 | **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; real synthesis verified programmatically against the actual model, not yet a live voice session with real speakers) |
+
+<sup>†</sup> macOS: signal-level AEC (real mic+speaker) and the Claude Code /
+Codex backends have real live-hardware confirmation as of 2026-08-10 (see
+[docs/field-notes/2026-08-10-macos-live-hardware-first-pass.md](docs/field-notes/2026-08-10-macos-live-hardware-first-pass.md))
+— opencode untested there (no provider credentials configured on that
+machine), and no live human speech has yet been transcribed through the
+mic into a backend on macOS, so it stays in this column until that
+happens.
 
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
