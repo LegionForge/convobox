@@ -1618,6 +1618,49 @@ def test_render_modal_widens_to_fit_long_detail_lines_without_truncating() -> No
     assert "\x1b[1m\x1b[36mEsc\x1b[0m now, then \x1b[1m\x1b[36m[S]\x1b[0m to save first." in joined
 
 
+def test_render_modal_input_line_shows_the_end_of_a_long_buffer_not_the_start() -> None:
+    # Live UAT finding, 2026-08-10: editing a long stt.hotwords list, the
+    # displayed "> {buffer}" line froze on the first N characters once the
+    # buffer exceeded the visible width -- fit()'s ordinary head-then-"..."
+    # truncation, applied to every OTHER content line, means whatever you
+    # just typed at the end was invisible with zero feedback it even
+    # changed. The input line must show the END (where the cursor always
+    # is -- this editor only ever appends/backspaces, no cursor movement),
+    # not the start.
+    buffer = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november"
+    lines = render_modal(
+        "Edit Hotwords",
+        "Editing stt.hotwords",
+        ["Current: (unset)", "Space-separated words."],
+        buffer,
+        60,
+        30,
+    )
+    joined = "\n".join(lines)
+    # The tail of the buffer (what was most recently typed) must be
+    # visible -- the OLD head-truncating behavior would never show this.
+    assert "mike november" in joined
+    # The very start of the buffer must NOT be fully present with nothing
+    # missing -- some truncation must have actually happened, or this
+    # test isn't exercising the overflow path at all.
+    assert "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november" not in joined
+    # A leading ellipsis marks the truncation, same visual language as
+    # fit()'s own trailing "..." elsewhere in this file.
+    assert "> ..." in joined
+
+
+def test_render_modal_input_line_short_buffer_is_unaffected() -> None:
+    # The tail-truncating input-line formatter must be a no-op (same as
+    # plain fit()) when the buffer already fits -- no leading "...", no
+    # missing characters.
+    lines = render_modal(
+        "Edit Voice", "Editing tts.voice", ["Current: (unset)", "hint"], "af_sarah", 100, 30
+    )
+    joined = "\n".join(lines)
+    assert "> af_sarah" in joined
+    assert "> ...af_sarah" not in joined
+
+
 def test_handle_browse_quit_confirmation_shows_save_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     config = AppConfig()
     state = TuiState(
