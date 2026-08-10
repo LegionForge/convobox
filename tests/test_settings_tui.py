@@ -83,6 +83,34 @@ def test_modal_edit_accepts_value_on_enter(monkeypatch: pytest.MonkeyPatch) -> N
     assert value == "hi"
 
 
+def test_modal_command_edit_unchanged_does_not_corrupt_the_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Live UAT finding, 2026-08-10: the Command field's buffer used to be
+    # seeded via the generic _format_value() (comma-joined, correct for
+    # OTHER list-kind fields like hard_stop_phrases, wrong here) while its
+    # OWN parse-on-accept uses shlex.split() (space-based, no comma
+    # handling). Simply opening this field and pressing Enter WITHOUT
+    # TYPING ANYTHING used to corrupt every token with a trailing comma.
+    spec = FieldSpec("backend", "command", "Command", "command")
+    keys = iter(["ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._edit_value_interactive(
+        spec, ["codex.cmd", "--model", "gpt-5.6-terra"], AppConfig()
+    )
+    assert accepted is True
+    assert value == ["codex.cmd", "--model", "gpt-5.6-terra"]
+
+
+def test_modal_command_edit_none_seeds_an_empty_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = FieldSpec("backend", "command", "Command", "command")
+    keys = iter(["ENTER"])
+    monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
+    accepted, value = settings_tui._edit_value_interactive(spec, None, AppConfig())
+    assert accepted is True
+    assert value is None  # empty buffer -> _parse_value's "keep current" case
+
+
 def test_modal_choice_edit_cycles_with_space_and_arrow(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = FieldSpec(
         "interaction",
