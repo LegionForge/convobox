@@ -1022,3 +1022,67 @@ glitch; user-side recall uncertainty in a long (~2 hour), many-artifact
 live session. Worth a clean, deliberate reproduction attempt (not
 squeezed into the same session as everything else being tested) before
 concluding anything further.
+
+---
+
+## A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops
+
+**Status:** validated-live, 2026-08-09, no fix built yet -- two follow-up
+options identified (below), deliberately not implemented without
+scoping the tradeoff first. Full evidence, exact timestamps, and the
+mechanism writeup: `docs/field-notes/2026-08-09-hard-stop-does-not-
+cancel-an-in-flight-tool-call.md`.
+
+**Symptom.** During a real ~1h38m live voice UAT session (codex backend,
+real headset), saying the pause phrase or a safeword while a
+`commandExecution` tool call was in flight consistently produced this
+sequence: the interrupt RPC (`turn/interrupt` for codex; the equivalent
+`control_request interrupt` / `POST .../interrupt` for claude-code /
+opencode) succeeds with no error, and ConvoBox's own state (pause/resume,
+safeword-matched, "resumed listening") transitions cleanly and
+immediately -- but the tool call's real `tool_result` doesn't arrive
+until the underlying shell command finishes on its own schedule, **16 to
+48+ seconds later**, across 5 separate incidents. Reproduces identically
+whether triggered by voice or the web UI's Stop-listening button (rules
+out an STT-timing explanation), and stacking multiple hard-stop signals
+in a row during the same wait doesn't shorten it.
+
+**Why:** all three backend adapters' `send_hard_stop()` only signal the
+agent's own conversational/orchestration layer to stop -- none of the
+three vendor APIs is documented to guarantee killing a shell subprocess
+the agent already spawned for a tool call, and ConvoBox never has a
+process handle on that subprocess (it only observes the eventual
+`tool_result` the agent chooses to report). This directly relates to,
+but is a different mechanism than, the entry above (a misheard safeword
+landing on the pause phrase) -- that entry's "in-flight work is
+cancelled either way" claim is about ConvoBox's OWN turn-level state,
+which this finding doesn't contradict; the gap here is one level deeper,
+at the tool call's own OS process.
+
+**Unlike this repo's other "can't force-kill" findings (STT/AEC thread
+offload), this one is solvable** -- an OS process (unlike an in-process
+Python thread) can always be force-killed, and ConvoBox already holds a
+real process handle on each backend's own CLI subprocess (used cleanly
+in every adapter's `aclose()` on shutdown). The capability exists;
+hard-stop just doesn't currently escalate to using it.
+
+**Two follow-up options identified, neither built yet:**
+1. **Honesty fix (small, low-risk):** don't let the UI say "resumed
+   listening" as if everything stopped when a hard-stop was sent but no
+   corresponding `tool_result`/turn-completion has arrived yet -- track
+   and surface that pending-cleanup state truthfully instead of
+   silently going quiet about it.
+2. **Escalating force-kill (bigger, needs its own scoping/UAT pass):**
+   if no completion arrives within a grace period after the polite
+   interrupt, escalate to killing and respawning the backend process.
+   Trades the whole session/thread's context for an actual guarantee --
+   should be a deliberate, probably config-gated choice, not a silent
+   default. Candidate follow-up test scenarios (from a same-session
+   discussion with the codex backend itself, live-testing its own
+   cancellation semantics): does the process actually die and stop
+   performing side effects after an abort, or does aborting-then-
+   restarting the same command produce duplicate/detached execution;
+   how does a natural timeout compare to a manual abort; does a command
+   with its own restart policy resist cancellation; what happens to
+   output ordering (pre-delay vs. post-delay messages) when a delayed
+   command is interrupted mid-stream.
