@@ -440,7 +440,25 @@ class InteractionConfig(BaseModel):
 
 
 class SafewordConfig(BaseModel):
-    hard_stop_phrases: list[str] = Field(default_factory=lambda: ["stop stop stop"])
+    # Each phrase is a word tripled, not a single word -- the anti-false-
+    # positive mechanism (a bare "stop" is common in normal conversation;
+    # nobody says a word three times in a row by accident). "abort" and
+    # "halt" were added 2026-08-09 as universal, en-US-broad emergency-
+    # stop vocabulary with minimal overlap with this project's OWN
+    # domain vocabulary (unlike candidates considered and rejected --
+    # "kill"/"freeze" -- both of which are extremely common phrasing in
+    # normal conversation ABOUT a coding-agent tool, e.g. "kill the
+    # process"/"it froze", elevating false-positive risk specifically
+    # here). Deliberately NOT added to any default stt.hotwords list --
+    # docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-
+    # repetition.md validated-live that hotwording a phrase makes it
+    # both easier to say AND easier for the STT decoder to hallucinate
+    # into a runaway repetition loop that falls through into a real
+    # hard-stop; more default safewords is a deliberate stop-coverage
+    # tradeoff, not something to also amplify via hotwords by default.
+    hard_stop_phrases: list[str] = Field(
+        default_factory=lambda: ["stop stop stop", "abort abort abort", "halt halt halt"]
+    )
 
 
 class BackendConfig(BaseModel):
