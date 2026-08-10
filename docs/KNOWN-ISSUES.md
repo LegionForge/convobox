@@ -471,13 +471,48 @@ the barge-in/self-interruption problem was necessarily software-only
 (overlap-gate, text-echo-filter), since `EchoCanceller.__init__` raised
 immediately without the package installed.
 
-**Not yet done.** A live mic+speaker attenuation measurement on macOS
-hardware (the Mac equivalent of JP's Windows UAT run) hasn't been run —
-this entry only confirms the canceller constructs and passes its unit
-tests here, not that it converges well against this machine's actual
-room/speaker/mic acoustics. `docs/KNOWN-ISSUES.md`'s existing note below
-(erratic 0.5-12dB attenuation on Windows) may or may not reproduce
-identically on macOS; that's a separate, still-open question.
+**Follow-up (2026-08-10): the live mic+speaker attenuation measurement
+this entry asked for has now been run, on this machine's real hardware
+(AIRHUG 28 mic, Mac mini Speakers) -- different finding than expected.**
+Ran `scripts/acoustic_calibration.py` (the repo's own unattended
+real-room AEC/VAD calibration tool, previously only exercised on
+Windows) twice independently, in a dedicated `git worktree` at
+`convobox-UAT` (kept separate from this dev tree; see AGENTS.md's
+"claim scope before editing" precedent) with a real Piper voice
+(`en_US-lessac-medium`) actually played through the speakers and
+captured back through the mic:
+
+- Trial 1: `attenuation=2.49dB, ceiling=1.92dB` (auto-estimated delay
+  238ms). Trial 2 (independent run): `attenuation=5.08dB,
+  ceiling=0.69dB`. **Both readings sit at or below the tool's own
+  "measurable ceiling"** -- per `EchoCanceller.measurable_ceiling_db()`'s
+  own docstring, that means speaker echo at this mic barely rises above
+  room ambient noise in the first place, not that AEC is failing to
+  cancel it. `raw_playback_rms` (0.0047-0.0049) vs `ambient_rms`
+  (0.0037-0.0040) confirms it directly: the un-cancelled echo is only
+  marginally louder than the room's own noise floor.
+- **Zero false barge-ins in either trial, with AEC on OR off**
+  (`false_barge_ins: 0` for both `raw_vad` and `processed_vad`, both
+  runs) -- the actual safety-relevant signal (would self-echo trip a
+  spurious interrupt) reads clean even in the AEC-off condition on this
+  hardware. Raw VAD did register 1-2 short utterances from the
+  un-cancelled echo (once even peaking at `peak_vad_probability=0.997`),
+  but never sustained long enough to cross `BargeInMonitor`'s own
+  threshold -- the same distinction this repo's `[G1]`/`[G2]` UAT
+  entries already draw between "VAD notices something" and "a real
+  barge-in fires."
+- **Reads as a genuinely different acoustic situation than the Windows
+  finding below (erratic 0.5-12dB, clearly-above-ambient echo)**, not a
+  contradiction of it -- plausibly this mic (AIRHUG 28) and/or the Mac
+  mini Speakers' real-world coupling in this room is simply quieter
+  relative to ambient noise than JP's Windows setup was. Only 2 trials,
+  one room, one hardware pair -- not enough to generalize to "macOS is
+  fine," just enough to say this specific machine's speaker-echo problem
+  (if this repo ever needs to chase one on it) looks small relative to
+  room noise, not that AEC itself is unusually strong or weak here.
+- Full JSON reports + raw/AEC-processed WAV evidence live under the UAT
+  worktree's own `uat-acoustic-calibration/` (gitignored scratch,
+  per this project's own convention -- not copied into this repo).
 
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
