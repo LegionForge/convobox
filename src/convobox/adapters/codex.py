@@ -15,9 +15,18 @@ adapter was written. Key facts:
 - `turn/steer` is REAL steering of the in-flight turn (unlike Claude
   Code's queue-only semantics); it requires `expectedTurnId` and fails
   if that turn is no longer active.
-- `turn/interrupt {threadId, turnId}` cancels for real (confirmed
-  live: interrupted turn emits `turn/completed`, and the same thread
-  serves subsequent turns fine).
+- `turn/interrupt {threadId, turnId}` cancels the TURN for real
+  (confirmed live: interrupted turn emits `turn/completed`, and the
+  same thread serves subsequent turns fine) -- but NOT necessarily an
+  already-dispatched `commandExecution` tool call's underlying shell
+  subprocess. Live-caught 2026-08-09 (real UAT session, docs/field-notes
+  /2026-08-09-hard-stop-does-not-cancel-an-in-flight-tool-call.md): five
+  separate incidents where `turn/interrupt` succeeded (zero RPC errors
+  logged) and ConvoBox's own state reset immediately, but the real
+  command's `tool_result` still arrived 16-48+ seconds later, on the
+  underlying command's own schedule. The turn-level guarantee above is
+  real and still holds; it just doesn't extend as far down as this
+  docstring previously implied.
 - Text arrives as `item/completed` notifications whose item has
   `type: "agentMessage"` and the full `text` (deltas exist too;
   ignored, same policy as OpenCode's text.ended-not-text.delta).
