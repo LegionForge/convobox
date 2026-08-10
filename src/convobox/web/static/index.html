@@ -158,6 +158,7 @@
      composer bar below (not part of the scrolling area -- see
      #events-scroll). --- */
   main {
+    position: relative;
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
@@ -168,6 +169,32 @@
     min-height: 0;
     overflow-y: auto;
   }
+  /* --- Drag-and-drop upload overlay: covers the chat area (not the
+     composer, so it stays visibly usable/droppable-adjacent) while a
+     drag is in progress. pointer-events: none so the overlay itself
+     never intercepts the drop -- main's own dragover/drop listeners
+     handle it (see the drag-depth-counter note in the script below for
+     why a plain dragenter/dragleave pair isn't enough). --- */
+  #drop-overlay {
+    position: absolute;
+    inset: 0;
+    bottom: 3.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    text-align: center;
+    background: rgba(46, 125, 251, 0.12);
+    border: 2px dashed var(--user-bg);
+    border-radius: 8px;
+    margin: 0.4rem;
+    color: var(--fg);
+    font-size: 0.95rem;
+    font-weight: 600;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #drop-overlay[hidden] { display: none; }
   #events {
     max-width: 760px;
     width: 100%;
@@ -481,6 +508,7 @@
       <div id="empty">No events yet.</div>
     </div>
   </div>
+  <div id="drop-overlay" hidden>Drop to upload &mdash; goes into the backend's working directory</div>
   <form id="composer">
     <label for="composer-input" class="visually-hidden">Message to send</label>
     <textarea id="composer-input" placeholder="Type a message&hellip;" rows="1"></textarea>
@@ -559,6 +587,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const composerForm = document.getElementById("composer");
   const composerInput = document.getElementById("composer-input");
   const composerSendBtn = document.getElementById("composer-send-btn");
+  const mainEl = document.querySelector("main");
+  const dropOverlayEl = document.getElementById("drop-overlay");
   let currentSessionId = null;
 
   // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
@@ -1111,6 +1141,61 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       composerInput.focus();
     }
   });
+
+  // Drag-and-drop upload (POST /api/upload -> convobox.web.uploads, fenced
+  // to backend.working_dir). A drag-depth counter, not a plain dragenter/
+  // dragleave pair -- the browser fires dragleave every time the pointer
+  // crosses from main into a CHILD element (every bubble, the composer,
+  // ...) and back, which would otherwise flicker the overlay on/off
+  // constantly instead of just once per real enter/exit of main itself.
+  let dragDepth = 0;
+
+  mainEl.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragDepth += 1;
+    dropOverlayEl.hidden = false;
+  });
+  mainEl.addEventListener("dragover", (e) => {
+    // Required even with no other work to do -- without preventDefault()
+    // here, the browser's default (open the file, don't fire "drop") wins.
+    e.preventDefault();
+  });
+  mainEl.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropOverlayEl.hidden = true;
+  });
+  mainEl.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    dropOverlayEl.hidden = true;
+    const files = Array.from(e.dataTransfer?.files || []);
+    for (const file of files) {
+      await uploadFile(file);
+    }
+  });
+
+  async function uploadFile(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      // CSRF_HEADERS only -- no Content-Type here, the browser must set
+      // multipart/form-data's own boundary param itself; setting it
+      // manually breaks the upload (app.py's CSRF middleware landed
+      // after this feature was first written -- every mutating route
+      // needs this header now, see require_csrf_header's own docstring).
+      const res = await fetch("/api/upload", { method: "POST", headers: CSRF_HEADERS, body: formData });
+      if (!res.ok) {
+        console.error("upload failed", file.name, res.status, await res.text());
+      }
+      // No local bubble render on success, same reasoning as the composer
+      // above -- the backend-notification message (app.py's
+      // _notify_backend_of_upload -> WebTextInputBridge.submit) arrives
+      // via the same SSE broadcast a typed/spoken transcript would.
+    } catch (err) {
+      console.error("upload failed", file.name, err);
+    }
+  }
 
   // Previously silent -- click did a fetch + reload with zero visible
   // feedback, so it looked like it did nothing even when it worked (and
