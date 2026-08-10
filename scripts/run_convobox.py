@@ -2016,6 +2016,24 @@ async def run(args: argparse.Namespace) -> None:
             config.web.bind_address, config.web.port, config.web.history_tracking_enabled,
         )
 
+    # Live UAT, 2026-08-10: real NameError, reproduced on the first backend
+    # event of any --text run ("cannot access free variable 'indicator'").
+    # _dispatch_event below closes over `indicator`, and the comment at its
+    # real assignment further down (`indicator = WorkingIndicator()`)
+    # reasoned that's fine because Python resolves closures at CALL time,
+    # not definition time -- true for the mic-loop path, but it missed that
+    # --text mode calls _dispatch_event (via handle_transcript(), a few
+    # lines below) and returns BEFORE that assignment is ever reached, so
+    # the closure sees a genuinely unbound name, not just a stale value.
+    # _on_backend_event's own `indicator: WorkingIndicator | None = None`
+    # parameter already tolerates having no indicator to update (nothing to
+    # animate outside the mic-loop/TUI path) -- this default just makes
+    # that the REAL value --text mode's dispatches see, instead of an
+    # unbound-variable crash. The mic-loop path still reassigns this same
+    # name to a real WorkingIndicator further down, which _dispatch_event
+    # picks up the same way it always did.
+    indicator: WorkingIndicator | None = None
+
     def _dispatch_event(event: BackendEvent) -> None:
         _on_backend_event(
             tui_state, last_spoken_response, event,
