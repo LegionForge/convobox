@@ -279,7 +279,7 @@ class Orchestrator:
         self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak_after_delay(text, delay_s))
 
-    async def hard_stop(self) -> None:
+    async def hard_stop(self) -> bool:
         """Stop playback/TTS, tell the backend to abort the in-flight turn,
         and cancel event consumption -- the exact sequence handle_transcript's
         safeword branch already ran inline, extracted so any other trigger
@@ -287,6 +287,25 @@ class Orchestrator:
         button) can call the identical, already-safety-verified sequence
         rather than a second hand-copied one.
 
+        Returns whether the adapter was actually busy (a turn in flight)
+        at the moment this was called -- the "honesty fix" flagged in
+        docs/KNOWN-ISSUES.md's "A hard-stop does not guarantee an in-flight
+        tool call actually stops" entry (2026-08-09 field note). This does
+        NOT mean the interrupt failed to stop anything; every adapter's own
+        send_hard_stop() confirms the CONVERSATIONAL turn genuinely aborts.
+        What it does NOT confirm is that an already-dispatched tool call's
+        underlying OS subprocess stopped -- that keeps running to its own
+        completion on all three backends (see the field note), and this
+        method's own docstring/stop_event_loop() already ensure that
+        trailing result is discarded rather than spoken. A caller that
+        surfaces this to the user (log line, TUI/web turn) should use this
+        return value to avoid implying "everything stopped" when a tool
+        call may still be finishing in the background -- exactly the gap
+        the field note's "Option 1" asked for. Deliberately just a bool,
+        not a richer pending-cleanup state machine: option 2 (escalating
+        force-kill) is the follow-up that would actually resolve the
+        underlying gap; this only makes what ConvoBox already knows
+        honest, per JP's own scoping of the two options as separate work.
         Deliberately does NOT touch listening/pause state -- unlike
         run_convobox.py's ListeningGate "pause" branch (which also enters a
         paused-until-resume-word state on top of this same sequence), the
@@ -319,6 +338,7 @@ class Orchestrator:
         different channel" case (see its own docstring), just never called
         from here.
         """
+        was_busy = self._adapter.is_busy()
         if self._player is not None:
             self._player.stop()
         if self._tts is not None:
@@ -327,6 +347,14 @@ class Orchestrator:
         await self.stop_event_loop()
         if self._approval_gate is not None:
             self._approval_gate.cancel_wait()
+        if was_busy:
+            logger.info(
+                "hard-stop interrupted a turn that was still busy -- if it "
+                "included a tool call, the underlying process is not "
+                "guaranteed to have stopped; any result it eventually "
+                "produces will be discarded, not spoken"
+            )
+        return was_busy
 
     async def stop_event_loop(self) -> None:
         self._cancel_speak_task()
