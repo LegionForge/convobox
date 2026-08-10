@@ -184,8 +184,10 @@ interaction:
 safeword:
   hard_stop_phrases:
     - "stop stop stop"    # the most STT-robust phrase; recommended primary
-    - "mayday mayday mayday"   # add any you like -- plosive, distinctive
-                          # phrases survive far-field STT best
+    - "abort abort abort" # universal, distinctive, low overlap with
+    - "halt halt halt"    # normal conversation -- add any you like, but
+                          # a word tripled (not a single word) is the
+                          # anti-false-positive mechanism; keep that shape
 
 # ---------------------------------------------------------------------------
 # vad -- voice activity detection (Silero) segmentation. Defaults are good;
