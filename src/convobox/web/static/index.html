@@ -1608,6 +1608,15 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   async function saveSettings() {
     saveBtn.disabled = true;
     errorsEl.hidden = true;
+    // Computed BEFORE originalValues gets overwritten below -- a section
+    // whose own subtree didn't change doesn't force a restart message,
+    // even if some OTHER dirty section (edited, then left, without
+    // saving) does. Matches each section's own banner (renderBody()),
+    // which is per-section, not a single blanket claim for the whole
+    // form.
+    const anyChangedSectionNeedsRestart = sections.some(
+      (s) => s.restart_required && JSON.stringify(draft[s.key]) !== JSON.stringify(originalValues[s.key])
+    );
     try {
       const res = await fetch("/api/settings/save", {
         method: "POST",
@@ -1622,7 +1631,12 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
         return;
       }
       originalValues = JSON.parse(JSON.stringify(draft));
-      setStatus("Saved -- restart ConvoBox for changes to take effect.", false);
+      setStatus(
+        anyChangedSectionNeedsRestart
+          ? "Saved -- restart ConvoBox for changes to take effect."
+          : "Saved -- changes apply on your next page refresh, no restart needed.",
+        false
+      );
     } catch (err) {
       errorsEl.textContent = "Save failed: " + err;
       errorsEl.hidden = false;
