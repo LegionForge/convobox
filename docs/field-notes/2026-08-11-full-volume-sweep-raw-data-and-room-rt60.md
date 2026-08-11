@@ -1,6 +1,6 @@
 ---
 title: Full self-barge-in volume sweep (100%-20%, N=7 per level, 119 real trials) + room RT60 measurement -- complete raw data for reuse
-status: validated-live (N=7 per level, corroborated across an initial sweep + 3 repeat up/down cycles)
+status: validated-live (volume sweep: N=7 per level, 119 trials; RT60: N=50 repeat measurements)
 date: 2026-08-11
 project: ConvoBox (github.com/LegionForge/convobox)
 versions: ConvoBox main @ 82f1117; tts.volume=4.0 (fixed), macOS system output volume swept 100%-20% in 5% steps
@@ -14,7 +14,7 @@ room:
   walls_ceiling: bare, no acoustic treatment
   furnishings: no rugs, no couches, no soft furnishings of any kind
   layout: open on 3 sides to a kitchen, a front room, and a hallway -- not an enclosed box; sound propagates into connected volumes rather than reflecting back from all directions
-  measured_rt60: ~0.2s (T20-based) to ~0.4s (T30-based), 3 live repeat measurements, see below
+  measured_rt60: T20 0.2133s mean (sd 0.0138s, N=50); T30 0.4589s mean (sd 0.0573s, N=50). Whole-house AC + a box fan (Corsi-Rosenthal box, low speed) both running throughout the N=50 measurement. See below for the full dataset and the ambient-noise correlation check.
 evidence:
   - 119 real live trials total (initial 100%-to-20% sweep, then 3 full up/down repeat cycles), scripts/acoustic_calibration.py, one trial per volume level per pass
   - 3 real RT60 measurements via exponential sine sweep (Farina/ESS method), a standalone script (convobox-UAT worktree scratch, not committed)
@@ -271,4 +271,110 @@ pass.
 | 3 | down | 30 | auto(238ms) | 8.08 | 2.46 | 7.37 | 100.0 | 4 | 2 | 3 | 1 |
 | 3 | down | 25 | auto(238ms) | 7.08 | 1.14 | 7.81 | 146.0 | 2 | 0 | 1 | 0 |
 | 3 | down | 20 | auto(238ms) | 5.91 | 1.05 | 6.46 | 134.0 | 2 | 0 | 1 | 0 |
+
+
+
+---
+
+## Follow-up (same day): 50-repeat RT60 reproducibility test, with ambient-noise correlation
+
+JP asked for another 10 RT60 measurements to check reproducibility,
+then 40 more on top of that for a genuinely robust sample size --
+**50 total real repeat measurements**, all with the exact same
+setup/placement as the original 3-trial measurement above. Also added
+per-trial ambient-noise capture (1.5s immediately before each sweep)
+as a proxy for real-time fan/HVAC state, since neither can be queried
+programmatically.
+
+**Confirmed environmental state for this entire 50-trial batch (per
+JP, mid-run): whole-house central AC running, plus a 20" box fan on
+low ~5 meters from the mic, configured as a Corsi-Rosenthal box air
+filter.** Both were on throughout -- this dataset is NOT an "AC off /
+fan off" baseline; it reflects real, typical household background
+noise conditions, which is arguably more representative of real-world
+ConvoBox usage than a silent room would be.
+
+### Results (N=50)
+
+| Metric | Mean | SD | Min | Max |
+|---|---|---|---|---|
+| T20-based RT60 | 0.2133s | 0.0138s | 0.185s | 0.250s |
+| T30-based RT60 | 0.4589s | 0.0573s | 0.356s | 0.652s |
+| Ambient RMS | 0.03243 | 0.00260 | 0.02313 | 0.03559 |
+| Recorded sweep peak | 0.6765 | 0.0089 | -- | -- |
+
+**T20 remains tight and reproducible at N=50** (coefficient of
+variation ~6.5%) -- confirms the earlier 3-trial result wasn't a fluke.
+**T30 is noticeably noisier** (CV ~12.5%, and its max grew from 0.457s
+at N=10 to 0.652s at N=50 as more outliers turned up) -- reinforces
+that T20 is the more trustworthy of the two estimators for this room/
+setup, consistent with the earlier reasoning about SNR at the -35dB
+crossing point.
+
+**Ambient-noise correlation, corrected**: after the first 10 runs, one
+low-ambient trial also showed the longest measured RT60, suggestively
+matching the hypothesis that a quieter noise floor lets more of the
+true decay tail be measured before it's swallowed by background noise.
+**At N=50, that correlation is real but weak** (Pearson r = -0.243 for
+T20, r = -0.155 for T30 -- both negative, matching the hypothesized
+direction, but far from a dominant effect). **Worth naming as its own
+lesson**: the N=10 pattern looked more dramatic than it actually was:
+a single coincidental low-ambient/high-RT60 pairing does not establish
+a strong relationship, and the larger sample corrected that impression
+without contradicting the direction of the effect.
+
+### Full raw data (all 50 trials)
+
+| Run | Ambient RMS | T20 RT60 (s) | T30 RT60 (s) | Recorded Peak |
+|---|---|---|---|---|
+| run1 | 0.03087 | 0.185 | 0.356 | 0.6823 |
+| run2 | 0.02313 | 0.213 | 0.457 | 0.6915 |
+| run3 | 0.03510 | 0.188 | 0.395 | 0.6816 |
+| run4 | 0.03541 | 0.188 | 0.406 | 0.6783 |
+| run5 | 0.03531 | 0.194 | 0.373 | 0.6738 |
+| run6 | 0.03541 | 0.196 | 0.437 | 0.6839 |
+| run7 | 0.03527 | 0.199 | 0.383 | 0.6815 |
+| run8 | 0.03309 | 0.196 | 0.386 | 0.6739 |
+| run9 | 0.03530 | 0.192 | 0.38 | 0.6748 |
+| run10 | 0.03313 | 0.196 | 0.382 | 0.6850 |
+| run11 | 0.03323 | 0.194 | 0.386 | 0.6841 |
+| run12 | 0.03342 | 0.22 | 0.444 | 0.6767 |
+| run13 | 0.03539 | 0.207 | 0.473 | 0.6926 |
+| run14 | 0.03312 | 0.211 | 0.488 | 0.6759 |
+| run15 | 0.02689 | 0.232 | 0.55 | 0.6674 |
+| run16 | 0.03559 | 0.208 | 0.419 | 0.6780 |
+| run17 | 0.03011 | 0.207 | 0.41 | 0.6625 |
+| run18 | 0.02870 | 0.213 | 0.49 | 0.6771 |
+| run19 | 0.02937 | 0.209 | 0.421 | 0.6883 |
+| run20 | 0.02948 | 0.207 | 0.421 | 0.6672 |
+| run21 | 0.03324 | 0.207 | 0.414 | 0.6887 |
+| run22 | 0.03221 | 0.205 | 0.419 | 0.6691 |
+| run23 | 0.03351 | 0.237 | 0.48 | 0.6735 |
+| run24 | 0.03341 | 0.213 | 0.525 | 0.6785 |
+| run25 | 0.03324 | 0.213 | 0.437 | 0.6817 |
+| run26 | 0.03330 | 0.213 | 0.437 | 0.6716 |
+| run27 | 0.03331 | 0.22 | 0.528 | 0.6783 |
+| run28 | 0.02951 | 0.238 | 0.505 | 0.6758 |
+| run29 | 0.03343 | 0.22 | 0.459 | 0.6964 |
+| run30 | 0.03320 | 0.213 | 0.444 | 0.6706 |
+| run31 | 0.03336 | 0.212 | 0.458 | 0.6794 |
+| run32 | 0.03346 | 0.212 | 0.444 | 0.6698 |
+| run33 | 0.03352 | 0.239 | 0.516 | 0.6744 |
+| run34 | 0.03346 | 0.216 | 0.456 | 0.6768 |
+| run35 | 0.03129 | 0.212 | 0.444 | 0.6707 |
+| run36 | 0.03327 | 0.224 | 0.477 | 0.6662 |
+| run37 | 0.03341 | 0.224 | 0.55 | 0.6676 |
+| run38 | 0.03341 | 0.219 | 0.468 | 0.6722 |
+| run39 | 0.03224 | 0.25 | 0.652 | 0.6638 |
+| run40 | 0.03344 | 0.218 | 0.484 | 0.6750 |
+| run41 | 0.03343 | 0.218 | 0.475 | 0.6689 |
+| run42 | 0.02940 | 0.215 | 0.474 | 0.6857 |
+| run43 | 0.03339 | 0.224 | 0.519 | 0.6595 |
+| run44 | 0.03350 | 0.215 | 0.457 | 0.6812 |
+| run45 | 0.02686 | 0.219 | 0.464 | 0.6804 |
+| run46 | 0.03330 | 0.23 | 0.585 | 0.6885 |
+| run47 | 0.02681 | 0.218 | 0.457 | 0.6609 |
+| run48 | 0.03356 | 0.224 | 0.491 | 0.6662 |
+| run49 | 0.03132 | 0.219 | 0.471 | 0.6628 |
+| run50 | 0.03359 | 0.225 | 0.5 | 0.6928 |
 

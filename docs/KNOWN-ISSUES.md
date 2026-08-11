@@ -583,12 +583,27 @@ hardware specs, and sources:
 barge-ins worse than AEC-off (means of 8-13 vs. steady ~1); at and
 below it, AEC flips back to normal (reducing false triggers below the
 raw baseline). Also added a room RT60 measurement (exponential sine
-sweep / Farina method, 3 repeat trials): ~0.2s (T20) to ~0.4s (T30) in
-this session's 400 sq ft, hard-floored, open-plan test room -- shorter
-than the room's "wet" subjective impression might suggest, plausibly
-because being open on 3 sides lets reflected energy propagate away
-rather than building up. Full raw data (every one of the 119 trials,
+sweep / Farina method): ~0.2s (T20) to ~0.4s (T30) in this session's
+400 sq ft, hard-floored, open-plan test room -- shorter than the
+room's "wet" subjective impression might suggest, plausibly because
+being open on 3 sides lets reflected energy propagate away rather than
+building up. Full raw data (every one of the 119 volume-sweep trials,
 plus complete hardware/room specs) published for reuse:
+`docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
+
+**Follow-up (2026-08-11, same day): RT60 extended to N=50 repeat
+measurements with ambient-noise logging.** T20 stayed tight and
+reproducible (mean 0.2133s, sd 0.0138s, CV ~6.5%); T30 was noisier
+(mean 0.4589s, sd 0.0573s, CV ~12.5%) -- confirms T20 is the more
+trustworthy estimator here. Confirmed environmental state for the
+whole batch: whole-house central AC running plus a box fan (Corsi-
+Rosenthal configuration) on low, both throughout -- a real household
+background-noise condition, not a silent-room ideal. A suggestive
+N=10 pattern (lower ambient noise correlating with longer measured
+RT60) held its direction at N=50 but was much weaker than it first
+appeared (Pearson r=-0.243 for T20, r=-0.155 for T30) -- a real
+example of a small sample overselling an effect size. Full 50-trial
+raw data appended to the same field note:
 `docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
 
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
