@@ -576,6 +576,21 @@ session -- ruled out as a confound, not just assumed. Full writeup,
 hardware specs, and sources:
 `docs/field-notes/2026-08-11-self-barge-in-combined-mitigation-and-hardware-notes.md`.
 
+**Follow-up (2026-08-11, same day): a full 119-trial volume sweep
+(100%-20% system volume in 5% steps, N=7 per level, initial sweep +
+3 corroborating up/down cycles) pins the transition zone precisely at
+30-40% system output volume.** Above it, AEC consistently makes false
+barge-ins worse than AEC-off (means of 8-13 vs. steady ~1); at and
+below it, AEC flips back to normal (reducing false triggers below the
+raw baseline). Also added a room RT60 measurement (exponential sine
+sweep / Farina method, 3 repeat trials): ~0.2s (T20) to ~0.4s (T30) in
+this session's 400 sq ft, hard-floored, open-plan test room -- shorter
+than the room's "wet" subjective impression might suggest, plausibly
+because being open on 3 sides lets reflected energy propagate away
+rather than building up. Full raw data (every one of the 119 trials,
+plus complete hardware/room specs) published for reuse:
+`docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
