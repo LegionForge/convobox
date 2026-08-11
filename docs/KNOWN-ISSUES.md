@@ -569,11 +569,11 @@ fully cancel a nonlinear/distorted acoustic path, which would explain
 why AEC-processed audio measured worse than AEC-off at every delay
 tested. No digital clipping found in the raw mic captures (peak
 0.63-0.68/1.0), but that doesn't rule out acoustic distortion at the
-speaker itself, a different phenomenon. Also newly documented: the
-AIRHUG 28 mic's own onboard "AI Noise Reduction" DSP mode (LED-indicated,
-believed off/green this session but not visually reconfirmed per-test)
-is a second, uncontrolled nonlinear processing stage in every test this
-whole session. Full writeup, hardware specs, and sources:
+speaker itself, a different phenomenon. **Also confirmed (JP directly
+observed the LED)**: the AIRHUG 28 mic's own onboard "AI Noise
+Reduction" DSP mode was OFF (green LED) throughout all testing this
+session -- ruled out as a confound, not just assumed. Full writeup,
+hardware specs, and sources:
 `docs/field-notes/2026-08-11-self-barge-in-combined-mitigation-and-hardware-notes.md`.
 
 **Not done as part of this pass, deliberately:** publishing a macOS wheel

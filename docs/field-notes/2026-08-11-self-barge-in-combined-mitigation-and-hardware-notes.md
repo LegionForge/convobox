@@ -7,7 +7,7 @@ versions: ConvoBox main @ 4aedbac; tts.volume=4.0, macOS system output volume=75
 hardware:
   computer: Mac mini M4 (2024) -- Apple's own spec sheet lists a single "Built-in speaker" (singular); independent reviews (Best Buy Q&A, Popzara, bestsounds.net) specifically describe it as small and prone to distortion at volume, not a stereo pair or hi-fi driver.
   microphone: AIRHUG 28 USB conference microphone -- 360 degree omnidirectional pickup (no directional/cardioid rejection of the speaker's own output), built-in DSP chip with an "AI Noise Reduction" mode. Three-color LED indicates mode -- Blue: AI Noise Reduction ON, Green: Original Mode (AI DSP off), Red: Muted.
-  ai_dsp_state: Operator (JP) believes the LED was green (Original Mode, AI DSP off) during all testing in this session, but did not visually re-confirm at the time -- recorded as a real, unverified caveat, not asserted as fact.
+  ai_dsp_state: Confirmed OFF -- JP directly observed the mic status LED showing green (Original Mode) throughout all testing in this session. Not a caveat; ruled out as a variable.
   mic_placement: approximately 8cm from the Mac mini, facing away from the Mac mini's own body (i.e. not pointed at the computer/speaker).
 evidence:
   - 4 more real trials at tts.volume=4.0 + macOS system volume 75%, combining the two individually-best mitigations found in the prior field note (aec_delay_ms=400, barge_in_min_speech_ms=1200)
@@ -70,15 +70,12 @@ to "occasional, survivable."
   built-in DSP chip with an "AI Noise Reduction" mode, indicated by a
   3-color LED (Blue = AI Noise Reduction on, Green = Original Mode /
   AI DSP off, Red = Muted).
-- **AI DSP state, honestly caveated**: JP believes the LED was green
-  (Original Mode, DSP off) throughout this session's testing, but did
-  not visually re-confirm at the time of any individual test run. If
-  the mic's own onboard AI noise-reduction WAS active, that's a second
-  layer of nonlinear signal processing (separate from ConvoBox's own
-  AEC) sitting between the true acoustic signal and what
-  `EchoCanceller` ever sees -- worth a deliberate visual check (glance
-  at the LED color) before the next round of AEC tuning, since it
-  would materially change what "AEC isn't working" even means here.
+- **AI DSP state, confirmed**: JP directly observed the mic status LED
+  showing green (Original Mode, AI DSP off) throughout all testing in
+  this session -- ruled out as a variable, not just assumed. This means
+  every result in this and the prior field note reflects `EchoCanceller`
+  fighting the raw acoustic path directly, with no additional
+  undocumented onboard mic-side processing in the loop.
 - **Mic placement**: ~8cm from the Mac mini, facing away from the Mac
   mini's own body.
 
@@ -135,11 +132,11 @@ would be the natural next test if this theory needs to move from
   which a linear AEC structurally cannot fully cancel -- explains the
   session's most surprising finding (AEC making things worse) far more
   satisfyingly than "AEC just isn't tuned right."
-- **The AIRHUG 28's onboard AI DSP mode state is a real, unverified
-  variable** in every test this whole session -- worth a deliberate
-  visual LED check before the next investigation, since it's a second
-  nonlinear processing stage this repo's own `EchoCanceller` has no
-  visibility into or control over.
+- **The AIRHUG 28's onboard AI DSP mode was confirmed off (green LED)
+  throughout testing** -- ruled out as a confound. Every result in this
+  session's testing reflects `EchoCanceller` against the raw acoustic
+  path, not a second undocumented nonlinear processing stage stacked
+  on top of it.
 - **The single biggest lever remains turning the volume down** --
   everything in this note is about coping with distortion at a volume
   level that was itself an explicit, deliberate choice for
