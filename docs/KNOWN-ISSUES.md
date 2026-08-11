@@ -535,6 +535,26 @@ trigger anything during playback there. No fix built or proposed this
 pass — live characterization only. Full writeup:
 `docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md`.
 
+**Follow-up (2026-08-11, same day): automated mitigation testing at the
+exact demo volume (`tts.volume=4.0`, macOS system output 75%) —
+a real, counterintuitive finding.** A 7-point AEC delay sweep found
+**AEC-processed audio produced MORE false barge-ins than AEC-off, at
+every single delay tested** (8-13 vs. 1) — the opposite of AEC's
+intended effect, likely because residual-suppressor artifacts at this
+volume are themselves speech-shaped enough to trip VAD more often than
+the raw uncancelled echo. 400ms was the least-bad delay tested (8 vs.
+10 for auto-238ms) but still far worse than AEC-off. A separate
+4-point `barge_in_min_speech_ms` sweep (250/500/800/1200ms, N=1 each —
+directional, not statistically robust) showed a real trend toward
+1200ms converging to the AEC-off baseline (1 false trigger). Ranked
+recommendation: lower the volume (biggest lever, matches this
+session's whole volume-escalation arc), raise
+`barge_in_min_speech_ms` if `conversational` mode must stay on at high
+volume, set `aec_delay_ms: 400` explicitly as a smaller assist, or
+fall back to `do-not-disturb`/headphones to sidestep the problem
+entirely. Full writeup:
+`docs/field-notes/2026-08-11-self-barge-in-mitigation-at-demo-volume.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
