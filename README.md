@@ -116,15 +116,21 @@ voice pipeline has already been through. See
 | **Platform**| Windows 11                                                            | Linux, macOS<sup>†</sup>              |
 | **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
 | **STT**     | faster-whisper                                                        | —                                     |
-| **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; real synthesis verified programmatically against the actual model, not yet a live voice session with real speakers) |
+| **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; live voice session with real speakers confirmed on macOS 2026-08-10, not yet on Windows/Linux) |
 
-<sup>†</sup> macOS: signal-level AEC (real mic+speaker) and the Claude Code /
-Codex backends have real live-hardware confirmation as of 2026-08-10 (see
-[docs/field-notes/2026-08-10-macos-live-hardware-first-pass.md](docs/field-notes/2026-08-10-macos-live-hardware-first-pass.md))
-— opencode untested there (no provider credentials configured on that
-machine), and no live human speech has yet been transcribed through the
-mic into a backend on macOS, so it stays in this column until that
-happens.
+<sup>†</sup> macOS: as of 2026-08-10, signal-level AEC (real mic+speaker,
+41 live trials), the Claude Code / Codex backends, Kokoro TTS, and —
+via a synthetic-speech-injection harness (no human speaker available
+that session) — the real mic loop and the safeword hard-stop have all
+been confirmed live end to end (see
+[docs/field-notes/2026-08-10-macos-live-mic-loop-and-safeword-first-confirmation.md](docs/field-notes/2026-08-10-macos-live-mic-loop-and-safeword-first-confirmation.md)
+and [docs/STATUS.md](docs/STATUS.md)'s "Since 0.3.1" section, which
+links every field note from that session). Still open:
+real human speech through the mic (everything above used synthetic TTS
+injection, not a person talking), opencode (no provider credentials
+configured on that machine), and Chrome/browser-driven web UI testing
+(tooling unavailable that session) — macOS stays in this column until
+those close.
 
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).

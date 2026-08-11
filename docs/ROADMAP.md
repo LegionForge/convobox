@@ -365,9 +365,21 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
 - VS Code / VSCodium extension: voice channel + editor-navigation
   actions (agent can point at lines/files; user can ask to be taken
   to the error).
-- Apple Silicon validation (Mac Mini awaits; first second-environment
-  test).
-- macOS/Linux UAT parity; second-voice, second-room validation.
+- ~~Apple Silicon validation (Mac Mini awaits; first second-environment
+  test).~~ **Substantially done, 2026-08-10** (see
+  `docs/field-notes/2026-08-10-*.md`): signal-level AEC, Claude Code +
+  Codex backend connectivity, Kokoro + Piper TTS, and — the headline —
+  the real mic loop and safeword hard-stop all confirmed live on a Mac
+  mini (Apple Silicon), via a synthetic-speech-injection harness (no
+  human speaker available that session). What's still genuinely open:
+  a real human voice test (the injection harness proves the pipeline
+  wiring, not human-speech STT accuracy at normal conversational
+  volume/distance), opencode (blocked on provider credentials on that
+  machine), and Chrome/browser-driven web UI UAT (tooling unavailable
+  that session).
+- macOS/Linux UAT parity; second-voice, second-room validation. Linux
+  still entirely untested; macOS itself now has a real live-hardware
+  pass (above) but still needs the human-voice case closed.
 
 ## Long-term
 - Frontend any LLM/provider, cloud and local; desktop/web surfaces.
