@@ -65,6 +65,28 @@ Speakers. Full evidence for every finding lives in
   speaking), Chrome/browser-driven web UI testing (tooling unavailable
   this session), and opencode (credentials).
 
+**First real human-speech demo on macOS, 2026-08-11** — closes the
+"real human voice input" gap the pass above left open. JP demoed
+ConvoBox live to his son. **Safeword confirmed working with real
+speech, 3 times** (`stop stop stop` x2, `abort abort abort` x1).
+**Barge-in confirmed working** after switching
+`interaction.interrupt_preset` to `conversational` — then a **real
+self-triggered barge-in loop** appeared under rapid-fire conditions
+(20 barge-ins in ~90s, 18/19 with a following AEC reading showing
+`UNDER-CANCELLING`). Diagnosed live: attenuation stayed near this
+session's steady-state baseline (6.54dB vs. 6.75dB) while the measured
+echo-to-ambient ceiling spiked (14.22dB vs. ~0.53dB) — rapid
+back-to-back short turns leave proportionally more residual echo for a
+fixed amount of real cancellation to remove. `do-not-disturb` mode
+(the config's original default) isn't subject to this, since ordinary
+speech can't trigger anything mid-playback there. Also reconfirmed
+`[E6]`'s far-field hallucination pattern with real speech (not
+synthetic), including one instance where a hallucinated transcript
+happened to contain "stop listening" as a substring and paused the
+session — a real, organic occurrence of an already-documented risk
+category. No fix built this pass; full writeup:
+`docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md`.
+
 A day-long live-UAT + infra-hardening pass, 2026-08-05/06. Four PRs
 merged (#212, #202, #204, #205), two open and ready (#206, #213), plus
 cross-repo GitHub/PyPI publishing hardening still in progress. Full

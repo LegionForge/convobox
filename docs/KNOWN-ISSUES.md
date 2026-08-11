@@ -514,6 +514,27 @@ captured back through the mic:
   worktree's own `uat-acoustic-calibration/` (gitignored scratch,
   per this project's own convention -- not copied into this repo).
 
+**Follow-up (2026-08-11): first real human-speech demo on macOS —
+safeword and barge-in both confirmed live, plus a real self-triggered
+barge-in loop found and diagnosed.** JP demoed ConvoBox live to his son
+(real speech, not synthetic injection). The safeword fired correctly 3
+times (`stop stop stop` x2, `abort abort abort` x1); barge-in
+(`interaction.interrupt_preset: conversational`) fired correctly on
+the first two deliberate interrupts, then entered a real, sustained
+self-triggered loop (20 barge-ins in ~90s, several firing with no one
+present). Diagnosed live: 18 of 19 barge-in events showed
+`UNDER-CANCELLING`, with attenuation staying close to this session's
+steady-state baseline (6.54dB vs. 6.75dB) while the measured
+echo-to-ambient ceiling spiked (14.22dB vs. ~0.53dB baseline) — rapid
+back-to-back short turns (each cut short by the previous false
+trigger) measurably increases the echo reaching the mic relative to
+ambient, leaving proportionally more residual for a fixed amount of
+real cancellation. `do-not-disturb` mode (this config's original
+default) is not subject to this risk, since ordinary speech can't
+trigger anything during playback there. No fix built or proposed this
+pass — live characterization only. Full writeup:
+`docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
