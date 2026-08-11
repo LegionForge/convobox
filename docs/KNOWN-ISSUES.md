@@ -555,6 +555,27 @@ fall back to `do-not-disturb`/headphones to sidestep the problem
 entirely. Full writeup:
 `docs/field-notes/2026-08-11-self-barge-in-mitigation-at-demo-volume.md`.
 
+**Follow-up (2026-08-11, same day): combining both mitigations nearly
+solves it, and a likely root cause was identified.** `aec_delay_ms=400`
++ `barge_in_min_speech_ms=1200` together, 4 real trials at the same
+demo volume: mean 1.25 false barge-ins (2 of 4 trials hit zero), down
+from 8-13 with no mitigation or either lever alone. **Likely root
+cause, corroborated but not directly confirmed**: the Mac mini M4's
+single built-in speaker (Apple's own spec lists it singular;
+independent reviews describe it as prone to distortion at volume) may
+be genuinely distorting acoustically at `tts.volume=4.0` + macOS
+system volume 75% -- a linear AEC (WebRTC AEC3) structurally cannot
+fully cancel a nonlinear/distorted acoustic path, which would explain
+why AEC-processed audio measured worse than AEC-off at every delay
+tested. No digital clipping found in the raw mic captures (peak
+0.63-0.68/1.0), but that doesn't rule out acoustic distortion at the
+speaker itself, a different phenomenon. Also newly documented: the
+AIRHUG 28 mic's own onboard "AI Noise Reduction" DSP mode (LED-indicated,
+believed off/green this session but not visually reconfirmed per-test)
+is a second, uncontrolled nonlinear processing stage in every test this
+whole session. Full writeup, hardware specs, and sources:
+`docs/field-notes/2026-08-11-self-barge-in-combined-mitigation-and-hardware-notes.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
