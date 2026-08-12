@@ -113,10 +113,26 @@ voice pipeline has already been through. See
 
 | Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
 |-------------|----------------------------------------------------------------------|---------------------------------------|
-| **Platform**| Windows 11                                                            | Linux, macOS                         |
+| **Platform**| Windows 11                                                            | Linux, macOS<sup>†</sup>              |
 | **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
 | **STT**     | faster-whisper                                                        | —                                     |
-| **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; real synthesis verified programmatically against the actual model, not yet a live voice session with real speakers) |
+| **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; live voice session with real speakers confirmed on macOS 2026-08-10, not yet on Windows/Linux) |
+
+<sup>†</sup> macOS: as of 2026-08-10/11, signal-level AEC (real
+mic+speaker, 41 live trials), the Claude Code / Codex backends, Kokoro
+TTS, the real mic loop, and — with a REAL human speaker as of
+2026-08-11 — the safeword hard-stop (3 live firings) and barge-in have
+all been confirmed working end to end (see
+[docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md](docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md)
+and [docs/STATUS.md](docs/STATUS.md)'s "Since 0.3.1" section, which
+links every field note from this pass). That same live demo also
+surfaced a real self-triggered barge-in loop in `conversational` mode
+under rapid-fire conditions (diagnosed, not yet fixed) and reconfirmed
+`[E6]`'s far-field STT-accuracy challenge with real (not synthetic)
+speech. Still open: opencode (no provider credentials configured on
+that machine), Chrome/browser-driven web UI testing (tooling
+unavailable this session), and sustained everyday-use reliability —
+macOS stays in this column until those close.
 
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
