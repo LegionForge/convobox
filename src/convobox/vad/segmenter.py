@@ -239,8 +239,30 @@ class UtteranceSegmenter:
         the awaited task on timeout; this only ever observes and reports,
         never abandons.
         """
+        # execution_started records time.monotonic() from INSIDE the worker
+        # callable, at the moment it actually starts running -- not when
+        # this task was merely submitted to asyncio.to_thread()'s shared,
+        # process-wide default pool (GitHub issue #235, finding B3's
+        # second half). Under pool contention (e.g. the mic capture loop
+        # or Piper's chunk pump -- each fixed to use their own dedicated
+        # executor, but anything else sharing the default pool could still
+        # do this), a submitted task can sit queued for a while before a
+        # worker is free, and the stall warning below used to misattribute
+        # that queue-wait entirely to "the window call is still running",
+        # which the review's own text flags this exact mechanism can't
+        # actually distinguish from a genuinely stuck Silero call. A
+        # single-element list, not a plain variable, so the closure below
+        # can assign into it from the worker thread and this coroutine can
+        # read it back -- list.append is atomic under the GIL, no lock
+        # needed for a single write-once-read-many value like this.
+        execution_started: list[float] = []
+
+        def _timed_feed(chunk: np.ndarray) -> list[np.ndarray]:
+            execution_started.append(time.monotonic())
+            return self.feed(chunk)
+
         task: asyncio.Future[list[np.ndarray]] = asyncio.ensure_future(
-            asyncio.to_thread(self.feed, chunk)
+            asyncio.to_thread(_timed_feed, chunk)
         )
         start = time.monotonic()
         stalled = False
@@ -250,13 +272,33 @@ class UtteranceSegmenter:
             if done:
                 break
             stalled = True
-            logger.warning(
-                "VAD feed_async() call still running after %.1fs (a normal "
-                "window call takes ~1-3ms) -- not abandoning it, just "
-                "reporting; see docs/KNOWN-ISSUES.md's VAD segmenter "
-                "freeze entry",
-                time.monotonic() - start,
-            )
+            now = time.monotonic()
+            if execution_started:
+                queue_wait_s = execution_started[0] - start
+                running_s = now - execution_started[0]
+                logger.warning(
+                    "VAD feed_async() call still running after %.1fs total "
+                    "(queued %.1fs before a worker thread picked it up, "
+                    "running %.1fs since -- a normal window call takes "
+                    "~1-3ms) -- not abandoning it, just reporting; see "
+                    "docs/KNOWN-ISSUES.md's VAD segmenter freeze entry",
+                    now - start, queue_wait_s, running_s,
+                )
+            else:
+                # Still sitting in the thread pool's own internal queue --
+                # Silero hasn't been called at all yet. This is the
+                # thread-pool-contention signature specifically (a
+                # DIFFERENT failure mode than a slow/stuck Silero call),
+                # and worth saying plainly rather than implying the model
+                # itself is what's slow.
+                logger.warning(
+                    "VAD feed_async() call still QUEUED after %.1fs -- the "
+                    "worker thread hasn't started it yet (thread-pool "
+                    "contention, not a stuck Silero call) -- not "
+                    "abandoning it, just reporting; see "
+                    "docs/KNOWN-ISSUES.md's VAD segmenter freeze entry",
+                    now - start,
+                )
             interval = _SLOW_CALL_REPEAT_WARNING_S
         if stalled:
             logger.warning(

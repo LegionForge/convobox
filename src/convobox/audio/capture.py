@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import queue
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from types import TracebackType
 from typing import TYPE_CHECKING, Self
 
@@ -43,6 +44,22 @@ class MicrophoneStream:
         self.channels = channels
         self._queue: queue.Queue[np.ndarray | object] = queue.Queue()
         self._stream: sd.InputStream | None = None
+        # Dedicated single-worker executor for stream()'s blocking
+        # self._queue.get() below -- NOT asyncio.to_thread's default,
+        # process-wide pool (GitHub issue #235, finding B3). During any
+        # silence, stream() has a worker parked in a blocking get() with
+        # no timeout for the whole silence duration; sharing the default
+        # pool with everything else that uses asyncio.to_thread()
+        # (Piper's own chunk pump, faster-whisper's thread-offloaded
+        # transcribe() calls) means this one long-lived occupant reduces
+        # real capacity for short ones under load -- the review's own
+        # diagnosed mechanism for "fine under normal use, hangs under
+        # rapid-fire stress". A dedicated executor with exactly the
+        # capacity this loop actually needs (one call in flight at a
+        # time) can't starve anything else, and vice versa.
+        self._stream_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="convobox-mic-stream"
+        )
 
     def _callback(
         self,
@@ -79,8 +96,9 @@ class MicrophoneStream:
 
     async def stream(self) -> AsyncIterator[np.ndarray]:
         """Yield captured float32 chunks without blocking the event loop."""
+        loop = asyncio.get_running_loop()
         while self._stream is not None:
-            chunk = await asyncio.to_thread(self._queue.get)
+            chunk = await loop.run_in_executor(self._stream_executor, self._queue.get)
             if chunk is _CLOSE_SENTINEL:
                 self._queue.put(_CLOSE_SENTINEL)  # let other waiters observe it too
                 return
@@ -92,6 +110,17 @@ class MicrophoneStream:
             self._stream.close()
             self._stream = None
             self._queue.put(_CLOSE_SENTINEL)
+        # wait=False (not blocking this synchronous close() call), but
+        # deliberately NOT cancel_futures=True: with a single worker and
+        # more than one concurrent stream() consumer (a real, tested case
+        # -- see test_stream_close_wakes_all_concurrent_waiters_via_requeue),
+        # a second consumer's queue.get() job can still be QUEUED, not yet
+        # running, when close() is called. cancel_futures=True would cancel
+        # that job outright instead of letting it run once the first
+        # consumer's requeue (the "if chunk is _CLOSE_SENTINEL" branch
+        # above) puts the sentinel back -- live-caught: broke that exact
+        # test when first written this way.
+        self._stream_executor.shutdown(wait=False)
 
     def __enter__(self) -> Self:
         self.start()

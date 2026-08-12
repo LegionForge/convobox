@@ -4,6 +4,7 @@ import asyncio
 import queue
 import threading
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -143,15 +144,37 @@ class PiperTTSEngine(TTSEngine):
             target=self._produce_chunks, args=(clean, chunk_queue), daemon=True
         )
         thread.start()
+        # Dedicated single-worker executor for the chunk_queue.get() calls
+        # below, scoped to this one synthesis -- NOT asyncio.to_thread's
+        # default, process-wide pool (GitHub issue #235, finding B3). For
+        # the whole synthesis, one worker is parked in a blocking get()
+        # with no timeout at any given moment; sharing the default pool
+        # with everything else that uses asyncio.to_thread() (the mic
+        # capture loop's own equivalent fix above, faster-whisper's
+        # thread-offloaded transcribe() calls) means this occupant
+        # reduces real capacity for short ones under load. Short-lived
+        # (one call's worth of chunks, not a persistent instance
+        # attribute like MicrophoneStream's) since synthesize_stream()
+        # itself is a fresh call per utterance, not a long-lived object.
+        # Not a `with` block deliberately: ThreadPoolExecutor.__exit__ calls
+        # shutdown(wait=True) with NO timeout, which could hang this
+        # generator's teardown indefinitely if a GeneratorExit arrives
+        # mid-synthesis (the caller abandons iteration) while a chunk is
+        # still in flight -- worse than the bounded thread.join(timeout=1.0)
+        # this finally block already had. shutdown(wait=False) below keeps
+        # teardown just as bounded as before this fix.
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="convobox-piper-chunks")
         try:
             while True:
-                item = await asyncio.to_thread(chunk_queue.get)
+                item = await loop.run_in_executor(executor, chunk_queue.get)
                 if item is _STREAM_DONE:
                     return
                 yield item  # type: ignore[misc]
         finally:
             self._speaking = False
             thread.join(timeout=1.0)
+            executor.shutdown(wait=False)
 
     def _produce_chunks(self, text: str, chunk_queue: queue.Queue[np.ndarray | object]) -> None:
         try:
