@@ -290,6 +290,40 @@ async def test_hard_stop_cancels_a_pending_approval_gate_wait() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hard_stop_returns_whether_a_turn_was_actually_busy() -> None:
+    # The "honesty fix" from docs/KNOWN-ISSUES.md's "A hard-stop does not
+    # guarantee an in-flight tool call actually stops" entry: hard_stop()
+    # now reports whether it interrupted a turn that was genuinely in
+    # flight, so a caller (web bridge, run_convobox.py's pause branch) can
+    # avoid implying "everything stopped" when a tool call's underlying
+    # process may still be finishing in the background. FakeBackendAdapter's
+    # send_hard_stop() deliberately does NOT clear _busy (unlike every real
+    # adapter), matching how is_busy() must be read BEFORE send_hard_stop()
+    # is called to mean anything.
+    orch_busy, _, _, _ = make_orchestrator(busy=True)
+    assert await orch_busy.hard_stop() is True
+
+    orch_idle, _, _, _ = make_orchestrator(busy=False)
+    assert await orch_idle.hard_stop() is False
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_logs_a_caveat_only_when_a_turn_was_busy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="convobox.orchestrator.orchestrator")
+
+    orch_idle, _, _, _ = make_orchestrator(busy=False)
+    await orch_idle.hard_stop()
+    assert "not guaranteed to have stopped" not in caplog.text
+
+    caplog.clear()
+    orch_busy, _, _, _ = make_orchestrator(busy=True)
+    await orch_busy.hard_stop()
+    assert "not guaranteed to have stopped" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_hard_stop_without_an_approval_gate_does_not_raise() -> None:
     # Matches the existing without-tts-or-player coverage above --
     # approval_gate is optional (most sessions have no approval_phrase

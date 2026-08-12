@@ -677,14 +677,22 @@ class _FakeAdapterForListening:
 
 
 class _FakeOrchestratorForListening:
-    def __init__(self) -> None:
+    def __init__(self, hard_stop_returns: bool = False) -> None:
         self.stop_event_loop_calls = 0
         self.hard_stop_calls = 0
+        # Real Orchestrator.hard_stop() returns whether a turn was
+        # actually busy when it fired -- see test_orchestrator.py's
+        # test_hard_stop_returns_whether_a_turn_was_actually_busy. Fixed
+        # per-instance here (not driven by a real adapter) since these
+        # tests only need to confirm the bridge threads the return value
+        # through to its own log/TUI message, not re-derive is_busy()
+        # semantics already covered in test_orchestrator.py.
+        self._hard_stop_returns = hard_stop_returns
 
     async def stop_event_loop(self) -> None:
         self.stop_event_loop_calls += 1
 
-    async def hard_stop(self) -> None:
+    async def hard_stop(self) -> bool:
         # WebListeningBridge.pause() delegates to this rather than calling
         # player.stop()/tts.stop()/adapter.send_hard_stop() itself -- the
         # real Orchestrator.hard_stop() does those on ITS OWN stored
@@ -692,6 +700,7 @@ class _FakeOrchestratorForListening:
         # fakes here, by design -- see the tests that assert on this
         # counter instead of the player/tts/adapter fakes directly).
         self.hard_stop_calls += 1
+        return self._hard_stop_returns
 
 
 def test_listening_bridge_with_no_targets_reports_not_ready_and_not_paused() -> None:
@@ -870,6 +879,44 @@ async def test_listening_bridge_pause_appends_a_tui_system_turn_when_wired() -> 
     assert len(tui_state.turns) == 1
     assert tui_state.turns[0].speaker == "system"
     assert "Athena" in tui_state.turns[0].text
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_notes_a_still_busy_tool_call_when_hard_stop_reports_it() -> None:
+    # The "honesty fix" from docs/KNOWN-ISSUES.md's "A hard-stop does not
+    # guarantee an in-flight tool call actually stops" entry: when
+    # Orchestrator.hard_stop() reports a turn was genuinely busy, the web
+    # UI's own "paused listening" message must not imply everything
+    # stopped cleanly -- a tool call may still be finishing in the
+    # background. Companion to test_hard_stop_returns_whether_a_turn_was_
+    # actually_busy in test_orchestrator.py, which covers the return value
+    # itself; this covers the bridge actually using it.
+    gate = _FakeListeningGate(is_paused=False)
+    tui_state = ConversationTuiState()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(hard_stop_returns=True), "none", tui_state, "Athena",
+    )
+
+    await bridge.pause()
+
+    assert "still be finishing" in tui_state.turns[0].text
+
+
+@pytest.mark.asyncio
+async def test_listening_bridge_pause_omits_the_caveat_when_nothing_was_busy() -> None:
+    gate = _FakeListeningGate(is_paused=False)
+    tui_state = ConversationTuiState()
+    bridge = WebListeningBridge()
+    bridge.set_targets(  # type: ignore[arg-type]
+        gate, _FakePlayer(), _FakeTTS(), _FakeAdapterForListening(),
+        _FakeOrchestratorForListening(hard_stop_returns=False), "none", tui_state, "Athena",
+    )
+
+    await bridge.pause()
+
+    assert "still be finishing" not in tui_state.turns[0].text
 
 
 @pytest.mark.asyncio

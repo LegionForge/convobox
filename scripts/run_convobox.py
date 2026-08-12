@@ -2016,6 +2016,24 @@ async def run(args: argparse.Namespace) -> None:
             config.web.bind_address, config.web.port, config.web.history_tracking_enabled,
         )
 
+    # Live UAT, 2026-08-10: real NameError, reproduced on the first backend
+    # event of any --text run ("cannot access free variable 'indicator'").
+    # _dispatch_event below closes over `indicator`, and the comment at its
+    # real assignment further down (`indicator = WorkingIndicator()`)
+    # reasoned that's fine because Python resolves closures at CALL time,
+    # not definition time -- true for the mic-loop path, but it missed that
+    # --text mode calls _dispatch_event (via handle_transcript(), a few
+    # lines below) and returns BEFORE that assignment is ever reached, so
+    # the closure sees a genuinely unbound name, not just a stale value.
+    # _on_backend_event's own `indicator: WorkingIndicator | None = None`
+    # parameter already tolerates having no indicator to update (nothing to
+    # animate outside the mic-loop/TUI path) -- this default just makes
+    # that the REAL value --text mode's dispatches see, instead of an
+    # unbound-variable crash. The mic-loop path still reassigns this same
+    # name to a real WorkingIndicator further down, which _dispatch_event
+    # picks up the same way it always did.
+    indicator: WorkingIndicator | None = None
+
     def _dispatch_event(event: BackendEvent) -> None:
         _on_backend_event(
             tui_state, last_spoken_response, event,
@@ -2555,6 +2573,20 @@ async def run(args: argparse.Namespace) -> None:
                     if gate_action == "pause":
                         player.stop()
                         tts.stop()
+                        # Captured BEFORE send_hard_stop() -- every
+                        # adapter's own send_hard_stop() unconditionally
+                        # clears is_busy() regardless of whether a tool
+                        # call's underlying process actually stopped, so
+                        # this is the only point that still reflects
+                        # whether a real turn was interrupted. Used below
+                        # for the "honesty fix" caveat (docs/KNOWN-ISSUES.md,
+                        # "A hard-stop does not guarantee an in-flight tool
+                        # call actually stops") -- same reasoning as
+                        # Orchestrator.hard_stop()'s own was_busy capture,
+                        # duplicated here since this branch predates that
+                        # method and still runs its own copy of the same
+                        # stop sequence.
+                        was_busy = adapter.is_busy()
                         await adapter.send_hard_stop()
                         # Live UAT, 2026-07-31 (3 confirmed instances across two
                         # sessions): audio was heard 1-10+ seconds AFTER a pause
@@ -2583,15 +2615,21 @@ async def run(args: argparse.Namespace) -> None:
                         # for why this is unconditional on tui_state.
                         if config.interaction.pause_resume_ack == "tone":
                             player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
+                        caveat = (
+                            " (a tool call may still be finishing in the background)"
+                            if was_busy
+                            else ""
+                        )
                         log.info(
                             "paused listening (matched %r) -- hard-stopped in-flight "
-                            "work; say %r to resume",
-                            text, config.interaction.resume_word,
+                            "work%s; say %r to resume",
+                            text, caveat, config.interaction.resume_word,
                         )
                         if tui_state is not None:
                             tui_state.add_turn(
                                 "system",
-                                f"paused listening -- say {config.interaction.resume_word!r} to resume",
+                                f"paused listening -- say {config.interaction.resume_word!r} "
+                                f"to resume{caveat}",
                             )
                         continue
                     # High-stakes approval prompt. This is deliberately
