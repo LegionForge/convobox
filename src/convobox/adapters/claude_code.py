@@ -537,10 +537,25 @@ class ClaudeCodeAdapter(BackendAdapter):
                 writer.close()
             return
         request = _safe_json_loads(line.decode(errors="replace"))
-        if request is None or request.get("token") != self._approval_token:
-            # Wrong/missing token: not a legitimate hook connection (either
-            # a bug or another local process probing the port). Deny and
-            # drop rather than trust it.
+        if request is None:
+            # Not a legitimate hook connection (either a bug or another
+            # local process probing the port). Deny and drop rather than
+            # trust it. Split out from the token check below (rather than
+            # one combined `request is None or ...` condition) so mypy can
+            # narrow `request` to non-None for every use after this point.
+            await self._reject_connection(writer, "unauthorized")
+            return
+        token = request.get("token")
+        # secrets.compare_digest, not `!=` -- this token gates who may
+        # answer a pending tool-call approval, so the comparison should be
+        # timing-safe on principle even though the realistic exposure is
+        # low (a random 128-bit token, loopback-only). compare_digest
+        # requires both operands to be str/bytes of a fixed type; the
+        # isinstance guard covers a missing/malformed "token" field
+        # (None, an int, ...) without raising.
+        if not isinstance(token, str) or not secrets.compare_digest(
+            token, self._approval_token
+        ):
             await self._reject_connection(writer, "unauthorized")
             return
         if self._pending_approval_writer is not None:

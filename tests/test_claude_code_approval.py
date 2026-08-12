@@ -259,6 +259,42 @@ async def test_wrong_token_is_rejected_with_a_deny_and_no_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_token_field_is_rejected_without_raising() -> None:
+    # secrets.compare_digest requires both operands to be str/bytes and
+    # raises TypeError otherwise -- a connection sending no "token" field
+    # at all (token=None) or a wrong-typed one must still get a clean
+    # deny, not an unhandled exception inside _handle_approval_connection.
+    adapter = _adapter()
+    try:
+        port = await adapter._ensure_approval_server()
+        reader, writer = await _connect(port)
+        writer.write(json.dumps({"tool_name": "Bash"}).encode() + b"\n")
+        await writer.drain()
+
+        reply = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+        assert reply["decision"] == "deny"
+        assert adapter._events.qsize() == 0
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_string_token_is_rejected_without_raising() -> None:
+    adapter = _adapter()
+    try:
+        port = await adapter._ensure_approval_server()
+        reader, writer = await _connect(port)
+        writer.write(json.dumps({"token": 12345, "tool_name": "Bash"}).encode() + b"\n")
+        await writer.drain()
+
+        reply = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+        assert reply["decision"] == "deny"
+        assert adapter._events.qsize() == 0
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
 async def test_second_concurrent_connection_is_denied_while_one_is_pending() -> None:
     # This adapter's turn model only has one tool call in flight at a
     # time (see module docstring) -- a second connection while one is
