@@ -249,6 +249,25 @@ principle. **Practical consequence: a working custom-provider config
 that needs a real credential currently has to hardcode it in plaintext
 -- `{env:VAR}` is not a safe way to keep a key out of the file today.**
 
+**Closed the loop with a fresh key: Inception confirmed working
+end-to-end through ConvoBox itself, plus one more real bug found along
+the way -- a startup race, not a config problem.** JP rotated the key
+and hardcoded a fresh one directly in `opencode.jsonc` himself (never
+typed or pasted through this session). First request against a
+freshly-started `opencode serve`: the same `ModelUnavailableError` seen
+throughout this whole investigation, even with a fully correct config.
+Retried the identical request against the same, now-warm server:
+succeeded immediately (`"banana"`, clean `finish:"stop"`). Then ran
+`scripts/run_convobox.py --text "Say the word banana and nothing else"`
+against that warm server: real spoken TTS response through the Mac mini
+speakers, matching the Ollama result exactly. **Real, useful finding**:
+`opencode serve` has a startup race where even a correctly-configured
+provider can fail the very first request after boot -- a warm retry
+resolves it every time this was tested. Explains some of the earlier
+back-and-forth in this investigation, and is a concrete, actionable
+thing for anyone else hitting `ModelUnavailableError` on an otherwise-
+correct custom provider: retry once before assuming the config is wrong.
+
 ## What transfers
 
 - **`plan` and `permissive` modes are solid on both claude-code and codex** --
@@ -282,3 +301,10 @@ that needs a real credential currently has to hardcode it in plaintext
   text fine but never correctly invoked a tool, confirmed (not assumed)
   to be a model limitation by testing Ollama's own API directly with an
   explicit tool schema, bypassing opencode entirely.
+- **`opencode serve` has a real startup race**: the first request against
+  a freshly-started server can fail with `ModelUnavailableError` even
+  for a fully correct, working custom-provider config -- confirmed with
+  Inception (fresh key, fresh server, first request failed, identical
+  retry against the same warm server succeeded). A warm retry before
+  assuming a config is broken is a real, useful piece of practical
+  guidance from this session, not just a curiosity.

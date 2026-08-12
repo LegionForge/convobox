@@ -909,14 +909,32 @@ consequence for anyone following the custom-provider workaround above:
 in that file in plaintext.** Not filed upstream yet; a good second
 candidate alongside the `serve`-swallows-failures bug above.
 
+**Follow-up, same session: Inception confirmed working end-to-end
+through ConvoBox itself (not just raw curl), plus one more real bug --
+a startup race, not a config problem.** With a fresh Inception key
+hardcoded directly in `opencode.jsonc` (per the `{env:...}` bug above),
+the *very first* request to a freshly-started `opencode serve` failed
+with the same `ModelUnavailableError` seen throughout this
+investigation -- but retrying the identical request against the
+*same, now-warm* server succeeded immediately (`"banana"`, clean
+`finish:"stop"`), and `scripts/run_convobox.py --text` against that
+warm server produced a real spoken TTS response through the Mac mini
+speakers. So there's a real startup race in `opencode serve`: a
+provider/model can be correctly configured and still fail on the first
+request after boot, before succeeding on every subsequent one. Anyone
+hitting `ModelUnavailableError` on a custom provider should retry once
+against an already-running server before concluding the config itself
+is wrong.
+
 **Practical state for ConvoBox today:** the opencode backend IS usable
 via a manually-declared custom provider (confirmed working end-to-end
-for actual text generation, both local/Ollama and cloud/Inception); it
-remains unusable via `opencode auth login` (OAuth or API-key) or the
-built-in Zen catalog, for the reasons diagnosed above, and any
-custom-provider config that needs a real credential currently has to
-hardcode it (the `{env:...}` bug above) rather than reference an
-environment variable. Full write-up:
+for actual text generation, both local/Ollama and cloud/Inception,
+through ConvoBox itself); it remains unusable via `opencode auth login`
+(OAuth or API-key) or the built-in Zen catalog, for the reasons
+diagnosed above, and any custom-provider config that needs a real
+credential currently has to hardcode it (the `{env:...}` bug above)
+rather than reference an environment variable. A cold-start retry may
+also be needed the first time a server starts. Full write-up:
 `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
 
 ---
