@@ -1149,3 +1149,53 @@ hard-stop just doesn't currently escalate to using it.
    with its own restart policy resist cancellation; what happens to
    output ordering (pre-delay vs. post-delay messages) when a delayed
    command is interrupted mid-stream.
+
+---
+
+## `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it
+
+**Status:** diagnosed live 2026-08-11, macOS (Mac mini M4), both claude-code
+and codex backends. Not fixed this pass -- fail-safe in practice (nothing
+ever gets written without a real answer) but the mechanism is misleading
+and worth a real fix.
+
+**Symptom.** Ask either backend (in `--text` mode, `permission_mode: approve`)
+to write a file: the approval prompt fires correctly
+(`Approval needed to run Write. Say <phrase> to approve...` for claude-code;
+`item/fileChange/requestApproval` for codex), then **exactly 120 seconds of
+silence**, then `backend still busy after 120s; giving up the wait` and the
+process exits. No file is ever created, on either backend, confirmed twice
+for codex and once (to full resolution) for claude-code.
+
+**Root cause.** `ApprovalPromptGate`'s own `approval_timeout_s` (default
+30s), the thing that's supposed to auto-deny a silently-abandoned approval
+prompt, is only ever ticked by `_working_watchdog` -- and
+`scripts/run_convobox.py` only constructs `watchdog_task` in the mic-loop
+setup path, well after `--text` mode's own early `return`. So in `--text`
+mode, `approval_gate.observe_timeout()` is never called at all; the
+approval just sits pending until an unrelated, generic 120s
+"`backend still busy`" bail-out in `_drain_until_idle` gives up and the
+script calls `adapter.aclose()`, disconnecting the backend without ever
+sending an explicit decline.
+
+**Why this matters even though nothing unsafe happens.** The net effect is
+safe today (no destructive action executes without a real answer), but
+what looks like "the system denied my request" is actually "the system
+gave up waiting and disconnected" -- a real distinction if this approval
+channel is ever built on further (e.g. surfaced to a caller who cares
+*why* a request didn't go through, or a future mode where abandon and
+deny should behave differently).
+
+**Fix candidates, neither built yet:** either construct a lightweight
+version of the watchdog (or just call `approval_gate.observe_timeout()`
+on a bare timer) in `--text` mode too, or have `--text` mode's own exit
+path call `resolve_pending_approval(False)` explicitly before
+`adapter.aclose()`.
+
+**Also attempted, inconclusive:** the live mic-loop voice-approval flow
+itself (the thing `--text` mode structurally can't exercise) -- 4 live
+synthetic-injection attempts, blocked by real, loud ambient background
+noise in the test room that session (not a code issue). Full detail,
+plus the clean `plan`/`permissive` mode confirmations on both backends
+(N=2 each) and a re-confirmation that opencode remains untestable
+(0 configured credentials): `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
