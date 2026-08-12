@@ -902,23 +902,44 @@ def _dump_config(config: AppConfig) -> str:
     return yaml.safe_dump(config.model_dump(mode="python", exclude_defaults=True), sort_keys=False)
 
 
+# Backups live in a subdirectory next to the config, not scattered directly
+# in the same directory as convobox.yaml (GitHub issue #235, finding D4) --
+# a live repo accumulated ~90 convobox.yaml.backup-* files in its root over
+# time, which AGENTS.md's own "no scratch/test artifacts in the repo root"
+# rule flags, and which made a plain `ls`/directory listing noisy. Backups
+# are otherwise unchanged: same filename stamp format, same one-per-save
+# cadence, just one level deeper.
+_BACKUP_DIRNAME = ".convobox-backups"
+
+
+def _backup_dir(path: Path) -> Path:
+    return path.parent / _BACKUP_DIRNAME
+
+
 def backup_config(path: Path) -> Path | None:
     if not path.exists():
         return None
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup = path.with_name(f"{path.name}.backup-{stamp}")
+    backup_dir = _backup_dir(path)
+    backup_dir.mkdir(exist_ok=True)
+    backup = backup_dir / f"{path.name}.backup-{stamp}"
     backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     return backup
 
 
 def list_config_backups(path: Path) -> list[Path]:
-    """Every backup_config()-written convobox.yaml.backup-* next to path,
-    newest first. Filenames are that function's own <name>.backup-
-    <YYYYMMDD-HHMMSS> stamp, which sorts lexicographically = chronologically
-    -- a hand-renamed one (e.g. a trailing custom suffix) still sorts
-    correctly by its date/time prefix, since glob only matches names that
-    already start with that stamp."""
-    return sorted(path.parent.glob(f"{path.name}.backup-*"), reverse=True)
+    """Every backup_config()-written convobox.yaml.backup-* in path's
+    .convobox-backups/ subdirectory, newest first. Filenames are that
+    function's own <name>.backup-<YYYYMMDD-HHMMSS> stamp, which sorts
+    lexicographically = chronologically -- a hand-renamed one (e.g. a
+    trailing custom suffix) still sorts correctly by its date/time prefix,
+    since glob only matches names that already start with that stamp.
+    Returns [] (not an error) when the subdirectory doesn't exist yet --
+    e.g. a config that's never been saved through save_with_backup."""
+    backup_dir = _backup_dir(path)
+    if not backup_dir.is_dir():
+        return []
+    return sorted(backup_dir.glob(f"{path.name}.backup-*"), reverse=True)
 
 
 def write_config(path: Path, config: AppConfig) -> None:
@@ -2428,7 +2449,7 @@ def _restore_original(state: TuiState) -> None:
 def _restore_from_backup(state: TuiState) -> None:
     backups = list_config_backups(state.path)
     if not backups:
-        state.status = f"no backups found next to {state.path}"
+        state.status = f"no backups found in {_backup_dir(state.path)}"
         return
     latest = backups[0]
     if not _confirm_modal(
@@ -2437,7 +2458,7 @@ def _restore_from_backup(state: TuiState) -> None:
         [
             f"This replaces every staged value with {latest.name}'s contents.",
             "Nothing is written to disk until you press [S] to save.",
-            f"({len(backups)} backup(s) available next to this config; "
+            f"({len(backups)} backup(s) available in {_backup_dir(state.path).name}/; "
             "restoring the most recent.)",
         ],
     ):
