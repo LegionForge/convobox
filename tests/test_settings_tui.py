@@ -1167,11 +1167,15 @@ def test_backup_config_returns_none_for_new_file(tmp_path: Path) -> None:
 
 
 def test_list_config_backups_is_newest_first(tmp_path: Path) -> None:
+    # Backups live in a .convobox-backups/ subdirectory next to the config
+    # (GitHub issue #235, finding D4), not scattered directly alongside it.
     path = tmp_path / "convobox.yaml"
-    (tmp_path / "convobox.yaml.backup-20260805-100000").write_text("a", encoding="utf-8")
-    (tmp_path / "convobox.yaml.backup-20260806-090000").write_text("b", encoding="utf-8")
-    (tmp_path / "convobox.yaml.backup-20260805-223836").write_text("c", encoding="utf-8")
-    (tmp_path / "unrelated.yaml.backup-20260807-000000").write_text("d", encoding="utf-8")
+    backup_dir = tmp_path / ".convobox-backups"
+    backup_dir.mkdir()
+    (backup_dir / "convobox.yaml.backup-20260805-100000").write_text("a", encoding="utf-8")
+    (backup_dir / "convobox.yaml.backup-20260806-090000").write_text("b", encoding="utf-8")
+    (backup_dir / "convobox.yaml.backup-20260805-223836").write_text("c", encoding="utf-8")
+    (backup_dir / "unrelated.yaml.backup-20260807-000000").write_text("d", encoding="utf-8")
 
     backups = settings_tui.list_config_backups(path)
 
@@ -1184,6 +1188,23 @@ def test_list_config_backups_is_newest_first(tmp_path: Path) -> None:
 
 def test_list_config_backups_empty_when_none_exist(tmp_path: Path) -> None:
     assert settings_tui.list_config_backups(tmp_path / "convobox.yaml") == []
+
+
+def test_backup_config_writes_into_a_convobox_backups_subdirectory(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "convobox.yaml"
+    path.write_text("tts:\n  voice: en_US-lessac-medium\n", encoding="utf-8")
+
+    backup = backup_config(path)
+
+    assert backup is not None
+    assert backup.parent == tmp_path / ".convobox-backups"
+    assert backup.parent.name not in {"", "."}
+    # The config's own directory (the old location) must NOT also get a
+    # stray backup file -- a regression here would mean both places end
+    # up with copies, not a clean move.
+    assert list((tmp_path).glob("convobox.yaml.backup-*")) == []
 
 
 def test_apply_load_recovery_is_a_no_op_when_nothing_failed() -> None:

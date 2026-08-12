@@ -30,6 +30,12 @@ uat-acoustic-calibration/
 # is the one deliberately-tracked exception.
 convobox*.yaml
 !convobox.example.yaml
+# Config backups now live in a subdirectory (settings_tui.py's
+# backup_config/list_config_backups, GitHub issue #235 finding D4) rather
+# than scattered as convobox.yaml.backup-* directly in the repo root --
+# the old flat pattern is kept too so a pre-existing checkout with old-style
+# backups still has them ignored until cleaned up.
+.convobox-backups/
 convobox.yaml.backup-*
 
 # run_convobox.py's AEC delay auto-tune diagnostic sidecar (config.py's
