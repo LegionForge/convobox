@@ -661,6 +661,49 @@ async def test_feed_async_warns_when_a_call_runs_past_the_threshold(
     # With a 0.05s repeat interval and a 0.2s call, more than one
     # "still running" warning should have fired before completion.
     assert caplog.text.count("still running") >= 2
+    # GitHub issue #235, finding B3's second half: once the worker HAS
+    # started, the warning reports queue-wait and running-time as
+    # separate numbers, not one undifferentiated total.
+    assert "queued" in caplog.text
+    assert "running" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_feed_async_reports_still_queued_when_the_worker_has_not_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # GitHub issue #235, finding B3's second half: a task that hasn't been
+    # picked up by a worker thread at all yet (real thread-pool
+    # contention) must be reported differently from one that's genuinely
+    # running long -- misattributing queue-wait to "the window call is
+    # still running" was the diagnosed gap (the existing logging couldn't
+    # tell the two apart). Simulated deterministically by delaying when
+    # asyncio.to_thread's underlying callable actually starts, rather than
+    # trying to force real contention by saturating the shared default
+    # pool with dozens of OS threads in a unit test.
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.05)
+    caplog.set_level(logging.WARNING)
+
+    real_to_thread = asyncio.to_thread
+
+    async def delayed_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        # Still nothing appended to execution_started by the time the
+        # first (and likely second) warning tick fires.
+        await asyncio.sleep(0.15)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(segmenter_module.asyncio, "to_thread", delayed_to_thread)
+    seg, _ = _make_segmenter(monkeypatch, [0.9])
+
+    await seg.feed_async(_windows(1))
+
+    assert "still QUEUED" in caplog.text
+    assert "thread-pool contention" in caplog.text
+    # Must not claim the model call itself is what's running/slow while
+    # it's genuinely still queued -- that's exactly the misattribution
+    # this fix closes.
+    assert "still running" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -139,6 +139,42 @@ async def test_synthesize_stream_yields_chunks_incrementally() -> None:
     assert voice.calls == ["hello there"]
 
 
+# --- synthesize_stream()'s chunk-queue consumer uses a dedicated,
+# call-scoped single-worker executor, not asyncio.to_thread()'s shared,
+# process-wide default pool (GitHub issue #235, finding B3) -- for the
+# whole synthesis, one worker sits blocked in a no-timeout get() at any
+# given moment; sharing the default pool with everything else that
+# offloads to it (the mic capture loop's own equivalent fix, faster-
+# whisper's transcribe() calls) means this occupant reduces real
+# capacity for short ones under load. ---
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_uses_a_dedicated_single_worker_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.tts.piper as piper_module
+
+    created: list[object] = []
+    real_executor_cls = piper_module.ThreadPoolExecutor
+
+    def spying_executor(*args, **kwargs):  # type: ignore[no-untyped-def]
+        executor = real_executor_cls(*args, **kwargs)
+        created.append(executor)
+        return executor
+
+    monkeypatch.setattr(piper_module, "ThreadPoolExecutor", spying_executor)
+
+    chunk_a = np.array([100, 200, 300], dtype=np.int16)
+    engine, _ = _make_engine([[chunk_a]])
+
+    received = [chunk async for chunk in engine.synthesize_stream("hi")]
+
+    assert len(received) == 1
+    assert len(created) == 1
+    assert created[0]._max_workers == 1
+
+
 @pytest.mark.asyncio
 async def test_synthesize_concatenates_all_chunks() -> None:
     chunk_a = np.array([0, 16384], dtype=np.int16)

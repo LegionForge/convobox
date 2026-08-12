@@ -108,6 +108,66 @@ async def test_stream_yields_chunks_in_order() -> None:
     np.testing.assert_array_equal(await gen.__anext__(), second)
 
 
+# --- stream() uses a dedicated single-worker executor for its blocking
+# queue.get(), not asyncio.to_thread()'s shared, process-wide default pool
+# (GitHub issue #235, finding B3) -- during any silence, one worker sits
+# blocked in that get() for the whole silence duration; sharing the
+# default pool with everything else that offloads to it (faster-whisper's
+# transcribe() calls, Piper's own chunk pump) means this one long-lived
+# occupant reduces real capacity for short ones under load, the
+# diagnosed mechanism for "fine under normal use, hangs under rapid-fire
+# stress". ---
+
+
+def test_stream_executor_is_dedicated_and_single_worker() -> None:
+    mic = MicrophoneStream()
+    assert mic._stream_executor._max_workers == 1
+    mic.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_actually_routes_through_its_dedicated_executor() -> None:
+    mic = MicrophoneStream()
+    mic.start()
+    stream = FakeInputStream.instances[0]
+    stream.emit(np.arange(3, dtype=np.float32))
+
+    submitted: list[object] = []
+    real_submit = mic._stream_executor.submit
+
+    def spy_submit(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        submitted.append(fn)
+        return real_submit(fn, *args, **kwargs)
+
+    mic._stream_executor.submit = spy_submit  # type: ignore[method-assign]
+
+    await mic.stream().__anext__()
+
+    assert submitted, "stream() must submit its blocking get() to its own dedicated executor"
+    mic.close()
+
+
+@pytest.mark.asyncio
+async def test_close_after_stream_does_not_hang_on_executor_shutdown() -> None:
+    # Regression guard: close()'s executor.shutdown() must be wait=False
+    # -- a blocking shutdown() would defeat the point of stream() not
+    # holding up other work, and could hang indefinitely if a consumer's
+    # get() is still outstanding (matching this class's existing
+    # non-blocking close() semantics elsewhere).
+    mic = MicrophoneStream()
+    mic.start()
+    task = asyncio.ensure_future(mic.stream().__anext__())
+    await asyncio.sleep(0.05)  # let the worker actually reach queue.get()
+
+    start = time.monotonic()
+    mic.close()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0
+    with pytest.raises(StopAsyncIteration):
+        await task
+
+
 def test_close_stops_and_closes_underlying_stream() -> None:
     mic = MicrophoneStream()
     mic.start()
