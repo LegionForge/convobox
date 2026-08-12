@@ -203,3 +203,118 @@ def test_editor_uri_route_does_not_get_swallowed_by_the_catch_all_artifact_route
         response = client.get("/api/artifacts/deep/nested/main.js/editor-uri")
     assert response.status_code == 200
     assert response.json()["uri"] == f"vscode://file/{(nested / 'main.js').resolve().as_posix()}"
+
+
+# --- GET /api/artifacts (2026-08-12): the working-directory file browser
+# -- filtered through the SAME ARTIFACT_MEDIA_TYPES allowlist the
+# single-file route enforces, plus dotfile/symlink exclusion. See
+# docs/ARTIFACT-PANE-SCOPE.md's "Working-Directory File Browser" section
+# for why a plain directory scan was rejected and what this replaces it
+# with. ---
+
+
+def test_list_artifacts_with_no_working_dir_returns_503() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.status_code == 503
+
+
+def test_list_artifacts_returns_only_allowlisted_extensions(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "report.html").write_text("<html></html>")
+    (working_dir / "script.py").write_text("print('hi')")  # not in the allowlist
+    (working_dir / "notes.exe").write_bytes(b"fake")  # not in the allowlist
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.status_code == 200
+    data = response.json()
+    assert sorted(data["files"]) == ["chart.png", "report.html"]
+    assert data["truncated"] is False
+
+
+def test_list_artifacts_includes_nested_files_with_relative_posix_paths(
+    working_dir: Path,
+) -> None:
+    nested = working_dir / "plots" / "sub"
+    nested.mkdir(parents=True)
+    (nested / "a.png").write_bytes(b"fake")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.status_code == 200
+    assert response.json()["files"] == ["plots/sub/a.png"]
+
+
+def test_list_artifacts_excludes_dotfiles(working_dir: Path) -> None:
+    (working_dir / ".env").write_text("SECRET=1")
+    (working_dir / "chart.png").write_bytes(b"fake")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.json()["files"] == ["chart.png"]
+
+
+def test_list_artifacts_excludes_dot_directories_entirely(working_dir: Path) -> None:
+    # A file with an allowlisted extension sitting INSIDE a dot-directory
+    # (e.g. .git/) must never appear, regardless of its own extension --
+    # the directory itself signals "not meant to be browsed".
+    dot_dir = working_dir / ".git"
+    dot_dir.mkdir()
+    (dot_dir / "config.txt").write_text("not a real git config, just allowlisted-looking")
+    (working_dir / "chart.png").write_bytes(b"fake")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.json()["files"] == ["chart.png"]
+
+
+def test_list_artifacts_excludes_symlinked_files(working_dir: Path, tmp_path: Path) -> None:
+    secret = tmp_path / "outside.png"
+    secret.write_bytes(b"do-not-list-me")
+    link = working_dir / "link.png"
+    link.symlink_to(secret)
+    (working_dir / "real.png").write_bytes(b"fake")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.json()["files"] == ["real.png"]
+
+
+def test_list_artifacts_excludes_symlinked_directories(
+    working_dir: Path, tmp_path: Path
+) -> None:
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "leak.png").write_bytes(b"do-not-list-me")
+    link_dir = working_dir / "linked"
+    link_dir.symlink_to(secret_dir)
+    (working_dir / "real.png").write_bytes(b"fake")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.json()["files"] == ["real.png"]
+
+
+def test_list_artifacts_returns_empty_list_for_an_empty_working_dir(
+    working_dir: Path,
+) -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    assert response.status_code == 200
+    assert response.json() == {"files": [], "truncated": False}
+
+
+def test_list_artifacts_truncates_and_flags_it(working_dir: Path) -> None:
+    from convobox.web.artifacts import _MAX_BROWSE_RESULTS
+
+    for i in range(_MAX_BROWSE_RESULTS + 5):
+        (working_dir / f"file{i:04d}.png").write_bytes(b"fake")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get("/api/artifacts")
+    data = response.json()
+    assert len(data["files"]) == _MAX_BROWSE_RESULTS
+    assert data["truncated"] is True

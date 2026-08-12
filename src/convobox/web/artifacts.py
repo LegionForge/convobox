@@ -12,30 +12,59 @@ ClaudeCodeAdapter is the first adapter to emit BackendEventType.ARTIFACT
 (see claude_code.py); opencode/codex remain unwired -- each adapter's
 detection is its own separate opt-in, per the scope doc's slice-by-slice
 plan.
+
+Also serves GET /api/artifacts (2026-08-12, docs/ARTIFACT-PANE-SCOPE.md's
+"Working-Directory File Browser" section) -- a filtered listing of files
+in working_dir, not just ones a tool call already named. Reverses that
+doc's earlier 2026-07-29 rejection of a general browser: the listing is
+filtered through the SAME ARTIFACT_MEDIA_TYPES allowlist this file's
+single-artifact route already enforces (a file type this server would
+refuse to serve can never appear in the listing either), plus dotfile
+and symlink exclusion on top -- see the doc for the full reasoning on
+why a plain directory scan was rejected and what changed.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from convobox.adapters.base import ARTIFACT_MEDIA_TYPES
 
+# Working-directory file browser (docs/ARTIFACT-PANE-SCOPE.md's
+# "Working-Directory File Browser" section) -- a hard cap on how many
+# matching files a single listing request will return. Not a pagination
+# limit (no offset/cursor) -- v1 scope is "flat, filtered list", not a
+# browsable-at-any-scale directory tree. The walk stops entirely the
+# moment this many matches are found, so a pathological deeply-nested
+# working_dir can't turn one request into unbounded filesystem work.
+_MAX_BROWSE_RESULTS = 500
 
-def _resolve_artifact(working_dir: Path | None, artifact_path: str) -> Path:
-    """Shared by both routes below -- the path-traversal fence must have
-    exactly one implementation, not two copies that could drift apart.
-    Raises the same HTTPExceptions either route needs; callers don't
-    catch anything themselves."""
+
+def _resolve_working_dir(working_dir: Path | None) -> Path:
+    """Shared by every route below -- raises the same 503 either the
+    single-file route or the listing route needs when backend.working_dir
+    isn't configured. Resolving here (once) rather than at each call site
+    keeps that check from drifting between routes."""
     if working_dir is None:
         raise HTTPException(
             503,
             "no backend.working_dir configured -- artifacts can only be "
             "served from within it, and none is set",
         )
-    base = working_dir.resolve()
+    return working_dir.resolve()
+
+
+def _resolve_artifact(working_dir: Path | None, artifact_path: str) -> Path:
+    """Shared by both single-file routes below -- the path-traversal fence
+    must have exactly one implementation, not two copies that could drift
+    apart. Raises the same HTTPExceptions either route needs; callers
+    don't catch anything themselves."""
+    base = _resolve_working_dir(working_dir)
     candidate = (base / artifact_path).resolve()
     # Path-traversal fence: candidate must resolve to somewhere INSIDE
     # base. Checking base in candidate.parents (not a string prefix
@@ -48,12 +77,74 @@ def _resolve_artifact(working_dir: Path | None, artifact_path: str) -> Path:
     return candidate
 
 
+def _list_browsable_files(base: Path) -> tuple[list[str], bool]:
+    """Every file under base whose extension is already in
+    ARTIFACT_MEDIA_TYPES (the same allowlist the single-file route
+    enforces -- a listing can never surface a file type this server would
+    refuse to serve anyway), sorted, relative-POSIX-path. Two exclusions
+    on top of the extension allowlist, both defense-in-depth against the
+    listing surfacing something it shouldn't (see the scope doc's
+    reasoning): any path component starting with "." (dotfiles/dot-dirs
+    like .git/.env/.ssh -- excluded even if an entry inside happened to
+    have an allowlisted extension), and symlinks (never followed --
+    os.walk's own followlinks=False keeps directory symlinks from being
+    descended into at all; the per-file is_symlink() check below catches
+    a symlinked FILE sitting directly in an otherwise-real directory,
+    which followlinks alone wouldn't).
+
+    Returns (paths, truncated) -- truncated is True if _MAX_BROWSE_RESULTS
+    was hit before the walk finished (there were more matches than shown,
+    not that these are necessarily the "first" N in any meaningful order).
+    """
+    results: list[str] = []
+    truncated = False
+    for root, dirnames, filenames in os.walk(base, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if not d.startswith(".") and not (root_path / d).is_symlink()
+        )
+        for filename in sorted(filenames):
+            if filename.startswith("."):
+                continue
+            file_path = root_path / filename
+            if file_path.is_symlink():
+                continue
+            if file_path.suffix.lower() not in ARTIFACT_MEDIA_TYPES:
+                continue
+            if len(results) >= _MAX_BROWSE_RESULTS:
+                truncated = True
+                break
+            results.append(file_path.relative_to(base).as_posix())
+        if truncated:
+            break
+    return sorted(results), truncated
+
+
+class _BrowseResponse(BaseModel):
+    files: list[str]
+    truncated: bool
+
+
 def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
-    """Registers GET /api/artifacts/{path} and .../editor-uri. working_dir
-    is None unless backend.working_dir is explicitly configured --
-    unlike settings/listening, there is deliberately no fallback to
-    ConvoBox's own directory here; an unconfigured working_dir means
-    artifacts are unavailable, not "serve from somewhere unexpected"."""
+    """Registers GET /api/artifacts/{path}, .../editor-uri, and GET
+    /api/artifacts (the working-directory file browser -- see
+    _list_browsable_files). working_dir is None unless backend.working_dir
+    is explicitly configured -- unlike settings/listening, there is
+    deliberately no fallback to ConvoBox's own directory here; an
+    unconfigured working_dir means artifacts are unavailable, not "serve
+    from somewhere unexpected"."""
+
+    # No route-ordering hazard here (unlike editor-uri below): this is an
+    # exact path with no {artifact_path:path} segment, so it can never be
+    # swallowed by (or swallow) the catch-all route -- registration order
+    # relative to it doesn't matter, placed first simply for readability.
+    @app.get("/api/artifacts", response_model=_BrowseResponse)
+    async def list_artifacts() -> _BrowseResponse:
+        base = _resolve_working_dir(working_dir)
+        files, truncated = _list_browsable_files(base)
+        return _BrowseResponse(files=files, truncated=truncated)
 
     # Registered BEFORE the greedy catch-all route below on purpose:
     # {artifact_path:path} matches an entire remaining path including
