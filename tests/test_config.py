@@ -22,7 +22,6 @@ from convobox.config import (
     write_aec_estimate,
 )
 
-
 # --- resolve_config_path: the explicit-path / CONVOBOX_CONFIG / default
 # fallback order load_config() and settings_tui.py's default_config_path()
 # both delegate to, extracted so this order lives in exactly one place. ---

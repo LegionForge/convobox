@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from convobox.approval import DEFAULT_DENY_PHRASES, DEFAULT_EXPLAIN_PHRASES, ApprovalDetector
+from convobox.approval import (
+    DEFAULT_DENY_PHRASES,
+    DEFAULT_EXPLAIN_PHRASES,
+    ApprovalDetector,
+)
 
 
 @pytest.fixture

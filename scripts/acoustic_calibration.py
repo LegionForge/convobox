@@ -39,7 +39,10 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "scripts"))
 
-from convobox.audio.aec import EchoCanceller, _resample as _aec_resample
+from run_convobox import AEC_MEASURABLE_ECHO_DB, SINGLE_INSTANCE_PORT, BargeInMonitor
+
+from convobox.audio.aec import EchoCanceller
+from convobox.audio.aec import _resample as _aec_resample
 from convobox.audio.capture import MicrophoneStream
 from convobox.audio.correlation import correlation_at_lag, estimate_reference_lag
 from convobox.audio.playback import AudioPlayer
@@ -47,7 +50,6 @@ from convobox.config import VADConfig, load_config
 from convobox.interrupt_presets import resolve_preset
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.vad.segmenter import UtteranceSegmenter
-from run_convobox import AEC_MEASURABLE_ECHO_DB, BargeInMonitor, SINGLE_INSTANCE_PORT
 
 _TEST_TEXT = (
     "This is an automated acoustic echo cancellation test. The assistant is "

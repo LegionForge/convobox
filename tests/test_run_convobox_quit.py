@@ -12,7 +12,6 @@ from scripts.run_convobox import (
     _print_clean_exit_note,
 )
 
-
 # --- _cancel_main_task: the web UI's Quit button, wired as run()'s
 # quit_handler. Deliberately doesn't touch OS signals at all (see its own
 # docstring) -- both this and the route calling it run on the same event

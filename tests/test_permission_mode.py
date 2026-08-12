@@ -12,7 +12,6 @@ from convobox.config import (
 )
 from scripts.run_convobox import _check_backend_permission_mode
 
-
 # --- config field + validator ---
 
 def test_permission_mode_defaults_to_plan() -> None:

@@ -14,12 +14,12 @@ pytest.importorskip(
     "are opt-in, not part of dev, so most CLI/TUI-only installs never pull them in",
 )
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from convobox.config import DisplayConfig  # noqa: E402
-from convobox.web.app import create_app, sse_lines  # noqa: E402
-from convobox.web.history import HistoryDB, new_session_id  # noqa: E402
-from convobox.web.stream import EventBroadcaster  # noqa: E402
+from convobox.config import DisplayConfig
+from convobox.web.app import create_app, sse_lines
+from convobox.web.history import HistoryDB, new_session_id
+from convobox.web.stream import EventBroadcaster
 
 # Required by app.py's require_csrf_header middleware on every mutating
 # request (see its own docstring, GitHub issue #235 finding A3) -- set as

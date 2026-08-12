@@ -26,7 +26,7 @@ def main() -> int:
     failed: list[str] = []
     for name, cmd in CHECKS:
         print(f"--- {name}: {' '.join(cmd[1:])}", flush=True)
-        if subprocess.run(cmd).returncode != 0:  # noqa: S603
+        if subprocess.run(cmd).returncode != 0:
             failed.append(name)
     if failed:
         print(f"ci_local: FAILED -> {', '.join(failed)}", flush=True)

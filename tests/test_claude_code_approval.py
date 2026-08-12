@@ -19,16 +19,15 @@ import contextlib
 import json
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from unittest.mock import AsyncMock, MagicMock
-
 from convobox.adapters.base import BackendEventType
 from convobox.adapters.claude_code import (
-    ClaudeCodeAdapter,
     _APPROVAL_DECISION_TIMEOUT_S,
     _APPROVAL_HOST,
+    ClaudeCodeAdapter,
     _parse_mcp_list_output,
     _resolve_flags,
 )

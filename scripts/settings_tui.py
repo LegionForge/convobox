@@ -25,12 +25,12 @@ import shlex
 import shutil
 import sys
 import tempfile
+import textwrap
 import threading
 import time
-import textwrap
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable, Coroutine
 from typing import Any, Literal
 
 import numpy as np
@@ -60,6 +60,8 @@ from convobox.config import (
     read_aec_estimate,
     resolve_config_path,
 )
+from convobox.listening_pause import PauseListeningDetector
+from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 from convobox.stt.base import TranscriptResult
 from convobox.stt.factory import create_stt_engine
 from convobox.tts.factory import (
@@ -69,8 +71,6 @@ from convobox.tts.factory import (
     refresh_kokoro_voices,
     resolve_voice_paths,
 )
-from convobox.listening_pause import PauseListeningDetector
-from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 
 _RESET = "\x1b[0m"
 _REVERSE = "\x1b[7m"
@@ -809,9 +809,8 @@ def _device_choices(kind: Literal["input", "output"]) -> list[str]:
     just the default sentinel rather than raising into the render loop.
     """
     try:
-        import sounddevice as sd
-
         import audio_devices as ad
+        import sounddevice as sd
     except Exception:  # noqa: BLE001
         return [_SYSTEM_DEFAULT]
     try:
@@ -1243,9 +1242,8 @@ async def _compare_tts_engines(state: TuiState) -> None:
 
     import io
 
-    import sounddevice as sd
-
     import audio_devices as ad
+    import sounddevice as sd
 
     config = state.working
     with contextlib.redirect_stdout(io.StringIO()):
@@ -1384,9 +1382,8 @@ async def probe_audio(config: AppConfig, field_key: str | None = None) -> str:
     """
     import io
 
-    import sounddevice as sd
-
     import audio_devices as ad
+    import sounddevice as sd
 
     test_output = field_key != "input_device"
     test_input = field_key != "output_device"
@@ -1447,9 +1444,8 @@ async def _probe_input_device_live(state: TuiState, seconds: float = 3.0) -> str
     """
     import io
 
-    import sounddevice as sd
-
     import audio_devices as ad
+    import sounddevice as sd
 
     config = state.working
     with contextlib.redirect_stdout(io.StringIO()):
@@ -2134,9 +2130,8 @@ async def _test_kokoro_voice(voice: str, config: AppConfig) -> str:
     """
     import io
 
-    import sounddevice as sd
-
     import audio_devices as ad
+    import sounddevice as sd
 
     tts_config = _tts_config_for_comparison(config, "kokoro")
     if tts_config is None:
@@ -2167,9 +2162,8 @@ async def _test_piper_voice(voice: str, config: AppConfig) -> str:
     """
     import io
 
-    import sounddevice as sd
-
     import audio_devices as ad
+    import sounddevice as sd
 
     tts_config = _tts_config_for_comparison(config, "piper")
     if tts_config is None:
@@ -2212,9 +2206,8 @@ async def _test_piper_speaker(speaker: str, config: AppConfig) -> str:
 
     import io
 
-    import sounddevice as sd
-
     import audio_devices as ad
+    import sounddevice as sd
 
     speaker_value = None if speaker == _PIPER_SPEAKER_DEFAULT else speaker
     tts_config = tts_config.model_copy(update={"speaker": speaker_value})

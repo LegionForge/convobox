@@ -1742,7 +1742,7 @@ def test_handle_browse_quit_confirmation_shows_save_hint(monkeypatch: pytest.Mon
 # settings_tui's runtime import will later find -- verified directly before
 # writing these tests, not assumed. ---
 
-import audio_devices  # noqa: E402 -- see the note above for why this must come after the scripts import
+import audio_devices
 
 
 def _fake_device(index: int, name: str, hostapi: str = "MME") -> dict[str, object]:
@@ -2054,7 +2054,7 @@ async def test_probe_audio_reuses_audio_devices_functions_and_reports_both_direc
 
     def fake_play_test_tone(sd: object, index: int, seconds: float = 1.0) -> None:
         calls.append(("play_test_tone", None))
-        print("this must not leak to real stdout")  # noqa: T201 -- probe_audio must suppress it
+        print("this must not leak to real stdout")
 
     def fake_test_input_device(
         sd: object, index: int, seconds: float = 3.0, playback_device: int | None = None
@@ -2065,7 +2065,7 @@ async def test_probe_audio_reuses_audio_devices_functions_and_reports_both_direc
         # `audio_devices.py --setup` does (live UAT feedback, 2026-07-22:
         # the old behavior only metered the mic, never let you hear it).
         calls.append(("test_input_device", playback_device))
-        print("this must not leak either")  # noqa: T201
+        print("this must not leak either")
         return -30.0, -12.0
 
     monkeypatch.setattr(audio_devices, "collect_devices", fake_collect)
@@ -2208,7 +2208,7 @@ class _FakeInputStream:
     def __init__(self, samplerate: int, channels: int, device: int, callback: object) -> None:
         self._callback = callback
 
-    def __enter__(self) -> "_FakeInputStream":
+    def __enter__(self) -> _FakeInputStream:
         indata = np.array([[0.25]], dtype=np.float32)
         self._callback(indata, 1, None, None)  # type: ignore[misc]
         return self

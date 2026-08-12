@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from convobox.tui.state import ConversationTuiState
-from scripts.run_convobox import _handle_tui_key, _read_pending_key, _self_signal_interrupt
+from scripts.run_convobox import (
+    _handle_tui_key,
+    _read_pending_key,
+    _self_signal_interrupt,
+)
 
 
 def test_tab_switches_focus_pane() -> None:

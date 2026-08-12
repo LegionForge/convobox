@@ -258,7 +258,7 @@ def test_marker_is_nonempty_and_readable() -> None:
 
 # --- working-indicator heartbeat (silently-busy backend feedback) ---
 
-from scripts.run_convobox import WorkingIndicator  # noqa: E402
+from scripts.run_convobox import WorkingIndicator
 
 
 def _feed_working(ind: WorkingIndicator, busy: bool, playing: bool, n: int, dt: float = 1.0):
@@ -359,7 +359,7 @@ def test_current_activity_clears_when_idle() -> None:
 # stretch, but is invisible when interacting through a backend's own chat
 # UI rather than watching this terminal -- color makes it glanceable) ---
 
-from scripts.run_convobox import (  # noqa: E402
+from scripts.run_convobox import (
     _ANSI_GREEN,
     _ANSI_RED,
     _ANSI_YELLOW,

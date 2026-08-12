@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from convobox.approval import ApprovalDetector
 from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.approval import ApprovalDetector
 from convobox.tui import ConversationTuiState
 from scripts.run_convobox import (
     ApprovalPromptGate,

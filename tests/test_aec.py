@@ -17,7 +17,7 @@ pytest.importorskip(
     ),
 )
 
-from convobox.audio.aec import AecDumpWriter, EchoCanceller, _resample  # noqa: E402
+from convobox.audio.aec import AecDumpWriter, EchoCanceller, _resample
 
 _SR = 16000
 

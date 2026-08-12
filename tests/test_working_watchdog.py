@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Coroutine
-from typing import Callable
+from collections.abc import Callable, Coroutine
 
 import pytest
 
+from convobox.tui.state import ConversationTuiState
 from scripts.run_convobox import (
     ApprovalPromptGate,
     ContinuePromptGate,
@@ -34,7 +34,6 @@ from scripts.run_convobox import (
     WorkingIndicator,
     _working_watchdog,
 )
-from convobox.tui.state import ConversationTuiState
 
 _REAL_SLEEP = asyncio.sleep
 

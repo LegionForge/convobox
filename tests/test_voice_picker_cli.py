@@ -81,7 +81,7 @@ def test_installed_voices_on_nonexistent_dir_is_empty(tmp_path: Path) -> None:
 
 # --- numbered-reference resolution and command suggestions ---
 
-from scripts.voice_picker import resolve_key, suggest_command  # noqa: E402
+from scripts.voice_picker import resolve_key, suggest_command
 
 
 def test_resolve_key_number_picks_from_last_list() -> None:
@@ -120,7 +120,7 @@ def test_suggest_command_none_for_gibberish() -> None:
 
 # --- voice deletion ---
 
-from scripts.voice_picker import delete_voice  # noqa: E402
+from scripts.voice_picker import delete_voice
 
 
 def test_delete_voice_removes_onnx_and_json(tmp_path: Path) -> None:
@@ -148,9 +148,9 @@ def test_delete_voice_never_touches_other_files(tmp_path: Path) -> None:
 
 # --- persisting the chosen voice into convobox.yaml ---
 
-import yaml  # noqa: E402
+import yaml
 
-from scripts.voice_picker import write_choice_to_config  # noqa: E402
+from scripts.voice_picker import write_choice_to_config
 
 
 def test_write_choice_creates_config_when_missing(tmp_path: Path) -> None:

@@ -29,9 +29,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from _console import use_utf8_console
-
 import numpy as np
+from _console import use_utf8_console
 
 from convobox.config import STTConfig, TTSConfig
 from convobox.stt.transcriber import LocalTranscriber

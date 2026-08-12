@@ -10,11 +10,11 @@ pytest.importorskip(
     "are opt-in, not part of dev, so most CLI/TUI-only installs never pull them in",
 )
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from convobox.web.app import create_app  # noqa: E402
-from convobox.web.history import HistoryDB  # noqa: E402
-from convobox.web.uploads import _MAX_UPLOAD_BYTES  # noqa: E402
+from convobox.web.app import create_app
+from convobox.web.history import HistoryDB
+from convobox.web.uploads import _MAX_UPLOAD_BYTES
 
 # app.py's CSRF middleware (require_csrf_header) 403s any mutating request
 # missing this header -- added after this test file was first written, same

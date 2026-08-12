@@ -32,7 +32,7 @@ class _FakeStreamResponse:
     def iter_bytes(self):
         yield from self._chunks
 
-    def __enter__(self) -> "_FakeStreamResponse":
+    def __enter__(self) -> _FakeStreamResponse:
         return self
 
     def __exit__(self, *args: object) -> bool:
