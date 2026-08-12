@@ -471,13 +471,140 @@ the barge-in/self-interruption problem was necessarily software-only
 (overlap-gate, text-echo-filter), since `EchoCanceller.__init__` raised
 immediately without the package installed.
 
-**Not yet done.** A live mic+speaker attenuation measurement on macOS
-hardware (the Mac equivalent of JP's Windows UAT run) hasn't been run —
-this entry only confirms the canceller constructs and passes its unit
-tests here, not that it converges well against this machine's actual
-room/speaker/mic acoustics. `docs/KNOWN-ISSUES.md`'s existing note below
-(erratic 0.5-12dB attenuation on Windows) may or may not reproduce
-identically on macOS; that's a separate, still-open question.
+**Follow-up (2026-08-10): the live mic+speaker attenuation measurement
+this entry asked for has now been run, on this machine's real hardware
+(AIRHUG 28 mic, Mac mini Speakers) -- different finding than expected.**
+Ran `scripts/acoustic_calibration.py` (the repo's own unattended
+real-room AEC/VAD calibration tool, previously only exercised on
+Windows) twice independently, in a dedicated `git worktree` at
+`convobox-UAT` (kept separate from this dev tree; see AGENTS.md's
+"claim scope before editing" precedent) with a real Piper voice
+(`en_US-lessac-medium`) actually played through the speakers and
+captured back through the mic:
+
+- Trial 1: `attenuation=2.49dB, ceiling=1.92dB` (auto-estimated delay
+  238ms). Trial 2 (independent run): `attenuation=5.08dB,
+  ceiling=0.69dB`. **Both readings sit at or below the tool's own
+  "measurable ceiling"** -- per `EchoCanceller.measurable_ceiling_db()`'s
+  own docstring, that means speaker echo at this mic barely rises above
+  room ambient noise in the first place, not that AEC is failing to
+  cancel it. `raw_playback_rms` (0.0047-0.0049) vs `ambient_rms`
+  (0.0037-0.0040) confirms it directly: the un-cancelled echo is only
+  marginally louder than the room's own noise floor.
+- **Zero false barge-ins in either trial, with AEC on OR off**
+  (`false_barge_ins: 0` for both `raw_vad` and `processed_vad`, both
+  runs) -- the actual safety-relevant signal (would self-echo trip a
+  spurious interrupt) reads clean even in the AEC-off condition on this
+  hardware. Raw VAD did register 1-2 short utterances from the
+  un-cancelled echo (once even peaking at `peak_vad_probability=0.997`),
+  but never sustained long enough to cross `BargeInMonitor`'s own
+  threshold -- the same distinction this repo's `[G1]`/`[G2]` UAT
+  entries already draw between "VAD notices something" and "a real
+  barge-in fires."
+- **Reads as a genuinely different acoustic situation than the Windows
+  finding below (erratic 0.5-12dB, clearly-above-ambient echo)**, not a
+  contradiction of it -- plausibly this mic (AIRHUG 28) and/or the Mac
+  mini Speakers' real-world coupling in this room is simply quieter
+  relative to ambient noise than JP's Windows setup was. Only 2 trials,
+  one room, one hardware pair -- not enough to generalize to "macOS is
+  fine," just enough to say this specific machine's speaker-echo problem
+  (if this repo ever needs to chase one on it) looks small relative to
+  room noise, not that AEC itself is unusually strong or weak here.
+- Full JSON reports + raw/AEC-processed WAV evidence live under the UAT
+  worktree's own `uat-acoustic-calibration/` (gitignored scratch,
+  per this project's own convention -- not copied into this repo).
+
+**Follow-up (2026-08-11): first real human-speech demo on macOS —
+safeword and barge-in both confirmed live, plus a real self-triggered
+barge-in loop found and diagnosed.** JP demoed ConvoBox live to his son
+(real speech, not synthetic injection). The safeword fired correctly 3
+times (`stop stop stop` x2, `abort abort abort` x1); barge-in
+(`interaction.interrupt_preset: conversational`) fired correctly on
+the first two deliberate interrupts, then entered a real, sustained
+self-triggered loop (20 barge-ins in ~90s, several firing with no one
+present). Diagnosed live: 18 of 19 barge-in events showed
+`UNDER-CANCELLING`, with attenuation staying close to this session's
+steady-state baseline (6.54dB vs. 6.75dB) while the measured
+echo-to-ambient ceiling spiked (14.22dB vs. ~0.53dB baseline) — rapid
+back-to-back short turns (each cut short by the previous false
+trigger) measurably increases the echo reaching the mic relative to
+ambient, leaving proportionally more residual for a fixed amount of
+real cancellation. `do-not-disturb` mode (this config's original
+default) is not subject to this risk, since ordinary speech can't
+trigger anything during playback there. No fix built or proposed this
+pass — live characterization only. Full writeup:
+`docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md`.
+
+**Follow-up (2026-08-11, same day): automated mitigation testing at the
+exact demo volume (`tts.volume=4.0`, macOS system output 75%) —
+a real, counterintuitive finding.** A 7-point AEC delay sweep found
+**AEC-processed audio produced MORE false barge-ins than AEC-off, at
+every single delay tested** (8-13 vs. 1) — the opposite of AEC's
+intended effect, likely because residual-suppressor artifacts at this
+volume are themselves speech-shaped enough to trip VAD more often than
+the raw uncancelled echo. 400ms was the least-bad delay tested (8 vs.
+10 for auto-238ms) but still far worse than AEC-off. A separate
+4-point `barge_in_min_speech_ms` sweep (250/500/800/1200ms, N=1 each —
+directional, not statistically robust) showed a real trend toward
+1200ms converging to the AEC-off baseline (1 false trigger). Ranked
+recommendation: lower the volume (biggest lever, matches this
+session's whole volume-escalation arc), raise
+`barge_in_min_speech_ms` if `conversational` mode must stay on at high
+volume, set `aec_delay_ms: 400` explicitly as a smaller assist, or
+fall back to `do-not-disturb`/headphones to sidestep the problem
+entirely. Full writeup:
+`docs/field-notes/2026-08-11-self-barge-in-mitigation-at-demo-volume.md`.
+
+**Follow-up (2026-08-11, same day): combining both mitigations nearly
+solves it, and a likely root cause was identified.** `aec_delay_ms=400`
++ `barge_in_min_speech_ms=1200` together, 4 real trials at the same
+demo volume: mean 1.25 false barge-ins (2 of 4 trials hit zero), down
+from 8-13 with no mitigation or either lever alone. **Likely root
+cause, corroborated but not directly confirmed**: the Mac mini M4's
+single built-in speaker (Apple's own spec lists it singular;
+independent reviews describe it as prone to distortion at volume) may
+be genuinely distorting acoustically at `tts.volume=4.0` + macOS
+system volume 75% -- a linear AEC (WebRTC AEC3) structurally cannot
+fully cancel a nonlinear/distorted acoustic path, which would explain
+why AEC-processed audio measured worse than AEC-off at every delay
+tested. No digital clipping found in the raw mic captures (peak
+0.63-0.68/1.0), but that doesn't rule out acoustic distortion at the
+speaker itself, a different phenomenon. **Also confirmed (JP directly
+observed the LED)**: the AIRHUG 28 mic's own onboard "AI Noise
+Reduction" DSP mode was OFF (green LED) throughout all testing this
+session -- ruled out as a confound, not just assumed. Full writeup,
+hardware specs, and sources:
+`docs/field-notes/2026-08-11-self-barge-in-combined-mitigation-and-hardware-notes.md`.
+
+**Follow-up (2026-08-11, same day): a full 119-trial volume sweep
+(100%-20% system volume in 5% steps, N=7 per level, initial sweep +
+3 corroborating up/down cycles) pins the transition zone precisely at
+30-40% system output volume.** Above it, AEC consistently makes false
+barge-ins worse than AEC-off (means of 8-13 vs. steady ~1); at and
+below it, AEC flips back to normal (reducing false triggers below the
+raw baseline). Also added a room RT60 measurement (exponential sine
+sweep / Farina method): ~0.2s (T20) to ~0.4s (T30) in this session's
+400 sq ft, hard-floored, open-plan test room -- shorter than the
+room's "wet" subjective impression might suggest, plausibly because
+being open on 3 sides lets reflected energy propagate away rather than
+building up. Full raw data (every one of the 119 volume-sweep trials,
+plus complete hardware/room specs) published for reuse:
+`docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
+
+**Follow-up (2026-08-11, same day): RT60 extended to N=50 repeat
+measurements with ambient-noise logging.** T20 stayed tight and
+reproducible (mean 0.2133s, sd 0.0138s, CV ~6.5%); T30 was noisier
+(mean 0.4589s, sd 0.0573s, CV ~12.5%) -- confirms T20 is the more
+trustworthy estimator here. Confirmed environmental state for the
+whole batch: whole-house central AC running plus a box fan (Corsi-
+Rosenthal configuration) on low, both throughout -- a real household
+background-noise condition, not a silent-room ideal. A suggestive
+N=10 pattern (lower ambient noise correlating with longer measured
+RT60) held its direction at N=50 but was much weaker than it first
+appeared (Pearson r=-0.243 for T20, r=-0.155 for T30) -- a real
+example of a small sample overselling an effect size. Full 50-trial
+raw data appended to the same field note:
+`docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
 
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
@@ -1022,3 +1149,53 @@ hard-stop just doesn't currently escalate to using it.
    with its own restart policy resist cancellation; what happens to
    output ordering (pre-delay vs. post-delay messages) when a delayed
    command is interrupted mid-stream.
+
+---
+
+## `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it
+
+**Status:** diagnosed live 2026-08-11, macOS (Mac mini M4), both claude-code
+and codex backends. Not fixed this pass -- fail-safe in practice (nothing
+ever gets written without a real answer) but the mechanism is misleading
+and worth a real fix.
+
+**Symptom.** Ask either backend (in `--text` mode, `permission_mode: approve`)
+to write a file: the approval prompt fires correctly
+(`Approval needed to run Write. Say <phrase> to approve...` for claude-code;
+`item/fileChange/requestApproval` for codex), then **exactly 120 seconds of
+silence**, then `backend still busy after 120s; giving up the wait` and the
+process exits. No file is ever created, on either backend, confirmed twice
+for codex and once (to full resolution) for claude-code.
+
+**Root cause.** `ApprovalPromptGate`'s own `approval_timeout_s` (default
+30s), the thing that's supposed to auto-deny a silently-abandoned approval
+prompt, is only ever ticked by `_working_watchdog` -- and
+`scripts/run_convobox.py` only constructs `watchdog_task` in the mic-loop
+setup path, well after `--text` mode's own early `return`. So in `--text`
+mode, `approval_gate.observe_timeout()` is never called at all; the
+approval just sits pending until an unrelated, generic 120s
+"`backend still busy`" bail-out in `_drain_until_idle` gives up and the
+script calls `adapter.aclose()`, disconnecting the backend without ever
+sending an explicit decline.
+
+**Why this matters even though nothing unsafe happens.** The net effect is
+safe today (no destructive action executes without a real answer), but
+what looks like "the system denied my request" is actually "the system
+gave up waiting and disconnected" -- a real distinction if this approval
+channel is ever built on further (e.g. surfaced to a caller who cares
+*why* a request didn't go through, or a future mode where abandon and
+deny should behave differently).
+
+**Fix candidates, neither built yet:** either construct a lightweight
+version of the watchdog (or just call `approval_gate.observe_timeout()`
+on a bare timer) in `--text` mode too, or have `--text` mode's own exit
+path call `resolve_pending_approval(False)` explicitly before
+`adapter.aclose()`.
+
+**Also attempted, inconclusive:** the live mic-loop voice-approval flow
+itself (the thing `--text` mode structurally can't exercise) -- 4 live
+synthetic-injection attempts, blocked by real, loud ambient background
+noise in the test room that session (not a code issue). Full detail,
+plus the clean `plan`/`permissive` mode confirmations on both backends
+(N=2 each) and a re-confirmation that opencode remains untestable
+(0 configured credentials): `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
