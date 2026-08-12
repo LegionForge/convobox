@@ -455,6 +455,91 @@ def test_memory_diagnostic_never_raises_and_returns_a_string() -> None:
     assert result != ""
 
 
+# --- _memory_diagnostic's Windows branch (previously untested off a real
+# Windows machine -- macOS/Linux runs only ever exercised the "not
+# Windows" one-liner above). ctypes.windll doesn't exist at all outside
+# Windows, so it's monkeypatched in with raising=False, same pattern
+# already used for os.add_dll_directory in the CUDA tests below. The
+# function builds its OWN ctypes.Structure instance internally and calls
+# GlobalMemoryStatusEx(ctypes.byref(status)) -- byref()._obj is a real,
+# stable CPython implementation detail that hands back the wrapped
+# object, letting a fake GlobalMemoryStatusEx write into the SAME
+# structure the real Windows API call would, without needing access to
+# the function's private _MemoryStatusEx class from outside. ---
+
+
+def _fake_windll(available_bytes: int | None, *, succeeds: bool = True) -> SimpleNamespace:
+    def global_memory_status_ex(byref_status) -> int:  # type: ignore[no-untyped-def]
+        if not succeeds:
+            return 0
+        byref_status._obj.ullAvailPhys = available_bytes
+        return 1
+
+    kernel32 = SimpleNamespace(GlobalMemoryStatusEx=global_memory_status_ex)
+    return SimpleNamespace(kernel32=kernel32)
+
+
+def test_memory_diagnostic_on_windows_with_plenty_of_ram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        "ctypes.windll", _fake_windll(2048 * 1024 * 1024), raising=False
+    )
+    result = _memory_diagnostic()
+    assert "2048MB RAM available" in result
+    assert "known ctranslate2/MKL allocator quirk" in result
+
+
+def test_memory_diagnostic_on_windows_with_genuinely_low_ram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        "ctypes.windll", _fake_windll(512 * 1024 * 1024), raising=False
+    )
+    result = _memory_diagnostic()
+    assert "512MB RAM available" in result
+    assert "genuinely low" in result
+
+
+def test_memory_diagnostic_on_windows_when_the_api_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        "ctypes.windll", _fake_windll(None, succeeds=False), raising=False
+    )
+    result = _memory_diagnostic()
+    assert result == "memory info unavailable (GlobalMemoryStatusEx failed)"
+
+
+def test_memory_diagnostic_on_windows_swallows_any_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    class _RaisingKernel32:
+        @property
+        def GlobalMemoryStatusEx(self):  # type: ignore[no-untyped-def]
+            raise OSError("simulated ctypes failure")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        "ctypes.windll",
+        SimpleNamespace(kernel32=_RaisingKernel32()),
+        raising=False,
+    )
+    result = _memory_diagnostic()
+    assert result == "memory info unavailable"
+
+
 # --- _build_whisper_model: prefers the local cache, avoiding the
 # per-construction network freshness check faster-whisper otherwise makes
 # even when the model is already fully downloaded (found live, 2026-07-14,
