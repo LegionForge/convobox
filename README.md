@@ -129,10 +129,19 @@ links every field note from this pass). That same live demo also
 surfaced a real self-triggered barge-in loop in `conversational` mode
 under rapid-fire conditions (diagnosed, not yet fixed) and reconfirmed
 `[E6]`'s far-field STT-accuracy challenge with real (not synthetic)
-speech. Still open: opencode (no provider credentials configured on
-that machine), Chrome/browser-driven web UI testing (tooling
-unavailable this session), and sustained everyday-use reliability —
-macOS stays in this column until those close.
+speech. **opencode**, initially blocked on that machine for lack of
+provider credentials, was later configured with real credentials and
+put through a genuine multi-part investigation (2026-08-11): opencode's
+own *built-in* auth (`opencode auth login`, OAuth or API-key) is broken
+in `serve` mode — the interface ConvoBox actually talks to — across
+three independently-confirmed causes, but a manually-declared custom
+provider in `opencode.jsonc` works completely end-to-end through
+ConvoBox, including real tool-calling (a file genuinely created via a
+voice command, not just a spoken description of doing so). Still open:
+Chrome/browser-driven web UI testing (tooling unavailable across every
+session that's tried so far, not just this one) and sustained
+everyday-use reliability — macOS stays in this column until those
+close.
 
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
