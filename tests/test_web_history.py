@@ -213,6 +213,54 @@ def test_export_session_json_round_trips_through_json(tmp_path: Path) -> None:
         db.close()
 
 
+# --- iter_session_events (GitHub issue #235, finding A6): a real
+# row-by-row generator export_session_json's HTTP route now streams from,
+# instead of one .fetchall() + one big in-memory JSON string. ---
+
+
+def test_iter_session_events_yields_rows_oldest_first(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    try:
+        session_id = new_session_id()
+        for i in range(3):
+            db.append_event(session_id, "transcript", user_transcript=f"turn {i}")
+
+        rows = list(db.iter_session_events(session_id))
+
+        assert [r["user_transcript"] for r in rows] == ["turn 0", "turn 1", "turn 2"]
+    finally:
+        db.close()
+
+
+def test_iter_session_events_is_a_real_generator_not_a_list(tmp_path: Path) -> None:
+    import inspect
+
+    db = _db(tmp_path)
+    try:
+        session_id = new_session_id()
+        db.append_event(session_id, "transcript", user_transcript="hi")
+        assert inspect.isgenerator(db.iter_session_events(session_id))
+    finally:
+        db.close()
+
+
+def test_iter_session_events_only_returns_events_for_the_given_session(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    try:
+        session_a = new_session_id()
+        session_b = new_session_id()
+        db.append_event(session_a, "transcript", user_transcript="a")
+        db.append_event(session_b, "transcript", user_transcript="b")
+
+        rows = list(db.iter_session_events(session_a))
+
+        assert [r["user_transcript"] for r in rows] == ["a"]
+    finally:
+        db.close()
+
+
 def test_clear_session_deletes_only_that_sessions_events(tmp_path: Path) -> None:
     db = _db(tmp_path)
     try:

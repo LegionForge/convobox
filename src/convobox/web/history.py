@@ -13,6 +13,7 @@ import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +163,24 @@ class HistoryDB:
     def export_session_json(self, session_id: str) -> str:
         events = self.get_session_events(session_id, limit=1_000_000, offset=0)
         return json.dumps({"session_id": session_id, "events": events}, indent=2)
+
+    def iter_session_events(self, session_id: str) -> Iterator[dict[str, Any]]:
+        """Same rows as get_session_events, but a real row-by-row generator
+        (iterating the cursor directly, not .fetchall()) instead of one
+        query returning the whole result set at once -- for
+        GET /api/sessions/{id}/export (app.py), which used to call
+        export_session_json's limit=1_000_000 .fetchall() + build one
+        potentially-huge JSON string in memory before writing a single
+        byte to the client (GitHub issue #235, finding A6). No limit/
+        offset here on purpose -- this is specifically for "stream the
+        whole session," not the paginated case get_session_events serves.
+        """
+        cursor = self._conn.execute(
+            "SELECT * FROM events WHERE session_id = ? ORDER BY timestamp ASC",
+            (session_id,),
+        )
+        for row in cursor:
+            yield dict(row)
 
     def clear_session(self, session_id: str) -> None:
         self._conn.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
