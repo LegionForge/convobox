@@ -394,6 +394,84 @@
     color: var(--fg); font-size: 0.85rem;
   }
 
+  /* --- Artifact Chooser: a tab strip across the top of the pane, one tab
+     per artifact this session has produced (docs/ARTIFACT-PANE-SCOPE.md's
+     "Artifact Chooser" section). Horizontal scroll on overflow, never
+     wraps -- wrapping would eat vertical space from the artifact itself. */
+  #artifact-tabs {
+    display: flex; flex: 0 0 auto; overflow-x: auto; overflow-y: hidden;
+    border-bottom: 1px solid var(--border);
+  }
+  #artifact-tabs[hidden] { display: none; }
+  .artifact-tab {
+    flex: 0 0 auto; max-width: 140px; padding: 0.4rem 0.7rem;
+    font-size: 0.72rem; background: none; border: none;
+    border-bottom: 2px solid transparent; color: var(--dim);
+    cursor: pointer; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .artifact-tab:hover { background: var(--assistant-bg); color: var(--fg); }
+  .artifact-tab.active {
+    color: var(--fg); border-bottom-color: var(--fg); font-weight: 600;
+  }
+
+  /* --- Working-directory file browser: a filtered, flat list of files in
+     backend.working_dir (docs/ARTIFACT-PANE-SCOPE.md's "Working-Directory
+     File Browser" section) -- only ever files whose extension is already
+     in the artifact-serving allowlist, no dotfiles/symlinks. The trigger
+     button itself is a plain ribbon button (styled by .ribbon button,
+     same as Settings/Quit/etc. next to it) -- only the modal needs its
+     own rules. --- */
+  .artifact-browse-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 1rem; z-index: 100;
+  }
+  .artifact-browse-overlay[hidden] { display: none; }
+  .artifact-browse-modal {
+    background: var(--bg); color: var(--fg); border-radius: 10px;
+    width: min(480px, 92vw); max-height: 80vh; display: flex;
+    flex-direction: column; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  }
+  .artifact-browse-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+  }
+  .artifact-browse-header strong { flex: 1 1 auto; font-size: 0.9rem; }
+  .artifact-browse-header button {
+    font-size: 1.1rem; line-height: 1; background: none; border: none;
+    color: var(--fg); cursor: pointer; padding: 0.2rem 0.5rem; border-radius: 6px;
+  }
+  .artifact-browse-header button:hover { background: var(--assistant-bg); }
+  .artifact-browse-warning {
+    font-size: 0.72rem; opacity: 0.85; padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .artifact-browse-list {
+    overflow-y: auto; padding: 0.4rem 0;
+  }
+  .artifact-browse-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 1rem; font-size: 0.8rem;
+  }
+  .artifact-browse-row:hover { background: var(--assistant-bg); }
+  .artifact-browse-row button.artifact-browse-open {
+    flex: 1 1 auto; text-align: left; background: none; border: none;
+    color: var(--fg); cursor: pointer; padding: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .artifact-browse-row a.artifact-browse-newtab {
+    flex: 0 0 auto; font-size: 0.7rem; color: var(--dim); text-decoration: none;
+    border: 1px solid var(--border); border-radius: 6px; padding: 0.15rem 0.4rem;
+  }
+  .artifact-browse-row a.artifact-browse-newtab:hover { border-color: var(--dim); color: var(--fg); }
+  .artifact-browse-empty, .artifact-browse-error {
+    padding: 1rem; font-size: 0.8rem; opacity: 0.8; text-align: center;
+  }
+  .artifact-browse-truncated {
+    font-size: 0.7rem; opacity: 0.7; text-align: center; padding: 0.4rem;
+  }
+
   /* --- Settings: full-screen modal over the chat view, driven entirely
      by /api/settings/schema -- no per-field markup is hardcoded here, so
      a new FieldSpec on the Python side (src/convobox/config.py +
@@ -498,6 +576,7 @@
   <button id="clear-history-btn" title="Permanently deletes this session's saved history from disk. Cannot be undone -- does not affect the live conversation still on screen.">Clear history</button>
   <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead" aria-label="Pause listening"><span id="listening-btn-icon" aria-hidden="true">&#9208;</span><span id="listening-btn-label">Stop listening</span></button>
   <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after."><span aria-hidden="true">&#9209;</span> Stop</button>
+  <button id="artifact-browse-btn" title="Browse renderable files in the backend's working directory">Browse files</button>
   <button id="settings-btn" title="Open Settings -- edit convobox.yaml (audio devices, STT/TTS, safety phrases) without restarting">Settings</button>
   <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
 </header>
@@ -516,6 +595,7 @@
   </form>
 </main>
 <aside id="artifact-pane" hidden>
+  <div id="artifact-tabs" role="tablist" aria-label="Open artifacts" hidden></div>
   <div class="artifact-pane-header">
     <span id="artifact-pane-title"></span>
     <a id="artifact-pane-editor-link" href="#" target="_blank" rel="noopener noreferrer" hidden
@@ -524,6 +604,16 @@
   </div>
   <div id="artifact-pane-body"></div>
 </aside>
+</div>
+<div id="artifact-browse-overlay" class="artifact-browse-overlay" hidden>
+  <div class="artifact-browse-modal" role="dialog" aria-modal="true" aria-labelledby="artifact-browse-title">
+    <div class="artifact-browse-header">
+      <strong id="artifact-browse-title">Browse working directory</strong>
+      <button id="artifact-browse-close-btn" type="button" aria-label="Close" title="Close">&times;</button>
+    </div>
+    <div class="artifact-browse-warning">Files below were written by the backend agent and have not been reviewed for safety. HTML/scripts render sandboxed, but treat all contents as untrusted.</div>
+    <div id="artifact-browse-list" class="artifact-browse-list"></div>
+  </div>
 </div>
 <div id="settings-overlay" class="settings-overlay" hidden>
   <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -584,12 +674,55 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const artifactBodyEl = document.getElementById("artifact-pane-body");
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
   const artifactEditorLink = document.getElementById("artifact-pane-editor-link");
+  const artifactTabsEl = document.getElementById("artifact-tabs");
+  const artifactBrowseBtn = document.getElementById("artifact-browse-btn");
+  const artifactBrowseOverlay = document.getElementById("artifact-browse-overlay");
+  const artifactBrowseCloseBtn = document.getElementById("artifact-browse-close-btn");
+  const artifactBrowseListEl = document.getElementById("artifact-browse-list");
   const composerForm = document.getElementById("composer");
   const composerInput = document.getElementById("composer-input");
   const composerSendBtn = document.getElementById("composer-send-btn");
   const mainEl = document.querySelector("main");
   const dropOverlayEl = document.getElementById("drop-overlay");
   let currentSessionId = null;
+
+  // Artifact Chooser state (docs/ARTIFACT-PANE-SCOPE.md's "Artifact
+  // Chooser" section) -- one ordered list per page-view, reset whenever
+  // the viewed session changes (loadHistory below). Identity key is the
+  // resolved artifact path: a later event for a path already in this
+  // list updates that SAME entry (content + timestamp) rather than
+  // appending a duplicate, matching the pane's own existing
+  // refresh-in-place behavior -- this is the same mechanism, not two.
+  let artifactTabs = [];
+  let activeArtifactPath = null;
+
+  function upsertArtifactTab(path) {
+    const label = path.split("/").pop() || path;
+    const existing = artifactTabs.find((t) => t.path === path);
+    if (existing) {
+      existing.timestamp = Date.now();
+    } else {
+      artifactTabs.push({ path, label, timestamp: Date.now() });
+    }
+    activeArtifactPath = path;
+    renderArtifactTabs();
+  }
+
+  function renderArtifactTabs() {
+    artifactTabsEl.innerHTML = "";
+    artifactTabsEl.hidden = artifactTabs.length < 2;
+    for (const tab of artifactTabs) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "artifact-tab" + (tab.path === activeArtifactPath ? " active" : "");
+      btn.textContent = tab.label;
+      btn.title = tab.path;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", tab.path === activeArtifactPath ? "true" : "false");
+      btn.addEventListener("click", () => renderArtifact(tab.path));
+      artifactTabsEl.appendChild(btn);
+    }
+  }
 
   // docs/ARTIFACT-PANE-SCOPE.md's v1 rendering scope: images render
   // directly, HTML renders sandboxed (agent-generated content, not this
@@ -679,6 +812,14 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   function renderArtifact(path) {
+    // Chooser bookkeeping first -- every caller (live ARTIFACT events,
+    // history replay, a tab click, a Browse-files pick) funnels through
+    // this one function, so this is the single place a tab gets
+    // created/reselected. Must run BEFORE the tab-strip's own click
+    // handler would re-trigger this (it just calls renderArtifact(path)
+    // directly, not through upsertArtifactTab), so re-clicking the
+    // already-active tab still re-fetches/re-renders correctly.
+    upsertArtifactTab(path);
     // Cache-bust on EVERY render, same path or not -- "a later ARTIFACT
     // event for the same path is a refresh, not a new pane" (scope doc)
     // means the underlying file changed, so a stale cached image/iframe
@@ -750,6 +891,77 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   artifactCloseBtn.addEventListener("click", () => { artifactPaneEl.hidden = true; });
+
+  // --- Working-directory file browser (docs/ARTIFACT-PANE-SCOPE.md's
+  // "Working-Directory File Browser" section): a small modal listing
+  // GET /api/artifacts's filtered results. Opening a listed file reuses
+  // renderArtifact() directly -- from this function's perspective, a
+  // browsed file and a tool-produced ARTIFACT event are the same kind of
+  // thing once opened (both just become/update a Chooser tab), only
+  // discovered a different way. ---
+  async function openArtifactBrowser() {
+    artifactBrowseOverlay.hidden = false;
+    artifactBrowseListEl.innerHTML = '<div class="artifact-browse-empty">Loading&hellip;</div>';
+    let data;
+    try {
+      const res = await fetch("/api/artifacts");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+    } catch (err) {
+      artifactBrowseListEl.innerHTML = "";
+      const errEl = document.createElement("div");
+      errEl.className = "artifact-browse-error";
+      errEl.textContent = `Could not list files: ${err}. Is backend.working_dir configured?`;
+      artifactBrowseListEl.appendChild(errEl);
+      return;
+    }
+    artifactBrowseListEl.innerHTML = "";
+    if (data.files.length === 0) {
+      const emptyRow = document.createElement("div");
+      emptyRow.className = "artifact-browse-empty";
+      emptyRow.textContent = "No renderable files found in the working directory yet.";
+      artifactBrowseListEl.appendChild(emptyRow);
+      return;
+    }
+    for (const path of data.files) {
+      const row = document.createElement("div");
+      row.className = "artifact-browse-row";
+
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "artifact-browse-open";
+      openBtn.textContent = path;
+      openBtn.title = path;
+      openBtn.addEventListener("click", () => {
+        renderArtifact(path);
+        artifactBrowseOverlay.hidden = true;
+      });
+      row.appendChild(openBtn);
+
+      const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+      const newTabLink = document.createElement("a");
+      newTabLink.className = "artifact-browse-newtab";
+      newTabLink.href = `/api/artifacts/${encodedPath}`;
+      newTabLink.target = "_blank";
+      newTabLink.rel = "noopener noreferrer";
+      newTabLink.textContent = "Open in new tab";
+      row.appendChild(newTabLink);
+
+      artifactBrowseListEl.appendChild(row);
+    }
+    if (data.truncated) {
+      const note = document.createElement("div");
+      note.className = "artifact-browse-truncated";
+      note.textContent = "More files exist than are shown here.";
+      artifactBrowseListEl.appendChild(note);
+    }
+  }
+
+  artifactBrowseBtn.addEventListener("click", openArtifactBrowser);
+  artifactBrowseCloseBtn.addEventListener("click", () => { artifactBrowseOverlay.hidden = true; });
+  artifactBrowseOverlay.addEventListener("click", (ev) => {
+    if (ev.target === artifactBrowseOverlay) artifactBrowseOverlay.hidden = true;
+  });
 
   // transcript (the user's own speech) renders on the right, like an
   // outgoing text message; everything else (assistant response, tool
@@ -862,11 +1074,24 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       // No chat bubble for this one -- the pane IS the rendering, a
       // bubble would just be empty (nothing in the backend_response/
       // content/tool_output chain below applies to an artifact_path).
-      // artifact_path is only ever present on the live SSE shape
-      // (event_to_dict) -- a page reload replaying persisted history
-      // rows doesn't carry it today (a known gap, not a crash: this
-      // silently no-ops rather than throwing).
-      if (ev.artifact_path) renderArtifact(ev.artifact_path);
+      // artifact_path is only ever present at the top level on the live
+      // SSE shape (event_to_dict, see stream.py) -- a replayed history
+      // row from GET /api/sessions/{id}/events is a raw DB row instead,
+      // which only carries the same data nested inside its own
+      // backend_event_json string column (history.py's HistoryDB stores
+      // event_to_dict()'s output there verbatim). Parse it here for the
+      // Chooser's history-replay seed (docs/ARTIFACT-PANE-SCOPE.md) --
+      // this used to silently no-op on replay, a known-and-documented
+      // gap this closes rather than leaving as a TODO.
+      let path = ev.artifact_path;
+      if (!path && ev.backend_event_json) {
+        try {
+          path = JSON.parse(ev.backend_event_json).artifact_path;
+        } catch (err) {
+          console.error("failed to parse backend_event_json for artifact replay", err);
+        }
+      }
+      if (path) renderArtifact(path);
       return;
     }
     if (emptyEl.parentNode) emptyEl.remove();
@@ -1006,6 +1231,15 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   async function loadHistory(sessionId) {
     currentSessionId = sessionId || null;
     pendingApprovalActions = null;
+    // Chooser state is per-viewed-session, not cross-session (deliberately
+    // deferred in docs/ARTIFACT-PANE-SCOPE.md's "Deferred out of this
+    // pass") -- switching sessions starts the tab strip fresh; replayed
+    // ARTIFACT events below (if any) repopulate it for the newly-viewed
+    // session.
+    artifactTabs = [];
+    activeArtifactPath = null;
+    artifactPaneEl.hidden = true;
+    renderArtifactTabs();
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
     const data = await res.json();
