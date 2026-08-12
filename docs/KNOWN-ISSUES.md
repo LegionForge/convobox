@@ -1273,6 +1273,70 @@ closer together in pronunciation.
 
 ---
 
+## "Open in editor" occasionally opens a different file than the one clicked -- cause unconfirmed, one hypothesis ruled out
+
+**Status:** hypothesis, actively reopened 2026-08-09 after a leading
+candidate explanation was directly disproven by live testing the same
+night. Not fixed. Full context: PR #249's own description carries the
+before/after story in detail.
+
+**Symptom, live-hit 2026-08-09** (real codex UAT session): clicking
+"Open in editor" on an artifact once brought VS Code to the foreground
+showing an unrelated file rather than the one just clicked.
+
+**Ruled out:** a backslash-vs-forward-slash URI-formatting bug in
+`get_artifact_editor_uri()` (`web/artifacts.py` built `vscode://file/`
+URIs via `Path.__str__()`, which uses native Windows backslashes -- not
+a valid URI path separator per RFC 3986). This was the original
+diagnosis and PR #249 fixed it (`Path.as_posix()` instead). **Directly
+disproven the same night**: JP tested the exact same, still-running,
+*unpatched* server process (confirmed via process uptime, never
+restarted since before the fix existed) by clicking the real button for
+a real artifact (`TestObjects.java`) -- it opened the correct file
+correctly, in a new VS Code window, despite the backslash URI. VS Code
+on Windows tolerates the malformed-per-RFC URI fine in practice. The
+`as_posix()` change is kept as a reasonable portability improvement
+(still correct per spec, may matter on non-Windows setups), but it does
+not explain the original symptom.
+
+**Leading remaining hypothesis, not yet confirmed:** a real sequencing
+gap in `index.html`'s `renderArtifact()`. The "Open in editor" link's
+`href` is set via a fire-and-forget `fetch(...editor-uri)` with no
+staleness guard -- unlike the same function's main content render,
+which already tracks `artifactLoadCounter` specifically to prevent a
+stale response from clobbering a newer one. If two ARTIFACT events fire
+close together (common in a real session -- several happened within
+seconds of each other during tonight's UAT), an older render's
+editor-uri fetch resolving *after* a newer one's could silently
+overwrite the link with the wrong file's URI while the pane itself
+already shows the newer, correct file's content. **Structurally
+confirmed** by code reading (the guard genuinely doesn't exist, unaided
+by any request-ordering primitive). **Not confirmed live**: an attempted
+timed reproduction (artificial `setTimeout` delays to force a
+controlled resolve-order) was inconclusive -- real Chrome tab-throttling
+dominated the timing (a requested ~50ms gap actually took ~800ms in
+practice), swamping the controlled delays before they could prove
+anything either way.
+
+**Candidate fix, not yet built:** apply the same `artifactLoadCounter`
+staleness-check pattern already used for the main content render to the
+editor-uri fetch's callback too -- ignore the response if a newer
+`renderArtifact()` call has started since this fetch was issued. Small,
+low-risk, and closes the gap regardless of whether it's confirmed as
+THE cause of the original symptom -- the sequencing gap is real either
+way.
+
+**Open question:** what actually caused the original symptom, if not
+either of the above? Not ruled out: a stale link from an *earlier*,
+unrelated click that was never actually cleared/updated by a subsequent
+render (a different bug shape than a live race); a one-off UI/rendering
+glitch; user-side recall uncertainty in a long (~2 hour), many-artifact
+live session. Worth a clean, deliberate reproduction attempt (not
+squeezed into the same session as everything else being tested) before
+concluding anything further.
+
+---
+
 ## A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops
 
 **Status:** validated-live, 2026-08-09, no fix built yet -- two follow-up

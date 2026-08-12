@@ -82,7 +82,16 @@ def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
         # VS Code-specific by construction (the URI scheme); no attempt
         # to detect or support other editors in this pass.
         candidate = _resolve_artifact(working_dir, artifact_path)
-        return {"uri": f"vscode://file/{candidate}"}
+        # as_posix(), not str() -- on Windows, Path's own str() uses native
+        # backslashes ("D:\foo\bar"), but a URI's path component only ever
+        # uses forward slashes (RFC 3986; vscode://file/ follows the same
+        # convention file:// URIs do). A raw backslash isn't a valid URI
+        # path separator at all -- VS Code's URI parser silently fails to
+        # navigate to it, so the window just comes to the foreground
+        # showing whatever was already open, not the intended file. Live-
+        # found 2026-08-09 UAT: "Open in editor" opened VS Code but left an
+        # unrelated file on screen, not the clicked artifact.
+        return {"uri": f"vscode://file/{candidate.as_posix()}"}
 
     @app.get("/api/artifacts/{artifact_path:path}")
     async def get_artifact(artifact_path: str) -> FileResponse:

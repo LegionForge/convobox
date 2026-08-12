@@ -163,7 +163,7 @@ def test_get_artifact_editor_uri_returns_a_vscode_uri_for_the_resolved_path(
         response = client.get("/api/artifacts/notes.md/editor-uri")
     assert response.status_code == 200
     data = response.json()
-    assert data["uri"] == f"vscode://file/{(working_dir / 'notes.md').resolve()}"
+    assert data["uri"] == f"vscode://file/{(working_dir / 'notes.md').resolve().as_posix()}"
 
 
 def test_get_artifact_editor_uri_missing_file_returns_404(working_dir: Path) -> None:
@@ -202,4 +202,4 @@ def test_editor_uri_route_does_not_get_swallowed_by_the_catch_all_artifact_route
     with TestClient(app) as client:
         response = client.get("/api/artifacts/deep/nested/main.js/editor-uri")
     assert response.status_code == 200
-    assert response.json()["uri"] == f"vscode://file/{(nested / 'main.js').resolve()}"
+    assert response.json()["uri"] == f"vscode://file/{(nested / 'main.js').resolve().as_posix()}"
