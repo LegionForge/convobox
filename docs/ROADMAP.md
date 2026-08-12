@@ -366,20 +366,25 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
   actions (agent can point at lines/files; user can ask to be taken
   to the error).
 - ~~Apple Silicon validation (Mac Mini awaits; first second-environment
-  test).~~ **Substantially done, 2026-08-10** (see
-  `docs/field-notes/2026-08-10-*.md`): signal-level AEC, Claude Code +
-  Codex backend connectivity, Kokoro + Piper TTS, and — the headline —
-  the real mic loop and safeword hard-stop all confirmed live on a Mac
-  mini (Apple Silicon), via a synthetic-speech-injection harness (no
-  human speaker available that session). What's still genuinely open:
-  a real human voice test (the injection harness proves the pipeline
-  wiring, not human-speech STT accuracy at normal conversational
-  volume/distance), opencode (blocked on provider credentials on that
-  machine), and Chrome/browser-driven web UI UAT (tooling unavailable
-  that session).
+  test).~~ **Substantially done, 2026-08-10/11** (see
+  `docs/field-notes/2026-08-10-*.md` and `2026-08-11-*.md`):
+  signal-level AEC, Claude Code + Codex backend connectivity, Kokoro +
+  Piper TTS, the real mic loop and safeword hard-stop, and — closing
+  what the 2026-08-10 pass left open — a real human-voice demo (safeword
+  confirmed 3x live, barge-in confirmed, a genuine self-triggered
+  barge-in loop diagnosed and largely mitigated) and opencode (initially
+  blocked on provider credentials on that machine; 2026-08-11 got real
+  credentials configured and, after a genuine multi-part investigation,
+  confirmed opencode's *built-in* auth is broken in `serve` mode across
+  three independent causes, but a manually-declared custom provider
+  works completely end-to-end — including real tool-calling — through
+  ConvoBox). **Still genuinely open**: Chrome/browser-driven web UI UAT
+  (tooling unavailable across every session that's tried so far, not
+  just this one).
 - macOS/Linux UAT parity; second-voice, second-room validation. Linux
-  still entirely untested; macOS itself now has a real live-hardware
-  pass (above) but still needs the human-voice case closed.
+  still entirely untested; macOS's human-voice case is now closed
+  (above) — what's left here is a genuinely different room/speaker/mic
+  setup and a second human voice, not the same gap restated.
 
 ## Long-term
 - Frontend any LLM/provider, cloud and local; desktop/web surfaces.
