@@ -2573,6 +2573,20 @@ async def run(args: argparse.Namespace) -> None:
                     if gate_action == "pause":
                         player.stop()
                         tts.stop()
+                        # Captured BEFORE send_hard_stop() -- every
+                        # adapter's own send_hard_stop() unconditionally
+                        # clears is_busy() regardless of whether a tool
+                        # call's underlying process actually stopped, so
+                        # this is the only point that still reflects
+                        # whether a real turn was interrupted. Used below
+                        # for the "honesty fix" caveat (docs/KNOWN-ISSUES.md,
+                        # "A hard-stop does not guarantee an in-flight tool
+                        # call actually stops") -- same reasoning as
+                        # Orchestrator.hard_stop()'s own was_busy capture,
+                        # duplicated here since this branch predates that
+                        # method and still runs its own copy of the same
+                        # stop sequence.
+                        was_busy = adapter.is_busy()
                         await adapter.send_hard_stop()
                         # Live UAT, 2026-07-31 (3 confirmed instances across two
                         # sessions): audio was heard 1-10+ seconds AFTER a pause
@@ -2601,15 +2615,21 @@ async def run(args: argparse.Namespace) -> None:
                         # for why this is unconditional on tui_state.
                         if config.interaction.pause_resume_ack == "tone":
                             player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
+                        caveat = (
+                            " (a tool call may still be finishing in the background)"
+                            if was_busy
+                            else ""
+                        )
                         log.info(
                             "paused listening (matched %r) -- hard-stopped in-flight "
-                            "work; say %r to resume",
-                            text, config.interaction.resume_word,
+                            "work%s; say %r to resume",
+                            text, caveat, config.interaction.resume_word,
                         )
                         if tui_state is not None:
                             tui_state.add_turn(
                                 "system",
-                                f"paused listening -- say {config.interaction.resume_word!r} to resume",
+                                f"paused listening -- say {config.interaction.resume_word!r} "
+                                f"to resume{caveat}",
                             )
                         continue
                     # High-stakes approval prompt. This is deliberately

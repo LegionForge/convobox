@@ -1787,6 +1787,22 @@ def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) ->
     # same as a "choice" field (which is never None) already is.
     if spec.kind == "device" and current is None:
         buffer = _SYSTEM_DEFAULT
+    elif spec.kind == "command":
+        # NOT _format_value() -- its generic list formatting is
+        # comma-joined ("codex.cmd, --model, x"), correct for the OTHER
+        # list-kind fields (which really are comma-separated, e.g.
+        # safeword.hard_stop_phrases) but wrong here: this field's own
+        # _parse_value branch re-parses via shlex.split() (space-based,
+        # shell-style, no comma handling at all). Seeding the buffer with
+        # the comma-joined form meant simply opening this field and
+        # pressing Enter unchanged -- no typing at all -- silently
+        # corrupted the command, appending a literal trailing comma to
+        # every argument (["codex.cmd", "--model", "x"] roundtripped to
+        # ["codex.cmd,", "--model,", "x"]). shlex.join() is shlex.split()'s
+        # own inverse, so seeding with it round-trips correctly whether
+        # or not the user actually changes anything. Live UAT finding,
+        # 2026-08-10.
+        buffer = shlex.join(current) if current else ""
     else:
         buffer = _format_value(current)
     hint = spec.help_text or _field_hint(spec)

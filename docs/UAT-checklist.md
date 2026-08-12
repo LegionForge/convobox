@@ -12,6 +12,16 @@ Additions from the 2026-07-11 live log:
 - **[E6] Whisper hallucination loops on far-field echo.** Observed live
   (one transcript repeated a clause five times). Currently caught by the
   overlap window; any future gate reordering must keep these out.
+  **Cross-platform reproduction, 2026-08-10 (macOS):** a TTS-speaker-
+  mic-Whisper round-trip test hit the identical failure signature
+  (a repeated "I'm sorry" clause) on completely different hardware
+  (Apple Silicon, AIRHUG 28 mic) — confirming this is a real Whisper/
+  far-field-acoustics characteristic, not something specific to the
+  original Windows hardware. Also confirmed the mitigation's premise
+  directly: feeding the same audio to the transcriber WITHOUT the
+  speaker/mic path scored 100% word accuracy, isolating the failure
+  entirely to the far-field acoustic path, not the model itself. See
+  `docs/field-notes/2026-08-10-macos-kokoro-and-tts-stt-roundtrip.md`.
 - **[L1] Agent replies are now in the log.** Live-confirmed gap during the
   2026-07-14 audio UAT: the `on_event` hook forwarded backend replies
   straight to TTS and logged none of them (and was only wired up under
