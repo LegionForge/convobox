@@ -926,15 +926,29 @@ hitting `ModelUnavailableError` on a custom provider should retry once
 against an already-running server before concluding the config itself
 is wrong.
 
+**Closing finding: real tool-calling confirmed working end-to-end, not
+just text generation.** Every earlier success this session (Ollama,
+first Inception pass) only proved the model could generate text --
+`qwen2.5-coder:7b` specifically could NOT invoke a real tool (see its
+own entry above). Inception's `mercury-2` advertises
+`"supported_features":["tools","json_mode","structured_outputs"]` in
+its own `/v1/models` response, unlike the Ollama model tried -- worth
+testing directly rather than assuming. Asked ConvoBox (`--text`,
+`inception-direct/mercury-2`, warmed-up server) to create a file in the
+sandbox: **the file was actually created, with the exact requested
+content**, and ConvoBox spoke a real confirmation. First genuine
+"the opencode agent actually did something" result in this entire
+investigation, not just "opencode can talk."
+
 **Practical state for ConvoBox today:** the opencode backend IS usable
 via a manually-declared custom provider (confirmed working end-to-end
-for actual text generation, both local/Ollama and cloud/Inception,
-through ConvoBox itself); it remains unusable via `opencode auth login`
-(OAuth or API-key) or the built-in Zen catalog, for the reasons
-diagnosed above, and any custom-provider config that needs a real
-credential currently has to hardcode it (the `{env:...}` bug above)
-rather than reference an environment variable. A cold-start retry may
-also be needed the first time a server starts. Full write-up:
+for actual text generation AND real tool-calling, both local/Ollama and
+cloud/Inception, through ConvoBox itself); it remains unusable via
+`opencode auth login` (OAuth or API-key) or the built-in Zen catalog,
+for the reasons diagnosed above, and any custom-provider config that
+needs a real credential currently has to hardcode it (the `{env:...}`
+bug above) rather than reference an environment variable. A cold-start
+retry may also be needed the first time a server starts. Full write-up:
 `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
 
 ---
