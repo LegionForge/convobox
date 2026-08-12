@@ -192,6 +192,34 @@ def test_get_session_events_honors_limit_and_offset(
     assert [e["user_transcript"] for e in events] == ["turn 2", "turn 3"]
 
 
+# --- limit/offset bounds (GitHub issue #235, finding A6): limit used to
+# go straight into the SQL LIMIT clause unbounded. ---
+
+
+def test_get_session_events_rejects_a_limit_above_the_bound(client: TestClient) -> None:
+    response = client.get("/api/sessions/does-not-exist/events?limit=1001")
+    assert response.status_code == 422
+
+
+def test_get_session_events_rejects_a_zero_or_negative_limit(client: TestClient) -> None:
+    assert client.get("/api/sessions/does-not-exist/events?limit=0").status_code == 422
+    assert client.get("/api/sessions/does-not-exist/events?limit=-1").status_code == 422
+
+
+def test_get_session_events_rejects_a_negative_offset(client: TestClient) -> None:
+    response = client.get("/api/sessions/does-not-exist/events?offset=-1")
+    assert response.status_code == 422
+
+
+def test_get_session_events_accepts_the_upper_bound(
+    client: TestClient, db: HistoryDB
+) -> None:
+    session_id = new_session_id()
+    db.append_event(session_id, "transcript", user_transcript="ok")
+    response = client.get(f"/api/sessions/{session_id}/events?limit=1000")
+    assert response.status_code == 200
+
+
 def test_clear_session_deletes_its_events(client: TestClient, db: HistoryDB) -> None:
     session_id = new_session_id()
     db.append_event(session_id, "transcript", user_transcript="clear me")
@@ -217,6 +245,33 @@ def test_export_session_returns_a_downloadable_json_attachment(
     body = json.loads(response.content)
     assert body["session_id"] == session_id
     assert body["events"][0]["user_transcript"] == "export me"
+
+
+def test_export_session_streams_events_in_order_for_multiple_events(
+    client: TestClient, db: HistoryDB
+) -> None:
+    # The export route was rewritten to stream (GitHub issue #235, finding
+    # A6) -- confirms the generator still produces valid, complete,
+    # correctly-ordered JSON across more than one event, not just the
+    # single-event happy path above.
+    session_id = new_session_id()
+    for i in range(5):
+        db.append_event(session_id, "transcript", user_transcript=f"turn {i}")
+
+    response = client.get(f"/api/sessions/{session_id}/export")
+
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert [e["user_transcript"] for e in body["events"]] == [
+        f"turn {i}" for i in range(5)
+    ]
+
+
+def test_export_session_for_an_empty_session_is_valid_json(client: TestClient) -> None:
+    response = client.get("/api/sessions/does-not-exist/export")
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body == {"session_id": "does-not-exist", "events": []}
 
 
 def test_cors_allows_a_loopback_origin_on_any_port(client: TestClient) -> None:

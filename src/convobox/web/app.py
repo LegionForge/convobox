@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -295,7 +295,13 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/events")
     async def get_session_events(
-        session_id: str, limit: int = 100, offset: int = 0
+        session_id: str,
+        # Bounded (GitHub issue #235, finding A6): limit/offset used to go
+        # straight into the SQL LIMIT/OFFSET clause unbounded -- a client
+        # (or a bug in one) could request an arbitrarily large page in one
+        # call. 1000 matches HistoryDB.get_session_events's own default.
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
     ) -> dict[str, list[dict[str, Any]]]:
         return {"events": db.get_session_events(session_id, limit=limit, offset=offset)}
 
@@ -328,10 +334,29 @@ def create_app(
         return {"status": "approved" if approved else "denied", "explanation": None}
 
     @app.get("/api/sessions/{session_id}/export")
-    async def export_session(session_id: str) -> Response:
-        data = db.export_session_json(session_id)
-        return Response(
-            content=data,
+    async def export_session(session_id: str) -> StreamingResponse:
+        # Streamed (GitHub issue #235, finding A6): this used to call
+        # export_session_json, which does one unbounded query
+        # (limit=1_000_000) and builds the entire response as one JSON
+        # string in memory before writing a single byte -- a genuinely
+        # long-lived, high-traffic session's export could be large.
+        # HistoryDB.iter_session_events yields rows one at a time (a real
+        # cursor iteration, not .fetchall()); this generator writes each
+        # event's JSON as it's produced, same net JSON shape
+        # export_session_json produces (just without the indent=2
+        # pretty-printing, not meaningful for a machine-consumed export).
+        async def generate() -> AsyncIterator[str]:
+            yield f'{{"session_id": {json.dumps(session_id)}, "events": ['
+            first = True
+            for event in db.iter_session_events(session_id):
+                if not first:
+                    yield ","
+                first = False
+                yield json.dumps(event)
+            yield "]}"
+
+        return StreamingResponse(
+            generate(),
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{session_id}.json"'},
         )
