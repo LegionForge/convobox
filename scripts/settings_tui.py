@@ -471,6 +471,32 @@ def fit(text: str, width: int) -> str:
     return text.ljust(width)
 
 
+def _fit_input_buffer(buffer: str, width: int) -> str:
+    """Renders the modal's "> {buffer}" input line, keeping the "> "
+    prompt fixed and truncating buffer from the START (not fit()'s usual
+    END) once it overflows width. This editor's cursor is always at the
+    end of buffer -- typing only ever appends, backspace only ever
+    removes from the end, there's no left/right cursor movement within
+    the text -- so once a long value (e.g. a space-separated
+    stt.hotwords list) exceeds the visible width, fit()'s normal
+    head-then-"..." truncation freezes the display on the first N
+    characters forever: you can keep typing (the real buffer is
+    unaffected) but never see what you just typed, and have no way to
+    tell the value even changed. Showing the END instead keeps whatever
+    is currently being typed in view, matching ordinary single-line text
+    input scrolling behavior. Live UAT finding, 2026-08-10 (JP, editing
+    stt.hotwords)."""
+    prefix = "> "
+    available = width - len(prefix)
+    if available <= 0:
+        return fit(prefix, width)
+    if len(buffer) > available:
+        shown = "..." + buffer[-(available - 3):] if available > 3 else buffer[-available:]
+    else:
+        shown = buffer
+    return (prefix + shown).ljust(width)
+
+
 def viewport_start(selected: int, total: int, height: int, current_start: int) -> int:
     if total <= height:
         return 0
@@ -1674,11 +1700,19 @@ def render_modal(
     box_top = " " * left_pad + border + border * (actual_box_width - 2) + border + " " * right_pad
     lines.append(box_top)
     inner_width = actual_box_width - 2
+    input_line_idx = len(content_lines) - 1  # always "> {buffer}", see append above
     for idx in range(body_height):
         if idx < len(content_lines):
             # _highlight_keys AFTER fit(), same ordering rule as the main
             # screen's help panel -- see that function's own docstring.
-            inner = _highlight_keys(fit(content_lines[idx], inner_width))
+            # The input line uses a tail-truncating fit, not the regular
+            # head-truncating one -- see _fit_input_buffer's own docstring.
+            fitted = (
+                _fit_input_buffer(buffer, inner_width)
+                if idx == input_line_idx
+                else fit(content_lines[idx], inner_width)
+            )
+            inner = _highlight_keys(fitted)
         else:
             inner = fit("", inner_width)
         lines.append(
@@ -1753,6 +1787,22 @@ def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) ->
     # same as a "choice" field (which is never None) already is.
     if spec.kind == "device" and current is None:
         buffer = _SYSTEM_DEFAULT
+    elif spec.kind == "command":
+        # NOT _format_value() -- its generic list formatting is
+        # comma-joined ("codex.cmd, --model, x"), correct for the OTHER
+        # list-kind fields (which really are comma-separated, e.g.
+        # safeword.hard_stop_phrases) but wrong here: this field's own
+        # _parse_value branch re-parses via shlex.split() (space-based,
+        # shell-style, no comma handling at all). Seeding the buffer with
+        # the comma-joined form meant simply opening this field and
+        # pressing Enter unchanged -- no typing at all -- silently
+        # corrupted the command, appending a literal trailing comma to
+        # every argument (["codex.cmd", "--model", "x"] roundtripped to
+        # ["codex.cmd,", "--model,", "x"]). shlex.join() is shlex.split()'s
+        # own inverse, so seeding with it round-trips correctly whether
+        # or not the user actually changes anything. Live UAT finding,
+        # 2026-08-10.
+        buffer = shlex.join(current) if current else ""
     else:
         buffer = _format_value(current)
     hint = spec.help_text or _field_hint(spec)

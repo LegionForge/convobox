@@ -9,6 +9,84 @@ section; for the formal per-release changelog, see
 
 ## Since 0.3.1 (in progress, not yet tagged)
 
+**First macOS live-hardware UAT pass, 2026-08-10.** Everything below
+this note through 0.3.1's Windows-only history predates any live
+hardware testing on macOS; this pass closes a meaningful chunk of that
+gap on a Mac mini (Apple Silicon), AIRHUG 28 USB mic, Mac mini
+Speakers. Full evidence for every finding lives in
+`docs/field-notes/2026-08-10-*.md`, not repeated here.
+
+- **Signal-level AEC confirmed working on real macOS hardware** — 41
+  live trials across the session (baseline + a 10-run batch + a 29-run
+  volume-escalation batch at 1.5x/2.0x/3.0x playback volume): mean
+  attenuation 5-8dB depending on volume, **zero false barge-ins in
+  every single trial**, AEC on or off. An initial 2-trial read got the
+  attenuation-vs-ceiling comparison backwards ("at or below" when the
+  real numbers were the opposite) — caught and corrected in place once
+  a larger batch made the arithmetic error obvious; see the
+  10-runs field note for the full self-correction writeup.
+- **Claude Code and Codex backends confirmed live via `--text` mode**
+  (real TTS through real speakers); **opencode untested on this
+  machine** — no provider credentials configured there, not something
+  set up unattended.
+- **A real crash was found and fixed in `run_convobox.py --text`
+  mode**: a `NameError` on the very first backend event, from a
+  closure over a variable only assigned in the mic-loop setup path.
+  Fixed (`ce413f9`) and reverified live against both backends.
+- **Kokoro TTS confirmed working live on macOS for the first time**
+  (previously "not yet a live voice session with real speakers" on any
+  platform, per this doc's own TTS section below).
+- **A TTS→speaker→mic→Whisper round-trip reproduced the known
+  `[E6]` far-field-echo hallucination pattern** (see
+  `docs/UAT-checklist.md`), then correctly isolated it: feeding the
+  same synthesized audio directly to the transcriber (no speaker/mic
+  path) scored 100% word accuracy for both Piper and Kokoro — the STT
+  model itself is fine; the far-field acoustic path is the hard part,
+  already known and already mitigated in real sessions by the overlap
+  gate.
+- **First live confirmation of the real mic loop AND the safeword
+  hard-stop on macOS** — via a synthetic-speech-injection harness (TTS
+  played through the real speaker, picked up by a live, non-`--text`
+  session's own mic; no human speaker was available). Full
+  VAD→STT→backend→TTS loop confirmed working end to end; the safeword
+  ("stop stop stop") correctly hard-stopped a live session twice, no
+  crash, clean recovery. One caveat recorded honestly: both trials had
+  `busy=False` at the moment of the stop (the backend turn had already
+  finished), so this doesn't yet confirm the `was_busy=True` branch a
+  same-session hard-stop fix (below) added.
+- **`Orchestrator.hard_stop()` "honesty fix" shipped**: it now reports
+  whether a turn was actually busy when it fired, and the web/voice
+  pause paths use that to stop implying a tool call fully stopped when
+  it may still be finishing in the background — closes an
+  explicitly-named, previously-unbuilt option from the 2026-08-09
+  hard-stop-doesn't-cancel-a-tool-call finding.
+- **Still open after this pass**: real human voice input on macOS
+  (everything above used synthetic TTS injection, not a person
+  speaking), Chrome/browser-driven web UI testing (tooling unavailable
+  this session), and opencode (credentials).
+
+**First real human-speech demo on macOS, 2026-08-11** — closes the
+"real human voice input" gap the pass above left open. JP demoed
+ConvoBox live to his son. **Safeword confirmed working with real
+speech, 3 times** (`stop stop stop` x2, `abort abort abort` x1).
+**Barge-in confirmed working** after switching
+`interaction.interrupt_preset` to `conversational` — then a **real
+self-triggered barge-in loop** appeared under rapid-fire conditions
+(20 barge-ins in ~90s, 18/19 with a following AEC reading showing
+`UNDER-CANCELLING`). Diagnosed live: attenuation stayed near this
+session's steady-state baseline (6.54dB vs. 6.75dB) while the measured
+echo-to-ambient ceiling spiked (14.22dB vs. ~0.53dB) — rapid
+back-to-back short turns leave proportionally more residual echo for a
+fixed amount of real cancellation to remove. `do-not-disturb` mode
+(the config's original default) isn't subject to this, since ordinary
+speech can't trigger anything mid-playback there. Also reconfirmed
+`[E6]`'s far-field hallucination pattern with real speech (not
+synthetic), including one instance where a hallucinated transcript
+happened to contain "stop listening" as a substring and paused the
+session — a real, organic occurrence of an already-documented risk
+category. No fix built this pass; full writeup:
+`docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md`.
+
 A day-long live-UAT + infra-hardening pass, 2026-08-05/06. Four PRs
 merged (#212, #202, #204, #205), two open and ready (#206, #213), plus
 cross-repo GitHub/PyPI publishing hardening still in progress. Full
@@ -317,11 +395,13 @@ pane) shipped together as `0.3.0` (2026-07-28, see
   `kokoro-onnx` itself: a single unpunctuated run of text exceeding the
   model's ~510-phoneme batch limit could hang synthesis forever (a
   detached background task dying silently, confirmed via 0% CPU for
-  10+ minutes) — now recovers with a bounded timeout instead. Not yet
-  done: a live voice session with real speakers (verified
-  programmatically against the real model so far, per the README
-  support matrix), and individual Kokoro voice files' own licenses
-  haven't been independently re-checked the way Piper's were.
+  10+ minutes) — now recovers with a bounded timeout instead. **Live
+  voice session with real speakers: done, 2026-08-10** (macOS/Apple
+  Silicon, see the "Since 0.3.1" macOS pass above) — auto-downloaded
+  its voice asset and played correctly through real hardware; not yet
+  independently confirmed on Windows/Linux. Individual Kokoro voice
+  files' own licenses still haven't been independently re-checked the
+  way Piper's were.
 - **A local web UI, 2026-07-25/26** (`--web` / `web.enabled`, opt-in,
   off by default) — see `docs/WEB-UI-ARCHITECTURE.md` for the full
   design and build history, `docs/WEB-UI-USAGE.md`/`WEB-UI-DEV.md` for
