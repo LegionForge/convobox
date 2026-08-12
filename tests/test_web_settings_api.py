@@ -202,3 +202,123 @@ def test_test_endpoint_blocks_on_invalid_draft_without_probing(client: TestClien
     )
     assert response.status_code == 409
     assert "test blocked" in response.json()["detail"]
+
+
+# --- /api/settings/test's actual probe dispatch (tts/stt/backend/audio ->
+# the matching scripts.settings_tui.probe_* function, else a generic
+# "validated" message) and its exception-to-500 handling -- previously
+# untested (only the pre-probe validation-blocks path above was covered),
+# found via a real coverage-gap sweep. probe_* functions do real
+# hardware/network work (device probing, backend subprocess spawn, etc.),
+# so these monkeypatch them rather than exercising the real thing -- same
+# reasoning tests/test_settings_tui.py already uses for its own
+# hardware-touching helpers. ---
+
+
+def test_test_endpoint_dispatches_tts_section_to_probe_tts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    async def fake_probe_tts(config: object) -> str:
+        return "tts probe ok"
+
+    monkeypatch.setattr(settings_tui, "probe_tts", fake_probe_tts)
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test", json={"section": "tts", "field": None, "values": values}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "tts probe ok"}
+
+
+def test_test_endpoint_dispatches_stt_section_to_probe_stt(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    async def fake_probe_stt(config: object) -> str:
+        return "stt probe ok"
+
+    monkeypatch.setattr(settings_tui, "probe_stt", fake_probe_stt)
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test", json={"section": "stt", "field": None, "values": values}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "stt probe ok"}
+
+
+def test_test_endpoint_dispatches_backend_section_to_probe_backend(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    async def fake_probe_backend(config: object) -> str:
+        return "backend probe ok"
+
+    monkeypatch.setattr(settings_tui, "probe_backend", fake_probe_backend)
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test", json={"section": "backend", "field": None, "values": values}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "backend probe ok"}
+
+
+def test_test_endpoint_dispatches_audio_section_to_probe_audio_with_field(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    seen: dict[str, object] = {}
+
+    async def fake_probe_audio(config: object, field_key: str | None = None) -> str:
+        seen["field_key"] = field_key
+        return "audio probe ok"
+
+    monkeypatch.setattr(settings_tui, "probe_audio", fake_probe_audio)
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test",
+        json={"section": "audio", "field": "output_device", "values": values},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "audio probe ok"}
+    # Confirms the route actually forwards req.field through, not just
+    # req.section -- a route that silently dropped it would still pass
+    # every assertion above.
+    assert seen["field_key"] == "output_device"
+
+
+def test_test_endpoint_falls_back_to_generic_message_for_an_unprobed_section(
+    client: TestClient,
+) -> None:
+    # "display" (and any other section without its own probe_*) has no
+    # hardware/network check -- the route's own else-branch, not an error.
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test", json={"section": "display", "field": None, "values": values}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "display configuration validated"}
+
+
+def test_test_endpoint_returns_500_when_a_probe_raises(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    async def failing_probe_tts(config: object) -> str:
+        raise RuntimeError("no audio device found")
+
+    monkeypatch.setattr(settings_tui, "probe_tts", failing_probe_tts)
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test", json={"section": "tts", "field": None, "values": values}
+    )
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "tts test failed" in detail
+    assert "RuntimeError" in detail
+    assert "no audio device found" in detail
