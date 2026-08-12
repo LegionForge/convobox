@@ -681,16 +681,25 @@ async def test_feed_async_reports_still_queued_when_the_worker_has_not_started(
     # asyncio.to_thread's underlying callable actually starts, rather than
     # trying to force real contention by saturating the shared default
     # pool with dozens of OS threads in a unit test.
+    #
+    # Timing margins here are deliberately generous: the repeat interval
+    # is far longer than the simulated queue delay, so the real (near-
+    # instant) call always finishes long before the next warning tick,
+    # even under a loaded/contended CI runner. A tight margin here
+    # previously caused a real flake (the delayed call starting right on
+    # a tick boundary, tripping the "still running" branch instead of
+    # "still QUEUED").
     monkeypatch.setattr(segmenter_module, "_SLOW_CALL_FIRST_WARNING_S", 0.05)
-    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.05)
+    monkeypatch.setattr(segmenter_module, "_SLOW_CALL_REPEAT_WARNING_S", 0.5)
     caplog.set_level(logging.WARNING)
 
     real_to_thread = asyncio.to_thread
 
     async def delayed_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
         # Still nothing appended to execution_started by the time the
-        # first (and likely second) warning tick fires.
-        await asyncio.sleep(0.15)
+        # first warning tick fires; comfortably clear of the (much
+        # later) repeat tick once it does start.
+        await asyncio.sleep(0.1)
         return await real_to_thread(func, *args, **kwargs)
 
     monkeypatch.setattr(segmenter_module.asyncio, "to_thread", delayed_to_thread)
