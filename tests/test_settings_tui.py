@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Self
 
 import numpy as np
 import pytest
@@ -642,7 +643,7 @@ def test_piper_voice_picker_modal_enter_on_placeholder_cancels(
     config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
 
     monkeypatch.setattr(settings_tui, "read_key", lambda: "ENTER")
-    accepted, value = settings_tui._piper_voice_picker_modal(None, config)
+    accepted, _value = settings_tui._piper_voice_picker_modal(None, config)
 
     assert accepted is False
 
@@ -2208,7 +2209,7 @@ class _FakeInputStream:
     def __init__(self, samplerate: int, channels: int, device: int, callback: object) -> None:
         self._callback = callback
 
-    def __enter__(self) -> _FakeInputStream:
+    def __enter__(self) -> Self:
         indata = np.array([[0.25]], dtype=np.float32)
         self._callback(indata, 1, None, None)  # type: ignore[misc]
         return self

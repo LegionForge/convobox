@@ -392,7 +392,7 @@ async def test_a_new_approval_succeeds_after_the_old_dead_one_clears() -> None:
 
         await asyncio.wait_for(_wait_cleared(), timeout=5.0)
 
-        reader2, writer2 = await _connect(port)
+        _reader2, writer2 = await _connect(port)
         writer2.write(
             json.dumps({"token": adapter._approval_token, "tool_name": "Write"}).encode() + b"\n"
         )

@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -16,7 +16,7 @@ from convobox.audio.playback import AudioPlayer
 class FakeInputStream:
     """Records construction kwargs and captures the capture callback."""
 
-    instances: list[FakeInputStream] = []
+    instances: ClassVar[list[FakeInputStream]] = []
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -241,7 +241,7 @@ def test_context_manager_closes_on_exception() -> None:
 class FakeOutputStream:
     """OutputStream whose write() records blocks and can be gated for timing."""
 
-    instances: list[FakeOutputStream] = []
+    instances: ClassVar[list[FakeOutputStream]] = []
     # Read at construction time so a test can arm a delay BEFORE calling
     # play() and have it apply from the very first write. Setting
     # instance.per_write_delay only after play() has already started races

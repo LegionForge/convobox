@@ -1494,9 +1494,11 @@ async def _probe_input_device_live(state: TuiState, seconds: float = 3.0) -> str
 def _section_summary(config: AppConfig) -> list[str]:
     report = validate_config(config)
     lines = [
-        f"backend: {config.backend.name}  tts: {config.tts.engine}/{config.tts.voice or '(unset)'}  "
-        f"stt: {config.stt.engine}/{config.stt.model}  audio: {config.audio.input_device or 'default'} -> "
-        f"{config.audio.output_device or 'default'}",
+        (
+            f"backend: {config.backend.name}  tts: {config.tts.engine}/{config.tts.voice or '(unset)'}  "
+            f"stt: {config.stt.engine}/{config.stt.model}  audio: {config.audio.input_device or 'default'} -> "
+            f"{config.audio.output_device or 'default'}"
+        ),
     ]
     if report.warnings:
         lines.append("warnings: " + " | ".join(report.warnings[:2]))
@@ -2451,8 +2453,10 @@ def _restore_from_backup(state: TuiState) -> None:
         [
             f"This replaces every staged value with {latest.name}'s contents.",
             "Nothing is written to disk until you press [S] to save.",
-            f"({len(backups)} backup(s) available in {_backup_dir(state.path).name}/; "
-            "restoring the most recent.)",
+            (
+                f"({len(backups)} backup(s) available in {_backup_dir(state.path).name}/; "
+                "restoring the most recent.)"
+            ),
         ],
     ):
         state.status = "restore cancelled"

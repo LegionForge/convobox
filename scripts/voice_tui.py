@@ -169,11 +169,15 @@ def _draw(state: _State) -> None:
 
     dominant = f" session-lang={state.dominant_language}" if state.dominant_language else ""
     lines = [
-        f"{_BOLD}ConvoBox voice clarity monitor{_RESET}   "
-        f"model={state.model} lang={state.language} gate={state.gate:.2f} "
-        f"device={state.device_label}{dominant}",
-        f"state: {status}   level [{_meter(state.level_db, state.peak_db, 24)}] "
-        f"{state.level_db:5.0f} dB   elapsed {elapsed // 60:02d}:{elapsed % 60:02d}",
+        (
+            f"{_BOLD}ConvoBox voice clarity monitor{_RESET}   "
+            f"model={state.model} lang={state.language} gate={state.gate:.2f} "
+            f"device={state.device_label}{dominant}"
+        ),
+        (
+            f"state: {status}   level [{_meter(state.level_db, state.peak_db, 24)}] "
+            f"{state.level_db:5.0f} dB   elapsed {elapsed // 60:02d}:{elapsed % 60:02d}"
+        ),
         "-" * min(cols, 100),
     ]
 
@@ -338,7 +342,7 @@ async def run(config_path: str | None, cli_device: str | None,
     # processing in legacy console hosts (same trick colorama uses
     # internally); it does not actually execute a program.
     # Mitigation: no interpolation, no variable, literal empty string only.
-    os.system("")  # nosec B605 B607
+    os.system("")  # nosec B605 B607  # noqa: ASYNC221 -- no process spawned, empty-string literal only
     sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
     try:
         worker_task = asyncio.create_task(stt_worker())

@@ -373,7 +373,7 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
                 try:
                     download(key, voices_dir)
                     print(f"downloaded -- 'play {arg}' to hear it")
-                except Exception as exc:  # CLI: report and keep looping, not fatal
+                except Exception as exc:  # noqa: BLE001 -- CLI: report and keep looping, not fatal
                     print(f"download failed: {exc}")
             elif cmd == "play":
                 if key not in installed:
@@ -384,13 +384,13 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
                         continue
                     try:
                         download(key, voices_dir)
-                    except Exception as exc:  # CLI: report and keep looping, not fatal
+                    except Exception as exc:  # noqa: BLE001 -- CLI: report and keep looping, not fatal
                         print(f"download failed: {exc}")
                         continue
                 try:
                     audition(key, voices_dir, text, rate, volume, player)
                     print(f"that was {describe(catalog, key)} -- 'use {arg}' to choose it")
-                except Exception as exc:  # CLI: report and keep looping, not fatal
+                except Exception as exc:  # noqa: BLE001 -- CLI: report and keep looping, not fatal
                     print(f"audition failed: {exc}")
             else:  # use
                 chosen = key

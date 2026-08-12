@@ -1150,7 +1150,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         # / settings_tui.py -- os.system("") with a hardcoded empty-string
         # literal enables ANSI/VT100 escape processing in legacy Windows
         # console hosts; it never executes a program.
-        os.system("")  # nosec B605 B607
+        os.system("")  # nosec B605 B607  # noqa: ASYNC221 -- no process spawned, empty-string literal only
     interval = 1.0
     was_playing = False
     last_broadcast: tuple[str | None, str | None] = (None, None)
@@ -2446,7 +2446,7 @@ async def run(args: argparse.Namespace) -> None:
         # os.system("") with a hardcoded empty-string literal has the
         # side effect of enabling ANSI/VT100 escape processing in legacy
         # Windows console hosts; it never executes a program.
-        os.system("")  # nosec B605 B607
+        os.system("")  # nosec B605 B607  # noqa: ASYNC221 -- no process spawned, empty-string literal only
         sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
         if sys.platform != "win32":
             # msvcrt.getwch() (used by _read_pending_key on Windows) already

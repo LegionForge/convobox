@@ -231,6 +231,7 @@ def test_main_reads_stdin_and_writes_the_decision_to_stdout() -> None:
         text=True,
         env={},
         timeout=10,
+        check=False,  # asserted on explicitly below, not raised on
     )
     assert proc.returncode == 0
     output = json.loads(proc.stdout)

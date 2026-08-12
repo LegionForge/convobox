@@ -531,7 +531,11 @@ def run(args: argparse.Namespace) -> Path:
     config = load_config(args.config)
     if not config.audio.echo_cancellation:
         print("note: config currently has audio.echo_cancellation=false; calibration will still test AEC")
-    output_dir = Path(args.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Local wall-clock time, deliberately -- this names a directory an
+    # operator will browse by hand right after a run, not a machine-
+    # readable log timestamp; tz-aware would just make the folder name
+    # harder to match against "when did I run this."
+    output_dir = Path(args.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005
     output_dir.mkdir(parents=True, exist_ok=False)
     lock = _acquire_audio_lock()
     try:
