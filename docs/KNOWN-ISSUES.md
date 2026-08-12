@@ -1273,12 +1273,14 @@ closer together in pronunciation.
 
 ---
 
-## "Open in editor" occasionally opens a different file than the one clicked -- cause unconfirmed, one hypothesis ruled out
+## "Open in editor" occasionally opens a different file than the one clicked -- fixed
 
-**Status:** hypothesis, actively reopened 2026-08-09 after a leading
-candidate explanation was directly disproven by live testing the same
-night. Not fixed. Full context: PR #249's own description carries the
-before/after story in detail.
+**Status:** fixed, 2026-08-11 (PR #<followup>) -- a stale-fetch race in
+`renderArtifact()`'s editor-uri lookup, live-reproduced on the real running
+app, then closed with a staleness guard. See below for the full trail:
+one hypothesis ruled out (2026-08-09), the real mechanism structurally
+identified but unconfirmed (2026-08-10, PR #249), then live-reproduced and
+fixed (2026-08-11).
 
 **Symptom, live-hit 2026-08-09** (real codex UAT session): clicking
 "Open in editor" on an artifact once brought VS Code to the foreground
@@ -1299,41 +1301,53 @@ on Windows tolerates the malformed-per-RFC URI fine in practice. The
 (still correct per spec, may matter on non-Windows setups), but it does
 not explain the original symptom.
 
-**Leading remaining hypothesis, not yet confirmed:** a real sequencing
-gap in `index.html`'s `renderArtifact()`. The "Open in editor" link's
-`href` is set via a fire-and-forget `fetch(...editor-uri)` with no
-staleness guard -- unlike the same function's main content render,
-which already tracks `artifactLoadCounter` specifically to prevent a
-stale response from clobbering a newer one. If two ARTIFACT events fire
-close together (common in a real session -- several happened within
-seconds of each other during tonight's UAT), an older render's
-editor-uri fetch resolving *after* a newer one's could silently
-overwrite the link with the wrong file's URI while the pane itself
-already shows the newer, correct file's content. **Structurally
-confirmed** by code reading (the guard genuinely doesn't exist, unaided
-by any request-ordering primitive). **Not confirmed live**: an attempted
-timed reproduction (artificial `setTimeout` delays to force a
-controlled resolve-order) was inconclusive -- real Chrome tab-throttling
-dominated the timing (a requested ~50ms gap actually took ~800ms in
-practice), swamping the controlled delays before they could prove
-anything either way.
+**Leading hypothesis, 2026-08-10 (PR #249):** a real sequencing gap in
+`index.html`'s `renderArtifact()`. The "Open in editor" link's `href` is
+set via a fire-and-forget `fetch(...editor-uri)` with no staleness
+guard. **Correction to that same writeup**: it claimed the main content
+render "already tracks `artifactLoadCounter` specifically to prevent a
+stale response from clobbering a newer one" -- rechecking the code,
+that's not accurate. `artifactLoadCounter` is incremented once per
+render and used only as a cache-busting query param on the body-content
+URL (`?t=${Date.now()}_${artifactLoadCounter}`); it was never actually
+compared against anywhere, so no staleness check existed for *either*
+the body content or the editor link. The body content happens to be
+race-safe anyway, but for a different reason: each render creates fresh
+DOM nodes (a new `<img>`/`<iframe>`, or `<pre>`/`<code>` appended after
+`artifactBodyEl.innerHTML` was cleared), so a slow, stale response from
+an old render either overwrites an element no longer in the DOM or gets
+replaced outright. `artifactEditorLink`, by contrast, is a single
+persistent element reused across every render -- there is nothing
+structural protecting it, which is exactly why it was vulnerable and the
+body content wasn't. Structurally confirmed by code reading; a same-night
+attempted timed reproduction (artificial `setTimeout` delays) was
+inconclusive, dominated by real Chrome tab-throttling (a requested
+~50ms gap actually took ~800ms in practice).
 
-**Candidate fix, not yet built:** apply the same `artifactLoadCounter`
-staleness-check pattern already used for the main content render to the
-editor-uri fetch's callback too -- ignore the response if a newer
-`renderArtifact()` call has started since this fetch was issued. Small,
-low-risk, and closes the gap regardless of whether it's confirmed as
-THE cause of the original symptom -- the sequencing gap is real either
-way.
+**Live-reproduced, 2026-08-11:** confirmed on the real running app
+(PR #249's branch, `--web`, real codex backend, working dir
+`_artifact-test-scratch`) by monkey-patching `window.fetch` in the live
+page to artificially delay the *first* of two real `editor-uri` calls,
+then driving two back-to-back real file edits through the web UI's text
+composer. Final observed state: artifact pane title/content = `test.js`
+(correct, most recent edit), but `artifactEditorLink.href` =
+`vscode://file/.../test.md` (wrong, an older edit) -- the exact symptom
+from the original report, reproduced with real fetches against the real
+`/api/artifacts/*/editor-uri` endpoint, not a mock. Notably, the run
+that reproduced it did so via a *second real, undelayed* ARTIFACT event
+for `test.md` that fired naturally after the `test.js` edits, not
+primarily through the injected delay -- confirming the race is reachable
+under real backend/tool-call timing, not just a contrived artificial
+ordering.
 
-**Open question:** what actually caused the original symptom, if not
-either of the above? Not ruled out: a stale link from an *earlier*,
-unrelated click that was never actually cleared/updated by a subsequent
-render (a different bug shape than a live race); a one-off UI/rendering
-glitch; user-side recall uncertainty in a long (~2 hour), many-artifact
-live session. Worth a clean, deliberate reproduction attempt (not
-squeezed into the same session as everything else being tested) before
-concluding anything further.
+**Fix:** added the staleness guard that was believed to already exist.
+`renderArtifact()` now captures `artifactLoadCounter` into a local
+`loadId` at call start; the editor-uri fetch's resolution callback
+checks `loadId !== artifactLoadCounter` and discards the response if a
+newer render has started since the fetch was issued -- same pattern the
+2026-08-10 writeup described, actually wired in this time. Verified live
+by re-running the same reproduction harness against the patched code:
+the stale response is now discarded and the href stays correct.
 
 ---
 

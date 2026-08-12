@@ -684,6 +684,10 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     // means the underlying file changed, so a stale cached image/iframe
     // must never be what's shown.
     artifactLoadCounter += 1;
+    // Captured for the editor-uri staleness check below -- artifactLoadCounter
+    // itself is only otherwise used as a cache-busting query param, it was
+    // never actually compared against anywhere until now.
+    const loadId = artifactLoadCounter;
     const encodedPath = path.split("/").map(encodeURIComponent).join("/");
     const url = `/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`;
     const filename = path.split("/").pop() || path;
@@ -723,9 +727,20 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     // on any failure (e.g. a future no-working_dir edge case) rather
     // than showing a dead link; failure here is never fatal to the pane
     // itself, which is why this isn't awaited before showing the pane.
+    //
+    // Staleness guard (loadId === artifactLoadCounter): artifactEditorLink
+    // is a single persistent element shared across every render, unlike the
+    // body content above (a fresh <img>/<iframe>/<pre> each time, so a slow
+    // stale response there just writes into a detached or since-overwritten
+    // node). Without this check, two ARTIFACT events firing close together
+    // let an older render's fetch resolve AFTER a newer one's and silently
+    // overwrite the link with the wrong file's URI while the pane still
+    // shows the newer, correct content. Live-reproduced 2026-08-11 -- see
+    // docs/KNOWN-ISSUES.md.
     fetch(`/api/artifacts/${encodedPath}/editor-uri`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((data) => {
+        if (loadId !== artifactLoadCounter) return;
         artifactEditorLink.href = data.uri;
         artifactEditorLink.hidden = false;
       })
