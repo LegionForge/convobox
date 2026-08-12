@@ -273,6 +273,83 @@ everything else. Plan:
 - Thumbnails/previews rendered directly in the tab (text label only for
   now).
 
+### Progress (2026-08-12)
+
+Implemented per the plan above: frontend-only tab strip, live ARTIFACT
+events accumulate into it, history-replay seed added (fixed a real gap
+found while building this — replayed history rows never carried
+`artifact_path` because `event_to_dict()`'s output only reaches the
+frontend nested inside the `backend_event_json` column, not flattened
+onto the row; the frontend now parses that JSON for `event_type ==
+"artifact"` rows during replay, same as the live SSE shape already
+provided). Identity-key refresh-in-place behavior implemented as
+specified — a repeat path updates the existing tab, never duplicates.
+
+## Working-Directory File Browser (2026-08-12, reverses the 2026-07-29 rejection above)
+
+JP asked for a way to open *any* file in `backend.working_dir`, not
+just ones a tool call already produced an `ARTIFACT` event for — the
+exact feature explicitly rejected above. Revisited deliberately, with
+the objection taken seriously rather than dismissed:
+
+**The original objection was really two separate risks, conflated.**
+(1) *Rendering* risk — a given file's content could be actively
+malicious (e.g. an HTML artifact attempting something nasty). Already
+well-mitigated for the existing single-artifact path: sandboxed
+`<iframe sandbox="allow-scripts">` (deliberately no `allow-same-origin`,
+so it can't reach ConvoBox's own API or the parent page), `textContent`
+never `innerHTML` for code, a fixed extension/MIME allowlist that
+refuses to serve arbitrary types at all. (2) *Enumeration* risk — a
+live directory-listing endpoint lets anything that can reach
+`http://127.0.0.1:<port>` (JS in an unrelated browser tab probing
+localhost, another local process) discover and read files a tool call
+never touched — `.env`, SSH keys, credentials, anything sitting in
+`working_dir` that was never meant to be artifact-served. **This second
+risk is the one the original rejection was actually about, and a UI
+warning dialog does nothing against it** — a warning only gates a
+human's *informed* choice to open something; it's no barrier at all to
+an automated/cross-origin read of the same endpoint.
+
+**Decision: build the listing endpoint filtered through the SAME
+`ARTIFACT_MEDIA_TYPES` allowlist the single-artifact route already
+enforces**, rather than a raw directory scan. This closes the sharpest
+edge of the enumeration risk structurally, not with a warning: `.env`,
+credentials, dotfiles, and anything off the renderable-extension
+allowlist simply never appear in the listing, regardless of what's
+actually sitting in the directory — the listing endpoint cannot surface
+a file type it would refuse to serve anyway. It does not eliminate
+enumeration entirely (an allowlisted file — an image, HTML, source
+file — could still contain something sensitive), which is why the
+warning banner is still worth adding, as a mitigation for the
+*rendering* risk (Risk 1) and an honest disclosure for residual Risk 2,
+not as the primary defense.
+
+**Additional exclusions, on top of the extension allowlist:**
+- Any path component starting with `.` (dotfiles, `.git/`, `.env`,
+  `.ssh/`) — excluded even if an entry inside happened to have an
+  allowlisted extension, since a dotDIRECTORY often signals "not meant
+  to be browsed" regardless of what's inside it.
+- Symlinks — never followed. A symlink inside `working_dir` pointing
+  outside it is a realistic way to defeat the fence entirely; simplest
+  safe behavior is to skip them, not to resolve-and-fence each one
+  individually.
+- A result cap (see implementation) with a `truncated` flag rather than
+  an unbounded walk — protects against a pathological huge/deeply-nested
+  `working_dir` turning a listing request into a resource problem.
+
+**Explicitly still NOT in scope**: a hierarchical tree explorer (the
+2026-07-29 rejection's other objection — VSCode-style browsing — still
+holds; this ships a flat, filtered, sorted file list, not a directory
+tree with expand/collapse). Opening a browsed file reuses the exact
+same rendering path as an ARTIFACT-triggered one (same pane, same
+Chooser tab-strip mechanism above) — from the frontend's perspective, a
+browsed file and a tool-produced artifact are the same kind of thing
+once opened, just discovered a different way. Each listed file also
+gets a plain `target="_blank"` link to open it in a new browser tab
+directly (JP's own "(or new tab)" ask) — no new backend route needed
+for that, the existing `/api/artifacts/{path}` GET route already serves
+it.
+
 ## Open Questions (for JP, not decided here)
 
 - Is opencode-first the right adapter to start with, or does JP want
