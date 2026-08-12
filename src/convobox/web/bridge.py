@@ -438,17 +438,29 @@ class WebListeningBridge:
         if self._gate.is_paused:
             return False
         self._gate.is_paused = True
-        await self._orchestrator.hard_stop()
+        was_busy = await self._orchestrator.hard_stop()
         if self._pause_resume_ack == "tone":
             self._player.play(generate_ack_tone("paused"), ACK_TONE_SAMPLE_RATE_HZ)
+        # was_busy caveat: hard_stop() aborting a real in-flight turn does
+        # NOT guarantee an already-dispatched tool call's own subprocess
+        # stopped (docs/KNOWN-ISSUES.md, "A hard-stop does not guarantee an
+        # in-flight tool call actually stops" -- the "honesty fix"). Told to
+        # the operator here, not just logged, since this is exactly the
+        # surface that entry flagged as silently implying "everything
+        # stopped" when it might not have.
+        caveat = (
+            " (a tool call may still be finishing in the background)"
+            if was_busy
+            else ""
+        )
         logger.info(
-            "paused listening (web UI) -- hard-stopped in-flight work; say %r to resume",
-            self._resume_word,
+            "paused listening (web UI) -- hard-stopped in-flight work%s; say %r to resume",
+            caveat, self._resume_word,
         )
         if self._tui_state is not None:
             self._tui_state.add_turn(
                 "system",
-                f"paused listening (web) -- say {self._resume_word!r} to resume",
+                f"paused listening (web) -- say {self._resume_word!r} to resume{caveat}",
             )
         return True
 
