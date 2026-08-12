@@ -766,6 +766,191 @@ generated reply) against the currently-installed opencode version before
 re-enabling `backend.model` in any config -- if it passes, this whole
 entry can move to a changelog/fixed note instead of KNOWN-ISSUES.md.
 
+**Follow-up (2026-08-11): the curl matrix above was finally re-run live
+(v1.18.15, macOS, real ChatGPT Plus/Pro OAuth credentials configured via
+`opencode auth login`) -- STILL BROKEN, same symptom, now with the exact
+mechanism identified, plus a more general bug found underneath it.**
+
+`GET /api/model` / `GET /api/provider` on a fresh `opencode serve`
+instance still list only the `opencode` (Zen) provider -- the
+OAuth-authenticated `openai` provider never appears, exactly as
+2026-07-18 found. `opencode run -m openai/gpt-5.4-mini "..."` (and
+`gpt-5.4`, and `gpt-5.6-terra`) all answer correctly via the interactive
+CLI in the same shell, same credentials -- confirming the split is still
+serve-vs-CLI, not credential validity. So the two candidate upstream
+fixes (`#38786`, `#39220`) either didn't land in 1.18.15 or don't
+actually fix this specific symptom.
+
+**The real mechanism, isolated with `--print-logs --log-level DEBUG`:**
+pinning a session to `openai/gpt-5.4-mini` (or `gpt-5.4`, or
+`gpt-5.6-terra` -- tried all three, identical) throws server-side:
+
+```
+ERROR message="Failed to drain Session" cause="SessionRunnerModel.ModelUnavailableError: Model unavailable: openai/gpt-5.4-mini ..."
+```
+
+**This error is logged and then silently discarded -- it never reaches
+the API client in any form** (no SSE event, no session-state change, no
+HTTP error). The client (ConvoBox, or a bare `curl` against the SSE
+event stream, tested both ways) just waits forever with the prompt
+sitting in `admitted`/`prompted` state.
+
+**This turned out to be a more general opencode bug than "OAuth
+provider not loaded," confirmed by triggering the identical hang three
+different ways:**
+
+1. **OAuth-credentialed model** (`openai/gpt-5.4-mini` et al, via `opencode
+   auth login`): `SessionRunnerModel.ModelUnavailableError` (above).
+2. **`opencode serve --pure`** (external plugins disabled, which is how
+   the ChatGPT/Codex OAuth login is implemented): the *same* request
+   instead fails with a clean `HTTP 401: Missing bearer or basic
+   authentication in header` -- proving the plugin normally attaches
+   the OAuth credential to outbound requests for the interactive CLI,
+   but that attachment never happens for a `serve`-driven session.
+3. **`opencode/hy3-free`** (opencode's own free Zen catalog, previously
+   the verified-working model for ConvoBox per this entry's own
+   `[L2]`/6d629be history): fails with `HTTP 402: "The account
+   associated with the API Key is in arrears... top up the account"` --
+   a billing suspension on **opencode's own infrastructure**, nothing
+   to do with any credential configured on this machine, discovered
+   only because the "known-good" free model was tried as a control and
+   turned out not to be free/available right now either.
+
+All three are different root causes at the provider layer -- but all
+three produce the **exact same client-visible symptom**: `"Failed to
+drain Session"` logged once, then permanent silence. **The actual bug
+worth reporting upstream is this general one**: `opencode serve` never
+propagates a provider/request failure back to the API caller, regardless
+of *why* the provider call failed. `--text`-mode ConvoBox sessions
+eventually give up via their own unrelated generic 120s "backend still
+busy" bail-out (see the `--text`/`approve`-mode entry elsewhere in this
+file for the identical shape of that same class of gap on the ConvoBox
+side) -- but nothing ever tells the user *why* nothing happened.
+
+**Not filed upstream yet.** Repro is clean and reproducible (3
+independent trigger causes, identical symptom, `--log-level DEBUG`
+output in hand) -- a good candidate for a real issue report on
+`anomalyco/opencode` if this keeps mattering.
+
+**Workaround found, real and confirmed end-to-end through ConvoBox
+(2026-08-11, same session): a manually-declared custom provider in
+`opencode.jsonc` sidesteps the whole bug.** All three failures above
+share one thing in common -- every model tried came from opencode's
+*built-in* provider-catalog/auth machinery (`opencode auth login` OAuth,
+an `opencode auth login`-registered API key, or the built-in Zen
+catalog). A provider declared directly in config, the same shape as
+opencode's own `@ai-sdk/openai-compatible` custom-provider pattern
+(seen independently in `anomalyco/opencode#12065`'s working example),
+is a completely different code path and was NOT affected:
+
+```jsonc
+// ~/.config/opencode/opencode.jsonc
+{
+  "provider": {
+    "ollama-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": { "qwen2.5-coder:7b": {} }
+    }
+  }
+}
+```
+
+Pinning a session to `ollama-local/qwen2.5-coder:7b` (a local Ollama
+instance, OpenAI-compatible endpoint) generated a real, complete
+response through raw `curl` against `opencode serve` (`session.next.
+text.ended` with actual text, clean `finish:"stop"`) -- and then through
+**ConvoBox itself** (`--text` mode, real TTS spoken through the Mac mini
+speakers). This is almost certainly the shape of what was running
+successfully against opencode on Helios (Windows) earlier in this
+project's history -- a manually-configured local/custom provider, not a
+ChatGPT-Plus-OAuth or opencode-auth-registered API-key model.
+
+**One separate, expected limitation surfaced by this same test, not a
+bug -- verified, not just suspected:** `qwen2.5-coder:7b` returned the
+requested tool call (`{"name": "write", "arguments": {...}}`) as plain
+response TEXT instead of actually invoking it -- no file was created.
+Confirmed this is a genuine model-capability gap, not an opencode/
+ConvoBox wiring problem, by bypassing opencode's harness entirely:
+called Ollama's own OpenAI-compatible `/v1/chat/completions` directly
+with an explicit `tools` schema (the same shape opencode would send) --
+identical result, `finish_reason: "stop"` with the call embedded as text
+in `content`, no `tool_calls` array at all. This specific quantized
+model just doesn't reliably emit native function-calling output despite
+being handed a proper schema. A bigger/more agentic local model, or one
+explicitly fine-tuned for tool use, would be the next thing to try if
+local-model tool-calling through ConvoBox+opencode matters.
+
+**A second, independent bug found while testing a real (Inception Labs)
+API-key provider the same way: `{env:VAR}` substitution in
+`opencode.jsonc` doesn't work, for ANY value, not just secrets.** Tried
+`inception-direct` (`https://api.inceptionlabs.ai/v1`, an Inception Labs
+API key) declared the same custom-provider way as the working Ollama
+example above, with `"apiKey": "{env:INCEPTION_API_KEY}"` -- consistent
+`HTTP 401: Incorrect API key provided`, even though (a) the key itself
+was verified valid with a direct `curl` straight to Inception's API
+(real `200`, real model list) and (b) the env var was confirmed present
+in the `opencode serve` subprocess's actual environment via `ps eww`.
+Read opencode's own substitution source
+(`packages/opencode/src/config/variable.ts`'s `ConfigVariable.
+substitute`, regex `/\{env:([^}]+)\}/g` against `process.env`) -- looks
+correct and is applied to the whole raw config file text before JSON
+parsing, so the mechanism should work in principle. **Isolated with a
+clean control, no secret involved:** substituted `{env:OLLAMA_TEST_URL}`
+(a harmless test value) into the *already-proven-working* Ollama
+provider's `baseURL` field -- same `ModelUnavailableError` failure,
+confirming this is general breakage of `{env:...}` for provider
+`options` fields, not specific to API keys or to Inception. Hardcoding
+the literal value directly in the file (both for the Inception key and
+for the Ollama URL) works immediately every time. **Practical
+consequence for anyone following the custom-provider workaround above:
+`{env:VAR}` is not currently a safe way to keep a real API key out of
+`opencode.jsonc` -- a working config today means the literal key sits
+in that file in plaintext.** Not filed upstream yet; a good second
+candidate alongside the `serve`-swallows-failures bug above.
+
+**Follow-up, same session: Inception confirmed working end-to-end
+through ConvoBox itself (not just raw curl), plus one more real bug --
+a startup race, not a config problem.** With a fresh Inception key
+hardcoded directly in `opencode.jsonc` (per the `{env:...}` bug above),
+the *very first* request to a freshly-started `opencode serve` failed
+with the same `ModelUnavailableError` seen throughout this
+investigation -- but retrying the identical request against the
+*same, now-warm* server succeeded immediately (`"banana"`, clean
+`finish:"stop"`), and `scripts/run_convobox.py --text` against that
+warm server produced a real spoken TTS response through the Mac mini
+speakers. So there's a real startup race in `opencode serve`: a
+provider/model can be correctly configured and still fail on the first
+request after boot, before succeeding on every subsequent one. Anyone
+hitting `ModelUnavailableError` on a custom provider should retry once
+against an already-running server before concluding the config itself
+is wrong.
+
+**Closing finding: real tool-calling confirmed working end-to-end, not
+just text generation.** Every earlier success this session (Ollama,
+first Inception pass) only proved the model could generate text --
+`qwen2.5-coder:7b` specifically could NOT invoke a real tool (see its
+own entry above). Inception's `mercury-2` advertises
+`"supported_features":["tools","json_mode","structured_outputs"]` in
+its own `/v1/models` response, unlike the Ollama model tried -- worth
+testing directly rather than assuming. Asked ConvoBox (`--text`,
+`inception-direct/mercury-2`, warmed-up server) to create a file in the
+sandbox: **the file was actually created, with the exact requested
+content**, and ConvoBox spoke a real confirmation. First genuine
+"the opencode agent actually did something" result in this entire
+investigation, not just "opencode can talk."
+
+**Practical state for ConvoBox today:** the opencode backend IS usable
+via a manually-declared custom provider (confirmed working end-to-end
+for actual text generation AND real tool-calling, both local/Ollama and
+cloud/Inception, through ConvoBox itself); it remains unusable via
+`opencode auth login` (OAuth or API-key) or the built-in Zen catalog,
+for the reasons diagnosed above, and any custom-provider config that
+needs a real credential currently has to hardcode it (the `{env:...}`
+bug above) rather than reference an environment variable. A cold-start
+retry may also be needed the first time a server starts. Full write-up:
+`docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
+
 ---
 
 ## Web UI: artifact pane gaps (0.3.0)
