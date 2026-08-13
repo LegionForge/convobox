@@ -182,18 +182,23 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** still open, **not fixed by PR #269** (2026-08-12), despite
-#269 targeting exactly this bug's own then-leading hypothesis
-(thread-pool contention). Live re-tested the same day #269 merged: the
-freeze reproduced three clean times under the same rapid-fire-while-
-paused stress that originally produced it, and #269's own new
-queued-vs-running stall diagnostic (built specifically to catch this)
-never fired once across all three. That's evidence against, not just
-"unconfirmed for," the contention hypothesis -- see the 2026-08-12
-follow-up below and its own field note for the full timing evidence and
-the new leading candidate (an unwatched wait in `MicrophoneStream.stream()`,
-which as of this same pass now has its own equivalent instrumentation,
-not yet live-verified against a real recurrence).
+**Status:** still open, **escalated 2026-08-12 -- likely two distinct
+bugs, not one.** PR #269 (2026-08-12) targeted this bug's then-leading
+hypothesis (thread-pool contention) and did not fix it -- live re-tested
+the same day, three clean reproductions, #269's own new stall diagnostic
+never fired once. A same-day follow-up session then caught **two real
+short capture stalls (1-4s, confirmed zero queue backlog -- not the
+"backlog piling up" hypothesis, a genuine brief capture-callback hiccup,
+now directly observable for the first time)**, and separately, **a 12+
+minute freeze that resisted every recovery path tried** (web resume, the
+hard-stop API, even killing a hung backend subprocess that was itself
+stuck at the time) -- only a full process kill ended it. CPU forensics
+during that long freeze (target process pinned at a literal, sustained
+0% CPU) point at a genuine blocking wait with no timeout, most likely in
+backend-subprocess I/O, not the VAD/capture layer at all. **Treat this
+as safety-relevant and unresolved -- not a release candidate until at
+least the long-freeze variant is understood.** Full evidence in both
+2026-08-12 field notes linked below.
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -418,6 +423,22 @@ Full timing evidence, exact log excerpts, and reasoning:
 the sense of a regression -- the web-side recovery path remains a real,
 repeatable workaround -- but the underlying freeze itself is unresolved,
 and the mechanism actually responsible is once again unconfirmed.
+
+**Follow-up (2026-08-12, same day, later): a repeatable synthetic-speech
+harness confirms the short stalls above are real (zero queue backlog
+both times, ruling out the backlog-piling-up idea), then catches a
+qualitatively worse, 12+ minute freeze that resisted every recovery path
+tried -- web resume, the hard-stop API, and even killing a hung backend
+subprocess that happened to be stuck at the same time. Only a full
+process kill ended it.** The web UI's recovery path, 3-for-3 earlier the
+same day, failed on this attempt -- don't treat it as a guaranteed
+mitigation. CPU forensics (target process pinned at a literal, sustained
+0% during the freeze) point toward a genuine blocking wait with no
+timeout, likely in backend-subprocess I/O rather than the VAD/capture
+layer -- a plausible, different mechanism from everything hypothesized
+above, not yet confirmed. This may be two distinct bugs sharing a
+symptom, not one. Full evidence:
+`docs/field-notes/2026-08-12-vad-freeze-harness-catches-short-stalls-and-a-12-minute-unrecoverable-one.md`.
 
 ---
 
