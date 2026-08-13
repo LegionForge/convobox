@@ -1587,3 +1587,40 @@ condition would catch cases like this without materially increasing
 false rejections on good transcripts -- needs real distribution data
 across both accepted and rejected transcripts, not just this one sample.
 Full evidence: `docs/field-notes/2026-08-12-stt-hallucination-bypasses-the-language-probability-gate-near-miss-on-approval-phrase.md`.
+
+---
+
+## A safeword match in a transcript skips checking that same transcript for a pause phrase
+
+**Status:** validated-live, 2026-08-12. Not a safety gap (the hard-stop
+itself always fires correctly regardless) -- a real, code-confirmed
+interaction gap between two independent control mechanisms, no fix
+proposed yet.
+
+**Symptom.** JP spoke a long, rapid-fire safeword sequence live; STT
+transcribed it as one continuous 11.8s utterance containing multiple
+safewords AND the pause phrase: `'break break break cancel cancel
+cancel ... abort abort abort stop listening cancel cancel cancel ...'`.
+The hard-stop fired correctly on `'break break break'` (first match).
+`'stop listening'`, present verbatim later in the same transcript, was
+never separately evaluated -- the session never entered the paused
+state from this utterance.
+
+**Mechanism, confirmed in code** (`scripts/run_convobox.py:2507-2547`):
+the entire pause/resume check (`listening_gate.observe(text)`) lives
+inside `if not is_hard_stop:`. When a safeword matches a transcript,
+that whole block -- including the pause check -- is skipped entirely for
+that transcript, not just reordered after the hard-stop.
+`PauseListeningDetector` itself is unaffected and would have found the
+phrase if asked; the gap is in the caller never asking.
+
+**Why this is realistic, not contrived:** this project already has a
+documented hallucination pattern (2026-08-06) where a single STT segment
+can span many seconds of repeated/garbled phrases -- exactly the shape
+that lets two different trigger phrases land in one utterance. This
+session hit it live.
+
+**Not fixed this session** -- worth a deliberate decision (run the pause
+check unconditionally, independent of the hard-stop outcome, vs. keep
+today's mutually-exclusive design) rather than a reflexive change. Full
+evidence: `docs/field-notes/2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-utterance.md`.
