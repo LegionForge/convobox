@@ -139,6 +139,26 @@ uses for why pause and hard-stop are separate.
   genuinely produces zero `Processing audio` load during the stress
   window.
 
+## Resolved, 2026-08-12: typed text bypassing pause (E1) is the intended final behavior
+
+The security audit (GitHub issue #235, finding E1) flagged a related
+question this design was expected to settle alongside its own mute/
+pause questions: should `WebTextInputBridge.submit()` (the web UI's
+text box) respect pause state, the way a spoken reply does? Three
+options were on the table: formalize the status quo (typed text always
+bypasses pause), tighten it (return 409 while paused), or a third shape
+this doc's own mute proposal makes possible (bypass pause but respect
+mute once it ships).
+
+**JP's decision:** formalize the status quo. "I like that typing
+something in the text box while paused bypasses the 'stop listening'
+state." No code change -- `WebTextInputBridge`'s docstring
+(`src/convobox/web/bridge.py`) updated to record this as confirmed
+intent, not just an unreviewed default. Left explicitly open: whether
+typed text should respect *mute* once mute itself ships (option 3
+above) -- that's still a real question for Slice 0 below, not decided
+by this resolution.
+
 ## What this note deliberately does not do
 
 No code was written. The exact chunk-gating point ((1) vs. (2) above)

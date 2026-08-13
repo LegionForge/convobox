@@ -538,6 +538,14 @@ class WebTextInputBridge:
     (safeword aside), it does not interact with a live pause or a
     pending approval prompt the way a spoken reply would.
 
+    CONFIRMED as the intended final behavior, not just an unreviewed
+    default -- JP, 2026-08-12 (resolves GitHub issue #235's E1 finding,
+    which had left this as an open product question): "I like that
+    typing something in the text box while paused bypasses the 'stop
+    listening' state." See docs/DESIGN-mic-mute-vs-pause-listening.md
+    for the related, still-separately-open mute/pause design questions
+    this decision does not itself resolve.
+
     Constructed with no targets (create_app() needs something to hand its
     route closure at server-startup time), wired via set_targets() once
     the real Orchestrator/corrector/forwarder exist -- same pattern as
