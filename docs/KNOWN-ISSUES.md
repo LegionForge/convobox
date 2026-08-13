@@ -440,6 +440,26 @@ above, not yet confirmed. This may be two distinct bugs sharing a
 symptom, not one. Full evidence:
 `docs/field-notes/2026-08-12-vad-freeze-harness-catches-short-stalls-and-a-12-minute-unrecoverable-one.md`.
 
+**Correction + headline number, same evening, later still:** the session
+above ran with Windows' own mic "Audio Enhancements" ON the whole time
+(discovered live, disabled, fixed synthetic-audio pickup immediately) --
+an unknown fraction of that session's "total silence" was this OS-level
+setting suppressing the *test signal*, not ConvoBox's own pipeline
+stuck. A second, unrelated bug in the test harness's own success
+detection was also found and fixed (it was restarting visibly-healthy
+sessions). With **both** confounds removed, a clean 10-cycle automated
+batch still shows a real, frequent stall: **30% of cycles required a
+full session restart** (near-total audio pickup silence), and clean
+pause+resume success occurred in only 2/10 cycles. Resume-word matcher
+logic itself was traced and confirmed correct (`resumeword/detector.py`,
+`ListeningGate.observe()`) -- most "resume failed" readings are more
+likely a downstream consequence of the pause phrase itself sometimes not
+registering, not a matcher bug. **This 30% figure is the current
+best-controlled estimate of how often this stress pattern produces a
+real stall** -- treat it as the headline number for release discussions,
+superseding the smaller/less-controlled samples above. Full evidence:
+`docs/field-notes/2026-08-12-vad-freeze-exhaustive-batch-after-fixing-windows-enhancements-confound.md`.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")
