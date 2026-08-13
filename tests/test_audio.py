@@ -273,7 +273,11 @@ async def test_stream_reports_still_queued_when_the_worker_has_not_started(
         assert "still running" not in caplog.text
     finally:
         block_release.set()
-        await task
+        chunk = await task
+
+    # The queued call must still deliver the real chunk once unblocked,
+    # not just resolve without hanging.
+    np.testing.assert_array_equal(chunk, np.arange(3, dtype=np.float32))
     mic.close()
 
 
