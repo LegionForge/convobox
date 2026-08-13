@@ -1549,3 +1549,41 @@ noise in the test room that session (not a code issue). Full detail,
 plus the clean `plan`/`permissive` mode confirmations on both backends
 (N=2 each) and a re-confirmation that opencode remains untestable
 (0 configured credentials): `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
+
+---
+
+## STT error-ladder rejection gates on language probability, not decode confidence -- a low-confidence hallucination can slip through
+
+**Status:** validated-live, 2026-08-12, single instance -- not yet
+confirmed as a systematic gap across more samples.
+
+**Symptom.** JP was speaking live, deliberately only saying variations
+on "stop listening"/"resume listening". The pipeline transcribed
+`'mayday listening resume alpha bravo'` (`lang=en (0.62) dec=0.31`) --
+words he never said, not a garbled version of what he did say (confirmed
+by direct comparison against his own real-time report). It was not
+rejected; it went to the backend as ordinary conversation.
+
+**Why it wasn't caught.** The error ladder's low-confidence rejection
+(`stt.min_language_probability`, 0.4 in this config) checks the
+**language-detection probability**, not the separately-logged **decode
+confidence** (`dec=...`). This hallucination's language probability
+(0.62) was comfortably above threshold even though its decode confidence
+(0.31) was lower than two other transcripts the SAME session correctly
+rejected minutes earlier (`'stop brake'` lang=0.40, `'stop please'`
+lang=0.37). "Confident this is English" and "confident these are the
+right words" are different signals; only the first currently gates
+rejection.
+
+**Why this matters beyond STT accuracy in general.** The hallucinated
+content -- `"alpha bravo"` -- is two of the three words in this session's
+real `approval_phrase` (`"alpha bravo delta"`). It fell one word short
+and nothing unsafe happened, but it's a genuine near-miss on a
+security-relevant phrase, produced by hallucination rather than real
+speech, on a gate that measured the wrong confidence signal.
+
+**Not yet done:** checking whether adding `dec` as a second gate
+condition would catch cases like this without materially increasing
+false rejections on good transcripts -- needs real distribution data
+across both accepted and rejected transcripts, not just this one sample.
+Full evidence: `docs/field-notes/2026-08-12-stt-hallucination-bypasses-the-language-probability-gate-near-miss-on-approval-phrase.md`.
