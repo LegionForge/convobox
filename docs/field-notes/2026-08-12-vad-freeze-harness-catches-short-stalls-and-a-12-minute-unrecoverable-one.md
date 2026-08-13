@@ -29,6 +29,33 @@ repeatable synthetic-speech harness (so the stress doesn't depend on a
 human talking) plus CPU-contention instrumentation -- and an unplanned,
 much more severe recurrence that surfaced along the way.
 
+**IMPORTANT CORRECTION, added later the same evening -- read before
+trusting the "12+ minute freeze" story below at face value.** Windows'
+own OS-level mic "Audio Enhancements" was ON for this entire session,
+confirmed only afterward. That setting suppresses audio the machine
+recognizes as an echo of its own output -- exactly what a same-machine
+synthetic-speech harness produces (speakers -> mic, both on this
+machine). Disabling it later the same evening immediately fixed
+synthetic-audio pickup (see the follow-up session's own field note).
+That means an unknown fraction of this note's "total silence" -- the
+short capture stalls AND the long freeze's own total-silence stretch --
+may be Windows suppressing the *test signal itself*, not ConvoBox's mic
+pipeline actually stuck. **What survives this correction, verified by a
+mechanism independent of audio pickup entirely:** the hung backend
+subprocess (`codex.exe`, confirmed via direct process CPU-time
+forensics -- two samples 3s apart, byte-identical kernel/user time) is
+real regardless of whether Windows Enhancements affected anything else
+that session. The short-stall diagnostic firings (`feed_async`/`stream()`
+warnings) are also real regardless -- they're driven by ConvoBox's own
+internal timing, not by whether the mic heard the test phrases. **What's
+now in doubt:** whether the long freeze's mic-pipeline silence was
+independently confirmed to be a real app-level stall, or was at least
+partly an artifact of this same Windows setting suppressing renewed test
+audio after the initial hard-stop. Treat the long-freeze story below as
+a real, live-observed event (the process forensics don't lie) with an
+uncertain fraction of its "and the mic never heard anything after" being
+explained by this confound rather than the app.
+
 ## Setup
 
 A scratch harness pre-synthesizes the same hotword/safeword phrases used
