@@ -577,8 +577,8 @@
   <button id="listening-btn" title="Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead" aria-label="Pause listening"><span id="listening-btn-icon" aria-hidden="true">&#9208;</span><span id="listening-btn-label">Stop listening</span></button>
   <button id="stop-btn" class="stop-btn" title="Interrupts and stops all processing right now -- the same hard stop as saying the safeword out loud. Does not pause listening; the session keeps listening normally right after."><span aria-hidden="true">&#9209;</span> Stop</button>
   <button id="artifact-browse-btn" title="Browse renderable files in the backend's working directory"><span aria-hidden="true">&#128193;</span> Browse files</button>
-  <button id="settings-btn" title="Open Settings -- edit convobox.yaml (audio devices, STT/TTS, safety phrases) without restarting">Settings</button>
-  <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.">Quit</button>
+  <button id="settings-btn" title="Open Settings -- edit convobox.yaml (audio devices, STT/TTS, safety phrases) without restarting"><span aria-hidden="true">&#9881;</span> Settings</button>
+  <button id="quit-btn" class="quit-btn" title="Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit."><span aria-hidden="true">&#9211;</span><span id="quit-btn-label">Quit</span></button>
 </header>
 <div class="body-row">
 <main>
@@ -669,6 +669,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const sessionSelect = document.getElementById("session-select");
   const clearHistoryBtn = document.getElementById("clear-history-btn");
   const quitBtn = document.getElementById("quit-btn");
+  const quitBtnLabel = document.getElementById("quit-btn-label");
   const artifactPaneEl = document.getElementById("artifact-pane");
   const artifactTitleEl = document.getElementById("artifact-pane-title");
   const artifactBodyEl = document.getElementById("artifact-pane-body");
@@ -1487,19 +1488,19 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     if (!quitArmed) {
       quitArmed = true;
       quitBtn.classList.add("armed");
-      quitBtn.textContent = "Click again to quit";
+      quitBtnLabel.textContent = "Click again to quit";
       quitBtn.title = "This will actually end the session. Click elsewhere or wait a few seconds to cancel.";
       quitArmTimer = setTimeout(() => {
         quitArmed = false;
         quitBtn.classList.remove("armed");
-        quitBtn.textContent = "Quit";
+        quitBtnLabel.textContent = "Quit";
         quitBtn.title = "Ends the whole ConvoBox session -- mic, backend, and this page's own connection. Click once to arm, click again within a few seconds to actually quit.";
       }, 4000);
       return;
     }
     clearTimeout(quitArmTimer);
     quitBtn.disabled = true;
-    quitBtn.textContent = "Quitting…";
+    quitBtnLabel.textContent = "Quitting…";
     try {
       await fetch("/api/quit", { method: "POST", headers: CSRF_HEADERS });
     } catch (err) {
