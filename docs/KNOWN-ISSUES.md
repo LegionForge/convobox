@@ -1342,7 +1342,7 @@ closer together in pronunciation.
 
 ## "Open in editor" occasionally opens a different file than the one clicked -- fixed
 
-**Status:** fixed, 2026-08-11 (PR #<followup>) -- a stale-fetch race in
+**Status:** fixed, 2026-08-11 (PR #260) -- a stale-fetch race in
 `renderArtifact()`'s editor-uri lookup, live-reproduced on the real running
 app, then closed with a staleness guard. See below for the full trail:
 one hypothesis ruled out (2026-08-09), the real mechanism structurally
