@@ -182,13 +182,23 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** fix implemented 2026-08-07, **partially live-validated the
-same day** -- the freeze itself still reproduces live, but the fix's
-actual claim (the rest of the app, including the web UI's Resume
-Listening button, stays responsive while it happens) held up under a
-real recurrence. See the "Follow-up (2026-08-07, live UAT with this fix
-applied)" note below for the full picture; root cause of the underlying
-hang is still unconfirmed.
+**Status:** still open, **escalated 2026-08-12 -- likely two distinct
+bugs, not one.** PR #269 (2026-08-12) targeted this bug's then-leading
+hypothesis (thread-pool contention) and did not fix it -- live re-tested
+the same day, three clean reproductions, #269's own new stall diagnostic
+never fired once. A same-day follow-up session then caught **two real
+short capture stalls (1-4s, confirmed zero queue backlog -- not the
+"backlog piling up" hypothesis, a genuine brief capture-callback hiccup,
+now directly observable for the first time)**, and separately, **a 12+
+minute freeze that resisted every recovery path tried** (web resume, the
+hard-stop API, even killing a hung backend subprocess that was itself
+stuck at the time) -- only a full process kill ended it. CPU forensics
+during that long freeze (target process pinned at a literal, sustained
+0% CPU) point at a genuine blocking wait with no timeout, most likely in
+backend-subprocess I/O, not the VAD/capture layer at all. **Treat this
+as safety-relevant and unresolved -- not a release candidate until at
+least the long-freeze variant is understood.** Full evidence in both
+2026-08-12 field notes linked below.
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -372,6 +382,83 @@ normal use, hangs under rapid-fire stress" pattern without requiring
 Silero itself to ever actually stall. Not confirmed -- a concrete lead
 for whoever picks up the diagnostic-logging step above, not a
 diagnosis.
+
+**Follow-up (2026-08-12): PR #269 shipped for exactly this hypothesis,
+same-day live re-test shows it did not fix the freeze, and its own new
+diagnostic never fired.** PR #269 gave the thread-pool-contention theory
+above a concrete mechanism (two indefinite blockers -- mic capture's
+queue read and Piper's chunk pump -- competing with VAD/STT for the
+shared default executor) and dedicated executors for both, plus a
+queued-vs-running split added to `feed_async()`'s own stall warning
+specifically so a recurrence would show which of the two was actually
+happening.
+
+Live re-tested the same day, immediately after merge: three clean
+reproductions in ~15 minutes of the same rapid-fire-hotwords-while-paused
+stress that produced the original incidents (durations 52.8s/72.7s/60.7s;
+web UI Resume Listening recovered all three immediately, voice resume
+did not work during any of them). `feed_async()`'s stall warning never
+fired once. Since that warning is inside the exact code path #269's fix
+targeted, its silence across three real occurrences is evidence the
+stall isn't there -- not just an inconclusive result.
+
+New leading candidate: `MicrophoneStream.stream()`'s own blocking
+`queue.get()` (also given a dedicated executor by #269, but with no
+equivalent stall diagnostic until this same pass). Under continuous
+capture this call should return within about one blocksize (~32ms)
+regardless of silence vs. speech, since the audio callback enqueues
+chunks on a fixed hardware cadence -- so unlike a VAD/STT model call,
+this one running long for real would be a genuinely abnormal, specific
+signal (either real contention on its single-worker executor, or the
+underlying sounddevice callback has stopped delivering chunks entirely).
+Added the same queued-vs-running instrumentation here too, plus queue
+backlog depth (to test JP's own live hypothesis that chunks might be
+piling up behind a stalled consumer rather than capture itself
+stopping) -- **not yet live-verified against a real recurrence.**
+
+Full timing evidence, exact log excerpts, and reasoning:
+`docs/field-notes/2026-08-12-vad-freeze-live-reproduced-three-times-pr269-did-not-fix-it.md`.
+
+**Net: still an open, safety-relevant bug.** Not a release blocker in
+the sense of a regression -- the web-side recovery path remains a real,
+repeatable workaround -- but the underlying freeze itself is unresolved,
+and the mechanism actually responsible is once again unconfirmed.
+
+**Follow-up (2026-08-12, same day, later): a repeatable synthetic-speech
+harness confirms the short stalls above are real (zero queue backlog
+both times, ruling out the backlog-piling-up idea), then catches a
+qualitatively worse, 12+ minute freeze that resisted every recovery path
+tried -- web resume, the hard-stop API, and even killing a hung backend
+subprocess that happened to be stuck at the same time. Only a full
+process kill ended it.** The web UI's recovery path, 3-for-3 earlier the
+same day, failed on this attempt -- don't treat it as a guaranteed
+mitigation. CPU forensics (target process pinned at a literal, sustained
+0% during the freeze) point toward a genuine blocking wait with no
+timeout, likely in backend-subprocess I/O rather than the VAD/capture
+layer -- a plausible, different mechanism from everything hypothesized
+above, not yet confirmed. This may be two distinct bugs sharing a
+symptom, not one. Full evidence:
+`docs/field-notes/2026-08-12-vad-freeze-harness-catches-short-stalls-and-a-12-minute-unrecoverable-one.md`.
+
+**Correction + headline number, same evening, later still:** the session
+above ran with Windows' own mic "Audio Enhancements" ON the whole time
+(discovered live, disabled, fixed synthetic-audio pickup immediately) --
+an unknown fraction of that session's "total silence" was this OS-level
+setting suppressing the *test signal*, not ConvoBox's own pipeline
+stuck. A second, unrelated bug in the test harness's own success
+detection was also found and fixed (it was restarting visibly-healthy
+sessions). With **both** confounds removed, a clean 10-cycle automated
+batch still shows a real, frequent stall: **30% of cycles required a
+full session restart** (near-total audio pickup silence), and clean
+pause+resume success occurred in only 2/10 cycles. Resume-word matcher
+logic itself was traced and confirmed correct (`resumeword/detector.py`,
+`ListeningGate.observe()`) -- most "resume failed" readings are more
+likely a downstream consequence of the pause phrase itself sometimes not
+registering, not a matcher bug. **This 30% figure is the current
+best-controlled estimate of how often this stress pattern produces a
+real stall** -- treat it as the headline number for release discussions,
+superseding the smaller/less-controlled samples above. Full evidence:
+`docs/field-notes/2026-08-12-vad-freeze-exhaustive-batch-after-fixing-windows-enhancements-confound.md`.
 
 ---
 
@@ -1275,7 +1362,7 @@ closer together in pronunciation.
 
 ## "Open in editor" occasionally opens a different file than the one clicked -- fixed
 
-**Status:** fixed, 2026-08-11 (PR #<followup>) -- a stale-fetch race in
+**Status:** fixed, 2026-08-11 (PR #260) -- a stale-fetch race in
 `renderArtifact()`'s editor-uri lookup, live-reproduced on the real running
 app, then closed with a staleness guard. See below for the full trail:
 one hypothesis ruled out (2026-08-09), the real mechanism structurally
@@ -1462,3 +1549,78 @@ noise in the test room that session (not a code issue). Full detail,
 plus the clean `plan`/`permissive` mode confirmations on both backends
 (N=2 each) and a re-confirmation that opencode remains untestable
 (0 configured credentials): `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
+
+---
+
+## STT error-ladder rejection gates on language probability, not decode confidence -- a low-confidence hallucination can slip through
+
+**Status:** validated-live, 2026-08-12, single instance -- not yet
+confirmed as a systematic gap across more samples.
+
+**Symptom.** JP was speaking live, deliberately only saying variations
+on "stop listening"/"resume listening". The pipeline transcribed
+`'mayday listening resume alpha bravo'` (`lang=en (0.62) dec=0.31`) --
+words he never said, not a garbled version of what he did say (confirmed
+by direct comparison against his own real-time report). It was not
+rejected; it went to the backend as ordinary conversation.
+
+**Why it wasn't caught.** The error ladder's low-confidence rejection
+(`stt.min_language_probability`, 0.4 in this config) checks the
+**language-detection probability**, not the separately-logged **decode
+confidence** (`dec=...`). This hallucination's language probability
+(0.62) was comfortably above threshold even though its decode confidence
+(0.31) was lower than two other transcripts the SAME session correctly
+rejected minutes earlier (`'stop brake'` lang=0.40, `'stop please'`
+lang=0.37). "Confident this is English" and "confident these are the
+right words" are different signals; only the first currently gates
+rejection.
+
+**Why this matters beyond STT accuracy in general.** The hallucinated
+content -- `"alpha bravo"` -- is two of the three words in this session's
+real `approval_phrase` (`"alpha bravo delta"`). It fell one word short
+and nothing unsafe happened, but it's a genuine near-miss on a
+security-relevant phrase, produced by hallucination rather than real
+speech, on a gate that measured the wrong confidence signal.
+
+**Not yet done:** checking whether adding `dec` as a second gate
+condition would catch cases like this without materially increasing
+false rejections on good transcripts -- needs real distribution data
+across both accepted and rejected transcripts, not just this one sample.
+Full evidence: `docs/field-notes/2026-08-12-stt-hallucination-bypasses-the-language-probability-gate-near-miss-on-approval-phrase.md`.
+
+---
+
+## A safeword match in a transcript skips checking that same transcript for a pause phrase
+
+**Status:** validated-live, 2026-08-12. Not a safety gap (the hard-stop
+itself always fires correctly regardless) -- a real, code-confirmed
+interaction gap between two independent control mechanisms, no fix
+proposed yet.
+
+**Symptom.** JP spoke a long, rapid-fire safeword sequence live; STT
+transcribed it as one continuous 11.8s utterance containing multiple
+safewords AND the pause phrase: `'break break break cancel cancel
+cancel ... abort abort abort stop listening cancel cancel cancel ...'`.
+The hard-stop fired correctly on `'break break break'` (first match).
+`'stop listening'`, present verbatim later in the same transcript, was
+never separately evaluated -- the session never entered the paused
+state from this utterance.
+
+**Mechanism, confirmed in code** (`scripts/run_convobox.py:2507-2547`):
+the entire pause/resume check (`listening_gate.observe(text)`) lives
+inside `if not is_hard_stop:`. When a safeword matches a transcript,
+that whole block -- including the pause check -- is skipped entirely for
+that transcript, not just reordered after the hard-stop.
+`PauseListeningDetector` itself is unaffected and would have found the
+phrase if asked; the gap is in the caller never asking.
+
+**Why this is realistic, not contrived:** this project already has a
+documented hallucination pattern (2026-08-06) where a single STT segment
+can span many seconds of repeated/garbled phrases -- exactly the shape
+that lets two different trigger phrases land in one utterance. This
+session hit it live.
+
+**Not fixed this session** -- worth a deliberate decision (run the pause
+check unconditionally, independent of the hard-stop outcome, vs. keep
+today's mutually-exclusive design) rather than a reflexive change. Full
+evidence: `docs/field-notes/2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-utterance.md`.
