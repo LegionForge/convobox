@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from convobox.audio import capture as capture_module
 from convobox.audio.capture import MicrophoneStream
 from convobox.audio.playback import AudioPlayer
 
@@ -166,6 +168,113 @@ async def test_close_after_stream_does_not_hang_on_executor_shutdown() -> None:
     assert elapsed < 1.0
     with pytest.raises(StopAsyncIteration):
         await task
+
+
+# --- stream()'s own stall warning (queued vs. running, same distinction
+# feed_async() in vad/segmenter.py makes) -- diagnostic logging only, never
+# abandons the call. Live-motivated by a 2026-08-12 UAT session that
+# reproduced the still-open KNOWN-ISSUES.md mic-freeze bug three times
+# after feed_async's own instrumentation shipped (PR #269) and never once
+# saw it fire -- this is the equivalent instrumentation for the one call
+# that diagnostic couldn't see. See capture.py's own module-level comment
+# and docs/field-notes/2026-08-12-vad-freeze-live-reproduced-three-times-
+# pr269-did-not-fix-it.md.
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_warn_for_a_normal_fast_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    mic = MicrophoneStream()
+    mic.start()
+    FakeInputStream.instances[0].emit(np.arange(3, dtype=np.float32))
+
+    await mic.stream().__anext__()
+
+    assert "still running" not in caplog.text
+    assert "still QUEUED" not in caplog.text
+    assert "finally returned" not in caplog.text
+    mic.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_warns_when_queue_get_runs_past_the_threshold(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Thresholds patched down so this exercises the real warn-then-repeat
+    # logic without waiting the real 0.5s/5.0s production values.
+    monkeypatch.setattr(capture_module, "_STREAM_STALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(capture_module, "_STREAM_STALL_REPEAT_WARNING_S", 0.05)
+    caplog.set_level(logging.WARNING)
+
+    mic = MicrophoneStream()
+    mic.start()
+    stream = FakeInputStream.instances[0]
+    # Three chunks queued before the slow get() below ever runs, so the
+    # backlog-count report has something real to show.
+    stream.emit(np.arange(3, dtype=np.float32))
+    stream.emit(np.arange(3, 6, dtype=np.float32))
+    stream.emit(np.arange(6, 9, dtype=np.float32))
+
+    real_get = mic._queue.get
+
+    def slow_get(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(0.2)
+        return real_get(*args, **kwargs)
+
+    mic._queue.get = slow_get  # type: ignore[method-assign]
+
+    await mic.stream().__anext__()
+
+    assert "still running" in caplog.text
+    assert "finally returned" in caplog.text
+    # With a 0.05s repeat interval and a 0.2s call, more than one warning
+    # should have fired before completion.
+    assert caplog.text.count("still running") >= 2
+    assert "queued" in caplog.text
+    assert "running" in caplog.text
+    # The two chunks still sitting behind this one must show up in the
+    # backlog count -- directly tests the "is a backlog piling up behind
+    # a stuck consumer" hypothesis from the live session.
+    assert "backlogged" in caplog.text
+    mic.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_still_queued_when_the_worker_has_not_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A task that hasn't been picked up by the dedicated worker at all yet
+    # (real executor contention, e.g. a second concurrent stream()
+    # consumer) must be reported differently from one that's genuinely
+    # running long -- same misattribution gap feed_async's own analogous
+    # test guards against. Simulated deterministically by occupying the
+    # single dedicated worker with a blocking dummy job first, rather than
+    # trying to force real contention.
+    monkeypatch.setattr(capture_module, "_STREAM_STALL_FIRST_WARNING_S", 0.05)
+    monkeypatch.setattr(capture_module, "_STREAM_STALL_REPEAT_WARNING_S", 0.5)
+    caplog.set_level(logging.WARNING)
+
+    mic = MicrophoneStream()
+    mic.start()
+    FakeInputStream.instances[0].emit(np.arange(3, dtype=np.float32))
+
+    block_release = threading.Event()
+    mic._stream_executor.submit(block_release.wait)
+
+    try:
+        task = asyncio.ensure_future(mic.stream().__anext__())
+        await asyncio.sleep(0.15)  # let at least one warning tick fire while queued
+
+        assert "still QUEUED" in caplog.text
+        # Must not claim the queue.get() call itself is what's running/slow
+        # while it's genuinely still queued behind the dummy job.
+        assert "still running" not in caplog.text
+    finally:
+        block_release.set()
+        await task
+    mic.close()
 
 
 def test_close_stops_and_closes_underlying_stream() -> None:

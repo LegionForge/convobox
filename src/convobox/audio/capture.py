@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
+import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from types import TracebackType
@@ -14,6 +16,8 @@ from convobox.audio._sounddevice import import_sounddevice
 if TYPE_CHECKING:
     import sounddevice as sd
 
+logger = logging.getLogger(__name__)
+
 # float32 in [-1, 1] because Silero VAD and faster-whisper both consume
 # float32 numpy arrays directly; int16 would force a conversion on every chunk.
 _DTYPE = "float32"
@@ -22,6 +26,27 @@ _DTYPE = "float32"
 # this, stream()/read() can hang forever after close() since nothing else
 # ever wakes a blocking get() on an empty queue.
 _CLOSE_SENTINEL = object()
+
+# stream()'s own stall warning, same two-stage shape as VAD segmenter.py's
+# feed_async() (_SLOW_CALL_FIRST_WARNING_S/_SLOW_CALL_REPEAT_WARNING_S) --
+# live-motivated by a 2026-08-12 UAT session that reproduced the
+# still-open KNOWN-ISSUES.md mic-freeze bug three times AFTER feed_async's
+# own instrumentation shipped (PR #269) and never once saw it fire. Under
+# continuous capture, self._queue.get() below should return within about
+# one blocksize's worth of audio (~32ms at the default 512/16000) whether
+# or not anyone is speaking -- chunks arrive at a fixed hardware cadence
+# regardless of silence vs. speech. So unlike a plain VAD/STT model call,
+# THIS wait running long for real is not "waiting for the user to talk";
+# it's either genuine executor contention (queued behind another job --
+# unusual with this executor's single dedicated worker, see __init__'s own
+# comment) or the underlying sounddevice callback has stopped delivering
+# new chunks entirely, a capture-layer stall this project has never had
+# direct evidence for before. See docs/KNOWN-ISSUES.md's VAD segmenter
+# freeze entry and docs/field-notes/2026-08-12-vad-freeze-live-reproduced-
+# three-times-pr269-did-not-fix-it.md for the live sessions that motivated
+# this.
+_STREAM_STALL_FIRST_WARNING_S = 0.5
+_STREAM_STALL_REPEAT_WARNING_S = 5.0
 
 
 class MicrophoneStream:
@@ -95,10 +120,79 @@ class MicrophoneStream:
         return chunk  # type: ignore[return-value]
 
     async def stream(self) -> AsyncIterator[np.ndarray]:
-        """Yield captured float32 chunks without blocking the event loop."""
+        """Yield captured float32 chunks without blocking the event loop.
+
+        Logs a stall warning (queued vs. running, same distinction
+        feed_async() in vad/segmenter.py makes) if a single ``queue.get()``
+        call takes unusually long -- see the module-level comment on
+        `_STREAM_STALL_FIRST_WARNING_S` for why that's a meaningful signal
+        here specifically, not just slow-as-usual.
+        """
         loop = asyncio.get_running_loop()
         while self._stream is not None:
-            chunk = await loop.run_in_executor(self._stream_executor, self._queue.get)
+            execution_started: list[float] = []
+
+            def _timed_get(started: list[float] = execution_started) -> np.ndarray | object:
+                started.append(time.monotonic())
+                return self._queue.get()
+
+            task = loop.run_in_executor(self._stream_executor, _timed_get)
+            start = time.monotonic()
+            interval = _STREAM_STALL_FIRST_WARNING_S
+            stalled = False
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    break
+                stalled = True
+                now = time.monotonic()
+                # qsize() is racy by nature (queue.Queue's own docs) but
+                # exact precision doesn't matter here -- this is a coarse
+                # "is a backlog piling up behind a stuck consumer, or is
+                # the queue genuinely empty (capture itself stalled)"
+                # signal, not a correctness-critical count. Directly tests
+                # the live hypothesis from the 2026-08-12 UAT session
+                # (docs/field-notes/2026-08-12-vad-freeze-live-reproduced-
+                # three-times-pr269-did-not-fix-it.md): non-zero here means
+                # `_callback` is still enqueueing chunks and something else
+                # stopped consuming them; zero here (while genuinely
+                # running long, not just queued) means the callback itself
+                # has stopped delivering new chunks.
+                qsize = self._queue.qsize()
+                if execution_started:
+                    queue_wait_s = execution_started[0] - start
+                    running_s = now - execution_started[0]
+                    logger.warning(
+                        "MicrophoneStream.stream() queue.get() still running "
+                        "after %.1fs total (queued %.1fs before the worker "
+                        "picked it up, running %.1fs since -- under continuous "
+                        "capture this should return within one blocksize, "
+                        "~%.0fms) -- %d chunk(s) already backlogged in the "
+                        "queue behind this call -- not abandoning it, just "
+                        "reporting; see docs/KNOWN-ISSUES.md's VAD segmenter "
+                        "freeze entry",
+                        now - start, queue_wait_s, running_s,
+                        1000 * self.blocksize / self.sample_rate, qsize,
+                    )
+                else:
+                    logger.warning(
+                        "MicrophoneStream.stream() queue.get() still QUEUED "
+                        "after %.1fs -- the dedicated worker thread hasn't "
+                        "started it yet (unexpected with a single-worker "
+                        "executor unless another stream() consumer is also "
+                        "active) -- %d chunk(s) backlogged -- not abandoning "
+                        "it, just reporting; see docs/KNOWN-ISSUES.md's VAD "
+                        "segmenter freeze entry",
+                        now - start, qsize,
+                    )
+                interval = _STREAM_STALL_REPEAT_WARNING_S
+            if stalled:
+                logger.warning(
+                    "MicrophoneStream.stream() queue.get() finally returned "
+                    "after %.1fs total (%d chunk(s) still backlogged)",
+                    time.monotonic() - start, self._queue.qsize(),
+                )
+            chunk = task.result()
             if chunk is _CLOSE_SENTINEL:
                 self._queue.put(_CLOSE_SENTINEL)  # let other waiters observe it too
                 return

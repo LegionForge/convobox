@@ -182,13 +182,18 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** fix implemented 2026-08-07, **partially live-validated the
-same day** -- the freeze itself still reproduces live, but the fix's
-actual claim (the rest of the app, including the web UI's Resume
-Listening button, stays responsive while it happens) held up under a
-real recurrence. See the "Follow-up (2026-08-07, live UAT with this fix
-applied)" note below for the full picture; root cause of the underlying
-hang is still unconfirmed.
+**Status:** still open, **not fixed by PR #269** (2026-08-12), despite
+#269 targeting exactly this bug's own then-leading hypothesis
+(thread-pool contention). Live re-tested the same day #269 merged: the
+freeze reproduced three clean times under the same rapid-fire-while-
+paused stress that originally produced it, and #269's own new
+queued-vs-running stall diagnostic (built specifically to catch this)
+never fired once across all three. That's evidence against, not just
+"unconfirmed for," the contention hypothesis -- see the 2026-08-12
+follow-up below and its own field note for the full timing evidence and
+the new leading candidate (an unwatched wait in `MicrophoneStream.stream()`,
+which as of this same pass now has its own equivalent instrumentation,
+not yet live-verified against a real recurrence).
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -372,6 +377,47 @@ normal use, hangs under rapid-fire stress" pattern without requiring
 Silero itself to ever actually stall. Not confirmed -- a concrete lead
 for whoever picks up the diagnostic-logging step above, not a
 diagnosis.
+
+**Follow-up (2026-08-12): PR #269 shipped for exactly this hypothesis,
+same-day live re-test shows it did not fix the freeze, and its own new
+diagnostic never fired.** PR #269 gave the thread-pool-contention theory
+above a concrete mechanism (two indefinite blockers -- mic capture's
+queue read and Piper's chunk pump -- competing with VAD/STT for the
+shared default executor) and dedicated executors for both, plus a
+queued-vs-running split added to `feed_async()`'s own stall warning
+specifically so a recurrence would show which of the two was actually
+happening.
+
+Live re-tested the same day, immediately after merge: three clean
+reproductions in ~15 minutes of the same rapid-fire-hotwords-while-paused
+stress that produced the original incidents (durations 52.8s/72.7s/60.7s;
+web UI Resume Listening recovered all three immediately, voice resume
+did not work during any of them). `feed_async()`'s stall warning never
+fired once. Since that warning is inside the exact code path #269's fix
+targeted, its silence across three real occurrences is evidence the
+stall isn't there -- not just an inconclusive result.
+
+New leading candidate: `MicrophoneStream.stream()`'s own blocking
+`queue.get()` (also given a dedicated executor by #269, but with no
+equivalent stall diagnostic until this same pass). Under continuous
+capture this call should return within about one blocksize (~32ms)
+regardless of silence vs. speech, since the audio callback enqueues
+chunks on a fixed hardware cadence -- so unlike a VAD/STT model call,
+this one running long for real would be a genuinely abnormal, specific
+signal (either real contention on its single-worker executor, or the
+underlying sounddevice callback has stopped delivering chunks entirely).
+Added the same queued-vs-running instrumentation here too, plus queue
+backlog depth (to test JP's own live hypothesis that chunks might be
+piling up behind a stalled consumer rather than capture itself
+stopping) -- **not yet live-verified against a real recurrence.**
+
+Full timing evidence, exact log excerpts, and reasoning:
+`docs/field-notes/2026-08-12-vad-freeze-live-reproduced-three-times-pr269-did-not-fix-it.md`.
+
+**Net: still an open, safety-relevant bug.** Not a release blocker in
+the sense of a regression -- the web-side recovery path remains a real,
+repeatable workaround -- but the underlying freeze itself is unresolved,
+and the mechanism actually responsible is once again unconfirmed.
 
 ---
 
