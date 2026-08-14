@@ -132,7 +132,7 @@ async def _run_ticks(
         # The awaited result is intentionally discarded -- this line's
         # purpose IS the CancelledError it raises (caught by the context
         # manager above), not a return value.
-        await task
+        _ = await task
 
 
 # --- approval-timeout resolution: silence on a pending approval must
