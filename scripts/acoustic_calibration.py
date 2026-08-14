@@ -39,7 +39,10 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "scripts"))
 
-from convobox.audio.aec import EchoCanceller, _resample as _aec_resample
+from run_convobox import AEC_MEASURABLE_ECHO_DB, SINGLE_INSTANCE_PORT, BargeInMonitor
+
+from convobox.audio.aec import EchoCanceller
+from convobox.audio.aec import _resample as _aec_resample
 from convobox.audio.capture import MicrophoneStream
 from convobox.audio.correlation import correlation_at_lag, estimate_reference_lag
 from convobox.audio.playback import AudioPlayer
@@ -47,7 +50,6 @@ from convobox.config import VADConfig, load_config
 from convobox.interrupt_presets import resolve_preset
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.vad.segmenter import UtteranceSegmenter
-from run_convobox import AEC_MEASURABLE_ECHO_DB, BargeInMonitor, SINGLE_INSTANCE_PORT
 
 _TEST_TEXT = (
     "This is an automated acoustic echo cancellation test. The assistant is "
@@ -529,7 +531,11 @@ def run(args: argparse.Namespace) -> Path:
     config = load_config(args.config)
     if not config.audio.echo_cancellation:
         print("note: config currently has audio.echo_cancellation=false; calibration will still test AEC")
-    output_dir = Path(args.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Local wall-clock time, deliberately -- this names a directory an
+    # operator will browse by hand right after a run, not a machine-
+    # readable log timestamp; tz-aware would just make the folder name
+    # harder to match against "when did I run this."
+    output_dir = Path(args.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005
     output_dir.mkdir(parents=True, exist_ok=False)
     lock = _acquire_audio_lock()
     try:

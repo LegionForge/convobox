@@ -88,7 +88,7 @@ def _make_engine(
 # happens to have voices downloaded (.models/ is gitignored, so CI never
 # does). ---
 
-from unittest.mock import patch  # noqa: E402
+from unittest.mock import patch
 
 
 def test_init_loads_the_voice_and_computes_sample_rate() -> None:

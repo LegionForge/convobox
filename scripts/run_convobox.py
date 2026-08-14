@@ -71,6 +71,8 @@ from _console import use_utf8_console
 from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.approval import ApprovalDetector
+from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
+from convobox.audio.ack_tones import generate_ack_tone
 from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
@@ -84,15 +86,13 @@ from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
 from convobox.response_tiering import ContinueDetector
+from convobox.resumeword import ResumeWordDetector
 from convobox.safeword.detector import SafewordDetector
 from convobox.stt.base import STTEngine, TranscriptResult
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, TuiStatus, render_conversation_frame
-from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
-from convobox.audio.ack_tones import generate_ack_tone
-from convobox.resumeword import ResumeWordDetector
 from convobox.web.bridge import WebEventForwarder
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
@@ -1150,7 +1150,7 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
         # / settings_tui.py -- os.system("") with a hardcoded empty-string
         # literal enables ANSI/VT100 escape processing in legacy Windows
         # console hosts; it never executes a program.
-        os.system("")  # nosec B605 B607
+        os.system("")  # nosec B605 B607  # noqa: ASYNC221 -- no process spawned, empty-string literal only
     interval = 1.0
     was_playing = False
     last_broadcast: tuple[str | None, str | None] = (None, None)
@@ -1712,7 +1712,7 @@ def _check_backend_working_dir(backend: object) -> None:
 
 
 async def _cancel_main_on_web_server_exit(
-    web_server_task: "asyncio.Task[None]", main_task: "asyncio.Task[None]"
+    web_server_task: asyncio.Task[None], main_task: asyncio.Task[None]
 ) -> None:
     """uvicorn.Server.serve() installs its OWN signal.signal(SIGINT/SIGTERM/
     SIGBREAK, ...) handler for as long as it's running (uvicorn.server.
@@ -1739,7 +1739,7 @@ async def _cancel_main_on_web_server_exit(
         main_task.cancel()
 
 
-def _install_web_sigint_override(main_task: "asyncio.Task[None]") -> None:
+def _install_web_sigint_override(main_task: asyncio.Task[None]) -> None:
     """Directly takes ownership of SIGINT/SIGTERM/SIGBREAK away from
     uvicorn.Server.serve() (see _cancel_main_on_web_server_exit's docstring
     for why it steals them in the first place), instead of depending on
@@ -1776,7 +1776,7 @@ def _install_web_sigint_override(main_task: "asyncio.Task[None]") -> None:
             signal.signal(sig, _handler)
 
 
-def _cancel_main_task(main_task: "asyncio.Task[None]") -> None:
+def _cancel_main_task(main_task: asyncio.Task[None]) -> None:
     """The web UI's Quit button deliberately does NOT reuse
     _self_signal_interrupt's OS signal round-trip: this closure and the
     route handler that calls it both already run on the SAME event loop
@@ -2446,7 +2446,7 @@ async def run(args: argparse.Namespace) -> None:
         # os.system("") with a hardcoded empty-string literal has the
         # side effect of enabling ANSI/VT100 escape processing in legacy
         # Windows console hosts; it never executes a program.
-        os.system("")  # nosec B605 B607
+        os.system("")  # nosec B605 B607  # noqa: ASYNC221 -- no process spawned, empty-string literal only
         sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
         if sys.platform != "win32":
             # msvcrt.getwch() (used by _read_pending_key on Windows) already
@@ -2979,7 +2979,7 @@ async def _drain_until_idle(adapter, timeout_s: float) -> None:  # type: ignore[
     log.warning("backend still busy after %.0fs; giving up the wait", timeout_s)
 
 
-async def _stop_web_server(server: object | None, task: "asyncio.Task[None] | None") -> None:
+async def _stop_web_server(server: object | None, task: asyncio.Task[None] | None) -> None:
     """Shut down the web UI's uvicorn server (if one was started), used from
     every exit path (--text mode's early return, the mic loop's `finally`).
     Setting should_exit=True is uvicorn's own documented graceful-shutdown

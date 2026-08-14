@@ -19,16 +19,15 @@ import contextlib
 import json
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from unittest.mock import AsyncMock, MagicMock
-
 from convobox.adapters.base import BackendEventType
 from convobox.adapters.claude_code import (
-    ClaudeCodeAdapter,
     _APPROVAL_DECISION_TIMEOUT_S,
     _APPROVAL_HOST,
+    ClaudeCodeAdapter,
     _parse_mcp_list_output,
     _resolve_flags,
 )
@@ -393,7 +392,7 @@ async def test_a_new_approval_succeeds_after_the_old_dead_one_clears() -> None:
 
         await asyncio.wait_for(_wait_cleared(), timeout=5.0)
 
-        reader2, writer2 = await _connect(port)
+        _reader2, writer2 = await _connect(port)
         writer2.write(
             json.dumps({"token": adapter._approval_token, "tool_name": "Write"}).encode() + b"\n"
         )

@@ -11,8 +11,8 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from convobox.config import STTConfig
 from convobox.stt.transcriber import (
     LocalTranscriber,
-    _memory_diagnostic,
     _build_whisper_model,
+    _memory_diagnostic,
     _register_cuda_dll_directories,
 )
 

@@ -117,7 +117,7 @@ async def main() -> None:
     try:
         await asyncio.wait_for(spike_module.run(None, None), timeout=60.0)
         log.info("PASS: run() exited cleanly (safeword path reached and broke the loop)")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.error("FAIL: run() did not exit within 60s — safeword was likely never detected")
         raise SystemExit(1)
 

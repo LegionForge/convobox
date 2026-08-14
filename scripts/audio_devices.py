@@ -250,7 +250,7 @@ def format_level(rms_db: float, peak_db: float, width: int = 30) -> str:
     """A text VU meter: RMS bar over a -60..0 dBFS range, plus a verdict (pure)."""
     floor_db = -60.0
     frac = max(0.0, min(1.0, (rms_db - floor_db) / (0.0 - floor_db)))
-    filled = int(round(frac * width))
+    filled = round(frac * width)
     bar = "#" * filled + "-" * (width - filled)
     return (
         f"[{bar}] rms {rms_db:6.1f} dBFS  peak {peak_db:6.1f} dBFS  "
@@ -567,7 +567,7 @@ def _resample_audio(audio: Any, src_rate: int, dst_rate: int) -> Any:
     audio = np.asarray(audio, dtype=np.float32)
     if src_rate == dst_rate or audio.size == 0:
         return audio
-    n_dst = int(round(len(audio) * dst_rate / src_rate))
+    n_dst = round(len(audio) * dst_rate / src_rate)
     if n_dst <= 0:
         return np.zeros(0, dtype=np.float32)
     src_x = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)

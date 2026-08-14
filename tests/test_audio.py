@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -18,7 +18,7 @@ from convobox.audio.playback import AudioPlayer
 class FakeInputStream:
     """Records construction kwargs and captures the capture callback."""
 
-    instances: list["FakeInputStream"] = []
+    instances: ClassVar[list[FakeInputStream]] = []
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -344,10 +344,9 @@ def test_context_manager_starts_and_closes() -> None:
 
 
 def test_context_manager_closes_on_exception() -> None:
-    with pytest.raises(RuntimeError):
-        with MicrophoneStream():
-            assert FakeInputStream.instances[0].started is True
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), MicrophoneStream():
+        assert FakeInputStream.instances[0].started is True
+        raise RuntimeError("boom")
 
     assert FakeInputStream.instances[0].closed is True
 
@@ -355,7 +354,7 @@ def test_context_manager_closes_on_exception() -> None:
 class FakeOutputStream:
     """OutputStream whose write() records blocks and can be gated for timing."""
 
-    instances: list["FakeOutputStream"] = []
+    instances: ClassVar[list[FakeOutputStream]] = []
     # Read at construction time so a test can arm a delay BEFORE calling
     # play() and have it apply from the very first write. Setting
     # instance.per_write_delay only after play() has already started races
@@ -631,7 +630,7 @@ def test_play_stream_with_no_chunks_never_touches_the_device() -> None:
 
 # --- output resampling (device-rate conformance; the WASAPI/DirectSound fix) ---
 
-from convobox.audio.playback import (  # noqa: E402
+from convobox.audio.playback import (
     _device_output_rate,
     _resample,
     _StreamResampler,

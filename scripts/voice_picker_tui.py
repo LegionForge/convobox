@@ -291,7 +291,7 @@ def _play(state: TuiState, player: AudioPlayer) -> None:
         draw(state)
         try:
             download(key, state.voices_dir)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- TUI: report in the status line, keep the app alive
             state.status = f"download failed: {exc}"
             return
         state.refresh_installed()
@@ -307,7 +307,7 @@ def _play(state: TuiState, player: AudioPlayer) -> None:
         player.play(audio, tts.sample_rate)
         duration = len(audio) / tts.sample_rate
         state.status = f"playing {key} ({duration:.1f}s, synthesized in {synth_ms:.0f}ms) -- S stops"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- TUI: report in the status line, keep the app alive
         state.status = f"audition failed: {exc}"
 
 
@@ -324,7 +324,7 @@ def _download(state: TuiState) -> None:
         download(key, state.voices_dir)
         state.refresh_installed()
         state.status = f"downloaded {key} -- P plays it"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- TUI: report in the status line, keep the app alive
         state.status = f"download failed: {exc}"
 
 

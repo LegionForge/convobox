@@ -10,11 +10,11 @@ pytest.importorskip(
     "are opt-in, not part of dev, so most CLI/TUI-only installs never pull them in",
 )
 
-import yaml  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+import yaml
+from fastapi.testclient import TestClient
 
-from convobox.web.app import create_app  # noqa: E402
-from convobox.web.history import HistoryDB  # noqa: E402
+from convobox.web.app import create_app
+from convobox.web.history import HistoryDB
 
 # Required by app.py's require_csrf_header middleware on every mutating
 # request (see its own docstring, GitHub issue #235 finding A3) -- set as

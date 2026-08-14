@@ -364,7 +364,7 @@ def test_echo_aware_player_audible_resets_after_a_hard_stop(
 
 # --- stage-1 text-level echo suppression ---
 
-from scripts.run_convobox import SpokenEchoFilter, SpokenTextRecorder  # noqa: E402
+from scripts.run_convobox import SpokenEchoFilter, SpokenTextRecorder
 
 
 def _filter_with(spoken: str, at: float = 100.0) -> SpokenEchoFilter:
@@ -436,7 +436,7 @@ def test_recorder_notes_text_and_delegates() -> None:
 
 # --- single-instance guard ---
 
-from scripts.run_convobox import acquire_single_instance_lock  # noqa: E402
+from scripts.run_convobox import acquire_single_instance_lock
 
 
 def test_single_instance_lock_is_exclusive_and_releases() -> None:
@@ -458,7 +458,7 @@ def test_single_instance_lock_is_exclusive_and_releases() -> None:
 
 # --- AEC stats verdict (three-way; the false-success-on-silence fix) ---
 
-from scripts.run_convobox import interpret_aec_stats  # noqa: E402
+from scripts.run_convobox import interpret_aec_stats
 
 
 def test_aec_verdict_empty_without_numbers() -> None:
@@ -499,7 +499,7 @@ def test_aec_verdict_under_cancelling_when_headroom_remains() -> None:
 # whole time even after fixing the delay hint, so residual echo in the
 # reverb tail right after playback is a real remaining risk) ---
 
-from scripts.run_convobox import _MAX_GRACE_S, grace_s_for_last_response  # noqa: E402
+from scripts.run_convobox import _MAX_GRACE_S, grace_s_for_last_response
 
 
 def test_grace_unchanged_without_numbers() -> None:

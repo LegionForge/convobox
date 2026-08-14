@@ -36,7 +36,10 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
-from convobox.audio.correlation import correlation_at_lag, estimate_reference_lag  # noqa: E402
+from convobox.audio.correlation import (
+    correlation_at_lag,
+    estimate_reference_lag,
+)
 
 _SEGMENT_WINDOW_S = 0.02  # 20ms short-term RMS window for silence detection
 

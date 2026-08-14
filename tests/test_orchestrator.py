@@ -269,7 +269,7 @@ async def test_hard_stop_method_cancels_the_event_loop() -> None:
     # coverage on hard_stop() itself, not just through handle_transcript()'s
     # safeword branch, now that other callers (the web UI's Pause/Stop
     # buttons) delegate to it too.
-    orch, adapter, _, _ = make_orchestrator(busy=False)
+    orch, _adapter, _, _ = make_orchestrator(busy=False)
     orch.start_event_loop()
     assert orch._events_task is not None
     await orch.hard_stop()
