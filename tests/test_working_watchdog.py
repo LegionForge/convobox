@@ -112,8 +112,6 @@ async def _run_ticks(
     executes -- for tests that need to mutate fake state BETWEEN ticks
     (e.g. "playback just finished" only becomes true partway through).
     """
-    import scripts.run_convobox as rc_mod
-
     calls = 0
 
     async def counted_sleep(_seconds: float) -> None:
@@ -125,9 +123,15 @@ async def _run_ticks(
         if pre_tick and calls in pre_tick:
             pre_tick[calls]()
 
-    monkeypatch.setattr(rc_mod.asyncio, "sleep", counted_sleep)
+    # scripts.run_convobox's own `import asyncio` is the same module object
+    # as this file's -- no need for a second import of that module just to
+    # reach it through an attribute.
+    monkeypatch.setattr(asyncio, "sleep", counted_sleep)
     task = asyncio.ensure_future(coro_factory())
     with pytest.raises(asyncio.CancelledError):
+        # The awaited result is intentionally discarded -- this line's
+        # purpose IS the CancelledError it raises (caught by the context
+        # manager above), not a return value.
         await task
 
 
