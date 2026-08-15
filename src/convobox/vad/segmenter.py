@@ -328,7 +328,11 @@ class UtteranceSegmenter:
             call_start = time.monotonic()
             prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
             logger.debug(
-                "VAD Silero call took %.1fms", (time.monotonic() - call_start) * 1000
+                "VAD Silero call took %.1fms prob=%.3f triggered=%s "
+                "trailing_silence=%s speech_windows=%s",
+                (time.monotonic() - call_start) * 1000,
+                prob, self._triggered, self._trailing_silence_windows,
+                self._speech_windows,
             )
         else:
             prob = float(self._model(torch.from_numpy(window), _SAMPLE_RATE).item())
