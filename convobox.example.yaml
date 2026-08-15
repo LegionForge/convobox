@@ -188,6 +188,15 @@ safeword:
     - "halt halt halt"    # normal conversation -- add any you like, but
                           # a word tripled (not a single word) is the
                           # anti-false-positive mechanism; keep that shape
+  # Opt-in, unset by default. Must be one of the phrases listed above. A
+  # normal safeword only asks the backend to abort its current turn over
+  # its own channel -- if the backend process itself is wedged (see
+  # docs/KNOWN-ISSUES.md's VAD/readline freeze entries), that polite
+  # request can go unanswered too. kill_phrase instead force-kills the
+  # backend's actual OS process and ends the whole ConvoBox session --
+  # a real ejection, not a request. Use a phrase you won't say by
+  # accident; the session ends, it does not resume.
+  # kill_phrase: "eject eject eject"
 
 # ---------------------------------------------------------------------------
 # vad -- voice activity detection (Silero) segmentation. Defaults are good;

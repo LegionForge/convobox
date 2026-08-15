@@ -1464,10 +1464,11 @@ the stale response is now discarded and the href stays correct.
 
 ## A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops
 
-**Status:** validated-live, 2026-08-09, no fix built yet -- two follow-up
-options identified (below), deliberately not implemented without
-scoping the tradeoff first. Full evidence, exact timestamps, and the
-mechanism writeup: `docs/field-notes/2026-08-09-hard-stop-does-not-
+**Status:** validated-live, 2026-08-09. Option 1 (honesty fix) was built
+shortly after. Option 2 (escalating force-kill) got a Phase 1 build
+2026-08-14 -- see below; the "escalating" part (automatic, timeout-based)
+was deliberately NOT what got built. Full evidence, exact timestamps, and
+the mechanism writeup: `docs/field-notes/2026-08-09-hard-stop-does-not-
 cancel-an-in-flight-tool-call.md`.
 
 **Symptom.** During a real ~1h38m live voice UAT session (codex backend,
@@ -1523,6 +1524,54 @@ hard-stop just doesn't currently escalate to using it.
    with its own restart policy resist cancellation; what happens to
    output ordering (pre-delay vs. post-delay messages) when a delayed
    command is interrupted mid-stream.
+
+**Option 2, Phase 1 built 2026-08-14** -- a *manual* escalation, not the
+automatic timeout-based one described above. Motivated by three real
+freeze incidents the same evening (`readline()` hung 65.5s+/236.7s+/
+unresolved-until-killed) where `send_hard_stop()`'s own polite interrupt
+rode the SAME channel that was stuck, so it couldn't reach the backend
+either. `BackendAdapter.force_kill()` (default: delegates to `aclose()`;
+`CodexAdapter`/`ClaudeCodeAdapter` override with a real OS-level
+`terminate()` -> wait 5s -> `kill()`, no RPC round-trip attempted at
+all) + `Orchestrator.force_kill()` + an opt-in `safeword.kill_phrase`
+config field (must be one of `hard_stop_phrases`; unset by default) that
+routes ONE specific configured safeword to this instead of the normal
+polite `hard_stop()`. JP's own config: `kill_phrase: "eject eject
+eject"`. Ends the whole ConvoBox session afterward (same as Quit) --
+does NOT attempt to keep the session alive by respawning and
+reconnecting.
+
+**Not done in Phase 1, scoped for a possible Phase 2:** reconnecting a
+freshly-spawned backend to the SAME conversation after a kill, instead of
+ending the session. Checked whether this is even possible 2026-08-14 via
+`codex.cmd app-server generate-json-schema`: codex's real protocol has a
+`thread/resume` RPC (`{threadId: string, ...}` params) that could
+reconnect to an existing server-side thread -- genuinely unverified
+whether resuming a thread whose last turn was violently killed mid-flight
+behaves cleanly, and `codex.py`'s adapter doesn't call it today
+(`_ensure_thread()` always calls `thread/start`, a fresh thread, when
+`self._thread_id is None`). `claude_code.py`'s adapter runs with
+`--no-session-persistence` and has no equivalent capability to reconnect
+to even in principle. `force_kill()`'s own docstring on both adapters
+scaffolds this seam (deliberately doesn't clear any resumable identifier)
+without implementing it.
+
+**Also not done:** an automatic, timeout-based escalation (the original
+"if no completion arrives within a grace period, escalate" framing above)
+-- what got built is an explicit, separate, operator-triggered phrase,
+not a fallback that fires on its own after `hard_stop()` seems to be
+taking too long. That would need its own scoping (what grace period, does
+it also default to ending the session) and hasn't happened.
+
+**Not yet live-verified.** Built and unit-tested (both adapters' real
+terminate/kill sequence, the config validator, the orchestrator branch
+and its logging) but the actual live scenario -- saying the configured
+kill phrase during a real wedged-backend freeze and confirming the
+process really dies and the session really ends -- has not been tested
+against a real recurrence yet. JP's own requirement before trusting it:
+a dedicated reliability pass on "eject eject eject" specifically (does it
+fire reliably, does it ever false-positive/false-negative), not assumed
+from the unit tests alone.
 
 ---
 
