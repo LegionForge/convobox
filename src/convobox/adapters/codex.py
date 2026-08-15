@@ -118,6 +118,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any
@@ -244,6 +245,30 @@ def _kill_by_command_text(command: str) -> list[int]:
     metacharacters, so a literal check avoids both false negatives from
     a broken pattern and the smaller but real risk of a regex matching
     more broadly than the literal text did).
+
+    POSIX-only by construction, not just by validation: `ps -eo
+    pid,command` and `signal.SIGKILL` are both POSIX-specific --
+    `signal.SIGKILL` does not exist as an attribute on Windows'
+    `signal` module at all (an `AttributeError`, not a graceful
+    failure, if this were ever reached there), and `ps` isn't a
+    standard Windows command either. Callers MUST check
+    `sys.platform != "win32"` before calling this -- it does not guard
+    itself, so it stays a plain, easily-testable function rather than
+    needing its own internal no-op-elsewhere branch.
+
+    Only macOS has actually been LIVE-VALIDATED (2026-08-15, 15/15
+    clean across three real scenarios -- see the accompanying field
+    note). Linux is expected, not confirmed, to behave the same way:
+    the underlying mechanism this fallback depends on (a codex child
+    reported by shell-quoted invocation text that doesn't survive into
+    `ps`'s own argv reconstruction) is a property of POSIX shell
+    parsing, not of macOS specifically, and codex's process-spawning
+    model (fork/exec, the real child becoming its own session/process-
+    group leader) is architecturally the same on any POSIX system --
+    but this has not been run against a real Linux `codex app-server`
+    to confirm the exact wrapper text (e.g. `/bin/bash -c` vs. macOS's
+    `/bin/zsh -lc`) unwraps the same way. Treat Linux as "should work,
+    not yet proven" until validated live there.
     """
     stripped_command = _strip_shell_quotes(command)
     try:
@@ -539,9 +564,18 @@ class CodexAdapter(BackendAdapter):
         # 15/15 clean across two real scenarios (shell_sleep,
         # file_write_progressive) where the normal path alone was 0/15 --
         # see docs/field-notes/2026-08-15-force-kill-pgrep-fallback-*.md.
+        #
+        # POSIX-only, not Windows (see _kill_by_command_text()'s own
+        # docstring): `ps`/`signal.SIGKILL` don't exist/work on Windows,
+        # so this is unconditionally excluded there rather than left to
+        # fail loudly (an uncaught AttributeError on signal.SIGKILL) or
+        # silently on a platform that was never tested. Linux is
+        # included on the strength of the same POSIX mechanisms macOS
+        # was validated against, NOT because it has been independently
+        # confirmed live -- see the docstring's own caveat.
         command, was_busy = self._last_command_text, self._busy
         await self._terminate_and_kill_process()
-        if was_busy and command:
+        if was_busy and command and sys.platform != "win32":
             _kill_by_command_text(command)
 
     async def _terminate_and_kill_process(self) -> None:
