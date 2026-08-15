@@ -505,9 +505,26 @@ this freeze class isn't confirmed to require stress conditions at all.
 Full evidence: `docs/field-notes/2026-08-14-mic-pipeline-silence-freeze-
 isolated-from-backend-via-typed-text-then-a-41-minute-compound-freeze.md`.
 
-**Not yet tested on macOS** -- still standing, now a higher-priority gap
-given the ~41-minute freeze suggests this may not be a Windows-specific
-or stress-specific phenomenon.
+**Reproduced live on macOS, 2026-08-15 -- NOT Windows-specific.** A
+5-cycle synthetic-speech stress harness (same shape as the Windows
+sessions above, Piper phrases through real speakers into a real mic)
+caught both the short self-resolving `readline()` stalls (5.5s-30.7s,
+same pattern) and, on the very first run, a severe freeze matching the
+12-minute Windows case's own signature: 94.4s stuck `readline()`
+(CPU forensics confirmed byte-identical process time across samples --
+genuinely zero CPU, not descheduled), plus over 2 minutes of total
+mic-pipeline silence (`Processing audio` never logged again) that
+survived a dedicated safeword recovery attempt, killing the hung
+subprocess directly, AND a fresh utterance played afterward. **One real
+platform divergence found:** killing the hung subprocess DID unblock
+the stuck `readline()` on macOS (`proc.returncode=-15`, immediate) --
+the opposite of the Windows note's own finding that a `taskkill` did
+NOT unblock the equivalent stuck read. The recovery still failed
+overall on both platforms, just for different, now-distinguishable
+reasons -- macOS's read woke up but something downstream (mic
+capture/VAD layer) stayed silent anyway; Windows' read never woke up at
+all. Full evidence: `docs/field-notes/2026-08-15-vad-mic-freeze-live-
+reproduced-on-macos.md`.
 
 ---
 
