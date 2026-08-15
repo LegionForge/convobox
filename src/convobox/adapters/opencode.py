@@ -10,7 +10,12 @@ from urllib.parse import urlparse
 import httpx
 from httpx_sse import aconnect_sse
 
-from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventType
+from convobox.adapters.base import (
+    BackendAdapter,
+    BackendEvent,
+    BackendEventType,
+    anext_with_stall_diagnostic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -271,8 +276,15 @@ class OpenCodeAdapter(BackendAdapter):
         # the tiny remaining window.
         self._listening.set()
         sse_source = await self._sse_context.__aenter__()
+        sse_iter = sse_source.aiter_sse().__aiter__()
         try:
-            async for sse in sse_source.aiter_sse():
+            while True:
+                try:
+                    sse = await anext_with_stall_diagnostic(
+                        sse_iter, "opencode SSE events()"
+                    )
+                except StopAsyncIteration:
+                    break
                 outer = _safe_json_loads(sse.data)
                 if outer is None:
                     continue

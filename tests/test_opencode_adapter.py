@@ -441,6 +441,50 @@ async def test_events_yield_typed_backend_events_from_real_shape(
 
 
 @pytest.mark.asyncio
+async def test_events_sse_stall_logs_warning_and_still_yields_the_frame(
+    server: OpenCodeServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Found live, 2026-08-15 (docs/field-notes/2026-08-15-force-kill-
+    # command-matching-fallback-and-opencode-freeze-diagnostic-gap.md):
+    # events()'s SSE read had zero stall diagnostic, unlike codex.py's/
+    # claude_code.py's readline() calls (PR #274) -- a real instrumentation
+    # gap on a structurally identical unbounded wait (read=None). This
+    # proves anext_with_stall_diagnostic() actually fires on a real delayed
+    # frame, not just on paper, and that the frame is still delivered
+    # correctly once it arrives (a stall is diagnosed, not abandoned).
+    adapter = OpenCodeAdapter(server.base_url)
+    events = []
+
+    async def collect() -> None:
+        async for event in adapter.events():
+            events.append(event)
+
+    collector = asyncio.ensure_future(collect())
+    try:
+        with caplog.at_level("WARNING"):
+            # No frame released yet -- the SSE read is genuinely pending.
+            # _READLINE_STALL_FIRST_WARNING_S is 0.5s; wait past it.
+            await asyncio.sleep(0.7)
+            await _release_all_gates(server, len(_SINGLE_STEP_FRAMES))
+            await asyncio.wait_for(collector, timeout=5)
+    finally:
+        collector.cancel()
+        await adapter._client.aclose()
+
+    stall_warnings = [r for r in caplog.records if "anext() still pending" in r.message]
+    recovered = [r for r in caplog.records if "anext() finally returned" in r.message]
+    assert stall_warnings, "expected at least one stall warning during the 0.7s delay"
+    assert recovered, "expected a recovery log line once the frame arrived"
+    assert all("opencode SSE events()" in r.message for r in stall_warnings + recovered)
+    # The stall must not have dropped or corrupted the eventual frame.
+    assert [e.type for e in events] == [
+        BackendEventType.TEXT,
+        BackendEventType.TOOL_CALL,
+        BackendEventType.TOOL_RESULT,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_malformed_sse_frame_is_skipped_not_crashed(server: OpenCodeServer) -> None:
     # A genuinely malformed data line (not valid JSON) must not crash the
     # generator or the events it's driving for -- _safe_json_loads()

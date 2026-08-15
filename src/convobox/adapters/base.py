@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,52 @@ async def readline_with_stall_diagnostic(
         logger.warning(
             "%s: readline() finally returned after %.1fs total (proc.returncode=%s)",
             label, time.monotonic() - start, proc.returncode,
+        )
+    return task.result()
+
+
+async def anext_with_stall_diagnostic[T](
+    aiter: AsyncIterator[T],
+    label: str,
+) -> T:
+    """await anext(aiter), logging the same stall warnings as
+    readline_with_stall_diagnostic() -- for adapters whose long-lived read
+    is an async-generator/SSE iterator (OpenCodeAdapter.events()) rather
+    than a StreamReader with an owning subprocess. No proc.returncode
+    equivalent exists here (there is no owned OS process to report on, by
+    design -- see OpenCodeAdapter's own docstring), so these warnings carry
+    elapsed time only.
+
+    Added because PR #274's readline_with_stall_diagnostic() instrumented
+    codex.py's and claude_code.py's own blocking reads (the backends with
+    live freeze incidents) but never audited opencode.py's structurally
+    similar unbounded wait (its SSE connection is opened with
+    ``read=None`` -- no timeout at all, a deliberate choice for long
+    multi-step tool calls, see events()' own comment) -- a real
+    instrumentation gap found live, 2026-08-15, not yet known to have
+    caused an actual incident. Raises StopAsyncIteration exactly like a
+    bare ``await anext(aiter)`` would once the stream ends.
+    """
+    task = asyncio.ensure_future(anext(aiter))
+    start = time.monotonic()
+    interval = _READLINE_STALL_FIRST_WARNING_S
+    stalled = False
+    while True:
+        done, _pending = await asyncio.wait({task}, timeout=interval)
+        if done:
+            break
+        stalled = True
+        logger.warning(
+            "%s: anext() still pending after %.1fs -- not abandoning it, "
+            "just reporting; see docs/KNOWN-ISSUES.md's VAD segmenter "
+            "freeze entry",
+            label, time.monotonic() - start,
+        )
+        interval = _READLINE_STALL_REPEAT_WARNING_S
+    if stalled:
+        logger.warning(
+            "%s: anext() finally returned after %.1fs total",
+            label, time.monotonic() - start,
         )
     return task.result()
 
