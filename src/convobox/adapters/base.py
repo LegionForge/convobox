@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ async def readline_with_stall_diagnostic(
     stream: asyncio.StreamReader,
     proc: asyncio.subprocess.Process,
     label: str,
+    busy: Callable[[], bool] | None = None,
 ) -> bytes:
     """await stream.readline(), logging a stall warning instead of blocking
     silently -- and logging proc.returncode on every warning, so a process
@@ -42,6 +43,16 @@ async def readline_with_stall_diagnostic(
     not fix that freeze -- it gives the next recurrence real telemetry
     (queued-vs-running timing, proc.returncode at each check) instead of
     the silence every prior live repro produced.
+
+    ``busy``, if given, is called fresh at each warning to report whether
+    a turn is actually in flight right now. Added 2026-08-15 after a live
+    capture (docs/field-notes/2026-08-15-*) showed this stall firing
+    routinely during ordinary IDLE gaps between turns -- readline() has
+    nothing to read whenever the backend has genuinely finished and is
+    correctly waiting for the next command, which looks identical in this
+    log line to a real stuck-mid-turn hang unless busy state is also
+    shown. A long stall with busy=False is very likely harmless; one with
+    busy=True is the shape actually worth treating as a freeze.
     """
     task = asyncio.ensure_future(stream.readline())
     start = time.monotonic()
@@ -53,16 +64,19 @@ async def readline_with_stall_diagnostic(
             break
         stalled = True
         logger.warning(
-            "%s: readline() still pending after %.1fs (proc.returncode=%s) "
-            "-- not abandoning it, just reporting; see docs/KNOWN-ISSUES.md's "
-            "VAD segmenter freeze entry",
+            "%s: readline() still pending after %.1fs (proc.returncode=%s, "
+            "busy=%s) -- not abandoning it, just reporting; see "
+            "docs/KNOWN-ISSUES.md's VAD segmenter freeze entry",
             label, time.monotonic() - start, proc.returncode,
+            busy() if busy is not None else "unknown",
         )
         interval = _READLINE_STALL_REPEAT_WARNING_S
     if stalled:
         logger.warning(
-            "%s: readline() finally returned after %.1fs total (proc.returncode=%s)",
+            "%s: readline() finally returned after %.1fs total "
+            "(proc.returncode=%s, busy=%s)",
             label, time.monotonic() - start, proc.returncode,
+            busy() if busy is not None else "unknown",
         )
     return task.result()
 

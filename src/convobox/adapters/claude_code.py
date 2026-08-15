@@ -702,7 +702,8 @@ class ClaudeCodeAdapter(BackendAdapter):
         assert proc.stderr is not None  # nosec B101 -- spawned with stderr=PIPE
         while True:
             line = await readline_with_stall_diagnostic(
-                proc.stderr, proc, "claude_code _drain_stderr"
+                proc.stderr, proc, "claude_code _drain_stderr",
+                busy=self.is_busy,
             )
             if not line:
                 return
@@ -872,7 +873,8 @@ class ClaudeCodeAdapter(BackendAdapter):
         try:
             while True:
                 line = await readline_with_stall_diagnostic(
-                    proc.stdout, proc, "claude_code _read_loop"
+                    proc.stdout, proc, "claude_code _read_loop",
+                    busy=self.is_busy,
                 )
                 if not line:
                     return
