@@ -1600,6 +1600,33 @@ process at all (same shape as the web-fetch case). Flagged rather than
 silently skipped -- standing up a real/mock MCP server would be new
 infrastructure with no different mechanism to actually observe.
 
+**Extended to claude-code and opencode, same evening (JP's own
+follow-up request).** claude-code: identical methodology, **30/30**,
+same "never caught mid-write partial progress" limitation, plus one
+useful outlier -- a single `shell_sleep` run took `force_kill()` 4.92s
+(every other run: 0.01-0.48s), live confirmation the `terminate()`
+-ignored-so-escalate-to-`kill()` fallback path actually fires for real,
+not just in the unit suite's mocked-timeout test.
+
+opencode is architecturally different -- `OpenCodeAdapter` never owns an
+OS process at all (an HTTP client to an already-running `opencode
+serve`), so its `force_kill()` is the `BackendAdapter` default
+(`aclose()`: close the connection, nothing more). Expected the real
+spawned process to survive every time. **Actual: 23/30 matched that
+expectation; 7/30 the spawned process died anyway** (highest on
+`web_fetch_slow`, 4/10) even though `force_kill()` did the exact same
+thing (an instant, ~0.00s local connection close) in every single run.
+Root cause not established -- flagged as a real open question, not
+guessed at further; needs opencode's own server internals to explain.
+**Net: opencode's kill behavior is unpredictable and must not be relied
+upon** -- the architectural limitation this section already named is
+confirmed real, but "the process always survives" is not the accurate
+description of what happens; "sometimes, unpredictably, it doesn't" is.
+
+Full data (all three backends, three scenario types, 10 runs each, raw
+per-iteration results) in `docs/field-notes/2026-08-14-force-kill-
+reliability-across-all-three-backends.md`.
+
 **Still open:** the voice/STT-trigger reliability question -- does
 saying "eject eject eject" live, through the real mic pipeline, actually
 match and route to `force_kill()` reliably, and does normal conversation
