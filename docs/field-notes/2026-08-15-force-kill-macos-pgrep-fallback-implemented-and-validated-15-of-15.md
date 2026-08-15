@@ -1,6 +1,6 @@
 ---
-title: The untested "pgrep/ps command-line matching fallback" idea flagged in this session's earlier force_kill() field note is now a real, implemented, and validated fix -- CodexAdapter.force_kill() falls back to a quote-stripped substring match against live `ps` output when the normal terminate/kill can't reach the real spawned child, closing the macOS gap 15/15 clean across all three test scenarios (0/15 before); required discovering and correcting a real matching bug first (codex's reported command text keeps its shell-quoting wrapper, but the live process's actual argv has already had that quoting consumed, so a naive literal substring match silently matched nothing)
-status: validated-live
+title: The untested "pgrep/ps command-line matching fallback" idea flagged in this session's earlier force_kill() field note is now a real, implemented, and validated fix -- CodexAdapter.force_kill() falls back to a quote-stripped substring match against live `ps` output when the normal terminate/kill can't reach the real spawned child, closing the macOS gap 15/15 clean across all three test scenarios (0/15 before); required discovering and correcting a real matching bug first (codex's reported command text keeps its shell-quoting wrapper, but the live process's actual argv has already had that quoting consumed, so a naive literal substring match silently matched nothing). SUPERSEDED IN PART, see the Correction section below: the "15/15 clean" validation itself had a blind spot (multi-statement scripts fork orphaned children the marker-based survivor check couldn't see) -- now fixed to recursively kill descendants, re-validated 10/10 with a corrected tree-aware survivor check.
+status: validated-live, with a correction (see bottom)
 date: 2026-08-15
 project: ConvoBox (github.com/LegionForge/convobox)
 versions: branch experiment/codex-pgrep-fallback-kill (off feat/force-kill-and-kill-phrase-safety @ 3f718e8, itself off main), codex-cli as installed tonight, macOS Darwin 25.6.0 (Apple Silicon, jps-Mac-mini)
@@ -148,3 +148,53 @@ should land as part of PR #277 or as its own follow-up.
   `processId` that would make this whole fallback unnecessary -- still
   untested, the other item from the earlier field note's "Not done
   here" list.
+
+## Correction (same day, later): the "15/15 clean" validation had a blind spot
+
+While checking whether this fallback could be made Linux-portable
+(prompted directly by JP), a manual `ps` check of leftover processes
+after what this note's own tests had called "clean" found three
+orphaned `sleep 90` processes still running, reparented to pid 1.
+
+**Root cause**: `sh -c 'echo <marker>; sleep 90'` is a MULTI-STATEMENT
+script. Only a script's tail command can be exec'd in-place; `sleep
+90` here runs as a genuinely SEPARATE forked child of the `sh -c`
+wrapper. `_kill_by_command_text()` matched and killed the wrapper
+(whose command line contains the marker), but never looked for or
+killed that wrapper's children -- `sleep 90` simply outlived its
+parent's death, orphaned.
+
+**Why the original validation didn't catch it**: the survivor check
+(`pgrep -f <marker>`) only re-searches for the ORIGINAL marker text --
+which was embedded in the `echo` portion of the script, never in the
+bare `sleep 90` that became a separate process. The orphan was
+invisible to the exact methodology this note used to claim "clean."
+
+**The fix**: `_kill_by_command_text()` now builds a full pid->ppid map
+from `ps -eo pid,ppid,command`, and after finding matches by command
+text, walks out (BFS) to every live descendant, killing those too --
+not just the one matched process.
+
+**Re-validation, this time correctly**: a new survivor check captures
+the FULL process tree (the matched pid plus all descendants) BEFORE
+the kill, then individually confirms each one is dead afterward --
+rather than re-searching by marker text, which is exactly what missed
+the orphan the first time. 10/10 clean across two batches, each run
+correctly showing 2 processes in the tree (the `sh -c` wrapper + the
+forked `sleep`), both confirmed killed.
+
+**What transfers**: a survivor check that re-uses the SAME signal
+(marker text, a log line, an event) the original detection used is
+structurally blind to any failure mode that changes that signal along
+the way -- here, a fork stripping the marker out of the child's own
+command line. A more robust check follows the actual causal chain
+(process ancestry, in this case) rather than re-querying the same
+observable that already succeeded once. (validated-live)
+
+This correction is the SAME commit range as this field note (branch
+`experiment/codex-pgrep-fallback-kill`) -- current `HEAD` on that
+branch already includes the fix; the "15/15" figures throughout the
+body above reflect the validation methodology available at the time
+and are superseded by the 10/10 tree-aware figures here, not
+retracted as false (the fallback DID kill the matched process every
+time; it just didn't kill enough).
