@@ -484,6 +484,31 @@ yet reproduced or tested on macOS.** Next real step: reproduce with this
 instrumentation live (Windows first, since that's where every prior
 repro happened) and read what actually fired.
 
+**That next step happened the same evening -- two more readline()
+freezes (65.5s+, 236.7s) reproduced live with the new instrumentation
+actually firing for the first time**, confirming the leading hypothesis
+directly rather than by inference. Full evidence: `docs/field-notes/
+2026-08-14-vad-freeze-harness-live-catches-two-more-readline-stalls-with-
+real-telemetry.md`.
+
+**A third, structurally DIFFERENT freeze also occurred the same evening**
+-- zero readline() warnings at all (ruling out this same mechanism),
+isolated for the first time via typed text (which bypasses the mic/VAD
+pipeline entirely and reached a healthy, responsive backend while the
+mic layer stayed dead) -- direct confirmation that the mic-freeze and
+backend-readline-freeze are genuinely separate bugs, not inference. The
+same session then entered an unnoticed **~41-minute** compound freeze
+(three segments: ~14.1min, ~7.9min, then 18.8+ min never self-resolving)
+discovered only in forensic log review afterward, triggered by ordinary
+low-volume activity rather than a rapid-fire burst -- the first evidence
+this freeze class isn't confirmed to require stress conditions at all.
+Full evidence: `docs/field-notes/2026-08-14-mic-pipeline-silence-freeze-
+isolated-from-backend-via-typed-text-then-a-41-minute-compound-freeze.md`.
+
+**Not yet tested on macOS** -- still standing, now a higher-priority gap
+given the ~41-minute freeze suggests this may not be a Windows-specific
+or stress-specific phenomenon.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")
