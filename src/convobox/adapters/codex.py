@@ -237,17 +237,32 @@ def _strip_shell_quotes(text: str) -> str:
 def _kill_by_command_text(command: str) -> list[int]:
     """Best-effort SIGKILL of every live process whose (quote-stripped)
     full command line appears within `command`'s own quote-stripped
-    text, or vice versa. See CodexAdapter.force_kill()'s own comment for
-    why this exists and its known fragility. Uses `ps -eo pid,command` +
-    a literal Python substring check -- deliberately NOT `pgrep -f`
+    text (or vice versa), AND every live descendant of each such
+    process. See CodexAdapter.force_kill()'s own comment for why this
+    exists and its known fragility. Uses `ps -eo pid,ppid,command` + a
+    literal Python substring check -- deliberately NOT `pgrep -f`
     (which interprets its pattern as POSIX extended regex; `command`
     here is untrusted-ish real shell text that can contain regex
     metacharacters, so a literal check avoids both false negatives from
     a broken pattern and the smaller but real risk of a regex matching
     more broadly than the literal text did).
 
+    Descendant-killing is NOT optional/defensive -- it's required for
+    correctness. Confirmed live, 2026-08-15: a multi-statement shell
+    script (`sh -c 'echo marker; sleep 90'`) reports command text
+    (matched here) for the `sh -c` WRAPPER process, but `sleep 90`
+    itself runs as a SEPARATE forked child (only a script's tail
+    command can be exec'd in-place; anything before a `;` forks) --
+    killing only the matched wrapper left `sleep 90` alive, reparented
+    to pid 1, invisible to a survivor check that (reasonably) only
+    re-searches for the ORIGINAL marker text, which never appears in
+    the orphaned child's own command line. This was caught by manually
+    inspecting leftover processes after what this fallback's own tests
+    had reported as "clean" -- the automated survivor check's blind
+    spot, not something the test runs themselves revealed.
+
     POSIX-only by construction, not just by validation: `ps -eo
-    pid,command` and `signal.SIGKILL` are both POSIX-specific --
+    pid,ppid,command` and `signal.SIGKILL` are both POSIX-specific --
     `signal.SIGKILL` does not exist as an attribute on Windows'
     `signal` module at all (an `AttributeError`, not a graceful
     failure, if this were ever reached there), and `ps` isn't a
@@ -256,35 +271,42 @@ def _kill_by_command_text(command: str) -> list[int]:
     itself, so it stays a plain, easily-testable function rather than
     needing its own internal no-op-elsewhere branch.
 
-    Only macOS has actually been LIVE-VALIDATED (2026-08-15, 15/15
-    clean across three real scenarios -- see the accompanying field
-    note). Linux is expected, not confirmed, to behave the same way:
-    the underlying mechanism this fallback depends on (a codex child
-    reported by shell-quoted invocation text that doesn't survive into
-    `ps`'s own argv reconstruction) is a property of POSIX shell
-    parsing, not of macOS specifically, and codex's process-spawning
-    model (fork/exec, the real child becoming its own session/process-
-    group leader) is architecturally the same on any POSIX system --
-    but this has not been run against a real Linux `codex app-server`
-    to confirm the exact wrapper text (e.g. `/bin/bash -c` vs. macOS's
-    `/bin/zsh -lc`) unwraps the same way. Treat Linux as "should work,
-    not yet proven" until validated live there.
+    Only macOS has actually been LIVE-VALIDATED. Linux is expected, not
+    confirmed, to behave the same way: the underlying mechanisms this
+    fallback depends on (shell-quoted invocation text that doesn't
+    survive into `ps`'s own argv reconstruction; multi-statement shell
+    scripts forking rather than exec'ing for non-tail commands) are
+    properties of POSIX shell parsing, not of macOS specifically, and
+    codex's process-spawning model (fork/exec, the real child becoming
+    its own session/process-group leader) is architecturally the same
+    on any POSIX system -- but this has not been run against a real
+    Linux `codex app-server` to confirm the exact wrapper text (e.g.
+    `/bin/bash -c` vs. macOS's `/bin/zsh -lc`) unwraps the same way.
+    Treat Linux as "should work, not yet proven" until validated live
+    there.
     """
     stripped_command = _strip_shell_quotes(command)
     try:
         out = subprocess.run(
-            ["ps", "-eo", "pid,command"],
+            ["ps", "-eo", "pid,ppid,command"],
             capture_output=True, text=True, timeout=5, check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []
-    killed: list[int] = []
+    children_by_ppid: dict[int, list[int]] = {}
+    matched_pids: set[int] = set()
     for line in out.splitlines()[1:]:  # skip header
         line = line.strip()
         if not line:
             continue
         pid_str, _, rest = line.partition(" ")
-        stripped_line_command = _strip_shell_quotes(rest.strip())
+        ppid_str, _, cmd_rest = rest.strip().partition(" ")
+        try:
+            pid, ppid = int(pid_str), int(ppid_str)
+        except ValueError:
+            continue
+        children_by_ppid.setdefault(ppid, []).append(pid)
+        stripped_line_command = _strip_shell_quotes(cmd_rest.strip())
         # A minimum length guard against trivial/short matches (e.g. a
         # bare "zsh" or "sh" substring) that could otherwise match an
         # unrelated process -- this fallback already accepts some false-
@@ -298,10 +320,21 @@ def _kill_by_command_text(command: str) -> list[int]:
             and stripped_command not in stripped_line_command
         ):
             continue
-        try:
-            pid = int(pid_str)
-        except ValueError:
+        matched_pids.add(pid)
+
+    # Expand to every live descendant of each matched pid (BFS over the
+    # ppid map) -- see docstring for why this is required, not optional.
+    to_kill: set[int] = set()
+    frontier = list(matched_pids)
+    while frontier:
+        pid = frontier.pop()
+        if pid in to_kill:
             continue
+        to_kill.add(pid)
+        frontier.extend(children_by_ppid.get(pid, []))
+
+    killed: list[int] = []
+    for pid in to_kill:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.kill(pid, signal.SIGKILL)
             killed.append(pid)
