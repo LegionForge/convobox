@@ -1426,6 +1426,54 @@ closer together in pronunciation.
 
 ---
 
+## "halt halt halt" (a default hard-stop phrase) failed round-trip transcription 4/5 times; bare "Athena" (default resume word) failed 3/5
+
+**Status:** diagnosed live 2026-08-15, macOS, real Piper TTS -> faster-
+whisper round-trip testing (`stt.model: base`). Not yet fixed or
+decided -- see recommendations below.
+
+**Symptom.** A safety-phrase reliability battery (23 hand-labeled test
+cases, gibberish and foreign-language phrasing included) found zero
+false positives anywhere, but two real false-negative gaps:
+`"halt halt halt"` -- one of only three default `hard_stop_phrases` --
+was misheard 4/5 times (`"Hold, hold, hold"` dominant, `"HOT POT POT"`
+once), phonetically close enough to be a plausible genuine STT
+confusion, not obviously a synthesis-only artifact. The default resume
+word `"Athena"` said bare/alone (the simplest, most natural usage) was
+misheard 3/5 times (`"patina"`, `"Adina"`, `"Aficino"`) -- notably worse
+than the `resumeword/detector.py` module's own documented "5/5" claim,
+which used varied multi-word phrasings; re-testing that same varied-
+phrasing set here reproduced a comparable 4/5. `"stop stop stop"` and
+`"abort abort abort"` were fully reliable (5/5 each).
+
+**Why this matters.** `resumeword/detector.py` already documents a
+round-trip verification discipline (`ROUNDTRIP_REJECTED_RESUME_WORDS`) --
+applied once, when "Athena" was chosen 2026-07-13, but never repeated
+for `hard_stop_phrases` when "abort"/"halt" were added 2026-08-09 (that
+addition's own comment reasons about vocabulary collision with the
+project's domain terms, not STT transcription reliability), and never
+re-applied to the bare-word resume-word case specifically.
+
+**Recommendations (not yet reviewed/decided by JP):**
+1. Re-evaluate `"halt halt halt"` as a default -- drop it, keep it with
+   a Settings-TUI warning (same shape as
+   `ROUNDTRIP_REJECTED_RESUME_WORDS`), or verify against real human
+   speech before deciding (this note's evidence is Piper-only).
+2. Document that a resume word said WITH a little surrounding phrase is
+   more reliable than said bare/alone.
+3. Extend the not-yet-built setup-wizard "test-transcribe a few times"
+   UX to hard-stop phrases too, not just the resume word.
+4. This is NOT evidence for gating safewords/hotwords broadly behind an
+   advanced-config warning -- the false-positive side is clean across
+   this whole battery. The gap is narrow (one phrase, one usage
+   pattern), not architectural.
+
+Full data, methodology, and the false-positive-side results (all clean):
+`docs/field-notes/2026-08-15-safety-phrase-reliability-battery-halt-and-
+bare-athena-unreliable.md`.
+
+---
+
 ## "Open in editor" occasionally opens a different file than the one clicked -- fixed
 
 **Status:** fixed, 2026-08-11 (PR #260) -- a stale-fetch race in
