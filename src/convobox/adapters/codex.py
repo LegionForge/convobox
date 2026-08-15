@@ -125,6 +125,7 @@ from convobox.adapters.base import (
     BackendAdapter,
     BackendEvent,
     BackendEventType,
+    readline_with_stall_diagnostic,
 )
 
 logger = logging.getLogger(__name__)
@@ -463,7 +464,9 @@ class CodexAdapter(BackendAdapter):
         assert proc.stdout is not None  # nosec B101 -- spawned with stdout=PIPE
         try:
             while True:
-                line = await proc.stdout.readline()
+                line = await readline_with_stall_diagnostic(
+                    proc.stdout, proc, "codex app-server _read_loop"
+                )
                 if not line:
                     return
                 msg = _safe_json_loads(line.decode(errors="replace"))

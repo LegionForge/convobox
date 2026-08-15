@@ -164,6 +164,7 @@ from convobox.adapters.base import (
     BackendAdapter,
     BackendEvent,
     BackendEventType,
+    readline_with_stall_diagnostic,
 )
 
 logger = logging.getLogger(__name__)
@@ -654,7 +655,9 @@ class ClaudeCodeAdapter(BackendAdapter):
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
         assert proc.stderr is not None  # nosec B101 -- spawned with stderr=PIPE
         while True:
-            line = await proc.stderr.readline()
+            line = await readline_with_stall_diagnostic(
+                proc.stderr, proc, "claude_code _drain_stderr"
+            )
             if not line:
                 return
             logger.debug("claude stderr: %s", line.decode(errors="replace").rstrip())
@@ -797,7 +800,9 @@ class ClaudeCodeAdapter(BackendAdapter):
         assert proc.stdout is not None  # nosec B101 -- spawned with stdout=PIPE
         try:
             while True:
-                line = await proc.stdout.readline()
+                line = await readline_with_stall_diagnostic(
+                    proc.stdout, proc, "claude_code _read_loop"
+                )
                 if not line:
                     return
                 outer = _safe_json_loads(line.decode(errors="replace"))
