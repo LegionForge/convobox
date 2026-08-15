@@ -460,6 +460,30 @@ real stall** -- treat it as the headline number for release discussions,
 superseding the smaller/less-controlled samples above. Full evidence:
 `docs/field-notes/2026-08-12-vad-freeze-exhaustive-batch-after-fixing-windows-enhancements-confound.md`.
 
+**Instrumentation pass, 2026-08-14 (no fix yet -- diagnostic only).**
+Implements the "not done this session" next step from the 12-minute-
+freeze field note above: both backend adapters' `readline()` calls
+(`codex.py`'s `_read_loop`, `claude_code.py`'s `_read_loop` and
+`_drain_stderr`) had the exact shape the field note's leading candidate
+pointed at -- an unbounded read with no timeout and no explicit check for
+"the process died without the pipe EOF'ing" -- and neither had the
+queued-vs-running stall diagnostic `capture.py`/`segmenter.py` already
+have. Added a shared helper, `readline_with_stall_diagnostic()`
+(`convobox/adapters/base.py`), same non-destructive `asyncio.wait()`
+polling shape (never cancels the underlying read), used by all three
+call sites; each stall warning now also logs `proc.returncode`. Also
+added a DEBUG log line for `ListeningGate.observe()`'s `"pass"` outcome
+(`run_convobox.py`, right after the `"pause"` branch) -- previously
+silent, this is the exact ambiguity the exhaustive-batch note above had
+to resolve by manual code-tracing (was a "resume" transcript ever
+actually paused-state, or did the pause phrase never register in the
+first place). Neither change fixes the freeze -- both exist purely so
+the *next* recurrence produces real telemetry instead of the silence
+every prior live repro has produced. All diagnosed on Windows; **not
+yet reproduced or tested on macOS.** Next real step: reproduce with this
+instrumentation live (Windows first, since that's where every prior
+repro happened) and read what actually fired.
+
 ---
 
 ## WASAPI output plays speech an octave too high ("static chipmunk")

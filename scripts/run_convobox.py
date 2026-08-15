@@ -2632,6 +2632,20 @@ async def run(args: argparse.Namespace) -> None:
                                 f"to resume{caveat}",
                             )
                         continue
+                    # gate_action == "pass" falls through to here, and can
+                    # ONLY happen when is_paused was already False (see
+                    # ListeningGate.observe()) -- e.g. the resume word
+                    # spoken when there was nothing to resume. Logged at
+                    # DEBUG specifically so a future investigation can tell
+                    # "the pause phrase never registered, so this was never
+                    # actually the resume path" apart from "the resume
+                    # matcher failed on a real pause" (the "drop" branch
+                    # above) directly from the log, instead of the
+                    # after-the-fact code-tracing that was needed in
+                    # docs/field-notes/2026-08-12-vad-freeze-exhaustive-
+                    # batch-after-fixing-windows-enhancements-confound.md to
+                    # reach the same conclusion.
+                    log.debug("listening gate: pass (not paused): %r", text)
                     # High-stakes approval prompt. This is deliberately
                     # before response-tiering, overlap, and echo gates (the
                     # user may answer immediately after the prompt finishes,
