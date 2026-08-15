@@ -1563,15 +1563,48 @@ not a fallback that fires on its own after `hard_stop()` seems to be
 taking too long. That would need its own scoping (what grace period, does
 it also default to ending the session) and hasn't happened.
 
-**Not yet live-verified.** Built and unit-tested (both adapters' real
-terminate/kill sequence, the config validator, the orchestrator branch
-and its logging) but the actual live scenario -- saying the configured
-kill phrase during a real wedged-backend freeze and confirming the
-process really dies and the session really ends -- has not been tested
-against a real recurrence yet. JP's own requirement before trusting it:
-a dedicated reliability pass on "eject eject eject" specifically (does it
-fire reliably, does it ever false-positive/false-negative), not assumed
-from the unit tests alone.
+**Mechanism verified live, 2026-08-14, 30/30 -- voice/STT trigger reliability still open.** Two
+separable questions here: (1) once force_kill() runs, does it actually
+kill the real spawned subprocess (not just the app-server's own
+top-level process, potentially leaving a shell/tool-call child as an
+orphan)? (2) does saying "eject eject eject" out loud reliably reach
+force_kill() at all -- correct STT transcription, no false positives on
+normal speech, no false negatives from a misheard phrase? Only (1) is
+verified so far.
+
+A scratch reliability harness (`_test_force_kill_stops_a_real_tool_call.py`,
+not committed -- JP's own request: "test it at least 10 times... try
+multiple types") drove a REAL codex CLI (not the fake app-server the unit
+suite uses) through `adapter.force_kill()` directly, 10 times each across
+three real long-running tool-call shapes: a plain shell sleep, a
+shell loop progressively writing a file (to also confirm genuine
+mid-flight interruption, not just process death after the work already
+finished), and a real outbound web fetch (`httpbin.org/delay/N`). Each
+run located the actual spawned OS process(es) via Windows/WMI
+`CommandLine` matching (no psutil dependency), called `force_kill()`,
+and confirmed via `Get-Process` that every spawned process -- not just
+the codex app-server's own top-level PID -- was actually dead afterward.
+**Result: 30/30 passed**, zero orphaned processes in any run (verified
+via a full post-run process-tree sweep, not just the harness's own
+per-iteration check). The file-write scenario's "confirm genuine
+mid-flight interruption" check never actually caught partial progress in
+any of the 10 runs -- force_kill() fired before the shell loop's first
+write in every case (real spawn latency eating most of the harness's
+wait window), so that specific piece of evidence is unconfirmed even
+though the underlying PASS/FAIL (process death) is solid across all 30.
+
+A fourth type JP asked about, an MCP tool call, wasn't separately built:
+by mechanism, a stdio-based MCP call spawns a real child OS process (same
+class already covered above); an HTTP-based MCP call makes no separate
+process at all (same shape as the web-fetch case). Flagged rather than
+silently skipped -- standing up a real/mock MCP server would be new
+infrastructure with no different mechanism to actually observe.
+
+**Still open:** the voice/STT-trigger reliability question -- does
+saying "eject eject eject" live, through the real mic pipeline, actually
+match and route to `force_kill()` reliably, and does normal conversation
+ever false-positive on it? That needs a real mic session, not scriptable
+the way the process-kill mechanism above was.
 
 ---
 
