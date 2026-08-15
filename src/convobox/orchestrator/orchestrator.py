@@ -435,14 +435,42 @@ class Orchestrator:
         return was_busy
 
     async def stop_event_loop(self) -> None:
+        # Retries cancel() up to 3x (3s each) rather than a single
+        # cancel-and-await, per 2026-08-15 live evidence against the
+        # opencode backend: a task suspended inside adapter.events()'s SSE
+        # read can silently fail to honor its FIRST cancel() -- observed
+        # hanging 15-90s with a single cancel, every time, never
+        # self-resolving -- but a SECOND cancel() reliably unstuck it
+        # within seconds, 7/7 replicated trials. Root cause not confirmed
+        # (suspected: httpcore's AutoBackend always uses anyio's asyncio
+        # backend, a known interop gap for bare Task.cancel()), but this
+        # bounds what was an indefinite freeze to a few seconds regardless.
+        # See docs/field-notes/2026-08-15-opencode-freeze-*.md for the full
+        # investigation. asyncio.shield() protects `task` itself from this
+        # wait_for's own timeout -- only the wait is abandoned, not the
+        # task, so it stays alive to be re-cancelled and re-awaited.
         self._cancel_speak_task()
         if self._events_task is None:
             return
-        self._events_task.cancel()
-        try:
-            await self._events_task
-        except asyncio.CancelledError:
-            pass
+        task = self._events_task
+        task.cancel()
+        for attempt in range(3):
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+                break
+            except asyncio.CancelledError:
+                break
+            except TimeoutError:
+                if task.done():
+                    break
+                logger.warning(
+                    "events task did not honor cancel() after 3s "
+                    "(attempt %d/3), re-cancelling -- see docs/field-notes/"
+                    "2026-08-15-opencode-freeze-repeated-cancel-mitigates-"
+                    "mechanism-and-workaround-candidate.md",
+                    attempt + 1,
+                )
+                task.cancel()
         self._events_task = None
 
     async def _consume_events(self) -> None:
