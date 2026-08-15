@@ -4,11 +4,14 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
-## [0.3.1] — 2026-08-01
+## [0.3.1] — 2026-08-14
 
-Patch release: 27 PRs since `0.3.0`, all live-verified. No config schema
-breaks -- every existing `convobox.yaml` keeps behaving exactly as before
-unless it opts into the one new setting below.
+Patch release: 107 PRs since `0.3.0`. First cycle with live macOS
+hardware coverage alongside Windows (Apple Silicon Mac mini, AIRHUG 28
+USB mic) -- full evidence in `docs/field-notes/` and summarized in
+`docs/STATUS.md`. No config schema breaks -- every existing
+`convobox.yaml` keeps behaving exactly as before unless it opts into a
+new setting below.
 
 ### Added
 - **Pause/resume acknowledgment tone** (`interaction.pause_resume_ack`,
@@ -24,6 +27,35 @@ unless it opts into the one new setting below.
 - **Web UI: paused status shows which word resumes listening** -- the
   activity ribbon now reads `paused (say "Athena" to resume)` instead of
   just `paused`. (#170)
+- **`stt.hotwords`** -- faster-whisper's own prompt-bias, to fight the
+  recurring short-resume-word ("Athena") mis-transcription pattern.
+  Live-UAT'd with STT decode randomness controlled for (`stt.temperature`
+  pinned); note microphone hardware swung resume-success rate far more
+  than hotwords did in the same testing, worth remembering before
+  crediting any future STT-config change without also controlling for
+  mic. (#204)
+- **`stt.compute_type` is now a picker** with real tradeoff hints instead
+  of free text. (#197)
+- **Async STT model download** with a spinner and elapsed-time feedback
+  in the settings TUI, instead of blocking silently. (#196)
+- **Two new default safewords**, `"abort abort abort"` and `"halt halt
+  halt"`, alongside the existing `"stop stop stop"`. (#251)
+- **Web UI: text entry box**, sent through the same path as `--text`
+  mode. (#202)
+- **Web UI: Stop button** that mirrors the spoken safeword hard-stop.
+  (#209)
+- **Web UI: `tool_call`/`tool_result` events render collapsed**, click to
+  expand. (#201)
+- **Web UI: drag-and-drop file upload**, written into
+  `backend.working_dir`. (#246)
+- **Web UI: Artifact Chooser tab strip** plus a filtered
+  working-directory file browser. (#261)
+- **Web UI: syntax-highlighted code in the artifact pane**, plus an
+  "Open in editor" action. (#228)
+- **Web UI: accessibility + feedback pass** on the ribbon, composer, and
+  settings chrome, including a pause/resume icon with screen-reader-safe
+  labeling and live-reloading display settings with a restart-required
+  indicator. (#227, #229, #233)
 
 ### Changed
 - **Safeword folded into the Interaction tab**, both the Settings TUI and
@@ -34,6 +66,13 @@ unless it opts into the one new setting below.
   sentence and a concrete "you say X, it does Y" example per preset,
   replacing terse internal jargon -- one shared `FieldSpec.help_text`
   covers both the TUI and web UI. (#183)
+- **TUI heartbeat and web status line now show what the backend is
+  doing**, not just that it's busy -- `working (thinking)` / `working
+  (<tool name>)` instead of a bare `working`. (#190, #205)
+- **Settings TUI's input-line editor shows the end of a long value**
+  instead of the start when opened. (#253)
+- **Config backups now go into `.convobox-backups/`**, not scattered
+  across the repo root. (#268)
 - **Barge-in interrupt marker reworded** from "(I interrupted your spoken
   response midway)" to "[User interrupted AI response]", shown in the
   transcript and forwarded to the backend as conversational context.
@@ -83,8 +122,83 @@ unless it opts into the one new setting below.
   server; the mic loop and backend adapter kept running underneath.
   Root cause: uvicorn installs its own OS signal handler for as long as
   it runs, so the existing signal-based shutdown path never fired. (#168)
+- **A real crash in `run_convobox.py --text` mode**: a `NameError` on the
+  very first backend event, from a closure over a variable only assigned
+  in the mic-loop setup path. Live-verified against both backends after
+  the fix. (#256)
+- **VAD segmenter could go silent indefinitely.** With
+  `vad.max_utterance_s` unset, `UtteranceSegmenter` could lock up
+  permanently -- mic capture and AEC stayed alive but zero utterances
+  ever completed, no log output. Setting the cap stopped the permanent
+  lockup but exposed a second, subtler gap: a forced-cap run that never
+  accumulated `min_speech_ms` of confidently-classified speech was
+  silently discarded, indistinguishable from genuine silence. Fixed with
+  a new `UtteranceSegmenter.discarded_forced_runs` counter and a
+  `_working_watchdog` heartbeat `WARNING` on increase. (#204)
+- **`Orchestrator.hard_stop()` now reports whether a turn was actually
+  busy when it fired** -- the web/voice pause paths use that to stop
+  implying a tool call fully stopped when it may still be finishing in
+  the background. (#255)
+- **`hard_stop()` now cancels a pending approval-gate wait**, not just
+  the speak/event-consumption tasks. (#240)
+- **Web UI: a web-triggered pause/resume now syncs to the TUI's
+  transcript pane** -- previously only the voice path touched
+  `ConversationTuiState`, so a session resumed via the web Stop/Resume
+  button could read as permanently hung in the TUI. (#212)
+- **Web UI: every heard transcript is now forwarded**, not just ones
+  that survive every gate -- an utterance dropped by any gate
+  (paused/not-the-resume-word, low-confidence, etc.) used to show in the
+  TUI's transcript pane but never reach the web UI at all. (#213)
+- **Packaging: the built wheel left every CLI entry point broken**
+  (`scripts/` was present in the sdist but dropped from the wheel).
+  Distribution renamed to `legionforge-convobox` on PyPI (matching the
+  org's existing naming convention), and a new OIDC Trusted-Publishing
+  `publish.yml` added, dormant until a `vX.Y.Z` tag is pushed. (#206)
+- **STT: reject an incompatible `compute_type`/`device` pairing at
+  config load** instead of failing later. (#210)
+- **Settings TUI recovers from an invalid on-disk config** instead of
+  crashing. (#215)
+- **Settings TUI: confirming a picker without cycling it no longer
+  claims the value was "updated."** (#200)
+- **Settings TUI: opening `backend.command` and pressing Enter unchanged
+  no longer corrupts it.** (#254)
+- **`run_convobox`: removed a dead duplicate approval-gate
+  construction.** (#239)
+- **Interaction: paused-listening drops now log at INFO, not DEBUG.**
+  (#198)
+- **Web UI: settings-save confirmation now matches the actual restart
+  requirement** instead of always claiming one is needed. (#248)
+- **Web UI: "Open in editor" `vscode://` URI used Windows backslashes**,
+  not valid URI syntax. (#249)
+- **Web UI: "Open in editor" guarded against a stale-fetch race.** (#260)
+- **STT `transcribe()` offloaded to a thread with an optional timeout**,
+  and the **VAD segmenter's per-window Silero call offloaded to a
+  thread** -- both were synchronous on the event loop and could
+  plausibly freeze the whole app. (#217, #231)
+- **Dedicated executors for indefinite blocking calls**, distinguishing
+  queue-wait time from execution time in VAD stall warnings. A follow-up
+  stall diagnostic for `MicrophoneStream.stream()` live-confirmed this
+  pass did not fully close the underlying VAD-freeze issue -- tracked as
+  a known issue below, not yet root-caused. (#269, #271)
+- **Web UI: SSE broadcast tasks are now tracked** instead of
+  fire-and-forget (a dropped reference meant CPython's weak-reference GC
+  could cancel one mid-broadcast, silently dropping frames). (#238)
+- **Web UI: SSE subscriber queues are now bounded**, evicting the oldest
+  entry and signaling drops instead of growing unbounded. (#241)
+- **Web UI: history DB writes offloaded off the event loop.** (#242)
 
 ### Security
+- **`claude-code` backend approval-gate gaps fixed** (issue #235, A1+A2).
+  (#236)
+- **CSRF-protected every mutating web route**, and restricted the
+  settings-API write surface. (#237)
+- **Approval hook token comparison now uses `secrets.compare_digest`**
+  instead of `!=`, closing a timing-attack surface. (#266)
+- **The `pypi` GitHub publishing environment is now gated**: restricted
+  to deploys from `main` only, plus a required human reviewer, ahead of
+  multiple AI agents having push access to this and sibling repos. Same
+  protection brought up to this bar on `LegionForge/guardian` and
+  `LegionForge/llm-valet`. (cross-repo, alongside #206)
 - **`backend.permission_mode: permissive` now genuinely bypasses every
   tool permission**, not just file edits. It previously mapped to the
   same Claude Code flag as `approve` (`acceptEdits`), which only
@@ -94,6 +208,37 @@ unless it opts into the one new setting below.
   those calls in a mode whose entire point is "act without asking."
   `permissive` now correctly maps to `bypassPermissions`; `approve` is
   unaffected. (#182)
+
+### Known issues
+- **A self-triggered barge-in loop under rapid-fire conditions on
+  macOS** (issue #119): 20 barge-ins in ~90s during a real live-speech
+  demo at high playback volume, 18/19 with a following AEC reading
+  showing `UNDER-CANCELLING`. No code fix shipped -- `do-not-disturb`
+  mode (the config's original default) isn't subject to this, since
+  ordinary speech can't trigger anything mid-playback there. For
+  `conversational` mode at high volume, a documented config-level
+  mitigation (`aec_delay_ms: 400` + `barge_in_min_speech_ms: 1200`)
+  brought false triggers from 8-13 down to a mean of 1.25 across 4 live
+  trials; likely root cause is the Mac mini's single built-in speaker
+  distorting acoustically at volume, which a linear AEC structurally
+  can't fully cancel. See `docs/KNOWN-ISSUES.md` and
+  `docs/field-notes/2026-08-11-self-barge-in-combined-mitigation-and-
+  hardware-notes.md`.
+- **Unresolved, safety-relevant freeze: the app can go totally
+  unresponsive, including both hard-stop paths.** Escalated 2026-08-12
+  as likely two distinct bugs. #269's dedicated executors targeted the
+  leading hypothesis (thread-pool contention) and did not fix it --
+  three clean live reproductions the same day, #269's own new stall
+  diagnostic never fired. Two variants confirmed: short capture stalls
+  (1-4s, zero queue backlog) and a 12+ minute freeze that resisted every
+  recovery path (web resume, hard-stop API, even killing the hung
+  backend subprocess) -- only a full process kill ended it, with the
+  target process pinned at 0% CPU throughout, pointing at a genuine
+  blocking wait with no timeout, likely in backend-subprocess I/O. A
+  same-day 10-cycle batch with confounds removed measured a real ~30%
+  stall rate. `docs/KNOWN-ISSUES.md`'s own words: **"treat this as
+  safety-relevant and unresolved -- not a release candidate until at
+  least the long-freeze variant is understood."**
 
 ## [0.3.0] — 2026-07-28
 
