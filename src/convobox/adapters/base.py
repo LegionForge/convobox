@@ -1,8 +1,70 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+# Same two-stage shape as MicrophoneStream.stream() (convobox/audio/capture.py)
+# and UtteranceSegmenter.feed_async() (convobox/vad/segmenter.py).
+_READLINE_STALL_FIRST_WARNING_S = 0.5
+_READLINE_STALL_REPEAT_WARNING_S = 5.0
+
+
+async def readline_with_stall_diagnostic(
+    stream: asyncio.StreamReader,
+    proc: asyncio.subprocess.Process,
+    label: str,
+) -> bytes:
+    """await stream.readline(), logging a stall warning instead of blocking
+    silently -- and logging proc.returncode on every warning, so a process
+    that has already died without EOF'ing its pipe is visible too.
+
+    Uses asyncio.wait() with a timeout in a loop, NOT asyncio.wait_for() --
+    wait_for cancels the underlying coroutine on timeout, which would
+    discard a line that arrives right after the deadline; asyncio.wait
+    just observes the still-running task and is re-awaited next iteration,
+    identical to the polling shape the two call sites above already use.
+
+    Added for docs/KNOWN-ISSUES.md's still-open, safety-relevant freeze
+    (the app can go totally unresponsive, including both hard-stop paths).
+    docs/field-notes/2026-08-12-vad-freeze-harness-catches-short-stalls-
+    and-a-12-minute-unrecoverable-one.md's leading, not-yet-confirmed
+    hypothesis for the severe variant is a blocking read on backend-
+    subprocess I/O with no timeout and no "process died" handling -- both
+    adapters' readline() calls (codex.py's _read_loop, claude_code.py's
+    _read_loop and _drain_stderr) matched that shape exactly and had no
+    equivalent instrumentation, unlike capture.py/segmenter.py. This does
+    not fix that freeze -- it gives the next recurrence real telemetry
+    (queued-vs-running timing, proc.returncode at each check) instead of
+    the silence every prior live repro produced.
+    """
+    task = asyncio.ensure_future(stream.readline())
+    start = time.monotonic()
+    interval = _READLINE_STALL_FIRST_WARNING_S
+    stalled = False
+    while True:
+        done, _pending = await asyncio.wait({task}, timeout=interval)
+        if done:
+            break
+        stalled = True
+        logger.warning(
+            "%s: readline() still pending after %.1fs (proc.returncode=%s) "
+            "-- not abandoning it, just reporting; see docs/KNOWN-ISSUES.md's "
+            "VAD segmenter freeze entry",
+            label, time.monotonic() - start, proc.returncode,
+        )
+        interval = _READLINE_STALL_REPEAT_WARNING_S
+    if stalled:
+        logger.warning(
+            "%s: readline() finally returned after %.1fs total (proc.returncode=%s)",
+            label, time.monotonic() - start, proc.returncode,
+        )
+    return task.result()
 
 
 class BackendEventType(str, Enum):
