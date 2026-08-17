@@ -10,7 +10,10 @@ from convobox.config import (
     detect_claude_code_approval_gap,
     detect_permission_conflict,
 )
-from scripts.run_convobox import _check_backend_permission_mode
+from scripts.run_convobox import (
+    _check_backend_permission_mode,
+    _check_plan_mode_blocks_artifact_tools,
+)
 
 # --- config field + validator ---
 
@@ -178,3 +181,34 @@ def test_claude_user_permission_flag_wins_over_translation() -> None:
     flags = _resolve_flags(["claude", "--permission-mode", "acceptEdits"], "plan")
     # We do not inject our own when the user already set one.
     assert flags.count("--permission-mode") == 0
+
+
+# --- _check_plan_mode_blocks_artifact_tools: warns that plan mode
+# reliably blocks the artifact-pane MCP tools headless (docs/ARTIFACT-
+# PANE-SCOPE.md), only called from run() once the MCP server is actually
+# being mounted -- see run_convobox.py's own call site.
+
+def test_plan_mode_warns_for_claude_code(caplog: pytest.LogCaptureFixture) -> None:
+    backend = BackendConfig(name="claude-code", permission_mode="plan")
+    with caplog.at_level("WARNING"):
+        _check_plan_mode_blocks_artifact_tools(backend)
+    assert "show_document" in caplog.text
+    assert "get_shown_artifact" in caplog.text
+
+
+def test_no_warning_for_claude_code_permissive(caplog: pytest.LogCaptureFixture) -> None:
+    backend = BackendConfig(name="claude-code", permission_mode="permissive")
+    with caplog.at_level("WARNING"):
+        _check_plan_mode_blocks_artifact_tools(backend)
+    assert caplog.text == ""
+
+
+def test_no_warning_for_non_claude_code_backend_in_plan_mode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # opencode/codex don't wire the artifact MCP tools through claude-code's
+    # ExitPlanMode mechanism at all -- this warning is claude-code-specific.
+    backend = BackendConfig(name="codex", permission_mode="plan")
+    with caplog.at_level("WARNING"):
+        _check_plan_mode_blocks_artifact_tools(backend)
+    assert caplog.text == ""
