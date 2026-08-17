@@ -109,6 +109,28 @@ class EventBroadcaster:
         `await queue.put(None)`) so a subscriber whose queue happens to be
         full at shutdown still reliably receives the sentinel and closes,
         rather than this call hanging on a full queue nothing is draining.
+
+        A {"type": "session_ended"} payload goes out FIRST, same delivery,
+        so the browser can tell "the server said goodbye" apart from an
+        ordinary dropped connection (which just looks like silence until
+        EventSource's own auto-retry either succeeds or keeps failing) --
+        live UAT ask, 2026-08-17: on Quit/kill_phrase the page just sat on
+        "reconnecting..." forever with no sign the session was actually,
+        deliberately over. index.html's own SSE handler closes the
+        connection outright on this message (no point auto-retrying
+        against a server that just said it's leaving) and switches to a
+        clearly terminal status instead.
         """
+        # Two puts, not one: unlike the None sentinel below (guaranteed to
+        # land -- see test_close_all_delivers_the_none_sentinel_even_when_
+        # the_queue_is_full), this message COULD itself be evicted by the
+        # very next put if a queue was already completely full (evict-
+        # oldest could remove the message this loop iteration just added).
+        # Accepted: the stream still closes correctly either way (that
+        # guarantee is unchanged), the only loss in that specific
+        # already-saturated-queue case is the nicer goodbye message
+        # degrading to a plain "reconnecting..." -- not a regression, just
+        # an edge case this best-effort addition doesn't cover.
         for queue in list(self._subscribers):
+            self._put_dropping_oldest(queue, {"type": "session_ended"})
             self._put_dropping_oldest(queue, None)

@@ -1407,15 +1407,64 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     setListeningButton(status === "paused");
   }
 
+  // How long to stay on the plain "reconnecting..." message before
+  // upgrading it to something that admits this might not be a passing
+  // blip -- EventSource keeps retrying either way (this never stops it),
+  // it only changes the wording once a retry stretch has gone on longer
+  // than an ordinary network hiccup would.
+  const _STALE_RECONNECT_MS = 8000;
+
   function connectStream() {
     const source = new EventSource("/api/events/stream");
+    let staleReconnectTimer = null;
+
+    function clearStaleReconnectTimer() {
+      if (staleReconnectTimer !== null) {
+        clearTimeout(staleReconnectTimer);
+        staleReconnectTimer = null;
+      }
+    }
+
+    // GitHub issue / live UAT ask, 2026-08-17: on Quit or the kill_phrase
+    // ending the whole ConvoBox process, this page just sat on
+    // "reconnecting..." forever -- indistinguishable from an ordinary
+    // network blip, when the server had actually said goodbye on
+    // purpose (WebEventForwarder's underlying EventBroadcaster.close_all()
+    // now sends this before closing every stream). Closing the
+    // EventSource outright (not just updating text) matters: there is no
+    // point auto-retrying against a server that just told us it's
+    // leaving, and leaving it running would race a PAGE RELOAD after
+    // ConvoBox restarts against this stale connection's own retry.
+    function handleSessionEnded() {
+      clearStaleReconnectTimer();
+      source.close();
+      statusEl.textContent = "session ended — restart ConvoBox and reload this page to reconnect";
+      statusEl.className = "disconnected";
+      composerInput.disabled = true;
+      composerSendBtn.disabled = true;
+      listeningBtn.disabled = true;
+      stopBtn.disabled = true;
+      artifactBrowseBtn.disabled = true;
+      quitBtn.disabled = true;
+    }
+
     source.onopen = () => {
+      clearStaleReconnectTimer();
       statusEl.textContent = "live";
       statusEl.className = "connected";
     };
     source.onerror = () => {
       statusEl.textContent = "reconnecting…";
       statusEl.className = "disconnected";
+      if (staleReconnectTimer === null) {
+        staleReconnectTimer = setTimeout(() => {
+          staleReconnectTimer = null;
+          // Still disconnected after a real stretch, not just a blip --
+          // onopen (above) would already have cleared this timer the
+          // moment a retry actually succeeded.
+          statusEl.textContent = "can't reach ConvoBox — still retrying…";
+        }, _STALE_RECONNECT_MS);
+      }
     };
     source.onmessage = (e) => {
       try {
@@ -1424,6 +1473,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
           renderActivityStatus(payload.status, payload.detail);
         } else if (payload.type === "approval_resolved") {
           handleApprovalResolved(payload.approved);
+        } else if (payload.type === "session_ended") {
+          handleSessionEnded();
         } else {
           renderEvent(payload);
         }
