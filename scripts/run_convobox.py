@@ -47,6 +47,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -1853,7 +1854,34 @@ async def run(args: argparse.Namespace) -> None:
     _check_backend_working_dir(config.backend)
     if args.web:
         config.web.enabled = True
-    adapter = create_backend_adapter(config.backend)
+    # The "show_document" MCP tool (web/mcp_server.py, docs/ARTIFACT-PANE-
+    # SCOPE.md's "Agent-Initiated Artifacts" section) -- generated here,
+    # BEFORE create_backend_adapter(), because config.web.port/enabled are
+    # already final at this point (unlike the server's actual bound
+    # SOCKET, which doesn't exist yet -- but the port is a fixed config
+    # value, not OS-assigned, so the URL is known without waiting for the
+    # server to actually start). None/None (mounts nothing, adds no CLI
+    # flags) unless BOTH web.enabled and backend.working_dir are set --
+    # matches add_mcp_routes()'s own condition: no pane to show anything
+    # in without the former, nothing to fence a path against without the
+    # latter. Always 127.0.0.1 for the CONNECT address regardless of
+    # web.bind_address (which only controls what interface the server
+    # LISTENS on) -- the backend CLI is a same-machine subprocess, so
+    # loopback always reaches it even when bind_address is 0.0.0.0.
+    mcp_url: str | None = None
+    mcp_token: str | None = None
+    if config.web.enabled and config.backend.working_dir:
+        mcp_token = secrets.token_hex(16)
+        # Trailing slash deliberate: the mounted MCP sub-app's own route
+        # lives at exactly that path, and Starlette's redirect-to-add-a-
+        # slash behavior only fires for GET/HEAD, never POST (redirecting
+        # a POST would silently drop its body) -- live-confirmed 2026-08-
+        # 1x: a bare "/mcp" POST 404s/405s depending on the exact mount
+        # wrapping, never redirects. Sending the correctly-slashed URL up
+        # front avoids relying on a redirect that was never going to
+        # happen for this client's request method anyway.
+        mcp_url = f"http://127.0.0.1:{config.web.port}/mcp/"
+    adapter = create_backend_adapter(config.backend, mcp_url=mcp_url, mcp_token=mcp_token)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
     # a phrase to recognize, and does nothing if the active backend never
@@ -1992,6 +2020,8 @@ async def run(args: argparse.Namespace) -> None:
             working_dir=(
                 Path(config.backend.working_dir) if config.backend.working_dir else None
             ),
+            mcp_token=mcp_token,
+            web_forwarder=web_forwarder,
         )
         web_uvicorn_config = uvicorn.Config(
             web_app,

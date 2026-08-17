@@ -350,6 +350,121 @@ directly (JP's own "(or new tab)" ask) — no new backend route needed
 for that, the existing `/api/artifacts/{path}` GET route already serves
 it.
 
+## Agent-Initiated Artifacts (2026-08-16)
+
+JP asked directly: "the llm should be given a tool to refocus a document
+or show a document from the cwd." Everything above only ever fires an
+ARTIFACT event as a SIDE EFFECT of a detected Write/Edit tool call --
+there was no way for the agent to say "show me this file I only read" or
+bring an already-shown one back into focus.
+
+### Design
+
+A new MCP server ConvoBox itself hosts (`src/convobox/web/mcp_server.py`),
+mounted on the SAME FastAPI app the web UI already runs, exposing one
+tool: `show_document(path)`. Deliberately reuses everything already
+built rather than inventing a parallel mechanism:
+
+- **Fencing**: the tool calls `artifacts.py`'s own `_resolve_artifact()`
+  and checks the same `ARTIFACT_MEDIA_TYPES` allowlist the browser-facing
+  `GET /api/artifacts/{path}` route already enforces -- one fence, not
+  two copies that could drift apart, same reasoning `_resolve_artifact`'s
+  own docstring already gives for sharing it between routes.
+- **Delivery**: the tool calls the SAME `WebEventForwarder` the adapter's
+  own Write/Edit detection already uses, emitting a plain
+  `BackendEvent(type=ARTIFACT, artifact_path=...)` -- from the frontend's
+  perspective, an agent-initiated artifact and a tool-produced one are
+  identical events over the same SSE stream; zero frontend changes were
+  needed.
+- **Auth**: this is a NEW kind of exposure the rest of this doc's
+  "Security" section doesn't cover -- a plain loopback HTTP endpoint any
+  local process could POST to, not gated by the existing CSRF-header
+  middleware (that header is a same-origin-browser signal only
+  ConvoBox's own frontend JS knows to send; the MCP client here is the
+  claude/codex CLI subprocess, not a browser, and can't send it). Fixed
+  with a random per-session bearer token, generated once in
+  `run_convobox.py` and handed to the CLI via `--mcp-config`'s own
+  `headers` field -- the same "random token over a loopback channel"
+  shape `adapters/claude_code.py`'s approval-hook TCP server already
+  uses, not a new pattern.
+- **Granted regardless of `permission_mode`**, unlike every other MCP
+  server this adapter grants (which only happens under `permissive`):
+  `show_document` is safe-by-construction (same fence as a route the
+  browser can already hit), so refusing it under the "plan" default
+  would defeat the point -- an agent that can only PLAN writes should
+  still be able to show a file it already read. Live-verified this
+  actually works under `plan`, the most restrictive default.
+
+### Real bugs live verification caught (spec-reading alone would have missed all three)
+
+This project's own standing rule (`TESTING.md`, `AGENTS.md`) is to verify
+against the real thing, not trust the code reading itself as done. Three
+real, independent bugs surfaced only by actually driving a real `claude`
+CLI subprocess against a real running server -- each would have shipped
+silently broken on spec-reading alone:
+
+1. **`--mcp-config`'s JSON schema and CLI flag usage were right, but the
+   registered server still failed to connect (`HTTP 405: ... Method Not
+   Allowed`).** Root cause: FastAPI/Starlette does NOT automatically run
+   a MOUNTED sub-app's own lifespan -- the MCP SDK's streamable-HTTP
+   session manager needs its `run()` context manager entered to
+   initialize an internal task group, and a request into a session
+   manager whose task group never started raises exactly that class of
+   error. Fixed by wrapping `app.router.lifespan_context` to also enter
+   the mounted sub-app's own lifespan (see `mcp_server.py`'s
+   `combined_lifespan`).
+2. **Mount path / trailing slash.** A bare `/mcp` (no trailing slash)
+   POST either 404s or 405s depending on exactly how the sub-app is
+   wrapped -- Starlette's redirect-to-add-a-slash behavior only fires for
+   GET/HEAD (redirecting a POST would silently drop its body), so it
+   never rescues a POST the way it would a browser GET. Fixed by always
+   using the trailing-slash URL (`.../mcp/`) end to end, sidestepping the
+   redirect question entirely rather than relying on it.
+3. **`show_document` as a plain `def` (not `async def`) crashed every
+   real call**: `"There is no current event loop in thread 'AnyIO worker
+   thread'"`. The SDK runs sync tool functions in an anyio worker thread
+   (no event loop of its own); `WebEventForwarder`'s own broadcast path
+   calls `asyncio.ensure_future()` internally, which needs one. `async
+   def` keeps the tool on the main loop (the SDK awaits async tool
+   functions directly, confirmed by reading `func_metadata.py`'s own
+   `call_fn_with_arg_validation`).
+
+Full path live-verified end to end (2026-08-16): a real `claude --print`
+process, given the exact `--mcp-config`/`--settings` flags
+`ClaudeCodeAdapter._ensure_extra_cli_flags()` builds, discovered and
+called `show_document`, and a real subscriber on `/api/events/stream`
+received the resulting `{"type": "artifact", ..., "artifact_path":
+"hello.txt"}` SSE event -- the identical shape the frontend's existing
+ARTIFACT handling already consumes.
+
+### codex and opencode: not done this pass
+
+JP asked for all three backends; only claude-code shipped and was
+live-verified this pass, deliberately -- see this project's own
+Change-Scope Discipline (`AGENTS.md`): ship a coherent, verified slice,
+name the rest rather than guess at it unverified.
+
+- **codex**: plausible via its own `-c mcp_servers.<name>.command=...`-
+  style dotted config overrides (the SAME mechanism
+  `adapters/codex.py`'s `_permission_config_args` already uses for other
+  settings, confirmed live 2026-07-20 that spawn-time `-c` wins over
+  `config.toml`) -- but registering an MCP server this way is unverified
+  against the real CLI. Given how many claude-code assumptions THIS pass
+  turned out wrong only once actually tested (all three bugs above),
+  codex needs the same live-verification treatment, not a port of this
+  code assumed correct by analogy.
+- **opencode**: structurally harder, not just unverified. ConvoBox
+  doesn't spawn opencode at all -- `OpenCodeAdapter` connects via
+  HTTP/SSE to an already-running `opencode serve` instance
+  (`adapters/__init__.py`'s own comment: "opencode is a pre-launched HTTP
+  server... both its permissions and its directory are fixed by wherever
+  `opencode serve` was started"). There is no per-session config surface
+  this adapter controls to inject an ad-hoc MCP server into the way
+  `--mcp-config` does for claude-code; registering one would mean
+  either the user's own persistent opencode config (outside ConvoBox's
+  reach) or a deeper investigation into opencode's own plugin/tool
+  system that hasn't happened yet.
+
 ## Open Questions (for JP, not decided here)
 
 - Is opencode-first the right adapter to start with, or does JP want

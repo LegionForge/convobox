@@ -80,9 +80,12 @@ def test_resolve_flags_permissive_maps_to_bypass_permissions() -> None:
 # "matcher" (confirmed live: omitting it gates ALL tools) ---
 
 
-def test_ensure_settings_file_wires_the_hook_via_module_invocation() -> None:
+@pytest.mark.asyncio
+async def test_ensure_settings_file_wires_the_hook_via_module_invocation() -> None:
     adapter = _adapter()
-    path = adapter._ensure_settings_file()
+    flags = await adapter._ensure_extra_cli_flags()
+    path = adapter._settings_path
+    assert path is not None
     try:
         data = json.loads(path.read_text())
         pre_tool_use = data["hooks"]["PreToolUse"][0]
@@ -91,15 +94,20 @@ def test_ensure_settings_file_wires_the_hook_via_module_invocation() -> None:
         assert "-m convobox.approval.hook_script" in hook["command"]
         assert sys.executable in hook["command"]
         assert "matcher" not in pre_tool_use
+        assert flags == ["--settings", str(path)]
     finally:
         path.unlink()
 
 
-def test_ensure_settings_file_is_written_once() -> None:
+@pytest.mark.asyncio
+async def test_ensure_settings_file_is_written_once() -> None:
     adapter = _adapter()
-    first = adapter._ensure_settings_file()
+    await adapter._ensure_extra_cli_flags()
+    first = adapter._settings_path
+    assert first is not None
     try:
-        second = adapter._ensure_settings_file()
+        await adapter._ensure_extra_cli_flags()
+        second = adapter._settings_path
         assert first == second
     finally:
         first.unlink()
@@ -571,7 +579,9 @@ async def test_permissive_mode_writes_an_mcp_permissions_settings_file(
     )
 
     try:
-        path = await adapter._ensure_mcp_permissions_settings_file()
+        await adapter._ensure_extra_cli_flags()
+        path = adapter._settings_path
+        assert path is not None
         data = json.loads(path.read_text())
         assert data == {"permissions": {"allow": ["mcp__obsidian", "mcp__browseros"]}}
     finally:

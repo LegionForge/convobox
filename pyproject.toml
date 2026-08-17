@@ -122,6 +122,12 @@ web = [
     # dependency of fastapi itself, has to be listed explicitly or upload
     # requests fail at request time with a RuntimeError, not at import time.
     "python-multipart>=0.0.9",
+    # The "show this document" tool the backend agent can call to refocus
+    # the artifact pane (src/convobox/web/mcp_server.py) -- the official
+    # SDK, not hand-rolled JSON-RPC/SSE framing, since correctness here is
+    # judged against a real external client (claude/codex's own MCP
+    # client), not just ConvoBox's own tests.
+    "mcp>=1.0",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
