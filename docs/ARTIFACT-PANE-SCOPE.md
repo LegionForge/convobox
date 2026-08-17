@@ -392,8 +392,10 @@ built rather than inventing a parallel mechanism:
   `show_document` is safe-by-construction (same fence as a route the
   browser can already hit), so refusing it under the "plan" default
   would defeat the point -- an agent that can only PLAN writes should
-  still be able to show a file it already read. Live-verified this
-  actually works under `plan`, the most restrictive default.
+  still be able to show a file it already read. **This intent doesn't
+  hold in practice for `plan` specifically -- see "Plan mode blocks
+  both artifact-pane tools" below.** The grant is still real and does
+  what it's supposed to for `permissive`/`approve`.
 
 ### Real bugs live verification caught (spec-reading alone would have missed all three)
 
@@ -436,6 +438,49 @@ called `show_document`, and a real subscriber on `/api/events/stream`
 received the resulting `{"type": "artifact", ..., "artifact_path":
 "hello.txt"}` SSE event -- the identical shape the frontend's existing
 ARTIFACT handling already consumes.
+
+### Plan mode blocks both artifact-pane tools (status diagnosed, 2026-08-17)
+
+The "Granted regardless of `permission_mode`" design decision above
+does not deliver on its own intent for `permission_mode: plan`
+specifically -- corrected here rather than left as a quiet inaccuracy.
+
+**Timeline:** a 2026-08-16 scripted `--text`-mode demo run had Claude
+explicitly decline to call `show_document` under `plan`
+("Plan mode blocks non-read-only tool calls... I can't call
+`show_document` right now"). A second scripted run with identical setup
+succeeded, which read at the time like inconsistent model-level
+hesitancy rather than a hard block (recorded as a hypothesis,
+`UAT-checklist.md` [AP5]). **JP's real voice UAT on 2026-08-17
+reproduced the decline reliably** ("plan mode blocks artifact pane mcp
+calls") -- the earlier scripted success was the outlier, not the
+decline.
+
+**Root cause:** `claude_code.py`'s own module docstring already
+documented this failure mode, before either artifact-pane tool existed
+-- under `plan`, Claude drafts a plan and attempts `ExitPlanMode`
+instead of executing a gated tool, and `ExitPlanMode` is disabled in
+headless mode (`--print`), so there is no way to grant the approval it
+would be asking for. This is the MODEL's own plan-mode system-prompt
+behavior -- a different layer from `_ensure_extra_cli_flags`'s
+`--settings` `permissions.allow` grant, which only affects the CLI
+harness's own allow/deny gate. The grant is real and does make
+`permissive`/`approve` mode work reliably; it just can't reach into
+plan mode's own "draft first, ask before acting" instinct, because the
+one channel that instinct uses to ask (`ExitPlanMode`) doesn't exist in
+this pipeline.
+
+**Practical consequence:** `show_document`/`get_shown_artifact` should
+be treated as unavailable under `permission_mode: plan`. No code fix is
+proposed here -- there is no known way to answer an `ExitPlanMode`
+request headless, so this isn't a bug to patch, it's an architectural
+limit of combining plan mode with a headless pipeline that also applies
+to every OTHER gated tool under plan (matching the class of hang this
+adapter's `--permission-mode plan` default was originally chosen to
+avoid, per the module docstring's own opening finding). Real fix, if
+ever wanted, would need a way to auto-answer `ExitPlanMode` headless
+(same shape as the existing interactive-approval hook for `approve`
+mode) -- a materially bigger change, not scoped here.
 
 ### codex and opencode: not done this pass
 
