@@ -193,7 +193,7 @@ platform = "linux"
 # not just src/convobox) pass, matching what
 # `mypy ... --ignore-missing-imports` already did for the whole tree.
 #
-# aec_audio_processing, piper/piper.*, fastapi/starlette/uvicorn, and
+# aec_audio_processing, piper/piper.*, fastapi/starlette/uvicorn/mcp, and
 # matplotlib are a different reason for the same fix: all are opt-in
 # extras (`uv sync --extra aec`/`--extra piper`/`--extra web`/
 # `--extra analysis`) deliberately NOT installed by CI's default lint job
@@ -232,6 +232,8 @@ module = [
     "starlette.*",
     "uvicorn",
     "uvicorn.*",
+    "mcp",
+    "mcp.*",
     "matplotlib",
     "matplotlib.*",
     "voice_picker",
