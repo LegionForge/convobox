@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from convobox.config import DisplayConfig
 from convobox.web.app import create_app, sse_lines
+from convobox.web.bridge import WebEventForwarder
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
 
@@ -641,6 +642,43 @@ def test_resolve_approval_when_bridge_reports_it_could_not_deliver_returns_409()
     with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.post("/api/sessions/s/approval", json={"action": "approve"})
     assert response.status_code == 409
+
+
+def test_resolve_approval_broadcasts_approval_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Live UAT gap, 2026-08-17: a voice-approved request left the web
+    # UI's own row clickable indefinitely -- this is what an approve/deny
+    # from the web buttons themselves must also broadcast, so every OTHER
+    # open tab (not just this one, which already updates its row locally)
+    # catches up too.
+    bridge = _FakeApprovalBridge(pending=True)
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+    app = create_app(
+        db=HistoryDB(Path(":memory:")), broadcaster=broadcaster,
+        approval_bridge=bridge, web_forwarder=forwarder,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "approve"})
+    assert response.status_code == 200
+    assert queue.get_nowait() == {"type": "approval_resolved", "approved": True}
+
+
+def test_resolve_approval_explain_does_not_broadcast_approval_resolved() -> None:
+    # "explain" keeps the request open -- the web UI's own row must stay
+    # active, so nothing should tell any tab a decision was made.
+    bridge = _FakeApprovalBridge(pending=True, explanation="rm -rf .incident-captures/*.wav")
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+    app = create_app(
+        db=HistoryDB(Path(":memory:")), broadcaster=broadcaster,
+        approval_bridge=bridge, web_forwarder=forwarder,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/sessions/s/approval", json={"action": "explain"})
+    assert response.status_code == 200
+    assert queue.empty()
 
 
 def test_resolve_approval_rejects_an_unknown_action(client: TestClient) -> None:
