@@ -378,7 +378,12 @@ async def test_close_all_puts_none_in_every_subscriber_queue() -> None:
 
     await broadcaster.close_all()
 
+    # session_ended (see close_all()'s own docstring) precedes the None
+    # sentinel -- both queues have plenty of room here, so neither put
+    # evicts the other.
+    assert await q1.get() == {"type": "session_ended"}
     assert await q1.get() is None
+    assert await q2.get() == {"type": "session_ended"}
     assert await q2.get() is None
 
 
