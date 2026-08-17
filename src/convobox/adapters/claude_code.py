@@ -472,14 +472,33 @@ class ClaudeCodeAdapter(BackendAdapter):
             allow.extend(f"mcp__{name}" for name in await self._enumerate_mcp_server_names())
         if self._mcp_url is not None:
             # Granted regardless of permission_mode, unlike every other
-            # MCP server: show_document is safe-by-construction (fenced
-            # to the exact same working_dir + extension allowlist the
-            # browser-facing GET /api/artifacts route already enforces,
-            # see web/mcp_server.py -- it can't do anything a human
-            # already looking at this session's own web UI couldn't do
-            # via Browse Files). Refusing it under "plan" would defeat
-            # the point: an agent that can only PLAN writes should still
-            # be able to show a file it already read.
+            # MCP server: show_document/get_shown_artifact are safe-by-
+            # construction (fenced to the exact same working_dir +
+            # extension allowlist the browser-facing GET /api/artifacts
+            # route already enforces, see web/mcp_server.py -- neither
+            # can do anything a human already looking at this session's
+            # own web UI couldn't do via Browse Files).
+            #
+            # CORRECTED, live-diagnosed 2026-08-17: this grant does NOT
+            # make either tool reliably usable under permission_mode:
+            # "plan", despite the original intent below. The grant only
+            # affects the CLI harness's own allow/deny gate -- it's real
+            # and does make "permissive"/"approve" work -- but plan
+            # mode's model-level behavior is a DIFFERENT layer this
+            # module's own docstring already documented before either
+            # tool existed: under plan, Claude drafts a plan and
+            # attempts ExitPlanMode instead of executing a tool, and
+            # ExitPlanMode is disabled headless, so there's no way to
+            # grant the approval it's asking for. JP's real voice UAT
+            # confirmed this reliably blocks both artifact-pane tools
+            # under plan (docs/ARTIFACT-PANE-SCOPE.md has the full
+            # writeup) -- the original reasoning ("an agent that can
+            # only PLAN writes should still be able to show a file it
+            # already read") was a reasonable INTENT, but this
+            # mechanism can't deliver it for plan mode specifically.
+            # Left in anyway: harmless where it doesn't help, and does
+            # help permissive/approve, so removing it would only lose
+            # ground.
             allow.append("mcp__convobox")
         if allow:
             settings.setdefault("permissions", {})["allow"] = allow

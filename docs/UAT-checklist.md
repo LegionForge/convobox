@@ -1323,18 +1323,29 @@ in this file:
 - The resize fix: verified via BrowserOS driving synthetic mouse events
   against a real running server, not a live UAT session's actual mouse.
 
-**Open question, found live 2026-08-16, status hypothesis (not yet
-reproduced enough times to call diagnosed):** under
-`permission_mode: plan`, one `--text`-mode run had Claude explicitly
-DECLINE to call `show_document` ("Plan mode blocks non-read-only tool
-calls... I can't call `show_document` right now"), even though the tool
-is granted unconditionally regardless of permission_mode (see
-`claude_code.py`'s `_ensure_extra_cli_flags`). A second run with
-identical setup succeeded. This reads like model-level caution (Claude's
-own plan-mode system-prompt guidance being conservative about a tool it
-doesn't recognize as safe) rather than a permission-grant bug -- the
-grant itself is mechanically confirmed present in the `--settings` JSON
-either way. **[AP5] below is the live test that actually settles this.**
+**[AP5], resolved -- status diagnosed, 2026-08-17: `permission_mode:
+plan` reliably blocks both artifact-pane MCP tools.** JP's real voice
+UAT confirmed this on a live mic session ("plan mode blocks artifact
+pane mcp calls"), matching the earlier scripted signal (one decline,
+one success across two `--text`-mode runs on 2026-08-16 -- the success
+was the outlier, not the decline). Root cause: `claude_code.py`'s own
+module docstring already documented, before `show_document` even
+existed, that plan mode makes Claude draft a plan and attempt
+`ExitPlanMode` instead of executing a tool -- and `ExitPlanMode` is
+disabled in headless mode, so there is no way to grant the approval it's
+asking for. This is the model's own plan-mode system-prompt behavior,
+a DIFFERENT layer from `_ensure_extra_cli_flags`'s `--settings`
+`permissions.allow` grant -- the grant is real and mechanically present
+either way (it's what makes `permissive`/`approve` mode work reliably),
+but it only affects the CLI harness's own allow/deny gate, not whether
+the model chooses to attempt the call at all under plan mode's
+"draft first, ask before acting" instructions. **Practical
+consequence: `show_document`/`get_shown_artifact` should be treated as
+unavailable under `permission_mode: plan`** -- use `permissive` or
+`approve` for artifact-pane testing/use. See
+`docs/ARTIFACT-PANE-SCOPE.md`'s "Answering 'what artifact is showing?'"
+section for the full writeup; the code comment claiming these tools are
+usable "regardless of permission_mode" is corrected there too.
 
 ### Setup
 
@@ -1357,7 +1368,7 @@ New-Item -ItemType Directory -Force $wd | Out-Null
 ```yaml
 backend:
   name: claude-code
-  permission_mode: permissive   # try approve and plan too -- see [AP5]/[AP7]
+  permission_mode: permissive   # also try approve ([AP7]) -- plan is a known dead end for these tools, see [AP5]
   working_dir: "%TEMP%/convobox-uat-artifacts"
 web:
   enabled: true
@@ -1388,12 +1399,14 @@ open `http://127.0.0.1:5173/` in a browser, and talk.
   NOT reflexively call `show_document` just because a filename was
   spoken -- this is model judgment, not a hard gate, so a live check is
   the only way to know.
-- **[AP5] Does it actually fire under `permission_mode: plan`?**
-  Settles the open question above. Run the SAME utterance ("show me
-  the quarterly report") several times under `plan` mode specifically.
-  Record the pass/fail rate -- if it's inconsistent, that's the
-  finding (model-level hesitancy, not a permission bug); if it fails
-  every time, that changes the diagnosis and needs its own follow-up.
+- **[AP5] RESOLVED, 2026-08-17: does not fire under
+  `permission_mode: plan`.** JP's live voice UAT confirmed a reliable
+  block, not intermittent hesitancy -- see this section's own opening
+  paragraph and `docs/ARTIFACT-PANE-SCOPE.md`'s "Plan mode blocks both
+  artifact-pane tools" for the full root-cause writeup. Use
+  `permissive` or `approve` for artifact-pane testing/use; `plan` is a
+  known, architectural dead end for these two tools, not a bug to keep
+  probing.
 - **[AP6] Resize is usable mid-conversation, not just via scripted
   drag.** With the pane open, actually grab the left-edge handle with
   a real mouse (cursor should show `col-resize` on hover) and drag it
