@@ -805,6 +805,31 @@ class ClaudeCodeAdapter(BackendAdapter):
         if settings_path is not None:
             with contextlib.suppress(OSError):
                 settings_path.unlink()
+        await self._terminate_and_kill_process(proc)
+
+    async def force_kill(self) -> None:
+        # Deliberately skips aclose()'s other teardown (denying a pending
+        # approval, closing the approval HTTP server, removing the
+        # settings file) -- those aren't part of "make the OS process
+        # stop now," and this is expected to be followed by a full normal
+        # shutdown (see BackendAdapter.force_kill()'s own docstring),
+        # whose own aclose() call moments later is idempotent on an
+        # already-dead process and still runs that other teardown then.
+        # No session/thread identifier to preserve here unlike codex.py's
+        # override -- this adapter runs with --no-session-persistence
+        # (see _REQUIRED_FLAGS above), so there's no resumable session for
+        # a future Phase 2 to reconnect to even in principle.
+        proc, self._proc = self._proc, None
+        reader_task, self._reader_task = self._reader_task, None
+        if reader_task is not None:
+            reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader_task
+        await self._terminate_and_kill_process(proc)
+
+    async def _terminate_and_kill_process(
+        self, proc: asyncio.subprocess.Process | None
+    ) -> None:
         if proc is None or proc.returncode is not None:
             return
         with contextlib.suppress(ProcessLookupError, OSError):

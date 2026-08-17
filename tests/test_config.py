@@ -12,6 +12,7 @@ from convobox.config import (
     AudioConfig,
     DisplayConfig,
     InteractionConfig,
+    SafewordConfig,
     STTConfig,
     WebConfig,
     aec_estimate_path,
@@ -148,6 +149,39 @@ def test_approval_phrase_rejects_a_common_affirmation_only_phrase() -> None:
 
 def test_approval_timeout_s_has_a_sane_default() -> None:
     assert InteractionConfig().approval_timeout_s == 30.0
+
+
+# --- SafewordConfig.kill_phrase: opt-in escalation to
+# Orchestrator.force_kill() -- see that method's own docstring. Must be
+# one of hard_stop_phrases, since it can't fire a hard stop it isn't
+# configured to be a safeword for. ---
+
+
+def test_kill_phrase_defaults_to_none() -> None:
+    assert SafewordConfig().kill_phrase is None
+
+
+def test_kill_phrase_accepts_a_phrase_already_in_hard_stop_phrases() -> None:
+    config = SafewordConfig(
+        hard_stop_phrases=["stop stop stop", "eject eject eject"],
+        kill_phrase="eject eject eject",
+    )
+    assert config.kill_phrase == "eject eject eject"
+
+
+def test_kill_phrase_rejects_a_phrase_not_in_hard_stop_phrases() -> None:
+    with pytest.raises(ValueError, match="must also be listed"):
+        SafewordConfig(
+            hard_stop_phrases=["stop stop stop"],
+            kill_phrase="eject eject eject",
+        )
+
+
+def test_kill_phrase_rejects_against_the_default_hard_stop_phrases() -> None:
+    # No hard_stop_phrases override -- kill_phrase is still checked
+    # against whatever the field's own default_factory produces.
+    with pytest.raises(ValueError, match="must also be listed"):
+        SafewordConfig(kill_phrase="eject eject eject")
 
 
 def test_approval_explanation_mode_rejects_an_unrecognized_value() -> None:

@@ -58,6 +58,53 @@ async def test_aclose_without_a_process_is_a_safe_noop() -> None:
     await adapter.aclose()  # idempotent
 
 
+# --- force_kill(): "option 2 (escalating force-kill)" -- a minimal
+# process-only kill, deliberately skipping aclose()'s other teardown (see
+# force_kill()'s own docstring on why: this is expected to be followed by
+# a full normal shutdown moments later, which runs the rest then). ---
+
+
+@pytest.mark.asyncio
+async def test_force_kill_terminates_the_subprocess() -> None:
+    adapter = _adapter()
+    await adapter.send_text("hi")
+    proc = adapter._proc
+    assert proc is not None and proc.returncode is None
+    await adapter.force_kill()
+    assert adapter._proc is None
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_without_a_process_is_a_safe_noop() -> None:
+    adapter = _adapter()
+    await adapter.force_kill()
+    await adapter.force_kill()
+
+
+@pytest.mark.asyncio
+async def test_force_kill_does_not_send_a_polite_interrupt_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole reason force_kill() exists: send_hard_stop()'s
+    # control_request/interrupt write rides the same pipe a wedged
+    # backend has already stopped reading. Assert force_kill() never
+    # calls _write_line() at all.
+    adapter = _adapter()
+    await adapter.send_text("hi")
+
+    called = False
+
+    async def _fail_if_called(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+        raise AssertionError("force_kill() must not call _write_line()")
+
+    monkeypatch.setattr(adapter, "_write_line", _fail_if_called)
+    await adapter.force_kill()
+    assert called is False
+
+
 @pytest.mark.asyncio
 async def test_send_text_yields_text_then_done_and_busy_lifecycle() -> None:
     adapter = _adapter()

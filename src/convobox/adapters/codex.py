@@ -426,6 +426,17 @@ class CodexAdapter(BackendAdapter):
         # the loop is alive, so its pipe transports close cleanly instead of
         # being GC'd after the loop closes (which prints "Event loop is
         # closed" / "unclosed transport" tracebacks on Windows). Idempotent.
+        await self._terminate_and_kill_process()
+
+    async def force_kill(self) -> None:
+        # Unlike aclose(), does NOT reset self._thread_id -- see
+        # BackendAdapter.force_kill()'s own docstring on why that's left
+        # for a future caller to decide (Phase 2, not built here). Sharing
+        # _terminate_and_kill_process() with aclose() is safe regardless:
+        # that helper only ever touches self._proc/self._reader_task.
+        await self._terminate_and_kill_process()
+
+    async def _terminate_and_kill_process(self) -> None:
         proc, self._proc = self._proc, None
         task, self._reader_task = self._reader_task, None
         if task is not None:
