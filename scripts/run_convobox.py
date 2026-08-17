@@ -1240,6 +1240,8 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                     "declined pending backend approval after %.1fs of silence",
                     approval_gate.timeout_s,
                 )
+                if web_forwarder is not None:
+                    web_forwarder.forward_approval_resolved(False)
                 if tui_state is not None:
                     tui_state.warning = None
             else:
@@ -2779,6 +2781,15 @@ async def run(args: argparse.Namespace) -> None:
                                     "%s pending backend approval: %r",
                                     "approved" if approved else "declined", text,
                                 )
+                                # Web UI has no row-level view into a
+                                # VOICE decision otherwise -- its own
+                                # approval-actions row would stay
+                                # clickable indefinitely. See
+                                # WebEventForwarder.forward_approval_
+                                # resolved's own docstring; live UAT
+                                # gap, 2026-08-17.
+                                if web_forwarder is not None:
+                                    web_forwarder.forward_approval_resolved(approved)
                                 if approved:
                                     # Delayed, not immediate: the resumed
                                     # turn starts running the tool call

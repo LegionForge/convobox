@@ -213,6 +213,24 @@ class WebEventForwarder:
         """
         self._broadcast({"type": "status", "status": status, "detail": detail})
 
+    def forward_approval_resolved(self, approved: bool) -> None:
+        """Broadcast the instant a pending approval is decided (approve or
+        deny -- "explain" keeps the request open, nothing to announce here),
+        however it was resolved: a spoken approval phrase (run_convobox.py's
+        mic loop has no approval-actions row of its own to update) or the
+        web UI's own Approve/Deny buttons, possibly from a DIFFERENT
+        browser tab than the one showing the still-live row. The tab that
+        actually clicked already disables its own row locally without
+        waiting for this broadcast (snappier, and works even if the
+        broadcast is somehow dropped) -- this is what catches every OTHER
+        open view up: live UAT, 2026-08-17, found a voice-approved request
+        left its web-UI row clickable indefinitely, since nothing told the
+        page a decision had already been made elsewhere. Never persisted
+        to history, same reasoning as forward_status: live/ephemeral UI
+        state, not a conversation event.
+        """
+        self._broadcast({"type": "approval_resolved", "approved": approved})
+
     def _broadcast(self, payload: dict[str, object]) -> None:
         if self._broadcaster is not None:
             # Orchestrator._on_event calls its hook synchronously from

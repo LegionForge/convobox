@@ -348,6 +348,8 @@ def create_app(
                 "could not deliver this decision to the backend -- the request may "
                 "have just been answered another way (voice) or timed out",
             )
+        if web_forwarder is not None:
+            web_forwarder.forward_approval_resolved(approved)
         return {"status": "approved" if approved else "denied", "explanation": None}
 
     @app.get("/api/sessions/{session_id}/export")

@@ -1096,6 +1096,20 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     note.textContent = message;
   }
 
+  // WebEventForwarder.forward_approval_resolved (bridge.py): fires the
+  // instant a pending approval is decided, however it was decided --
+  // voice (no row of its own to update) or a click, possibly from a
+  // DIFFERENT tab than the one showing the still-live row. Only ever
+  // touches pendingApprovalActions -- an older, already-superseded row
+  // (see that variable's own comment) is left alone; it's not the one
+  // this resolution was about. Live UAT gap, 2026-08-17: a voice-approved
+  // request left its web-UI row clickable indefinitely.
+  function handleApprovalResolved(approved) {
+    if (!pendingApprovalActions) return;
+    disableApprovalActions(pendingApprovalActions, approved ? "Approved." : "Denied.");
+    pendingApprovalActions = null;
+  }
+
   function buildApprovalActions() {
     const row = document.createElement("div");
     row.className = "approval-actions";
@@ -1408,6 +1422,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
         const payload = JSON.parse(e.data);
         if (payload.type === "status") {
           renderActivityStatus(payload.status, payload.detail);
+        } else if (payload.type === "approval_resolved") {
+          handleApprovalResolved(payload.approved);
         } else {
           renderEvent(payload);
         }
