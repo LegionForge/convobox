@@ -476,7 +476,8 @@ class CodexAdapter(BackendAdapter):
         try:
             while True:
                 line = await readline_with_stall_diagnostic(
-                    proc.stdout, proc, "codex app-server _read_loop"
+                    proc.stdout, proc, "codex app-server _read_loop",
+                    busy=lambda: self._busy,
                 )
                 if not line:
                     return

@@ -15,6 +15,15 @@ from convobox.tts.base import TTSEngine
 
 logger = logging.getLogger(__name__)
 
+# stop_event_loop()'s retry-cancel mitigation (docs/field-notes/2026-08-15-
+# opencode-freeze-*.md): module-level, not inline literals, so a test can
+# monkeypatch them down to something fast rather than genuinely waiting out
+# 3-9s of real time to exercise the retry path -- same reasoning as
+# adapters/base.py's own _READLINE_STALL_FIRST_WARNING_S being a named
+# constant rather than a literal in that diagnostic.
+_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S = 3.0
+_EVENTS_TASK_CANCEL_MAX_ATTEMPTS = 3
+
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 # Markdown link: speak the text, never the URL.
@@ -435,14 +444,45 @@ class Orchestrator:
         return was_busy
 
     async def stop_event_loop(self) -> None:
+        # Retries cancel() up to 3x (3s each) rather than a single
+        # cancel-and-await, per 2026-08-15 live evidence against the
+        # opencode backend: a task suspended inside adapter.events()'s SSE
+        # read can silently fail to honor its FIRST cancel() -- observed
+        # hanging 15-90s with a single cancel, every time, never
+        # self-resolving -- but a SECOND cancel() reliably unstuck it
+        # within seconds, 7/7 replicated trials. Root cause not confirmed
+        # (suspected: httpcore's AutoBackend always uses anyio's asyncio
+        # backend, a known interop gap for bare Task.cancel()), but this
+        # bounds what was an indefinite freeze to a few seconds regardless.
+        # See docs/field-notes/2026-08-15-opencode-freeze-*.md for the full
+        # investigation. asyncio.shield() protects `task` itself from this
+        # wait_for's own timeout -- only the wait is abandoned, not the
+        # task, so it stays alive to be re-cancelled and re-awaited.
         self._cancel_speak_task()
         if self._events_task is None:
             return
-        self._events_task.cancel()
-        try:
-            await self._events_task
-        except asyncio.CancelledError:
-            pass
+        task = self._events_task
+        task.cancel()
+        for attempt in range(_EVENTS_TASK_CANCEL_MAX_ATTEMPTS):
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S
+                )
+                break
+            except asyncio.CancelledError:
+                break
+            except TimeoutError:
+                if task.done():
+                    break
+                logger.warning(
+                    "events task did not honor cancel() after %.1fs "
+                    "(attempt %d/%d), re-cancelling -- see docs/field-notes/"
+                    "2026-08-15-opencode-freeze-repeated-cancel-mitigates-"
+                    "mechanism-and-workaround-candidate.md",
+                    _EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S, attempt + 1,
+                    _EVENTS_TASK_CANCEL_MAX_ATTEMPTS,
+                )
+                task.cancel()
         self._events_task = None
 
     async def _consume_events(self) -> None:
