@@ -182,23 +182,25 @@ bug rather than working around it).
 
 ## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
-**Status:** still open, **escalated 2026-08-12 -- likely two distinct
-bugs, not one.** PR #269 (2026-08-12) targeted this bug's then-leading
-hypothesis (thread-pool contention) and did not fix it -- live re-tested
-the same day, three clean reproductions, #269's own new stall diagnostic
-never fired once. A same-day follow-up session then caught **two real
-short capture stalls (1-4s, confirmed zero queue backlog -- not the
-"backlog piling up" hypothesis, a genuine brief capture-callback hiccup,
-now directly observable for the first time)**, and separately, **a 12+
-minute freeze that resisted every recovery path tried** (web resume, the
-hard-stop API, even killing a hung backend subprocess that was itself
-stuck at the time) -- only a full process kill ended it. CPU forensics
-during that long freeze (target process pinned at a literal, sustained
-0% CPU) point at a genuine blocking wait with no timeout, most likely in
-backend-subprocess I/O, not the VAD/capture layer at all. **Treat this
-as safety-relevant and unresolved -- not a release candidate until at
-least the long-freeze variant is understood.** Full evidence in both
-2026-08-12 field notes linked below.
+**Status:** narrowed and mostly resolved as of 2026-08-15 -- see the
+"2026-08-15 investigation, final status" summary near the end of this
+entry for the current, accurate picture before relying on anything
+below it, which reflects earlier, less-informed hypotheses.
+**Escalated 2026-08-12 -- likely two distinct bugs, not one.** PR #269
+(2026-08-12) targeted this bug's then-leading hypothesis (thread-pool
+contention) and did not fix it -- live re-tested the same day, three
+clean reproductions, #269's own new stall diagnostic never fired once. A
+same-day follow-up session then caught **two real short capture stalls
+(1-4s, confirmed zero queue backlog -- not the "backlog piling up"
+hypothesis, a genuine brief capture-callback hiccup, now directly
+observable for the first time)**, and separately, **a 12+ minute freeze
+that resisted every recovery path tried** (web resume, the hard-stop
+API, even killing a hung backend subprocess that was itself stuck at the
+time) -- only a full process kill ended it. CPU forensics during that
+long freeze (target process pinned at a literal, sustained 0% CPU) point
+at a genuine blocking wait with no timeout, most likely in
+backend-subprocess I/O, not the VAD/capture layer at all. Full evidence
+in both 2026-08-12 field notes linked below.
 
 **Symptom, live-hit 2026-08-06/07, `stt.device: cpu`** (after a related
 fix, PR #217, was already merged into the checkout): the app went
@@ -525,6 +527,82 @@ reasons -- macOS's read woke up but something downstream (mic
 capture/VAD layer) stayed silent anyway; Windows' read never woke up at
 all. Full evidence: `docs/field-notes/2026-08-15-vad-mic-freeze-live-
 reproduced-on-macos.md`.
+
+**2026-08-15 investigation, final status: mostly false alarms and a
+distinct, now-mitigated opencode bug -- one genuinely open variant
+remains.** The same evening's continued macOS investigation
+substantially reframed the picture above. In rough chronological order:
+claude-code was repeatedly more resilient than codex under the same
+stress harness (`docs/field-notes/2026-08-15-vad-freeze-claude-code-
+backend-more-resilient-than-codex-on-macos.md`,
+`docs/field-notes/2026-08-15-claude-code-vad-freeze-re-confirmed-clean-
+at-good-volume.md`); a second independent severe freeze plus a
+self-resolving 66.3s stall were caught, 2-for-2 batches tail-triggered
+(`docs/field-notes/2026-08-15-vad-freeze-second-severe-instance-plus-a-
+self-resolving-66s-stall.md`); and a **test-harness confound was found
+and fixed -- the macOS stress harness had been running at 25% system
+output volume**, and re-running both original repro conditions at
+confirmed good volume came back clean
+(`docs/field-notes/2026-08-15-vad-freeze-mic-layer-repro-was-a-test-
+harness-confound-system-output-volume-at-25pct.md`,
+`docs/field-notes/2026-08-15-vad-freeze-both-repro-conditions-clean-at-
+confirmed-good-volume.md`).
+
+With the volume confound removed and a **busy-state diagnostic** added
+to distinguish a genuinely stuck `readline()`/`aiter` from one that's
+simply idle (`docs/field-notes/2026-08-15-vad-freeze-readline-stalls-
+often-just-idle-time-not-a-hang-busy-state-fix.md`), a definitive
+idle-trigger re-run found a **335.6s `readline()` "stall" that was
+entirely harmless idle time**, and separately, a real mic-layer freeze
+caught twice
+(`docs/field-notes/2026-08-15-vad-freeze-idle-trigger-re-run-with-busy-
+diagnostic-readline-was-harmless-mic-layer-freeze-real.md`). A fresh
+10-cycle stress batch with the busy-aware diagnostic then found **zero
+genuine in-flight hangs**
+(`docs/field-notes/2026-08-15-vad-freeze-re-run-with-busy-diagnostic-
+zero-genuine-hangs-in-fresh-10-cycle-batch.md`). The backend-readline
+freeze's root cause was finally pinned down via a live native stack
+sample: **codex is blocked on its OWN stdin, not on anything in
+ConvoBox's event loop** -- refuting the standing
+thread-pool-contention/VAD-layer hypothesis this whole entry had been
+built around since 2026-08-12
+(`docs/field-notes/2026-08-15-vad-freeze-root-cause-codex-blocked-on-
+own-stdin-not-convobox-event-loop.md`). The idle-trigger freeze was then
+confirmed not to reproduce on claude-code
+(`docs/field-notes/2026-08-15-vad-freeze-idle-trigger-does-not-
+reproduce-on-claude-code.md`) or on opencode -- completing a 3-backend
+comparison and including a self-caught false alarm
+(`docs/field-notes/2026-08-15-vad-freeze-idle-trigger-does-not-
+reproduce-on-opencode.md`) -- and separately reconfirmed that the severe
+freeze doesn't require active stress conditions, a third independent
+catch
+(`docs/field-notes/2026-08-15-vad-freeze-idle-trigger-confirmed-no-
+active-stress-needed.md`).
+
+**Net effect on this entry's original claim:** the codex/backend-readline
+freeze this entry escalated on 2026-08-12 is now understood (blocked on
+codex's own stdin) and, on the orchestrator side, mitigated -- see the
+opencode retry-cancel fix under the force-kill entry below and
+`src/convobox/orchestrator/orchestrator.py`'s `stop_event_loop()`, which
+bounds what used to be an indefinite hang to ~3 retries x 3s, validated
+live against 143 automated hard-stops on Windows with zero timeouts
+(`docs/field-notes/2026-08-15-opencode-retry-cancel-fix-holds-under-
+automated-hardstop-storm-on-windows.md`). Most of what looked like a
+widespread, safety-relevant freeze across this entry's history has
+turned out to be either this one now-mitigated mechanism or harmless
+idle time misread as a hang by diagnostics that didn't yet distinguish
+the two.
+
+**Still genuinely open, not a false alarm:** the same evening also
+caught a **structurally new freeze variant -- mic-layer-only, no codex
+subprocess involved at all, 6+ minutes, the first time this shape
+self-resolved rather than requiring intervention**
+(`docs/field-notes/2026-08-15-vad-freeze-new-variant-mic-layer-only-6-
+minutes-self-resolved.md`). Root cause not established. Treat this
+specific variant, not the broader entry above it, as the live open risk
+going into any release -- rare (one occurrence to date, self-resolving),
+not confirmed eliminated, and not yet reproduced deliberately rather
+than caught incidentally.
 
 ---
 
