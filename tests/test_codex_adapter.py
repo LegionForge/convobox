@@ -969,9 +969,9 @@ def test_permission_config_args_unknown_mode_passes_no_overrides() -> None:
     # BackendConfig and CodexAdapter's constructor -- an unrecognized
     # value (typo, future mode not yet wired here) must degrade to no
     # -c overrides rather than raising or silently picking a posture.
-    from convobox.adapters.codex import _permission_config_args
+    import convobox.adapters.codex as mod
 
-    assert _permission_config_args("nonexistent-mode") == []
+    assert mod._permission_config_args("nonexistent-mode") == []
 
 
 def test_describe_approval_request_file_change_uses_the_changes_field() -> None:
