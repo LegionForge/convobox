@@ -1674,6 +1674,25 @@ def _check_backend_permission_mode(backend: object, interaction: object) -> None
     log.info("backend permission_mode: %s (%s)", mode, name)
 
 
+def _check_plan_mode_blocks_artifact_tools(backend: object) -> None:
+    """Warn that the show_document/get_shown_artifact MCP tools
+    (web/mcp_server.py) won't respond headless under claude-code's
+    default permission_mode. Only called when the MCP server is actually
+    being mounted (config.web.enabled and backend.working_dir both set --
+    see the call site), so this only fires when it's actually relevant."""
+    name = getattr(backend, "name", "")
+    mode = getattr(backend, "permission_mode", "plan")
+    if name == "claude-code" and mode == "plan":
+        log.warning(
+            "backend.permission_mode=plan reliably blocks the "
+            "show_document/get_shown_artifact MCP tools headless -- "
+            "ExitPlanMode doesn't work in --print mode. The artifact pane "
+            "will still work for files the backend writes; it just won't "
+            "respond to agent-initiated show/what's-showing requests. See "
+            "docs/ARTIFACT-PANE-SCOPE.md.",
+        )
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -1890,6 +1909,7 @@ async def run(args: argparse.Namespace) -> None:
         # front avoids relying on a redirect that was never going to
         # happen for this client's request method anyway.
         mcp_url = f"http://127.0.0.1:{config.web.port}/mcp/"
+        _check_plan_mode_blocks_artifact_tools(config.backend)
     adapter = create_backend_adapter(config.backend, mcp_url=mcp_url, mcp_token=mcp_token)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
