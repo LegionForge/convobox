@@ -1748,12 +1748,14 @@ Full evidence: `docs/field-notes/2026-08-12-stt-hallucination-bypasses-the-langu
 
 ---
 
-## A safeword match in a transcript skips checking that same transcript for a pause phrase
+## A safeword match in a transcript skips checking that same transcript for a pause phrase -- fixed
 
-**Status:** validated-live, 2026-08-12. Not a safety gap (the hard-stop
-itself always fires correctly regardless) -- a real, code-confirmed
-interaction gap between two independent control mechanisms, no fix
-proposed yet.
+**Status:** validated-live, 2026-08-12; fixed 2026-08-14, not yet
+live-reproduced against the patched code (unit-level + full-suite
+verification only so far -- see below). Never a safety gap (the
+hard-stop itself always fired correctly regardless, before or after
+this fix) -- this was a real, code-confirmed interaction gap between two
+independent control mechanisms.
 
 **Symptom.** JP spoke a long, rapid-fire safeword sequence live; STT
 transcribed it as one continuous 11.8s utterance containing multiple
@@ -1765,12 +1767,12 @@ never separately evaluated -- the session never entered the paused
 state from this utterance.
 
 **Mechanism, confirmed in code** (`scripts/run_convobox.py:2507-2547`):
-the entire pause/resume check (`listening_gate.observe(text)`) lives
-inside `if not is_hard_stop:`. When a safeword matches a transcript,
-that whole block -- including the pause check -- is skipped entirely for
-that transcript, not just reordered after the hard-stop.
-`PauseListeningDetector` itself is unaffected and would have found the
-phrase if asked; the gap is in the caller never asking.
+the entire pause/resume check (`listening_gate.observe(text)`) lived
+inside `if not is_hard_stop:`. When a safeword matched a transcript,
+that whole block -- including the pause check -- was skipped entirely
+for that transcript, not just reordered after the hard-stop.
+`PauseListeningDetector` itself was unaffected and would have found the
+phrase if asked; the gap was in the caller never asking.
 
 **Why this is realistic, not contrived:** this project already has a
 documented hallucination pattern (2026-08-06) where a single STT segment
@@ -1778,7 +1780,43 @@ can span many seconds of repeated/garbled phrases -- exactly the shape
 that lets two different trigger phrases land in one utterance. This
 session hit it live.
 
-**Not fixed this session** -- worth a deliberate decision (run the pause
-check unconditionally, independent of the hard-stop outcome, vs. keep
-today's mutually-exclusive design) rather than a reflexive change. Full
-evidence: `docs/field-notes/2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-utterance.md`.
+**JP's decision (2026-08-14):** run the pause/resume check
+unconditionally, even on a hard-stop transcript -- not because the two
+should race, but because the spoken pause path already performs its own
+full stop sequence as a side effect of registering the pause
+(`gate_action == "pause"` at `scripts/run_convobox.py:2573-2609` calls
+`player.stop()`/`tts.stop()`/`adapter.send_hard_stop()`, mirrored by
+`WebListeningBridge.pause()` calling `Orchestrator.hard_stop()`
+directly, `src/convobox/web/bridge.py:441`) -- so "stop listening"
+already implies "hard stop" as one bundled action, on both the spoken
+and web-button paths. The gap was that a safeword present in the same
+utterance short-circuited past that pause branch entirely, losing the
+paused-state transition even though an equivalent stop was about to
+happen anyway via the hard-stop path.
+
+**Fix:** `listening_gate.observe(text)` now also runs when
+`is_hard_stop` is true, applying only the STATE change (pause/resume is
+a pure state machine with no side effects of its own) -- not the
+"pause" branch's own stop sequence (redundant, the hard-stop path
+already stops everything) and not a `continue` (which would skip the
+hard-stop path entirely, the one guarantee that must never change). The
+existing safeword-hard-stop path is untouched: still checked first,
+still falls through unconditionally, still "never swallowed." New log
+lines ("also paused listening" / "also resumed listening") give live
+signal when this branch actually fires. `ListeningGate`'s own docstring
+updated to drop the now-stale "only call this when the safeword did NOT
+match" claim.
+
+**Verification so far:** full suite green (1412 passed / 2 pre-existing
+unrelated Windows symlink-privilege failures, same as before this
+change) and `mypy src/convobox scripts` clean. No unit test added --
+`run()` itself has no existing test harness (real mic/segmenter
+dependency; every fix to this exact function in this project's history
+has been live-UAT-verified, not unit-tested, including the original
+finding this fixes). **Not yet live-reproduced**: next real step is
+repeating the same rapid-fire chained-safeword-plus-"stop listening"
+utterance live and confirming both the hard-stop fires AND the session
+actually ends up in the paused state afterward (observable via a
+follow-up utterance being gated, or the new "also paused listening" log
+line). Full original evidence:
+`docs/field-notes/2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-utterance.md`.
