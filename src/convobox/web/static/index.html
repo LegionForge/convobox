@@ -917,10 +917,30 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       })
       .catch((err) => console.error("editor-uri fetch failed", err));
 
+    reportActiveArtifact(path);
     artifactPaneEl.hidden = false;
   }
 
-  artifactCloseBtn.addEventListener("click", () => { artifactPaneEl.hidden = true; });
+  // GitHub issue #280: the backend agent has no visibility into what
+  // the pane is actually displaying unless the browser -- the only
+  // place that truly knows (tab clicks, Browse-files opens, the pane
+  // being closed) -- tells it. Fire-and-forget, same posture as the
+  // editor-uri fetch above: this only feeds an informational MCP tool
+  // (get_shown_artifact, web/mcp_server.py), never anything the pane's
+  // own rendering depends on, so a failed report should never block or
+  // visibly break the UI.
+  function reportActiveArtifact(path) {
+    fetch("/api/artifacts/active", {
+      method: "POST",
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }).catch((err) => console.error("report active artifact failed", err));
+  }
+
+  artifactCloseBtn.addEventListener("click", () => {
+    artifactPaneEl.hidden = true;
+    reportActiveArtifact(null);
+  });
 
   // Drag-to-resize on the pane's left border (see the CSS comment on
   // #artifact-resize-handle for why this replaced the native `resize`
@@ -1321,6 +1341,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTabs = [];
     activeArtifactPath = null;
     artifactPaneEl.hidden = true;
+    reportActiveArtifact(null);
     renderArtifactTabs();
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);

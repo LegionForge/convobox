@@ -318,3 +318,56 @@ def test_list_artifacts_truncates_and_flags_it(working_dir: Path) -> None:
     data = response.json()
     assert len(data["files"]) == _MAX_BROWSE_RESULTS
     assert data["truncated"] is True
+
+
+# --- POST /api/artifacts/active (GitHub issue #280): the frontend's own
+# report of what the pane is really showing -- get_shown_artifact
+# (web/mcp_server.py) reads app.state.active_artifact_path, this route
+# is the only thing that ever writes it. ---
+
+
+def test_active_artifact_starts_unset() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    assert app.state.active_artifact_path is None
+
+
+def test_set_active_artifact_records_the_relative_path(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/artifacts/active", json={"path": "chart.png"})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "chart.png"
+
+
+def test_set_active_artifact_with_null_clears_it(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "chart.png"})
+        response = client.post("/api/artifacts/active", json={"path": None})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path is None
+
+
+def test_set_active_artifact_with_a_traversal_path_clears_rather_than_errors(
+    working_dir: Path,
+) -> None:
+    # A stale/racy or malformed report only feeds an informational MCP
+    # tool, never a security boundary (GET /api/artifacts/{path} already
+    # enforces that fence on the content this report describes) -- see
+    # add_artifact_routes()'s own comment on why this degrades to
+    # "nothing confidently known" instead of a 4xx the frontend has no
+    # useful way to act on.
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/artifacts/active", json={"path": "../../etc/passwd"})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path is None
+
+
+def test_set_active_artifact_requires_the_csrf_header(working_dir: Path) -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:  # deliberately no CSRF header
+        response = client.post("/api/artifacts/active", json={"path": None})
+    assert response.status_code == 403

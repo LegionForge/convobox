@@ -465,6 +465,84 @@ name the rest rather than guess at it unverified.
   reach) or a deeper investigation into opencode's own plugin/tool
   system that hasn't happened yet.
 
+## Answering "what artifact is showing?" (GitHub issue #280, 2026-08-17)
+
+The read-side complement to `show_document` (#281): before this, the
+backend agent had no way to answer "what's showing?" or "which tab am I
+on?" -- it could only guess from conversation history, which is wrong
+the moment a user manually switches tabs or closes the pane without a
+fresh ARTIFACT event.
+
+### Design
+
+A second tool on the same MCP server, `get_shown_artifact()` -- no new
+server, no new auth, same `mcp__convobox` grant already covers it
+(confirmed: that grant is per-SERVER, not per-tool, per the adapter's
+own docstring). The interesting design decision is where the "current"
+state actually lives:
+
+**Decision: the BROWSER is the source of truth, not this server's own
+broadcast history.** The server could track "the last ARTIFACT event I
+broadcast" as a cheap proxy, but that's wrong the instant a user clicks
+an older tab in the Chooser or closes the pane -- neither of those
+produces a new ARTIFACT event, so a broadcast-history proxy would keep
+reporting stale information exactly in the cases the issue's own
+framing ("which tab am I on?") cares about most. Instead,
+`renderArtifact()` (index.html) -- already the single chokepoint every
+path funnels through (live SSE events, tab clicks, Browse-files opens,
+history replay) -- gets one new fire-and-forget `POST
+/api/artifacts/active` call, and the close button/session-switch paths
+report `null`. The server just stores whatever the browser last told it
+(`app.state.active_artifact_path`); `get_shown_artifact` reads that
+directly. One new state field, one write path, no guessing.
+
+The new POST route re-validates the reported path through the same
+`_resolve_artifact()` fence as everything else (defense in depth, not a
+new security boundary -- this only feeds an informational tool, never
+serves content), but degrades an invalid report to "clear the state"
+rather than erroring; a stale/racy report has no good way for the
+frontend to act on a 4xx anyway.
+
+### Live-verified 2026-08-17
+
+A real claude-code session, three turns against a real running server
+with a real connected browser tab:
+
+1. Asked "what's showing?" before anything was opened -- correctly
+   answered nothing was shown.
+2. Called `show_document` for a real file -- the pane opened in the
+   real browser (confirmed via network-request inspection: the
+   `POST /api/artifacts/active` from `renderArtifact()` actually fired
+   and landed, 200).
+3. **Closed the pane via a real click in the real browser**, then asked
+   "what's showing?" again -- correctly answered nothing was shown,
+   and on its own flagged the apparent discrepancy with what it had
+   just opened. This is the case a broadcast-history proxy would have
+   gotten wrong (it would still show the old file, since closing the
+   pane broadcasts no ARTIFACT event) -- confirms the browser-as-
+   source-of-truth design actually matters, not just that the happy
+   path works.
+
+An earlier attempt at this same test appeared to fail (state didn't
+clear after closing the pane) -- root-caused to a stale cached
+`index.html` in the test browser tab (the same `StaticFiles` caching
+behavior already known from the resize-fix work), not a real bug:
+confirmed by re-running with `read_network_requests` at each step and a
+freshly cache-busted tab, which showed the report request landing
+correctly every time.
+
+### Deferred out of this pass
+
+- **Full tab-list awareness**, not just the active one. The issue's
+  "which tab am I on?" framing implies some notion of position among
+  several open artifacts; this pass only tracks the single active one,
+  matching the issue's simpler "what's showing" framing as the primary
+  ask. Answering "how many tabs are open" or "what else is open"
+  would mean also syncing the Chooser's full tab list server-side, not
+  just the active path -- a bigger, separable slice if it turns out to
+  matter in practice.
+- codex/opencode, same reasoning as `show_document` above.
+
 ## Open Questions (for JP, not decided here)
 
 - Is opencode-first the right adapter to start with, or does JP want

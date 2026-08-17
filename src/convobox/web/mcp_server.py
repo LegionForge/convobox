@@ -145,6 +145,33 @@ def add_mcp_routes(
             web_forwarder(BackendEvent(type=BackendEventType.ARTIFACT, artifact_path=relative))
         return f"Showing {relative} in the artifact pane."
 
+    @server.tool(
+        name="get_shown_artifact",
+        description=(
+            "Check which file, if any, is currently displayed in ConvoBox's "
+            "artifact pane -- grounded in the real UI state (which tab the "
+            "user has selected, or that the pane is closed), not just the "
+            "last file this session happened to open. Use this to answer "
+            "questions like 'what's showing?' or 'which file am I looking "
+            "at?' rather than guessing from conversation history."
+        ),
+    )
+    async def get_shown_artifact() -> str:
+        # Purely a read of app.state.active_artifact_path -- see
+        # add_artifact_routes()'s own comment on that field for why the
+        # BROWSER, not this server, is the source of truth for it (a
+        # POST from renderArtifact() on every live event, tab click, and
+        # Browse-files open). Sub-second race, accepted rather than
+        # engineered around: if this tool is called in the same instant
+        # show_document just fired, the browser may not have reported
+        # the new value back yet. A human asking a follow-up question
+        # takes far longer to speak than that round trip takes to
+        # complete in practice.
+        current = getattr(app.state, "active_artifact_path", None)
+        if current is None:
+            return "No artifact is currently shown in the pane."
+        return f"Currently showing: {current}"
+
     mcp_app = server.streamable_http_app(streamable_http_path="/")
     app.mount(MCP_MOUNT_PATH, _require_bearer_token(mcp_app, token))
 

@@ -1406,3 +1406,29 @@ open `http://127.0.0.1:5173/` in a browser, and talk.
   unconditionally, unlike Write/Edit under this mode) -- if it
   unexpectedly gates on approval, that's a real bug in the grant, not
   the hesitancy pattern [AP5] is tracking.
+
+`get_shown_artifact` (GitHub issue #280) is the read-side
+complement -- "what's showing" grounded in the real UI state, not just
+this session's own memory of the last thing it opened. Already
+live-verified via a scripted `adapter.send_text(...)` harness with a
+real connected browser tab (see `docs/ARTIFACT-PANE-SCOPE.md`'s
+"Answering 'what artifact is showing?'" section) -- same gap as
+[AP1]-[AP7] above: the voice/STT trigger path itself is untested.
+
+- **[AP8] A direct voice question is answered correctly.** With
+  `quarterly_report.json` already open (from [AP1]), ask "what's
+  showing in the artifact pane?" or "which file am I looking at?".
+  Confirm the answer names the right file, not a guess from
+  conversation history.
+- **[AP9] Closing the pane (or switching tabs) by hand, then asking, is
+  answered correctly -- not stale.** With an artifact open, manually
+  click the pane's close button (or click an older tab in the Chooser),
+  THEN ask "what's showing now?". Confirm the answer reflects the
+  ACTUAL current UI state (nothing shown, or the older tab), not the
+  last thing the agent itself opened -- this is the specific case a
+  naive "last broadcast" implementation would get wrong, and the whole
+  point of this tool per the issue's own framing.
+- **[AP10] Asking before anything has ever been shown.** Fresh session,
+  no artifact opened yet. Ask "what's in the artifact pane?". Confirm a
+  clear "nothing is currently shown" answer, not an error or a
+  hallucinated file name.
