@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncGenerator, Callable
 
 import numpy as np
@@ -536,6 +537,91 @@ async def test_stop_event_loop_before_start_is_a_safe_noop() -> None:
     assert orch._events_task is None
     await orch.stop_event_loop()  # must not raise
     assert orch._events_task is None
+
+
+# --- stop_event_loop()'s retry-cancel mitigation (docs/field-notes/2026-08-
+# 15-opencode-freeze-*.md): a task suspended inside adapter.events()'s SSE
+# read can silently fail to honor its first cancel() -- live-observed
+# hanging 15-90s, never self-resolving, on the opencode backend. A stubborn
+# fake task (swallows N cancellations before actually stopping) stands in
+# for that live behavior; _EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S is
+# monkeypatched down so these don't burn real wall-clock seconds. ---
+
+
+async def _stubborn_task(ignore_cancels: int) -> None:
+    """Sleeps "forever," swallowing the first `ignore_cancels`
+    CancelledErrors it receives (simulating a task that doesn't honor
+    cancel()) before finally letting one propagate."""
+    remaining = ignore_cancels
+    while True:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            if remaining <= 0:
+                raise
+            remaining -= 1
+
+
+@pytest.mark.asyncio
+async def test_stop_event_loop_retries_when_the_task_ignores_the_first_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.orchestrator.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S", 0.05)
+
+    orch, _, _, _ = make_orchestrator(busy=False)
+    orch._events_task = asyncio.create_task(_stubborn_task(ignore_cancels=1))
+
+    await asyncio.wait_for(orch.stop_event_loop(), timeout=2.0)  # must not hang
+
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_event_loop_does_not_retry_when_the_first_cancel_is_honored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The common case (no stall at all) must stay on the fast path -- no
+    # wasted retry-timeout wait when a single cancel() already worked.
+    # Setting the retry timeout absurdly long (instead of short, the other
+    # tests' approach) makes this the test that would actually go slow --
+    # and therefore fail via timeout -- if a retry were wrongly attempted.
+    import convobox.orchestrator.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S", 30.0)
+
+    orch, _, _, _ = make_orchestrator(busy=False)
+    orch._events_task = asyncio.create_task(_stubborn_task(ignore_cancels=0))
+
+    await asyncio.wait_for(orch.stop_event_loop(), timeout=1.0)
+
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_event_loop_gives_up_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bounds an indefinite freeze, not eliminates the possibility of one
+    # entirely -- a task that NEVER honors cancel must still let
+    # stop_event_loop() return (with the task abandoned, not awaited
+    # forever) rather than retry without limit.
+    import convobox.orchestrator.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_MAX_ATTEMPTS", 2)
+
+    orch, _, _, _ = make_orchestrator(busy=False)
+    stubborn = asyncio.create_task(_stubborn_task(ignore_cancels=1_000_000))
+    orch._events_task = stubborn
+
+    await asyncio.wait_for(orch.stop_event_loop(), timeout=2.0)  # must not hang
+
+    assert orch._events_task is None
+    stubborn.cancel()  # actually clean up the still-alive fake task
+    with contextlib.suppress(asyncio.CancelledError):
+        await stubborn
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,15 @@ from convobox.tts.base import TTSEngine
 
 logger = logging.getLogger(__name__)
 
+# stop_event_loop()'s retry-cancel mitigation (docs/field-notes/2026-08-15-
+# opencode-freeze-*.md): module-level, not inline literals, so a test can
+# monkeypatch them down to something fast rather than genuinely waiting out
+# 3-9s of real time to exercise the retry path -- same reasoning as
+# adapters/base.py's own _READLINE_STALL_FIRST_WARNING_S being a named
+# constant rather than a literal in that diagnostic.
+_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S = 3.0
+_EVENTS_TASK_CANCEL_MAX_ATTEMPTS = 3
+
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 # Markdown link: speak the text, never the URL.
@@ -454,9 +463,11 @@ class Orchestrator:
             return
         task = self._events_task
         task.cancel()
-        for attempt in range(3):
+        for attempt in range(_EVENTS_TASK_CANCEL_MAX_ATTEMPTS):
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S
+                )
                 break
             except asyncio.CancelledError:
                 break
@@ -464,11 +475,12 @@ class Orchestrator:
                 if task.done():
                     break
                 logger.warning(
-                    "events task did not honor cancel() after 3s "
-                    "(attempt %d/3), re-cancelling -- see docs/field-notes/"
+                    "events task did not honor cancel() after %.1fs "
+                    "(attempt %d/%d), re-cancelling -- see docs/field-notes/"
                     "2026-08-15-opencode-freeze-repeated-cancel-mitigates-"
                     "mechanism-and-workaround-candidate.md",
-                    attempt + 1,
+                    _EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S, attempt + 1,
+                    _EVENTS_TASK_CANCEL_MAX_ATTEMPTS,
                 )
                 task.cancel()
         self._events_task = None
