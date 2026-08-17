@@ -1557,7 +1557,10 @@ the stale response is now discarded and the href stays correct.
 **Status:** validated-live, 2026-08-09. Option 1 (honesty fix) was built
 shortly after. Option 2 (escalating force-kill) got a Phase 1 build
 2026-08-14 -- see below; the "escalating" part (automatic, timeout-based)
-was deliberately NOT what got built. Full evidence, exact timestamps, and
+was deliberately NOT what got built. **The Windows 90/90 result below does
+NOT transfer to macOS -- codex is 0/10 there; see the macOS finding
+further down before assuming this mechanism works cross-platform.** Full
+evidence, exact timestamps, and
 the mechanism writeup: `docs/field-notes/2026-08-09-hard-stop-does-not-
 cancel-an-in-flight-tool-call.md`.
 
@@ -1717,11 +1720,39 @@ Full data (all three backends, three scenario types, 10 runs each, raw
 per-iteration results) in `docs/field-notes/2026-08-14-force-kill-
 reliability-across-all-three-backends.md`.
 
+**macOS does NOT reproduce the Windows result, verified live 2026-08-15
+-- codex 0/10, claude-code 10/10, opposite split.** The Windows 90/90
+result does not transfer: `terminate()`/`kill()` both map to Windows'
+`TerminateProcess()`, but map to genuinely different POSIX signals
+(`SIGTERM`/`SIGKILL`) on macOS, which do not cascade to children by
+default (`os.killpg()` is not used anywhere in the adapters). For codex,
+every spawned shell child survived `force_kill()` -- root cause isolated
+to two stacked issues: (1) codex's default sandboxing (Apple Seatbelt)
+reparents the real leaf process to `launchd` almost immediately,
+detaching it from the app-server's process tree before `force_kill()`
+ever runs; (2) even with sandboxing disabled and the child genuinely
+still a live child of the process tree, `force_kill()` still didn't
+reach it, since signaling only the top-level PID doesn't cascade on
+POSIX. claude-code did not show either failure mode -- 10/10 clean, same
+as its own Windows result. `force_kill()`'s fast return time (~0.005s)
+is identical whether it succeeds or fails on macOS -- timing alone
+cannot distinguish the two. A process-group kill (`os.killpg()`) is a
+strong candidate fix for codex's case but was NOT confirmed live this
+session -- flagged as unconfirmed, not implemented. **Practical
+consequence for macOS users on this release: `safeword.kill_phrase`
+against a codex backend should be treated as unreliable for actually
+stopping a runaway spawned tool-call child, even though the top-level
+process is signaled correctly.** Full data:
+`docs/field-notes/2026-08-15-force-kill-does-not-reach-real-tool-call-
+children-on-macos.md`.
+
 **Still open:** the voice/STT-trigger reliability question -- does
 saying "eject eject eject" live, through the real mic pipeline, actually
 match and route to `force_kill()` reliably, and does normal conversation
 ever false-positive on it? That needs a real mic session, not scriptable
-the way the process-kill mechanism above was.
+the way the process-kill mechanism above was. Also open: confirming
+`os.killpg()` as an actual fix for codex on macOS, and root-causing why
+claude-code doesn't share the same failure mode.
 
 ---
 
