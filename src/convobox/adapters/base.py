@@ -267,3 +267,33 @@ class BackendAdapter(ABC):
         adapters). Must be idempotent and must not raise.
         """
         return
+
+    async def force_kill(self) -> None:
+        """Escalate beyond send_hard_stop(): terminate the underlying OS
+        process outright (or sever the connection, for adapters with no
+        owned process), regardless of whether the backend is responding to
+        anything over its own channel.
+
+        Exists for the case send_hard_stop() structurally cannot handle:
+        the backend itself is wedged (e.g. a blocking readline() with no
+        timeout — see docs/KNOWN-ISSUES.md's VAD/readline freeze entries,
+        live-reproduced 2026-08-14), so no message sent over its normal
+        channel will ever get a response, including the polite interrupt
+        send_hard_stop() sends. This method must NOT go through that
+        channel at all — an OS-level kill is the one lever that still
+        works when the process itself isn't reading its own stdin.
+
+        Default: delegates to aclose() — the correct behavior for adapters
+        with no real subprocess to escalate against (e.g. OpenCodeAdapter's
+        HTTP client, where severing the connection IS the strongest
+        available action). Subprocess-owning adapters override this with a
+        real terminate()/kill() sequence, structured so it does NOT discard
+        any resumable session/thread identifier the way a full aclose()
+        conceptually could — a future caller may want to reconnect to the
+        same conversation on a freshly spawned process rather than
+        starting over (not yet built; this method's shape is scaffolded
+        for that, not implementing it).
+
+        Must be idempotent and must not raise, same contract as aclose().
+        """
+        await self.aclose()

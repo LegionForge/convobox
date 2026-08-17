@@ -101,6 +101,96 @@ async def test_aclose_force_kills_a_process_that_ignores_terminate(
     assert adapter._proc is None
 
 
+# --- force_kill(): "option 2 (escalating force-kill)" -- shares
+# _terminate_and_kill_process() with aclose() (same real terminate()/kill()
+# sequence), so these mirror the aclose() tests above. The one thing that
+# actually matters and can't be shown by a plain call-count assertion: this
+# path never touches _request()/the RPC channel at all -- see the "doesn't
+# wait on send_hard_stop" test below. ---
+
+
+@pytest.mark.asyncio
+async def test_force_kill_terminates_the_appserver() -> None:
+    adapter = _adapter()
+    await adapter.send_text("hi")
+    proc = adapter._proc
+    assert proc is not None and proc.returncode is None
+    await adapter.force_kill()
+    assert adapter._proc is None
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_without_a_process_is_a_safe_noop() -> None:
+    adapter = _adapter()
+    await adapter.force_kill()
+    await adapter.force_kill()
+
+
+@pytest.mark.asyncio
+async def test_force_kill_kills_a_process_that_ignores_terminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.codex as mod
+
+    class _StubbornProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.terminate_called = False
+            self.kill_called = False
+
+        def terminate(self) -> None:
+            self.terminate_called = True
+
+        def kill(self) -> None:
+            self.kill_called = True
+            self.returncode = -9
+
+        async def wait(self) -> int | None:
+            return self.returncode
+
+    async def _fake_wait_for(coro: object, timeout: float) -> None:
+        coro.close()  # type: ignore[attr-defined]
+        raise TimeoutError
+
+    monkeypatch.setattr(mod.asyncio, "wait_for", _fake_wait_for)
+
+    adapter = _adapter()
+    proc = _StubbornProcess()
+    adapter._proc = proc  # type: ignore[assignment]
+
+    await adapter.force_kill()
+
+    assert proc.terminate_called is True
+    assert proc.kill_called is True
+    assert adapter._proc is None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_does_not_send_a_polite_interrupt_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole reason force_kill() exists: send_hard_stop()'s
+    # "turn/interrupt" RPC rides the same pipe a wedged backend has
+    # already stopped reading -- waiting on it (even with its own 30s
+    # _RESPONSE_TIMEOUT_S) defeats the purpose. Assert force_kill() never
+    # calls _request() at all, not just that it eventually succeeds.
+    adapter = _adapter()
+    await adapter.send_text("hi")
+
+    called = False
+
+    async def _fail_if_called(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+        raise AssertionError("force_kill() must not call _request()")
+
+    monkeypatch.setattr(adapter, "_request", _fail_if_called)
+    await adapter.force_kill()
+    assert called is False
+
+
 @pytest.mark.asyncio
 async def test_send_text_yields_text_then_done_and_busy_lifecycle() -> None:
     adapter = _adapter()
@@ -879,9 +969,9 @@ def test_permission_config_args_unknown_mode_passes_no_overrides() -> None:
     # BackendConfig and CodexAdapter's constructor -- an unrecognized
     # value (typo, future mode not yet wired here) must degrade to no
     # -c overrides rather than raising or silently picking a posture.
-    from convobox.adapters.codex import _permission_config_args
+    import convobox.adapters.codex as mod
 
-    assert _permission_config_args("nonexistent-mode") == []
+    assert mod._permission_config_args("nonexistent-mode") == []
 
 
 def test_describe_approval_request_file_change_uses_the_changes_field() -> None:

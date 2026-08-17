@@ -2059,6 +2059,17 @@ async def run(args: argparse.Namespace) -> None:
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
         approval_gate=approval_gate,
+        kill_phrase=config.safeword.kill_phrase,
+        # Reuses the exact same real-interrupt mechanism the web UI's Quit
+        # button and the TUI's Ctrl+C workaround already use (see this
+        # function's own docstring) -- Orchestrator.force_kill() has
+        # already synchronously killed the backend's OS process by the
+        # time this fires, so unlike Quit alone, ending the session here
+        # does not depend on this signal actually being delivered/handled
+        # promptly for the one thing that actually mattered (the
+        # subprocess being dead). This just asks the rest of the app
+        # (mic stream, web server) to unwind the same way Quit does.
+        on_kill_phrase=_self_signal_interrupt,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
     if approval_bridge is not None:
@@ -2072,6 +2083,12 @@ async def run(args: argparse.Namespace) -> None:
         config.safeword.hard_stop_phrases[0],
         os.getpid(),
     )
+    if config.safeword.kill_phrase is not None:
+        log.info(
+            "kill phrase %r configured -- force-kills the backend process "
+            "and ends this session, instead of the normal hard-stop",
+            config.safeword.kill_phrase,
+        )
 
     if args.text is not None:
         # Scriptable single-shot validation: the full Orchestrator/backend/

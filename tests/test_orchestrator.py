@@ -24,6 +24,7 @@ class FakeBackendAdapter(BackendAdapter):
         self.sent_text: list[str] = []
         self.sent_interject: list[str] = []
         self.hard_stops = 0
+        self.force_kills = 0
         # None (the default) keeps every existing test's behavior
         # byte-identical -- events() ends immediately, same as before this
         # param existed. A real list is for tests that need to drive
@@ -49,6 +50,15 @@ class FakeBackendAdapter(BackendAdapter):
 
     async def send_hard_stop(self) -> None:
         self.hard_stops += 1
+
+    async def force_kill(self) -> None:
+        # Deliberately does NOT clear _busy (matching send_hard_stop()'s
+        # own comment above -- is_busy() must be read BEFORE this is
+        # called to mean anything) and deliberately does NOT delegate to
+        # aclose() the way BackendAdapter's own default does -- this fake
+        # tracks the call directly so tests can assert force_kill() (not
+        # send_hard_stop()) is what actually fired.
+        self.force_kills += 1
 
     def is_busy(self) -> bool:
         return self._busy
@@ -154,14 +164,18 @@ def make_orchestrator(
     tier_responses: bool = False,
     approval_phrase: str | None = None,
     approval_gate: object | None = None,
+    safeword_phrases: list[str] | None = None,
+    kill_phrase: str | None = None,
+    on_kill_phrase: Callable[[], None] | None = None,
 ) -> tuple[Orchestrator, FakeBackendAdapter, FakeTTSEngine | None, FakePlayer | None]:
     adapter = FakeBackendAdapter(busy=busy)
-    safeword = SafewordDetector(["stop stop stop"])
+    safeword = SafewordDetector(safeword_phrases or ["stop stop stop"])
     if not with_tts:
         return (
             Orchestrator(
                 adapter, safeword, on_event=on_event, tier_responses=tier_responses,
                 approval_phrase=approval_phrase, approval_gate=approval_gate,
+                kill_phrase=kill_phrase, on_kill_phrase=on_kill_phrase,
             ),
             adapter,
             None,
@@ -173,7 +187,8 @@ def make_orchestrator(
         Orchestrator(
             adapter, safeword, tts=tts, player=player, on_event=on_event,
             tier_responses=tier_responses, approval_phrase=approval_phrase,
-            approval_gate=approval_gate,
+            approval_gate=approval_gate, kill_phrase=kill_phrase,
+            on_kill_phrase=on_kill_phrase,
         ),
         adapter,
         tts,
@@ -345,6 +360,154 @@ async def test_hard_stop_via_safeword_also_cancels_the_approval_gate() -> None:
     await orch.handle_transcript("stop stop stop")
     assert adapter.hard_stops == 1
     assert gate.cancel_wait_calls == 1
+
+
+# --- force_kill(): "option 2 (escalating force-kill)", built 2026-08-14
+# after three live freeze incidents in one session where send_hard_stop()'s
+# own polite interrupt could not reach a wedged backend subprocess. Same
+# test shape as hard_stop()'s own suite above -- direct entry point first,
+# then reached through handle_transcript()'s kill-phrase branch. ---
+
+
+@pytest.mark.asyncio
+async def test_force_kill_method_runs_the_sequence_directly() -> None:
+    orch, adapter, tts, player = make_orchestrator(busy=False, with_tts=True)
+    await orch.force_kill()
+    assert adapter.force_kills == 1
+    assert adapter.hard_stops == 0  # never the polite interrupt -- see force_kill()'s own docstring
+    assert tts.stop_calls == 1
+    assert player.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_force_kill_method_without_tts_or_player_does_not_raise() -> None:
+    orch, adapter, _, _ = make_orchestrator(busy=False, with_tts=False)
+    await orch.force_kill()
+    assert adapter.force_kills == 1
+
+
+@pytest.mark.asyncio
+async def test_force_kill_method_cancels_the_event_loop() -> None:
+    # Same safety-critical reasoning as test_hard_stop_method_cancels_the_
+    # event_loop above: a trailing TEXT event from the just-killed turn
+    # must never reach _on_event() and get spoken.
+    orch, _adapter, _, _ = make_orchestrator(busy=False)
+    orch.start_event_loop()
+    assert orch._events_task is not None
+    await orch.force_kill()
+    assert orch._events_task is None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_cancels_a_pending_approval_gate_wait() -> None:
+    gate = FakeApprovalGate()
+    orch, _, _, _ = make_orchestrator(busy=False, approval_gate=gate)
+    await orch.force_kill()
+    assert gate.cancel_wait_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_force_kill_returns_whether_a_turn_was_actually_busy() -> None:
+    orch_busy, _, _, _ = make_orchestrator(busy=True)
+    assert await orch_busy.force_kill() is True
+
+    orch_idle, _, _, _ = make_orchestrator(busy=False)
+    assert await orch_idle.force_kill() is False
+
+
+@pytest.mark.asyncio
+async def test_force_kill_logs_a_warning_only_when_a_turn_was_busy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="convobox.orchestrator.orchestrator")
+
+    orch_idle, _, _, _ = make_orchestrator(busy=False)
+    await orch_idle.force_kill()
+    assert "any in-flight work is gone" not in caplog.text
+
+    caplog.clear()
+    orch_busy, _, _, _ = make_orchestrator(busy=True)
+    await orch_busy.force_kill()
+    assert "any in-flight work is gone" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_kill_phrase_via_handle_transcript_calls_force_kill_not_hard_stop() -> None:
+    orch, adapter, _, _ = make_orchestrator(
+        busy=False,
+        safeword_phrases=["stop stop stop", "eject eject eject"],
+        kill_phrase="eject eject eject",
+    )
+    await orch.handle_transcript("eject eject eject")
+    assert adapter.force_kills == 1
+    assert adapter.hard_stops == 0
+
+
+@pytest.mark.asyncio
+async def test_other_safewords_still_use_hard_stop_when_kill_phrase_configured() -> None:
+    # The kill-phrase branch must not swallow every safeword -- only the
+    # one exact phrase configured as kill_phrase escalates; every other
+    # configured safeword keeps today's polite-interrupt behavior.
+    orch, adapter, _, _ = make_orchestrator(
+        busy=False,
+        safeword_phrases=["stop stop stop", "eject eject eject"],
+        kill_phrase="eject eject eject",
+    )
+    await orch.handle_transcript("stop stop stop")
+    assert adapter.hard_stops == 1
+    assert adapter.force_kills == 0
+
+
+@pytest.mark.asyncio
+async def test_kill_phrase_fires_the_on_kill_phrase_callback() -> None:
+    calls = 0
+
+    def on_kill() -> None:
+        nonlocal calls
+        calls += 1
+
+    orch, adapter, _, _ = make_orchestrator(
+        busy=False,
+        safeword_phrases=["stop stop stop", "eject eject eject"],
+        kill_phrase="eject eject eject",
+        on_kill_phrase=on_kill,
+    )
+    await orch.handle_transcript("eject eject eject")
+    assert calls == 1
+    assert adapter.force_kills == 1
+
+
+@pytest.mark.asyncio
+async def test_on_kill_phrase_callback_not_called_for_a_normal_safeword() -> None:
+    calls = 0
+
+    def on_kill() -> None:
+        nonlocal calls
+        calls += 1
+
+    orch, adapter, _, _ = make_orchestrator(
+        busy=False,
+        safeword_phrases=["stop stop stop", "eject eject eject"],
+        kill_phrase="eject eject eject",
+        on_kill_phrase=on_kill,
+    )
+    await orch.handle_transcript("stop stop stop")
+    assert calls == 0
+    assert adapter.hard_stops == 1
+
+
+@pytest.mark.asyncio
+async def test_kill_phrase_without_a_callback_configured_does_not_raise() -> None:
+    # on_kill_phrase is optional (run_convobox.py always wires one, but
+    # Orchestrator itself must not assume that) -- same "None is a safe
+    # default" contract as tts/player/approval_gate elsewhere in this file.
+    orch, adapter, _, _ = make_orchestrator(
+        busy=False,
+        safeword_phrases=["stop stop stop", "eject eject eject"],
+        kill_phrase="eject eject eject",
+    )
+    await orch.handle_transcript("eject eject eject")
+    assert adapter.force_kills == 1
 
 
 @pytest.mark.asyncio
