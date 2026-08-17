@@ -55,11 +55,13 @@ jobs:
       security-events: write # required for the CodeQL upload-sarif step inside sast.yml
     with:
       source-dirs: "src/convobox"
-      # dev-rig's default is "p/python p/fastapi" -- ConvoBox has no web
-      # framework yet (see README roadmap: the Phase 2 server component
-      # doesn't exist), so p/fastapi would just be dead weight. Swapped for
-      # a broader general-purpose ruleset instead.
-      semgrep-configs: "p/python p/security-audit"
+      # Restored p/fastapi 2026-08-17: ConvoBox now has a real FastAPI web
+      # UI (src/convobox/web/) plus a mounted MCP HTTP server with a CSRF
+      # exemption for its own routes -- exactly the trust-boundary code
+      # p/fastapi's ruleset targets. dev-rig's default is "p/python
+      # p/fastapi"; kept p/security-audit alongside it rather than
+      # dropping back to the narrower default.
+      semgrep-configs: "p/python p/fastapi p/security-audit"
       python-version: "3.12"
 
   audit:
