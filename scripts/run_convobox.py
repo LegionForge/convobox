@@ -559,11 +559,18 @@ class ListeningGate:
     "Pause/resume listening").
 
     Pure state machine, like BargeInMonitor, so it's unit-testable independent
-    of the mic loop. Call observe() once per transcript that the SAFEWORD DID
-    NOT match -- the caller checks the safeword first, unconditionally, outside
-    this class, because pause state and hard-stop are orthogonal axes (a
-    paused session must still be hard-stoppable; the safeword's own check
-    already runs regardless of anything this class does).
+    of the mic loop. Call observe() once per transcript -- the caller checks
+    the safeword first, unconditionally, outside this class, because pause
+    state and hard-stop are orthogonal axes (a paused session must still be
+    hard-stoppable; the safeword's own check already runs regardless of
+    anything this class does). observe() has no side effects beyond its own
+    is_paused flag, so it's safe to call even on a transcript that ALSO
+    matched the safeword -- the caller applies observe()'s state change but
+    not its usual side effects (the "pause" action's own stop sequence, any
+    `continue`) when a hard stop is also in play, since the hard-stop path
+    already stops everything and must not be skipped (docs/field-notes/
+    2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-
+    utterance.md).
     """
 
     def __init__(self, pause_detector: PauseListeningDetector, wake_detector: ResumeWordDetector) -> None:
@@ -2052,6 +2059,17 @@ async def run(args: argparse.Namespace) -> None:
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
         approval_gate=approval_gate,
+        kill_phrase=config.safeword.kill_phrase,
+        # Reuses the exact same real-interrupt mechanism the web UI's Quit
+        # button and the TUI's Ctrl+C workaround already use (see this
+        # function's own docstring) -- Orchestrator.force_kill() has
+        # already synchronously killed the backend's OS process by the
+        # time this fires, so unlike Quit alone, ending the session here
+        # does not depend on this signal actually being delivered/handled
+        # promptly for the one thing that actually mattered (the
+        # subprocess being dead). This just asks the rest of the app
+        # (mic stream, web server) to unwind the same way Quit does.
+        on_kill_phrase=_self_signal_interrupt,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
     if approval_bridge is not None:
@@ -2065,6 +2083,12 @@ async def run(args: argparse.Namespace) -> None:
         config.safeword.hard_stop_phrases[0],
         os.getpid(),
     )
+    if config.safeword.kill_phrase is not None:
+        log.info(
+            "kill phrase %r configured -- force-kills the backend process "
+            "and ends this session, instead of the normal hard-stop",
+            config.safeword.kill_phrase,
+        )
 
     if args.text is not None:
         # Scriptable single-shot validation: the full Orchestrator/backend/
@@ -2506,6 +2530,36 @@ async def run(args: argparse.Namespace) -> None:
 
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
+                if is_hard_stop:
+                    # The SAME transcript can also contain the pause phrase
+                    # (or, if already paused, the resume word) -- a long
+                    # hallucinated run of repeated safewords realistically
+                    # chains "stop listening" in too (docs/field-notes/
+                    # 2026-08-12-safeword-and-pause-phrase-are-mutually-
+                    # exclusive-within-one-utterance.md, live-caught). Pause
+                    # state and hard-stop are orthogonal axes per
+                    # ListeningGate's own docstring -- the hard stop still
+                    # falls straight through unconditionally below (never
+                    # swallowed or delayed), but that's no reason to also
+                    # silently drop a pause/resume intent genuinely present
+                    # in the same words. Only the STATE change is applied
+                    # here (ListeningGate.observe() is a pure state machine
+                    # with no side effects of its own) -- NOT the "pause"
+                    # branch's own stop sequence below (redundant: the
+                    # hard-stop path already stops everything) and NOT a
+                    # `continue` (which would skip the hard-stop path
+                    # entirely).
+                    also_gate_action = listening_gate.observe(text)
+                    if also_gate_action == "pause":
+                        log.info(
+                            "also paused listening (pause phrase matched in "
+                            "the same utterance as the hard stop): %r", text,
+                        )
+                    elif also_gate_action == "resume":
+                        log.info(
+                            "also resumed listening (resume word matched in "
+                            "the same utterance as the hard stop): %r", text,
+                        )
                 if not is_hard_stop:
                     # Echo-tail guard (stage-2 echo handling): if this
                     # utterance's audio landed inside the reverb/echo tail
