@@ -505,9 +505,26 @@ this freeze class isn't confirmed to require stress conditions at all.
 Full evidence: `docs/field-notes/2026-08-14-mic-pipeline-silence-freeze-
 isolated-from-backend-via-typed-text-then-a-41-minute-compound-freeze.md`.
 
-**Not yet tested on macOS** -- still standing, now a higher-priority gap
-given the ~41-minute freeze suggests this may not be a Windows-specific
-or stress-specific phenomenon.
+**Reproduced live on macOS, 2026-08-15 -- NOT Windows-specific.** A
+5-cycle synthetic-speech stress harness (same shape as the Windows
+sessions above, Piper phrases through real speakers into a real mic)
+caught both the short self-resolving `readline()` stalls (5.5s-30.7s,
+same pattern) and, on the very first run, a severe freeze matching the
+12-minute Windows case's own signature: 94.4s stuck `readline()`
+(CPU forensics confirmed byte-identical process time across samples --
+genuinely zero CPU, not descheduled), plus over 2 minutes of total
+mic-pipeline silence (`Processing audio` never logged again) that
+survived a dedicated safeword recovery attempt, killing the hung
+subprocess directly, AND a fresh utterance played afterward. **One real
+platform divergence found:** killing the hung subprocess DID unblock
+the stuck `readline()` on macOS (`proc.returncode=-15`, immediate) --
+the opposite of the Windows note's own finding that a `taskkill` did
+NOT unblock the equivalent stuck read. The recovery still failed
+overall on both platforms, just for different, now-distinguishable
+reasons -- macOS's read woke up but something downstream (mic
+capture/VAD layer) stayed silent anyway; Windows' read never woke up at
+all. Full evidence: `docs/field-notes/2026-08-15-vad-mic-freeze-live-
+reproduced-on-macos.md`.
 
 ---
 
@@ -1406,6 +1423,54 @@ unreliable enough live that one exact phrase can be hard to hit
 reliably"), not a new problem this feature introduced. Worth keeping in
 mind if `pause_listening_phrases`/`hard_stop_phrases` are ever tuned
 closer together in pronunciation.
+
+---
+
+## "halt halt halt" (a default hard-stop phrase) failed round-trip transcription 4/5 times; bare "Athena" (default resume word) failed 3/5
+
+**Status:** diagnosed live 2026-08-15, macOS, real Piper TTS -> faster-
+whisper round-trip testing (`stt.model: base`). Not yet fixed or
+decided -- see recommendations below.
+
+**Symptom.** A safety-phrase reliability battery (23 hand-labeled test
+cases, gibberish and foreign-language phrasing included) found zero
+false positives anywhere, but two real false-negative gaps:
+`"halt halt halt"` -- one of only three default `hard_stop_phrases` --
+was misheard 4/5 times (`"Hold, hold, hold"` dominant, `"HOT POT POT"`
+once), phonetically close enough to be a plausible genuine STT
+confusion, not obviously a synthesis-only artifact. The default resume
+word `"Athena"` said bare/alone (the simplest, most natural usage) was
+misheard 3/5 times (`"patina"`, `"Adina"`, `"Aficino"`) -- notably worse
+than the `resumeword/detector.py` module's own documented "5/5" claim,
+which used varied multi-word phrasings; re-testing that same varied-
+phrasing set here reproduced a comparable 4/5. `"stop stop stop"` and
+`"abort abort abort"` were fully reliable (5/5 each).
+
+**Why this matters.** `resumeword/detector.py` already documents a
+round-trip verification discipline (`ROUNDTRIP_REJECTED_RESUME_WORDS`) --
+applied once, when "Athena" was chosen 2026-07-13, but never repeated
+for `hard_stop_phrases` when "abort"/"halt" were added 2026-08-09 (that
+addition's own comment reasons about vocabulary collision with the
+project's domain terms, not STT transcription reliability), and never
+re-applied to the bare-word resume-word case specifically.
+
+**Recommendations (not yet reviewed/decided by JP):**
+1. Re-evaluate `"halt halt halt"` as a default -- drop it, keep it with
+   a Settings-TUI warning (same shape as
+   `ROUNDTRIP_REJECTED_RESUME_WORDS`), or verify against real human
+   speech before deciding (this note's evidence is Piper-only).
+2. Document that a resume word said WITH a little surrounding phrase is
+   more reliable than said bare/alone.
+3. Extend the not-yet-built setup-wizard "test-transcribe a few times"
+   UX to hard-stop phrases too, not just the resume word.
+4. This is NOT evidence for gating safewords/hotwords broadly behind an
+   advanced-config warning -- the false-positive side is clean across
+   this whole battery. The gap is narrow (one phrase, one usage
+   pattern), not architectural.
+
+Full data, methodology, and the false-positive-side results (all clean):
+`docs/field-notes/2026-08-15-safety-phrase-reliability-battery-halt-and-
+bare-athena-unreliable.md`.
 
 ---
 
