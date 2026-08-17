@@ -330,12 +330,12 @@
     /* flex-basis is deliberately "auto" (via "0 0 auto", NOT a fixed
        value like the old "0 0 min(420px, 40vw)") -- a flex item's
        explicit flex-basis overrides `width` entirely on the main axis,
-       which would make the native resize handle's own inline `width` it
-       sets on drag silently do nothing. With flex-basis: auto, `width`
-       below supplies the initial size AND stays live as the resize
-       handle overwrites it via inline style (inline always wins over
-       this stylesheet rule). Confirmed live: the "0 0 min(...)" version
-       accepted a manual style.width write with zero visible effect. */
+       which would make a JS-driven inline `width` write silently do
+       nothing. With flex-basis: auto, `width` below supplies the
+       initial size AND stays live as the resize handle overwrites it
+       via inline style (inline always wins over this stylesheet rule).
+       Confirmed live: the "0 0 min(...)" version accepted a manual
+       style.width write with zero visible effect. */
     flex: 0 0 auto;
     width: min(420px, 40vw);
     min-height: 0;
@@ -343,19 +343,32 @@
     flex-direction: column;
     border-left: 1px solid var(--border);
     background: var(--ribbon-bg);
-    /* Native browser resize handle (bottom-right corner) -- dragging it
-       sets an explicit inline width on this element. `main`'s own
-       `flex: 1 1 auto` (unchanged) already shrinks/grows to fill
-       whatever's left in `.body-row`, so both panes adjust together
-       with no JS needed. overflow: auto is required for `resize` to
-       apply at all -- browsers silently ignore it on `overflow: visible`
-       (the default). */
-    resize: horizontal;
-    overflow: auto;
     min-width: 240px;
     max-width: 85vw;
+    position: relative;
   }
   #artifact-pane[hidden] { display: none; }
+  /* Resize handle: a custom JS-driven drag strip straddling the pane's
+     LEFT border, not CSS `resize` (tried first, reverted -- this pane
+     is always the last flex item, docked flush against the BROWSER
+     WINDOW'S own right edge with zero px of slack past it. The native
+     `resize` handle renders at an element's bottom-RIGHT corner, so
+     "drag right to widen" has nowhere to go: the cursor hits the window
+     edge after ~1-2px, structurally regardless of screen size or
+     zoom -- live-confirmed (viewport width == pane's own right edge to
+     the pixel). Shrinking "worked" only because dragging LEFT, into the
+     page, has normal room; the same handle could never widen the pane
+     in this docked layout. A left-edge handle has no such problem --
+     both directions drag into open space (the chat pane shrinking/
+     growing on one side, nothing constraining the other). */
+  #artifact-resize-handle {
+    position: absolute; left: -4px; top: 0; bottom: 0; width: 9px;
+    cursor: col-resize; z-index: 5; touch-action: none;
+  }
+  #artifact-resize-handle:hover, #artifact-resize-handle.dragging {
+    background: linear-gradient(to right, transparent 3px, var(--dim) 3px 5px, transparent 5px);
+    opacity: 0.8;
+  }
   .artifact-pane-header {
     display: flex; align-items: center; gap: 0.5rem;
     padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border);
@@ -380,9 +393,22 @@
   #artifact-pane-editor-link[hidden] { display: none; }
   #artifact-pane-body {
     flex: 1 1 auto; min-height: 0; overflow: auto;
-    display: flex; align-items: center; justify-content: center;
+    display: flex;
     padding: 0.8rem;
   }
+  /* Center content that fits, WITHOUT clipping content that doesn't.
+     align-items/justify-content: center on the container (the old rule)
+     centers the scrollable range itself around the content's midpoint,
+     which for anything wider/taller than the pane makes half the
+     overflow permanently unreachable by scrolling no matter how far the
+     pane is resized -- live-confirmed: a wide artifact rendered with
+     ~13000px of content had ~6700px of scrollable range, i.e. the left
+     half was never reachable. margin: auto on the child is the standard
+     fix -- it absorbs free space (so small content still centers) but
+     collapses to 0 rather than going negative once the item is bigger
+     than the container, leaving the item flush at the scroll origin
+     with its FULL extent inside the scrollable range. */
+  #artifact-pane-body > * { margin: auto; }
   #artifact-pane-body img {
     max-width: 100%; max-height: 100%; object-fit: contain;
   }
@@ -595,6 +621,8 @@
   </form>
 </main>
 <aside id="artifact-pane" hidden>
+  <div id="artifact-resize-handle" role="separator" aria-orientation="vertical"
+       aria-label="Resize artifact pane" tabindex="0"></div>
   <div id="artifact-tabs" role="tablist" aria-label="Open artifacts" hidden></div>
   <div class="artifact-pane-header">
     <span id="artifact-pane-title"></span>
@@ -676,6 +704,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
   const artifactEditorLink = document.getElementById("artifact-pane-editor-link");
   const artifactTabsEl = document.getElementById("artifact-tabs");
+  const artifactResizeHandle = document.getElementById("artifact-resize-handle");
   const artifactBrowseBtn = document.getElementById("artifact-browse-btn");
   const artifactBrowseOverlay = document.getElementById("artifact-browse-overlay");
   const artifactBrowseCloseBtn = document.getElementById("artifact-browse-close-btn");
@@ -892,6 +921,58 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   artifactCloseBtn.addEventListener("click", () => { artifactPaneEl.hidden = true; });
+
+  // Drag-to-resize on the pane's left border (see the CSS comment on
+  // #artifact-resize-handle for why this replaced the native `resize`
+  // CSS property). Plain mouse events, not Pointer Events -- verified
+  // live that Chrome's CDP-driven automation input (used by this
+  // project's own BrowserOS-based UAT) dispatches mousedown/mousemove/
+  // mouseup but does not reliably synthesize the pointerdown/pointermove
+  // compatibility events a first draft of this handler relied on, which
+  // made the handle silently inert under automation while still working
+  // for a real physical mouse. Mouse events work under both.
+  (function initArtifactResize() {
+    const MIN_WIDTH = 240; // matches #artifact-pane's min-width
+    const MAX_WIDTH_FRACTION = 0.85; // matches #artifact-pane's max-width: 85vw
+    let startX = 0;
+    let startWidth = 0;
+
+    function clamp(width) {
+      return Math.min(Math.max(width, MIN_WIDTH), window.innerWidth * MAX_WIDTH_FRACTION);
+    }
+
+    function onMouseMove(e) {
+      // Dragging LEFT (cursor moves to a smaller clientX) grows the
+      // pane -- it's docked against the window's right edge, so its
+      // left border is the only edge that actually moves.
+      artifactPaneEl.style.width = `${clamp(startWidth + (startX - e.clientX))}px`;
+    }
+
+    function onMouseUp() {
+      artifactResizeHandle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    }
+
+    artifactResizeHandle.addEventListener("mousedown", (e) => {
+      startX = e.clientX;
+      startWidth = artifactPaneEl.getBoundingClientRect().width;
+      artifactResizeHandle.classList.add("dragging");
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      e.preventDefault();
+    });
+
+    // Keyboard equivalent for the role="separator" contract -- arrow
+    // keys nudge the width in fixed steps rather than requiring a drag.
+    artifactResizeHandle.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const current = artifactPaneEl.getBoundingClientRect().width;
+      const step = e.key === "ArrowLeft" ? 20 : -20;
+      artifactPaneEl.style.width = `${clamp(current + step)}px`;
+      e.preventDefault();
+    });
+  })();
 
   // --- Working-directory file browser (docs/ARTIFACT-PANE-SCOPE.md's
   // "Working-Directory File Browser" section): a small modal listing
