@@ -193,6 +193,71 @@ evidence for every finding below lives in `docs/field-notes/` (dated
     floating-action-tag issue convobox's did before this pass, not yet
     fixed.
 
+**2026-08-14 through 2026-08-17, pre-rc1 hardening pass.** 12 PRs
+(#276-#290, see [../CHANGELOG.md](../CHANGELOG.md) for the formal
+entries), closing out the freeze investigation above and adding the
+artifact-pane MCP tools:
+
+- **Safety-critical, each riding alone per this repo's own rule:** a fix
+  so a safeword match in a transcript no longer skips checking that same
+  transcript for a pause phrase (#276, live-verified), and
+  `safeword.kill_phrase` (#277) -- a genuine OS-level `force_kill()` of
+  the backend process for when the polite hard-stop path is itself
+  wedged. Live-verified through the real mic pipeline on Windows/codex
+  during an actual freeze. **A real macOS gap was found the same
+  evening and is disclosed in `docs/KNOWN-ISSUES.md`: `codex` is 0/10
+  on macOS** (Apple Seatbelt reparents the real child to `launchd`
+  before the kill signal reaches it; macOS signals don't cascade the
+  way Windows' `TerminateProcess()` does) -- `claude-code` stays
+  reliable (10/10) on both platforms. `os.killpg()` is a candidate fix,
+  not yet built.
+- **The freeze investigation above is now mostly resolved.** A
+  2026-08-15 session found most of what looked like a widespread,
+  safety-relevant freeze was either a test-harness volume confound, or
+  harmless idle time that earlier diagnostics couldn't yet distinguish
+  from a genuine hang. The remaining backend-readline mechanism was
+  root-caused live (codex blocked on its own stdin, not ConvoBox's
+  event loop) and mitigated: `Orchestrator.stop_event_loop()` now
+  retries `cancel()` up to 3x3s instead of once, bounding what used to
+  be an indefinite hang to ~9s -- validated live against 143 automated
+  hard-stops on Windows, zero timeouts (#289). **One genuinely new,
+  still-open variant was also caught**: a mic-layer-only freeze, no
+  codex subprocess involved, 6+ minutes, the first time this shape
+  self-resolved rather than requiring intervention. Root cause not
+  established -- rare (one occurrence to date), tracked in
+  `docs/KNOWN-ISSUES.md`.
+- **Web UI: artifact pane resize/overflow bug fixed** (#282) -- wide
+  content was permanently half-clipped and the pane couldn't be widened
+  at all (the native resize handle had zero drag room against the
+  browser edge; flex centering was silently swallowing overflow instead
+  of scrolling to it).
+- **Web UI: agent-initiated artifact-pane tools** (#283, #285) -- a
+  small local MCP server ConvoBox now hosts (bearer-token-authenticated,
+  loopback-only) gives the backend LLM `show_document(path)` and
+  `get_shown_artifact()`, closing issue #280. Live-verified end to end
+  against a real `claude` CLI and browser, including the manual-close
+  edge case. **`backend.permission_mode: plan` (the default) reliably
+  blocks both tools headless** -- `ExitPlanMode` doesn't work in
+  `--print` mode -- documented in `docs/ARTIFACT-PANE-SCOPE.md` (#286).
+- **Web UI: approval-actions row greys out immediately** once a voice
+  approve/deny decision resolves, instead of staying clickable
+  indefinitely (#287); **a distinct "session ended" status** replaces
+  an endless "reconnecting…" state when Quit or the kill phrase ends the
+  whole process (#288).
+
+**2026-08-17: pre-`0.3.1-rc1` readiness review.** An independent model
+(Opus) reviewed the full diff since the last tagged state for
+performance, security, stability, and usability before recommending a
+tag. Verdict: no code blockers -- full suite green (1465 passed, 2
+pre-existing unrelated Windows symlink-privilege failures), lint/type
+clean, every touched file has matching test coverage, safety-critical
+work rode alone as required. The review's punch list was docs-only: the
+macOS `kill_phrase` gap above needed disclosing before it could ship
+silently (this pass), the CHANGELOG/STATUS updates you're reading now,
+and a `permission_mode: plan` runtime warning + a stale CI comment
+excluding FastAPI from Semgrep's ruleset, both tracked as small
+follow-up code changes.
+
 ## Since 0.3.0
 
 27 PRs, `0.3.1` (2026-08-01, see [../CHANGELOG.md](../CHANGELOG.md) for the
