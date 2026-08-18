@@ -261,7 +261,7 @@ def main() -> None:
                         "type": "fileChange", "id": "fc_1", "status": "completed",
                         "changes": [
                             {"path": "notes.md", "kind": "add", "diff": "+hi"},
-                            {"path": "script.py", "kind": "add", "diff": "+print(1)"},
+                            {"path": "binary.exe", "kind": "add", "diff": "+fake"},
                             {"path": "../outside.md", "kind": "add", "diff": "+x"},
                         ],
                     },
