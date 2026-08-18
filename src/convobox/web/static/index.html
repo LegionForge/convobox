@@ -872,6 +872,30 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     ["json", "json"],
     ["xml", "xml"],
     ["md", "markdown"],
+    // Added 2026-08-18 alongside the extensions themselves (#297) --
+    // vendoring one grammar file per language, same cdnjs 11.11.1
+    // release as the ones above. .toml and .vue deliberately NOT
+    // mapped here: highlight.js has no clean dedicated grammar for
+    // either (TOML has no real equivalent to the "ini" approximation
+    // some other tools use; Vue's single-file-component format mixes
+    // HTML/JS/CSS in one file, which a single language grammar can't
+    // represent) -- both fall through to renderCodeArtifact's own
+    // plain-text fallback instead of rendering wrong.
+    ["py", "python"],
+    ["css", "css"],
+    ["sh", "bash"], ["bash", "bash"],
+    ["ps1", "powershell"],
+    ["sql", "sql"],
+    ["go", "go"],
+    ["rs", "rust"],
+    ["rb", "ruby"],
+    ["php", "php"],
+    ["kt", "kotlin"], ["kts", "kotlin"],
+    ["swift", "swift"],
+    ["scala", "scala"],
+    ["lua", "lua"],
+    ["dart", "dart"],
+    ["graphql", "graphql"], ["gql", "graphql"],
   ]);
   let artifactLoadCounter = 0;
 
