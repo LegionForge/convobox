@@ -473,6 +473,11 @@
     font-size: 0.72rem; opacity: 0.85; padding: 0.5rem 1rem;
     border-bottom: 1px solid var(--border);
   }
+  .artifact-html-warning {
+    font-size: 0.72rem; opacity: 0.85; padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--assistant-bg);
+  }
   .artifact-browse-list {
     overflow-y: auto; padding: 0.4rem 0;
   }
@@ -630,6 +635,11 @@
        title="Open this file in VS Code (requires VS Code installed with its vscode:// URI handler registered -- the default on a normal install)">Open in editor</a>
     <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane" title="Close the artifact pane">&times;</button>
   </div>
+  <div id="artifact-html-warning" class="artifact-html-warning" role="alert" hidden>
+    This HTML file may contain scripts. It renders sandboxed (no access to
+    ConvoBox's own page or your other tabs), but its contents have not been
+    reviewed for safety -- treat it as untrusted.
+  </div>
   <div id="artifact-pane-body"></div>
 </aside>
 </div>
@@ -703,6 +713,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const artifactBodyEl = document.getElementById("artifact-pane-body");
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
   const artifactEditorLink = document.getElementById("artifact-pane-editor-link");
+  const artifactHtmlWarningEl = document.getElementById("artifact-html-warning");
   const artifactTabsEl = document.getElementById("artifact-tabs");
   const artifactResizeHandle = document.getElementById("artifact-resize-handle");
   const artifactBrowseBtn = document.getElementById("artifact-browse-btn");
@@ -869,6 +880,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTitleEl.title = path;
     artifactBodyEl.innerHTML = "";
     artifactEditorLink.hidden = true;
+    artifactHtmlWarningEl.hidden = !_ARTIFACT_HTML_EXTENSIONS.has(ext);
 
     if (_ARTIFACT_IMAGE_EXTENSIONS.has(ext)) {
       const img = document.createElement("img");
