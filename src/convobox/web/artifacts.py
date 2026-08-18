@@ -130,6 +130,12 @@ class _BrowseResponse(BaseModel):
 class _SetActiveArtifactRequest(BaseModel):
     # None clears it -- the pane closed, or nothing has ever been shown.
     path: str | None = None
+    # Client-side artifactLoadCounter at the time this report was fired --
+    # a monotonic per-page-load sequence number, not a timestamp. None
+    # (any caller that doesn't send one) always applies, for robustness
+    # against any other client; this repo's own frontend always sends one.
+    # See the route handler below for why this exists.
+    sequence: int | None = None
 
 
 def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
@@ -156,6 +162,9 @@ def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
     # server-side. web/mcp_server.py's get_shown_artifact tool reads
     # this same field.
     app.state.active_artifact_path = None
+    # Highest `sequence` applied so far -- see set_active_artifact below.
+    # -1 (not 0) so a legitimate first report with sequence=0 still applies.
+    app.state.active_artifact_sequence = -1
 
     # No route-ordering hazard here (unlike editor-uri below): this is an
     # exact path with no {artifact_path:path} segment, so it can never be
@@ -174,6 +183,24 @@ def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
     # readability, not because ordering matters here).
     @app.post("/api/artifacts/active")
     async def set_active_artifact(body: _SetActiveArtifactRequest) -> dict[str, bool]:
+        # Staleness guard, same shape as the frontend's own editor-uri
+        # fetch (index.html) but server-side: two of these POSTs fired
+        # close together (a fast tab switch) have no guarantee of being
+        # APPLIED in the order they were sent -- Starlette awaits
+        # request-body parsing before this function's own code runs, and
+        # that's enough of a scheduling gap for two concurrent requests
+        # to complete out of order. Live UAT finding, 2026-08-18: this
+        # showed up as get_shown_artifact intermittently reporting the
+        # PREVIOUS tab right after switching ("works on the 2nd/3rd
+        # try"). Ignoring anything not newer than the highest sequence
+        # already applied removes the race regardless of arrival order.
+        if (
+            body.sequence is not None
+            and body.sequence <= app.state.active_artifact_sequence
+        ):
+            return {"ok": True}
+        if body.sequence is not None:
+            app.state.active_artifact_sequence = body.sequence
         if body.path is None:
             app.state.active_artifact_path = None
             return {"ok": True}

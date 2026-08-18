@@ -393,3 +393,67 @@ def test_set_active_artifact_requires_the_csrf_header(working_dir: Path) -> None
     with TestClient(app) as client:  # deliberately no CSRF header
         response = client.post("/api/artifacts/active", json={"path": None})
     assert response.status_code == 403
+
+
+# --- sequence guard (live UAT finding, 2026-08-18): two of these POSTs
+# fired close together (a fast tab switch) have no guarantee of being
+# APPLIED in send order -- a monotonic sequence number lets the server
+# ignore anything not newer than what it's already applied, regardless
+# of arrival order. ---
+
+
+def test_set_active_artifact_ignores_an_older_sequence(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        # The newer report (sequence=2) arrives and is applied FIRST --
+        # simulating the out-of-order completion this guard exists for.
+        client.post("/api/artifacts/active", json={"path": "notes.md", "sequence": 2})
+        response = client.post(
+            "/api/artifacts/active", json={"path": "chart.png", "sequence": 1}
+        )
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "notes.md"
+
+
+def test_set_active_artifact_ignores_an_equal_sequence(working_dir: Path) -> None:
+    # Strictly greater, not >=: a duplicate/retried report for the same
+    # render must not re-apply (harmless here, but keeps the semantics
+    # exact -- "newer," not "not older").
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "notes.md", "sequence": 1})
+        response = client.post(
+            "/api/artifacts/active", json={"path": "chart.png", "sequence": 1}
+        )
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "notes.md"
+
+
+def test_set_active_artifact_applies_a_newer_sequence(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "chart.png", "sequence": 1})
+        response = client.post(
+            "/api/artifacts/active", json={"path": "notes.md", "sequence": 2}
+        )
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "notes.md"
+
+
+def test_set_active_artifact_without_a_sequence_always_applies(working_dir: Path) -> None:
+    # Backward-compatible fallback for any caller that doesn't send one
+    # (this repo's own frontend always does) -- must not require it.
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "notes.md", "sequence": 5})
+        response = client.post("/api/artifacts/active", json={"path": "chart.png"})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "chart.png"
