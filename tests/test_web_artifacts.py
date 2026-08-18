@@ -142,6 +142,28 @@ def test_get_artifact_serves_a_code_file_as_text_plain(working_dir: Path) -> Non
     assert response.content == b"console.log('hi');"
 
 
+# Live UAT gap-check, 2026-08-17 (same class as the .py fix above): these
+# 19 extensions were entirely absent from ARTIFACT_MEDIA_TYPES. One
+# parametrized test rather than 19 near-duplicate functions -- the
+# mechanism (a dict lookup) is identical for every extension; what's
+# worth guarding is that each specific one is actually IN the dict, not
+# 19 copies of the same assertion shape.
+@pytest.mark.parametrize(
+    "ext",
+    [
+        "css", "sh", "bash", "ps1", "toml", "sql", "go", "rs", "rb", "php",
+        "kt", "kts", "swift", "scala", "lua", "dart", "vue", "graphql", "gql",
+    ],
+)
+def test_get_artifact_serves_newly_added_extensions(working_dir: Path, ext: str) -> None:
+    (working_dir / f"sample.{ext}").write_text("content")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get(f"/api/artifacts/sample.{ext}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+
+
 # --- "Open in editor" (.../editor-uri): resolves the same working_dir
 # fence as the main route, returns a vscode://file/ URI for the browser
 # to navigate to. ---
