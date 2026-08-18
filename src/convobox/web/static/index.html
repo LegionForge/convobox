@@ -929,7 +929,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       })
       .catch((err) => console.error("editor-uri fetch failed", err));
 
-    reportActiveArtifact(path);
+    reportActiveArtifact(path, loadId);
     artifactPaneEl.hidden = false;
   }
 
@@ -941,17 +941,31 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   // (get_shown_artifact, web/mcp_server.py), never anything the pane's
   // own rendering depends on, so a failed report should never block or
   // visibly break the UI.
-  function reportActiveArtifact(path) {
+  //
+  // `sequence` reuses artifactLoadCounter -- the same staleness-guard
+  // shape as the editor-uri fetch above, but server-side instead of
+  // client-side, since this POST has no response body to gate on.
+  // Live UAT finding, 2026-08-18: switching tabs quickly could report
+  // the OLDER path, not the newly-selected one, some fraction of the
+  // time ("works on the 2nd/3rd try") -- two POSTs fired close together
+  // have no guarantee they're APPLIED server-side in the order they
+  // were sent (Starlette awaits body-parsing before this route's own
+  // code runs, which is enough of a scheduling gap for two in-flight
+  // requests to complete out of order). Sending a monotonic sequence
+  // number and having the server ignore anything not newer than what
+  // it already applied removes the race regardless of processing order.
+  function reportActiveArtifact(path, sequence) {
     fetch("/api/artifacts/active", {
       method: "POST",
       headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, sequence }),
     }).catch((err) => console.error("report active artifact failed", err));
   }
 
   artifactCloseBtn.addEventListener("click", () => {
     artifactPaneEl.hidden = true;
-    reportActiveArtifact(null);
+    artifactLoadCounter += 1;
+    reportActiveArtifact(null, artifactLoadCounter);
   });
 
   // Drag-to-resize on the pane's left border (see the CSS comment on
@@ -1367,7 +1381,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTabs = [];
     activeArtifactPath = null;
     artifactPaneEl.hidden = true;
-    reportActiveArtifact(null);
+    artifactLoadCounter += 1;
+    reportActiveArtifact(null, artifactLoadCounter);
     renderArtifactTabs();
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
