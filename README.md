@@ -143,6 +143,24 @@ session that's tried so far, not just this one) and sustained
 everyday-use reliability — macOS stays in this column until those
 close.
 
+**Update, 2026-08-14 through 08-17:** a follow-up investigation session
+found most of what had looked like a widespread, safety-relevant
+macOS/Windows freeze was actually a test-harness volume confound or
+harmless idle time that earlier diagnostics couldn't yet distinguish
+from a genuine hang; the one real mechanism found (an opencode
+event-loop hang) was root-caused and mitigated (bounds what used to be
+an indefinite freeze to ~9s, validated against 143 automated
+hard-stops). One rare, self-resolving mic-layer freeze variant remains
+open. Separately, a genuine **macOS-specific safety gap** was found in
+the `safeword.kill_phrase` force-kill escalation: reliable for
+`claude-code` (10/10), but **`codex` is 0/10 on macOS** — Apple's
+Seatbelt sandboxing reparents the real spawned child to `launchd`
+before the kill signal can reach it, and macOS signals don't cascade to
+children the way Windows' `TerminateProcess()` does. Treat
+`kill_phrase` as unreliable on macOS with a codex backend until this is
+fixed. See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)'s force-kill
+entry and [docs/STATUS.md](docs/STATUS.md) for full detail.
+
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 
