@@ -565,22 +565,39 @@ async def _stubborn_task(ignore_cancels: int) -> None:
 @pytest.mark.asyncio
 async def test_stop_event_loop_retries_when_the_task_ignores_the_first_cancel(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import convobox.orchestrator.orchestrator as orch_mod
 
     monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S", 0.05)
+    caplog.set_level("WARNING", logger="convobox.orchestrator.orchestrator")
 
     orch, _, _, _ = make_orchestrator(busy=False)
     orch._events_task = asyncio.create_task(_stubborn_task(ignore_cancels=1))
+    # Let the stubborn task actually reach its `await asyncio.sleep(3600)`
+    # before stop_event_loop()'s first cancel() fires -- without this, an
+    # unscheduled task cancels instantly on its very first line (before
+    # _stubborn_task's own try/except ever runs), so ignore_cancels is never
+    # actually exercised and this test would pass even with the retry loop
+    # deleted entirely. Caught live via coverage: lines 471/474-485 of
+    # orchestrator.py were unreachable under the original version of this
+    # test.
+    await asyncio.sleep(0)
 
     await asyncio.wait_for(orch.stop_event_loop(), timeout=2.0)  # must not hang
 
     assert orch._events_task is None
+    # The retry must have actually happened, not just "didn't hang" --
+    # exactly one retry warning (ignore_cancels=1 means the 2nd cancel()
+    # succeeds).
+    assert caplog.text.count("did not honor cancel()") == 1
+    assert "attempt 1/3" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_stop_event_loop_does_not_retry_when_the_first_cancel_is_honored(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The common case (no stall at all) must stay on the fast path -- no
     # wasted retry-timeout wait when a single cancel() already worked.
@@ -590,18 +607,22 @@ async def test_stop_event_loop_does_not_retry_when_the_first_cancel_is_honored(
     import convobox.orchestrator.orchestrator as orch_mod
 
     monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S", 30.0)
+    caplog.set_level("WARNING", logger="convobox.orchestrator.orchestrator")
 
     orch, _, _, _ = make_orchestrator(busy=False)
     orch._events_task = asyncio.create_task(_stubborn_task(ignore_cancels=0))
+    await asyncio.sleep(0)  # see the sibling test's comment on why this matters
 
     await asyncio.wait_for(orch.stop_event_loop(), timeout=1.0)
 
     assert orch._events_task is None
+    assert "did not honor cancel()" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_stop_event_loop_gives_up_after_max_attempts(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Bounds an indefinite freeze, not eliminates the possibility of one
     # entirely -- a task that NEVER honors cancel must still let
@@ -609,16 +630,39 @@ async def test_stop_event_loop_gives_up_after_max_attempts(
     # forever) rather than retry without limit.
     import convobox.orchestrator.orchestrator as orch_mod
 
+    max_attempts = 2
     monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(orch_mod, "_EVENTS_TASK_CANCEL_MAX_ATTEMPTS", max_attempts)
+    caplog.set_level("WARNING", logger="convobox.orchestrator.orchestrator")
 
     orch, _, _, _ = make_orchestrator(busy=False)
-    stubborn = asyncio.create_task(_stubborn_task(ignore_cancels=1_000_000))
+    # stop_event_loop() only gets `max_attempts` cancel() calls actually
+    # DELIVERED to the task before giving up: task.cancel() merely
+    # schedules delivery, and each retry iteration's own await is what
+    # gives the event loop a chance to deliver the PREVIOUS iteration's
+    # cancel -- the very last task.cancel() (issued at the end of the
+    # final iteration) never gets a delivery chance before the function
+    # returns, since nothing awaits after it. So: swallow exactly
+    # `max_attempts` deliveries to survive the whole give-up sequence,
+    # then the cleanup's own final cancel() below merges with that
+    # already-pending-but-undelivered last request into the ONE delivery
+    # that finally lets it raise. Getting this count wrong by even one
+    # (verified live -- `1 + max_attempts` deadlocks `await stubborn`
+    # below, since the merge means one fewer delivery reaches the task
+    # than a naive per-cancel-call count suggests) leaves the task alive
+    # forever, hanging this test's own cleanup.
+    ignore_cancels = max_attempts
+    stubborn = asyncio.create_task(_stubborn_task(ignore_cancels=ignore_cancels))
     orch._events_task = stubborn
+    await asyncio.sleep(0)  # see test_stop_event_loop_retries_...'s comment
 
     await asyncio.wait_for(orch.stop_event_loop(), timeout=2.0)  # must not hang
 
     assert orch._events_task is None
+    # Gave up after exactly MAX_ATTEMPTS retries, not zero and not unbounded.
+    assert caplog.text.count("did not honor cancel()") == 2
+    assert "attempt 1/2" in caplog.text
+    assert "attempt 2/2" in caplog.text
     stubborn.cancel()  # actually clean up the still-alive fake task
     with contextlib.suppress(asyncio.CancelledError):
         await stubborn

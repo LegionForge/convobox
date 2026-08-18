@@ -210,7 +210,7 @@ async def test_successful_write_with_no_working_dir_configured_yields_no_artifac
 def test_stage_artifact_write_ignores_a_non_renderable_extension(tmp_path: Path) -> None:
     adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
     adapter._stage_artifact_write(
-        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "script.py"}}
+        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "binary.exe"}}
     )
     assert adapter._pending_artifact_writes == {}
 
@@ -227,6 +227,23 @@ def test_stage_artifact_write_accepts_markdown(tmp_path: Path) -> None:
         {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "notes.md"}}
     )
     assert adapter._pending_artifact_writes == {"tu_x": "notes.md"}
+
+
+def test_stage_artifact_write_accepts_python(tmp_path: Path) -> None:
+    # Live UAT finding, 2026-08-17: asking claude-code to show a .py file
+    # (via the new show_document MCP tool) failed silently, and the file
+    # didn't appear in the working-directory file browser either -- traced
+    # to the same class of bug as the .md fix above: .py was entirely
+    # absent from ARTIFACT_MEDIA_TYPES (src/convobox/adapters/base.py),
+    # despite every other common source-code extension (.js/.ts/.java/.c/
+    # .cpp/.cs) already being there, on a coding assistant. Fixed by
+    # adding ".py": "text/plain" to that allowlist -- this is the
+    # regression guard.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._stage_artifact_write(
+        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "script.py"}}
+    )
+    assert adapter._pending_artifact_writes == {"tu_x": "script.py"}
 
 
 def test_stage_artifact_write_ignores_non_write_edit_tools(tmp_path: Path) -> None:
