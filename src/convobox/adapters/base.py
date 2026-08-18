@@ -198,6 +198,7 @@ ARTIFACT_MEDIA_TYPES: dict[str, str] = {
     ".hpp": "text/plain",
     ".hh": "text/plain",
     ".cs": "text/plain",
+    ".py": "text/plain",
     ".json": "text/plain",
     ".xml": "text/plain",
 }
