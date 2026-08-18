@@ -829,9 +829,19 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   async function renderCodeArtifact(url, filename, lang) {
+    // lang is null/undefined for any renderable extension with no vendored
+    // highlight.js grammar (docs/ARTIFACT-PANE-SCOPE.md's own comment: this
+    // decides HOW to render an already-allowed extension, never WHETHER --
+    // that's ARTIFACT_MEDIA_TYPES's job, server-side). Live UAT finding,
+    // 2026-08-18: .py (and every other newly-added extension with no
+    // grammar -- .css/.sh/.toml/.go/etc.) fell all the way through to the
+    // plain download-link fallback below instead of rendering at all, since
+    // the old dispatch only reached this function when a grammar existed.
+    // Renders as plain, unstyled <pre> text in that case -- still readable
+    // inline, just without syntax colors -- rather than forcing a download.
     const pre = document.createElement("pre");
     const code = document.createElement("code");
-    code.className = `language-${lang}`;
+    if (lang) code.className = `language-${lang}`;
     pre.appendChild(code);
     artifactBodyEl.appendChild(pre);
     try {
@@ -844,8 +854,10 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       // already-set textContent and wraps it in ITS OWN generated
       // markup; it never re-parses this text as HTML itself.
       code.textContent = text;
-      await ensureHighlighter(lang);
-      window.hljs.highlightElement(code);
+      if (lang) {
+        await ensureHighlighter(lang);
+        window.hljs.highlightElement(code);
+      }
     } catch (err) {
       console.error("code artifact render failed", err);
       code.textContent = `Failed to load ${filename}: ${err}`;
@@ -893,7 +905,14 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       iframe.title = filename;
       iframe.sandbox = "allow-scripts";
       artifactBodyEl.appendChild(iframe);
-    } else if (_ARTIFACT_CODE_LANGUAGES.has(ext)) {
+    } else if (ext !== "pdf") {
+      // Everything else the backend allowlist (ARTIFACT_MEDIA_TYPES) lets
+      // through is text -- render it, with syntax highlighting when a
+      // grammar exists and plain <pre> text when it doesn't (see
+      // renderCodeArtifact's own comment). PDF is the one exception: not
+      // plain text, and browsers already handle it fine via "Open in new
+      // tab" -- no bespoke viewer needed (docs/ARTIFACT-PANE-SCOPE.md's
+      // Rendering section).
       renderCodeArtifact(url, filename, _ARTIFACT_CODE_LANGUAGES.get(ext));
     } else {
       const link = document.createElement("a");
