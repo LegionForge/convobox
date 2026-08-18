@@ -65,10 +65,10 @@ def test_get_artifact_missing_file_returns_404(working_dir: Path) -> None:
 
 
 def test_get_artifact_rejects_a_disallowed_extension(working_dir: Path) -> None:
-    (working_dir / "script.py").write_text("print('hi')")
+    (working_dir / "notes.exe").write_bytes(b"fake")
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
     with TestClient(app, headers=_CSRF_HEADERS) as client:
-        response = client.get("/api/artifacts/script.py")
+        response = client.get("/api/artifacts/notes.exe")
     assert response.status_code == 415
 
 
@@ -223,14 +223,14 @@ def test_list_artifacts_with_no_working_dir_returns_503() -> None:
 def test_list_artifacts_returns_only_allowlisted_extensions(working_dir: Path) -> None:
     (working_dir / "chart.png").write_bytes(b"fake")
     (working_dir / "report.html").write_text("<html></html>")
-    (working_dir / "script.py").write_text("print('hi')")  # not in the allowlist
+    (working_dir / "script.py").write_text("print('hi')")  # in the allowlist
     (working_dir / "notes.exe").write_bytes(b"fake")  # not in the allowlist
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
     with TestClient(app) as client:
         response = client.get("/api/artifacts")
     assert response.status_code == 200
     data = response.json()
-    assert sorted(data["files"]) == ["chart.png", "report.html"]
+    assert sorted(data["files"]) == ["chart.png", "report.html", "script.py"]
     assert data["truncated"] is False
 
 
