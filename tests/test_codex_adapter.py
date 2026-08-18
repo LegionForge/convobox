@@ -244,7 +244,7 @@ async def test_successful_file_change_yields_artifact_events_for_renderable_path
     tmp_path: Path,
 ) -> None:
     # The fake server's "write a file" scenario reports three changes:
-    # notes.md (renderable, inside working_dir), script.py (not a
+    # notes.md (renderable, inside working_dir), binary.exe (not a
     # renderable extension), and ../outside.md (renderable extension but
     # outside working_dir) -- only notes.md should produce an ARTIFACT.
     adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
@@ -302,7 +302,7 @@ async def test_successful_file_change_with_no_working_dir_configured_yields_no_a
 def test_resolve_artifact_writes_ignores_a_non_renderable_extension(tmp_path: Path) -> None:
     adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
     result = adapter._resolve_artifact_writes(
-        {"status": "completed", "changes": [{"path": "script.py"}]}
+        {"status": "completed", "changes": [{"path": "binary.exe"}]}
     )
     assert result == []
 
