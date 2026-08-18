@@ -430,15 +430,33 @@
   }
   #artifact-tabs[hidden] { display: none; }
   .artifact-tab {
-    flex: 0 0 auto; max-width: 140px; padding: 0.4rem 0.7rem;
+    display: flex; align-items: center; gap: 0.3rem;
+    flex: 0 0 auto; max-width: 140px; padding: 0.4rem 0.4rem 0.4rem 0.7rem;
     font-size: 0.72rem; background: none; border: none;
     border-bottom: 2px solid transparent; color: var(--dim);
-    cursor: pointer; white-space: nowrap; overflow: hidden;
-    text-overflow: ellipsis;
+    cursor: pointer; white-space: nowrap;
   }
   .artifact-tab:hover { background: var(--assistant-bg); color: var(--fg); }
   .artifact-tab.active {
     color: var(--fg); border-bottom-color: var(--fg); font-weight: 600;
+  }
+  .artifact-tab-label {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Hidden until hover/focus, matching the pane's own close button --
+     JP asked directly, 2026-08-18: no way to drop a single tab, only
+     the whole pane via the pane's own [x]. */
+  .artifact-tab-close {
+    flex: 0 0 auto; opacity: 0; width: 1.1rem; height: 1.1rem;
+    line-height: 1; padding: 0; border: none; border-radius: 3px;
+    background: none; color: inherit; font-size: 0.85rem; cursor: pointer;
+  }
+  .artifact-tab:hover .artifact-tab-close,
+  .artifact-tab:focus-within .artifact-tab-close {
+    opacity: 0.7;
+  }
+  .artifact-tab-close:hover, .artifact-tab-close:focus {
+    opacity: 1; background: var(--border);
   }
 
   /* --- Working-directory file browser: a filtered, flat list of files in
@@ -753,15 +771,74 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTabsEl.innerHTML = "";
     artifactTabsEl.hidden = artifactTabs.length < 2;
     for (const tab of artifactTabs) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "artifact-tab" + (tab.path === activeArtifactPath ? " active" : "");
-      btn.textContent = tab.label;
-      btn.title = tab.path;
-      btn.setAttribute("role", "tab");
-      btn.setAttribute("aria-selected", tab.path === activeArtifactPath ? "true" : "false");
-      btn.addEventListener("click", () => renderArtifact(tab.path));
-      artifactTabsEl.appendChild(btn);
+      // A <div role="tab"> wrapping a real <button> close control -- not a
+      // <button> itself, since a <button> can't legally contain another
+      // <button> (invalid HTML, breaks event handling). tabindex+keydown
+      // below replaces the native button activation this element no
+      // longer gets for free.
+      const tabEl = document.createElement("div");
+      tabEl.className = "artifact-tab" + (tab.path === activeArtifactPath ? " active" : "");
+      tabEl.title = tab.path;
+      tabEl.setAttribute("role", "tab");
+      tabEl.setAttribute("tabindex", "0");
+      tabEl.setAttribute("aria-selected", tab.path === activeArtifactPath ? "true" : "false");
+      tabEl.addEventListener("click", () => renderArtifact(tab.path));
+      tabEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          renderArtifact(tab.path);
+        }
+      });
+
+      const labelSpan = document.createElement("span");
+      labelSpan.className = "artifact-tab-label";
+      labelSpan.textContent = tab.label;
+      tabEl.appendChild(labelSpan);
+
+      // Hidden until hover/focus (CSS) -- JP asked directly, 2026-08-18:
+      // no way to drop a single tab before this, only the whole pane via
+      // the pane's own [x]. Older tabs stay open/rendered; this only
+      // removes the ONE tab clicked. stopPropagation() so this doesn't
+      // also fire the tab's own click-to-select handler above.
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "artifact-tab-close";
+      closeBtn.textContent = "×";
+      closeBtn.setAttribute("aria-label", `Close ${tab.label}`);
+      closeBtn.title = `Close ${tab.label}`;
+      closeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeArtifactTab(tab.path);
+      });
+      tabEl.appendChild(closeBtn);
+
+      artifactTabsEl.appendChild(tabEl);
+    }
+  }
+
+  function closeArtifactTab(path) {
+    const idx = artifactTabs.findIndex((t) => t.path === path);
+    if (idx === -1) return;
+    const wasActive = path === activeArtifactPath;
+    artifactTabs.splice(idx, 1);
+    if (artifactTabs.length === 0) {
+      // No tabs left -- same end state as the pane's own close button.
+      activeArtifactPath = null;
+      artifactPaneEl.hidden = true;
+      artifactLoadCounter += 1;
+      reportActiveArtifact(null, artifactLoadCounter);
+      renderArtifactTabs();
+      return;
+    }
+    if (wasActive) {
+      // Closed the tab currently showing -- switch to whichever REMAINING
+      // tab was viewed most recently (highest timestamp), not just the
+      // next one in array order, matching how tabs are already implicitly
+      // ordered by recency via upsertArtifactTab's own timestamp field.
+      const next = artifactTabs.reduce((a, b) => (a.timestamp > b.timestamp ? a : b));
+      renderArtifact(next.path);
+    } else {
+      renderArtifactTabs();
     }
   }
 
