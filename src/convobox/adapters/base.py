@@ -201,6 +201,28 @@ ARTIFACT_MEDIA_TYPES: dict[str, str] = {
     ".py": "text/plain",
     ".json": "text/plain",
     ".xml": "text/plain",
+    # Added 2026-08-17 (live UAT gap-check, same class as the .py fix
+    # above): common source/config/script extensions this allowlist had
+    # simply never been extended to cover.
+    ".css": "text/plain",
+    ".sh": "text/plain",
+    ".bash": "text/plain",
+    ".ps1": "text/plain",
+    ".toml": "text/plain",
+    ".sql": "text/plain",
+    ".go": "text/plain",
+    ".rs": "text/plain",
+    ".rb": "text/plain",
+    ".php": "text/plain",
+    ".kt": "text/plain",
+    ".kts": "text/plain",
+    ".swift": "text/plain",
+    ".scala": "text/plain",
+    ".lua": "text/plain",
+    ".dart": "text/plain",
+    ".vue": "text/plain",
+    ".graphql": "text/plain",
+    ".gql": "text/plain",
 }
 
 
