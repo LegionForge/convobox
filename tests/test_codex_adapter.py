@@ -1023,6 +1023,12 @@ def test_is_bare_generic_shell_false_for_a_real_command(command_line: str) -> No
     assert mod._is_bare_generic_shell(command_line) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="_kill_by_command_text uses signal.SIGKILL, which does not exist "
+    "on Windows; the pgrep/ps fallback it belongs to is itself gated to "
+    "non-Windows platforms at the force_kill() call site (codex.py).",
+)
 def test_kill_by_command_text_matches_a_short_legitimate_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
