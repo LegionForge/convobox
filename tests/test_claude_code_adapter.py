@@ -607,6 +607,45 @@ async def test_aclose_force_kills_a_process_that_ignores_terminate(
     assert adapter._proc is None
 
 
+# --- _write_line: a broken pipe mid-write (the process died but hasn't
+# been reaped, so returncode was still None and _ensure_proc trusted it)
+# must reap, respawn once, and retry -- not the same path as the
+# process-already-exited-before-send respawn test above, which never
+# touches _write_line's own try/except at all. ---
+
+
+@pytest.mark.asyncio
+async def test_write_line_reaps_and_respawns_after_a_broken_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DeadPipeStdin:
+        def write(self, data: bytes) -> None:
+            raise BrokenPipeError
+
+        async def drain(self) -> None:
+            raise AssertionError("drain() must not be reached after write() raises")
+
+    class _DeadPipeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _DeadPipeStdin()
+
+        async def wait(self) -> int | None:
+            self.returncode = -1
+            return self.returncode
+
+    adapter = ClaudeCodeAdapter(_FAKE_CLI)
+    stale_proc = _DeadPipeProcess()
+    adapter._proc = stale_proc  # type: ignore[assignment]
+    try:
+        await adapter._write_line({"type": "control_request", "request": {"subtype": "ping"}})
+        assert stale_proc.returncode is not None  # reaped via wait()
+        assert adapter._proc is not stale_proc  # respawned
+        assert adapter._proc is not None and adapter._proc.returncode is None
+    finally:
+        await _shutdown(adapter)
+
+
 # --- _safe_json_loads: malformed lines from the subprocess must not crash
 # the reader loop, just be skipped (events()'s "if outer is None: continue") ---
 
