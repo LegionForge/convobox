@@ -10,6 +10,7 @@ from scripts.run_convobox import (
     _cancel_main_task,
     _install_web_sigint_override,
     _print_clean_exit_note,
+    _restore_default_sigint_handler,
 )
 
 # --- _cancel_main_task: the web UI's Quit button, wired as run()'s
@@ -168,3 +169,24 @@ def test_print_clean_exit_note_is_silent_when_web_was_not_active(capsys) -> None
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out == ""
+
+
+# --- _restore_default_sigint_handler: regression coverage for the
+# 2026-08-18 live-voice finding (docs/field-notes/2026-08-18-kill-phrase-
+# live-voice-test-finds-two-real-gaps.md) -- a POSIX shell sets SIGINT to
+# SIG_IGN for a background job (`cmd &`) before exec'ing it, and CPython's
+# own startup leaves an inherited SIG_IGN alone, which silently breaks
+# _self_signal_interrupt()'s exit path (kill_phrase, the web UI's Quit
+# button, the Windows Ctrl+C workaround). Confirmed live: `signal.
+# getsignal(signal.SIGINT)` is <default_int_handler> run interactively but
+# <Handlers.SIG_IGN> run as `cmd &`, no nohup involved. ---
+
+
+def test_restore_default_sigint_handler_overrides_an_inherited_sig_ign() -> None:
+    original = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # simulate a backgrounded launch
+        _restore_default_sigint_handler()
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, original)
