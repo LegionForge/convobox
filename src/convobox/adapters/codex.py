@@ -234,6 +234,22 @@ def _strip_shell_quotes(text: str) -> str:
     return text.replace("'", "").replace('"', "")
 
 
+_GENERIC_SHELL_NAMES = {"sh", "zsh", "bash", "ksh", "csh", "tcsh", "dash", "fish"}
+
+
+def _is_bare_generic_shell(command_line: str) -> bool:
+    """True only for a ps command line that is NOTHING but a shell's
+    own bare name (e.g. "zsh", "-zsh" for a login shell, "/bin/sh"),
+    with no arguments at all. See _kill_by_command_text()'s own comment
+    for why this specific, narrow case -- and only this case -- needs
+    excluding.
+    """
+    parts = command_line.split()
+    if len(parts) != 1:
+        return False
+    return os.path.basename(parts[0]).lstrip("-") in _GENERIC_SHELL_NAMES
+
+
 def _kill_by_command_text(command: str) -> list[int]:
     """Best-effort SIGKILL of every live process whose (quote-stripped)
     full command line appears within `command`'s own quote-stripped
@@ -316,13 +332,21 @@ def _kill_by_command_text(command: str) -> list[int]:
             continue
         children_by_ppid.setdefault(ppid, []).append(pid)
         stripped_line_command = _strip_shell_quotes(cmd_rest.strip())
-        # A minimum length guard against trivial/short matches (e.g. a
-        # bare "zsh" or "sh" substring) that could otherwise match an
-        # unrelated process -- this fallback already accepts some false-
-        # positive risk by design (see the module docstring), but a
-        # short match is categorically more likely to be coincidental
-        # than deliberate.
-        if len(stripped_line_command) < 15:
+        # A guard against one specific coincidental false-positive: a
+        # BARE generic shell name with no arguments (e.g. ps reporting
+        # just "zsh", nothing else). codex's own reported invocation
+        # text always wraps the real command in a shell (e.g. "/bin/zsh
+        # -lc ..."), so a bare "zsh" is a substring of `stripped_command`
+        # on essentially every call -- without this guard, every
+        # unrelated live bare shell process on the box would match and
+        # get killed. A blanket minimum-length guard (any line under 15
+        # chars) was tried first, but it silently excluded real,
+        # legitimate short commands too -- "sleep 90" (8 chars) went
+        # unprotected in live voice testing. See docs/field-notes/
+        # 2026-08-18-kill-phrase-live-voice-test-finds-two-real-gaps.md.
+        # Only the specific bare-shell-name case needs excluding, not
+        # "any short line."
+        if _is_bare_generic_shell(stripped_line_command):
             continue
         if (
             stripped_line_command not in stripped_command
