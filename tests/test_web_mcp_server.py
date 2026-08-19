@@ -97,3 +97,25 @@ def test_mcp_route_is_exempt_from_the_csrf_header_check(working_dir: Path) -> No
             json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         )
     assert response.status_code == 401
+
+
+def test_mcp_route_forwards_to_the_wrapped_app_with_a_correct_bearer_token(
+    working_dir: Path,
+) -> None:
+    # Every other test here supplies a missing/wrong token and checks for
+    # 401 -- none of them ever exercises _require_bearer_token()'s actual
+    # happy path (`await app(scope, receive, send)`), so a regression that
+    # accidentally dropped or no-op'd that call (e.g. returning without
+    # forwarding) would pass every existing test in this file. A CORRECT
+    # token must not be rejected by OUR auth check -- whatever happens
+    # next is the wrapped mcp SDK app's own business (here, its DNS-
+    # rebinding transport-security check rejects TestClient's synthetic
+    # Host header with 421, a completely different failure from -- and
+    # proof of getting past -- our 401).
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir, mcp_token="secret")
+    with TestClient(app, headers={**_CSRF_HEADERS, "Authorization": "Bearer secret"}) as client:
+        response = client.post(
+            "/mcp/",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+    assert response.status_code != 401
