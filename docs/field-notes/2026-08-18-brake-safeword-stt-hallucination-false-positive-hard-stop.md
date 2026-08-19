@@ -6,15 +6,16 @@ project: ConvoBox (github.com/LegionForge/convobox)
 versions: main @ 2dd83b3 (post-0.3.1-rc1); claude-code backend; faster-whisper 1.2.1, stt.device=cpu, stt.model default, stt.temperature=0.0, stt.hotwords="stop brake eject mayday listening resume alpha bravo delta halt abort"; Windows 11 (helios)
 evidence:
   - convobox-UAT/convobox-tui.log, 2026-08-18 12:26:16-12:26:20 (timestamps quoted verbatim below)
+  - convobox-UAT/convobox-tui.log, 2026-08-18 16:14:59 (follow-up contrast case, timestamp quoted verbatim below)
   - docs/KNOWN-ISSUES.md's existing STT-hallucination entries (2026-08-06, 2026-08-12) -- same failure class, this is a new concrete instance
-  - convobox.yaml (UAT checkout): safeword.hard_stop_phrases includes "brake brake brake"; stt.hotwords includes "brake"
+  - convobox.yaml (UAT checkout): safeword.hard_stop_phrases includes "brake brake brake"; stt.hotwords includes "brake"; stt.min_language_probability=0.4
 provenance:
   authors:
-    - JP Cruz <jp@legionforge.org> (operator; live UAT session on helios, flagged the runaway-looking transcript live and asked for investigation)
+    - JP Cruz <jp@legionforge.org> (operator; live UAT session on helios, flagged the runaway-looking transcript live and asked for investigation; also flagged the follow-up contrast case live)
     - Claude Code (Anthropic claude-sonnet-5) -- log correlation, mechanism analysis, writing
   org: https://legionforge.org
   created: 2026-08-18T12:40:31-05:00
-  revised: 2026-08-18T12:40:31-05:00
+  revised: 2026-08-18T17:04:26-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -123,3 +124,47 @@ about the true source signal, only about what STT did with it.
   If the hotwords-amplification hypothesis holds, the same mechanism
   could in principle repeat for any of them, not just `brake` -- this
   instance is one data point, not a "brake specifically is worse" claim.
+
+## Follow-up (same session, 2026-08-18 16:14): a second repetition-loop
+hallucination, this time correctly caught and dropped -- useful contrast
+on when the existing confidence gate actually protects against this
+failure class.
+
+```
+2026-08-18 16:14:59,884 INFO dropped low-confidence transcript='停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止 停止' lang=th (0.15 < 0.40) [ERROR-LADDER: tier 1]
+```
+
+`停止` (停止) is Chinese for "stop" -- repeated **39 times**,
+same repetition-loop shape as the "brake" instance above. Two things
+differ, and both matter:
+
+1. **The language guess itself was wrong and low-confidence.**
+   faster-whisper decoded this as Thai (`lang=th`), not even Chinese
+   (the script it actually hallucinated), at `0.15` probability --
+   well under `stt.min_language_probability: 0.4`. This is exactly the
+   gate `min_language_probability` exists for, and it worked: the
+   transcript was logged as `dropped low-confidence transcript` and
+   never reached the safeword matcher at all. No hard-stop, no
+   downstream effect of any kind.
+2. **No hotword was involved.** `stt.hotwords` in this config has no
+   Chinese/Thai entries and doesn't include "stop" in any script --
+   this hallucination happened on its own, unprompted by any biasing
+   list, in a way the "brake" instance's leading hypothesis can't
+   explain by itself.
+
+**What this changes about the finding above:** it sharpens, rather than
+weakens, the original claim. The repetition-loop failure mode itself is
+not hotwords-dependent -- it can and does happen without any hotword
+bias at all (this instance). But `min_language_probability` is a real,
+working defense against the WRONG-LANGUAGE case, correctly catching this
+one. The "brake" instance slipped through specifically because it
+decoded in the *correct* language (`en`) at a confidence (`0.68`) above
+threshold, despite the content being complete garbage -- a same-language,
+moderate-confidence repetition loop is a gap this gate was never designed
+to catch, since it only checks "is this plausibly the configured
+language," not "is this plausible human speech content." The
+hotwords-amplification hypothesis from the original finding is still
+unconfirmed, and now looks like at most a contributing factor for
+same-language cases, not the whole story -- repetition-loop hallucination
+appears to be a more general faster-whisper behavior under short/
+ambiguous audio, independent of hotwords.
