@@ -13,6 +13,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -459,6 +460,35 @@ class SafewordConfig(BaseModel):
     hard_stop_phrases: list[str] = Field(
         default_factory=lambda: ["stop stop stop", "abort abort abort", "halt halt halt"]
     )
+    # Opt-in, unset by default: which ONE of hard_stop_phrases (if any)
+    # escalates beyond a normal hard stop to Orchestrator.force_kill() --
+    # a real OS-level terminate()/kill() of the backend subprocess (not
+    # just the polite same-channel interrupt every other safeword sends),
+    # followed by ending the whole ConvoBox session. Exists for the case
+    # a plain hard stop can't handle: the backend itself is wedged (a
+    # blocking readline() with no timeout can leave send_hard_stop()'s
+    # own interrupt request unanswered too, since it rides the same
+    # pipe -- see docs/KNOWN-ISSUES.md's VAD/readline freeze entries,
+    # live-reproduced 2026-08-14). Must be one of the strings already in
+    # hard_stop_phrases -- see the validator below -- not a parallel,
+    # independently-configured phrase.
+    kill_phrase: str | None = None
+
+    @field_validator("kill_phrase")
+    @classmethod
+    def _kill_phrase_must_be_a_hard_stop_phrase(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        if v is None:
+            return v
+        phrases = info.data.get("hard_stop_phrases") or []
+        if v not in phrases:
+            raise ValueError(
+                f"safeword.kill_phrase {v!r} must also be listed in "
+                f"safeword.hard_stop_phrases {phrases!r} -- it can't fire "
+                f"a hard stop it isn't configured to be a safeword for."
+            )
+        return v
 
 
 class BackendConfig(BaseModel):

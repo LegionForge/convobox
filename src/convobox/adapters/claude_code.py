@@ -305,12 +305,24 @@ class ClaudeCodeAdapter(BackendAdapter):
         command: Sequence[str] | None = None,
         permission_mode: str = "plan",
         working_dir: str | None = None,
+        mcp_url: str | None = None,
+        mcp_token: str | None = None,
     ) -> None:
         self._command = list(command) if command else ["claude"]
         self._permission_mode = permission_mode
         # Where the spawned agent reads/writes files. None -> inherit
         # ConvoBox's cwd; an explicit path isolates edits. See BackendConfig.
         self._working_dir = working_dir
+        # ConvoBox's own "show_document" MCP server (web/mcp_server.py),
+        # mounted on the web UI's FastAPI app -- both None unless
+        # config.web.enabled AND working_dir are set (run_convobox.py's
+        # own condition; there's no pane to show anything in otherwise).
+        # mcp_token is the bearer credential the server checks (see that
+        # module's docstring for why this can't just reuse the browser
+        # UI's own CSRF header -- the claude CLI's MCP client can't send
+        # it and isn't a browser the CSRF check's threat model covers).
+        self._mcp_url = mcp_url
+        self._mcp_token = mcp_token
         self._proc: asyncio.subprocess.Process | None = None
         self._proc_lock = asyncio.Lock()
         self._stderr_task: asyncio.Task[None] | None = None
@@ -364,32 +376,14 @@ class ClaudeCodeAdapter(BackendAdapter):
         async with self._proc_lock:
             if self._proc is None or self._proc.returncode is not None:
                 env = None
-                extra_flags: list[str] = []
                 if self._interactive_approval:
                     port = await self._ensure_approval_server()
-                    settings_path = self._ensure_settings_file()
                     env = dict(os.environ)
                     env["CONVOBOX_APPROVAL_HOST"] = _APPROVAL_HOST
                     env["CONVOBOX_APPROVAL_PORT"] = str(port)
                     env["CONVOBOX_APPROVAL_TOKEN"] = self._approval_token
                     env["CONVOBOX_APPROVAL_TIMEOUT_S"] = str(_APPROVAL_DECISION_TIMEOUT_S)
-                    extra_flags = ["--settings", str(settings_path)]
-                elif self._permission_mode == "permissive":
-                    # MCP tool calls hit a SEPARATE permission gate that
-                    # --permission-mode doesn't cover at all (see
-                    # _enumerate_mcp_server_names's docstring) -- without
-                    # this, "permissive" (acts without asking) silently
-                    # doesn't hold for any MCP server the user has
-                    # configured, live-confirmed 2026-07-22 against
-                    # acceptEdits. "permissive" now maps to bypassPermissions
-                    # (see _PERMISSION_CLAUDE_MODE), which likely makes this
-                    # explicit grant redundant -- bypassPermissions should
-                    # skip the MCP gate too -- but that has NOT been
-                    # live-reverified, so this stays in as a harmless
-                    # belt-and-suspenders grant rather than being removed on
-                    # an untested assumption.
-                    mcp_settings_path = await self._ensure_mcp_permissions_settings_file()
-                    extra_flags = ["--settings", str(mcp_settings_path)]
+                extra_flags = await self._ensure_extra_cli_flags()
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
                     *_resolve_flags(self._command, self._permission_mode),
@@ -430,36 +424,107 @@ class ClaudeCodeAdapter(BackendAdapter):
         assert self._approval_port is not None  # nosec B101 -- set immediately above
         return self._approval_port
 
-    def _ensure_settings_file(self) -> Path:
-        """Write (once) the --settings JSON wiring Claude Code's
-        PreToolUse hook to convobox.approval.hook_script, gating every
-        tool (no "matcher" -- confirmed live this gates ALL tools, the
-        deliberate MVP scope). A temp file, not the working directory's
-        own .claude/settings.json -- confirmed live that --settings
-        accepts an arbitrary external path, so this never touches or
-        risks clobbering the user's real project settings."""
-        if self._settings_path is None:
-            fd, path = tempfile.mkstemp(
-                prefix="convobox-claude-settings-", suffix=".json"
-            )
-            settings = {
-                "hooks": {
-                    "PreToolUse": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": f'"{sys.executable}" -m convobox.approval.hook_script',
-                                }
-                            ]
-                        }
-                    ]
+    async def _ensure_extra_cli_flags(self) -> list[str]:
+        """Builds every extra CLI flag this session needs beyond
+        _resolve_flags()'s own required protocol flags: the approval
+        hook's PreToolUse wiring (permission_mode == "approve"), the
+        enumerated pre-existing-MCP-server grants (permission_mode ==
+        "permissive", see _enumerate_mcp_server_names), and convobox's
+        own "show_document" MCP server (self._mcp_url) -- unlike the
+        other two, granted UNCONDITIONALLY across every permission_mode,
+        not just "permissive" (see the inline comment below for why).
+
+        These used to be two separate, mutually-exclusive --settings
+        files (one per branch in _ensure_proc); merged into one here
+        because Claude Code only accepts a single --settings flag, and
+        the "show_document" grant now needs to coexist with whichever of
+        the other two is active (or neither, under the "plan" default,
+        which previously passed no --settings at all).
+        """
+        settings: dict[str, Any] = {}
+        if self._interactive_approval:
+            settings["hooks"] = {
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'"{sys.executable}" -m convobox.approval.hook_script',
+                            }
+                        ]
+                    }
+                ]
+            }
+        allow: list[str] = []
+        if self._permission_mode == "permissive":
+            # MCP tool calls hit a SEPARATE permission gate that
+            # --permission-mode doesn't cover at all (see
+            # _enumerate_mcp_server_names's docstring) -- without this,
+            # "permissive" (acts without asking) silently doesn't hold
+            # for any MCP server the user has configured, live-confirmed
+            # 2026-07-22 against acceptEdits. "permissive" now maps to
+            # bypassPermissions (see _PERMISSION_CLAUDE_MODE), which
+            # likely makes this explicit grant redundant --
+            # bypassPermissions should skip the MCP gate too -- but that
+            # has NOT been live-reverified, so this stays in as a
+            # harmless belt-and-suspenders grant rather than being
+            # removed on an untested assumption.
+            allow.extend(f"mcp__{name}" for name in await self._enumerate_mcp_server_names())
+        if self._mcp_url is not None:
+            # Granted regardless of permission_mode, unlike every other
+            # MCP server: show_document/get_shown_artifact are safe-by-
+            # construction (fenced to the exact same working_dir +
+            # extension allowlist the browser-facing GET /api/artifacts
+            # route already enforces, see web/mcp_server.py -- neither
+            # can do anything a human already looking at this session's
+            # own web UI couldn't do via Browse Files).
+            #
+            # CORRECTED, live-diagnosed 2026-08-17: this grant does NOT
+            # make either tool reliably usable under permission_mode:
+            # "plan", despite the original intent below. The grant only
+            # affects the CLI harness's own allow/deny gate -- it's real
+            # and does make "permissive"/"approve" work -- but plan
+            # mode's model-level behavior is a DIFFERENT layer this
+            # module's own docstring already documented before either
+            # tool existed: under plan, Claude drafts a plan and
+            # attempts ExitPlanMode instead of executing a tool, and
+            # ExitPlanMode is disabled headless, so there's no way to
+            # grant the approval it's asking for. JP's real voice UAT
+            # confirmed this reliably blocks both artifact-pane tools
+            # under plan (docs/ARTIFACT-PANE-SCOPE.md has the full
+            # writeup) -- the original reasoning ("an agent that can
+            # only PLAN writes should still be able to show a file it
+            # already read") was a reasonable INTENT, but this
+            # mechanism can't deliver it for plan mode specifically.
+            # Left in anyway: harmless where it doesn't help, and does
+            # help permissive/approve, so removing it would only lose
+            # ground.
+            allow.append("mcp__convobox")
+        if allow:
+            settings.setdefault("permissions", {})["allow"] = allow
+
+        extra_flags: list[str] = []
+        if settings:
+            if self._settings_path is None:
+                fd, path = tempfile.mkstemp(
+                    prefix="convobox-claude-settings-", suffix=".json"
+                )
+                with os.fdopen(fd, "w") as f:
+                    json.dump(settings, f)
+                self._settings_path = Path(path)
+            extra_flags = ["--settings", str(self._settings_path)]
+        if self._mcp_url is not None:
+            mcp_config = {
+                "mcpServers": {
+                    "convobox": {
+                        "type": "http",
+                        "url": self._mcp_url,
+                        "headers": {"Authorization": f"Bearer {self._mcp_token}"},
+                    }
                 }
             }
-            with os.fdopen(fd, "w") as f:
-                json.dump(settings, f)
-            self._settings_path = Path(path)
-        return self._settings_path
+            extra_flags += ["--mcp-config", json.dumps(mcp_config)]
+        return extra_flags
 
     async def _enumerate_mcp_server_names(self) -> list[str]:
         """Every MCP server this machine's Claude Code install knows
@@ -508,25 +573,6 @@ class ClaudeCodeAdapter(BackendAdapter):
             logger.warning("claude mcp list failed; permissive mode will not grant MCP tools", exc_info=True)
             return []
         return _parse_mcp_list_output(stdout.decode(errors="replace"))
-
-    async def _ensure_mcp_permissions_settings_file(self) -> Path:
-        """Write (once) the --settings JSON granting every configured MCP
-        server -- the permissive-mode counterpart to
-        _ensure_settings_file's hook wiring. See
-        _enumerate_mcp_server_names's own docstring for why this exists
-        and what it can't fix (OAuth-gated connectors)."""
-        if self._settings_path is None:
-            server_names = await self._enumerate_mcp_server_names()
-            fd, path = tempfile.mkstemp(
-                prefix="convobox-claude-settings-", suffix=".json"
-            )
-            settings = {
-                "permissions": {"allow": [f"mcp__{name}" for name in server_names]}
-            }
-            with os.fdopen(fd, "w") as f:
-                json.dump(settings, f)
-            self._settings_path = Path(path)
-        return self._settings_path
 
     async def _handle_approval_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -656,7 +702,8 @@ class ClaudeCodeAdapter(BackendAdapter):
         assert proc.stderr is not None  # nosec B101 -- spawned with stderr=PIPE
         while True:
             line = await readline_with_stall_diagnostic(
-                proc.stderr, proc, "claude_code _drain_stderr"
+                proc.stderr, proc, "claude_code _drain_stderr",
+                busy=self.is_busy,
             )
             if not line:
                 return
@@ -778,6 +825,31 @@ class ClaudeCodeAdapter(BackendAdapter):
         if settings_path is not None:
             with contextlib.suppress(OSError):
                 settings_path.unlink()
+        await self._terminate_and_kill_process(proc)
+
+    async def force_kill(self) -> None:
+        # Deliberately skips aclose()'s other teardown (denying a pending
+        # approval, closing the approval HTTP server, removing the
+        # settings file) -- those aren't part of "make the OS process
+        # stop now," and this is expected to be followed by a full normal
+        # shutdown (see BackendAdapter.force_kill()'s own docstring),
+        # whose own aclose() call moments later is idempotent on an
+        # already-dead process and still runs that other teardown then.
+        # No session/thread identifier to preserve here unlike codex.py's
+        # override -- this adapter runs with --no-session-persistence
+        # (see _REQUIRED_FLAGS above), so there's no resumable session for
+        # a future Phase 2 to reconnect to even in principle.
+        proc, self._proc = self._proc, None
+        reader_task, self._reader_task = self._reader_task, None
+        if reader_task is not None:
+            reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader_task
+        await self._terminate_and_kill_process(proc)
+
+    async def _terminate_and_kill_process(
+        self, proc: asyncio.subprocess.Process | None
+    ) -> None:
         if proc is None or proc.returncode is not None:
             return
         with contextlib.suppress(ProcessLookupError, OSError):
@@ -801,7 +873,8 @@ class ClaudeCodeAdapter(BackendAdapter):
         try:
             while True:
                 line = await readline_with_stall_diagnostic(
-                    proc.stdout, proc, "claude_code _read_loop"
+                    proc.stdout, proc, "claude_code _read_loop",
+                    busy=self.is_busy,
                 )
                 if not line:
                     return

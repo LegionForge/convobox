@@ -58,6 +58,53 @@ async def test_aclose_without_a_process_is_a_safe_noop() -> None:
     await adapter.aclose()  # idempotent
 
 
+# --- force_kill(): "option 2 (escalating force-kill)" -- a minimal
+# process-only kill, deliberately skipping aclose()'s other teardown (see
+# force_kill()'s own docstring on why: this is expected to be followed by
+# a full normal shutdown moments later, which runs the rest then). ---
+
+
+@pytest.mark.asyncio
+async def test_force_kill_terminates_the_subprocess() -> None:
+    adapter = _adapter()
+    await adapter.send_text("hi")
+    proc = adapter._proc
+    assert proc is not None and proc.returncode is None
+    await adapter.force_kill()
+    assert adapter._proc is None
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_without_a_process_is_a_safe_noop() -> None:
+    adapter = _adapter()
+    await adapter.force_kill()
+    await adapter.force_kill()
+
+
+@pytest.mark.asyncio
+async def test_force_kill_does_not_send_a_polite_interrupt_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole reason force_kill() exists: send_hard_stop()'s
+    # control_request/interrupt write rides the same pipe a wedged
+    # backend has already stopped reading. Assert force_kill() never
+    # calls _write_line() at all.
+    adapter = _adapter()
+    await adapter.send_text("hi")
+
+    called = False
+
+    async def _fail_if_called(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+        raise AssertionError("force_kill() must not call _write_line()")
+
+    monkeypatch.setattr(adapter, "_write_line", _fail_if_called)
+    await adapter.force_kill()
+    assert called is False
+
+
 @pytest.mark.asyncio
 async def test_send_text_yields_text_then_done_and_busy_lifecycle() -> None:
     adapter = _adapter()
@@ -163,7 +210,7 @@ async def test_successful_write_with_no_working_dir_configured_yields_no_artifac
 def test_stage_artifact_write_ignores_a_non_renderable_extension(tmp_path: Path) -> None:
     adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
     adapter._stage_artifact_write(
-        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "script.py"}}
+        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "binary.exe"}}
     )
     assert adapter._pending_artifact_writes == {}
 
@@ -180,6 +227,23 @@ def test_stage_artifact_write_accepts_markdown(tmp_path: Path) -> None:
         {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "notes.md"}}
     )
     assert adapter._pending_artifact_writes == {"tu_x": "notes.md"}
+
+
+def test_stage_artifact_write_accepts_python(tmp_path: Path) -> None:
+    # Live UAT finding, 2026-08-17: asking claude-code to show a .py file
+    # (via the new show_document MCP tool) failed silently, and the file
+    # didn't appear in the working-directory file browser either -- traced
+    # to the same class of bug as the .md fix above: .py was entirely
+    # absent from ARTIFACT_MEDIA_TYPES (src/convobox/adapters/base.py),
+    # despite every other common source-code extension (.js/.ts/.java/.c/
+    # .cpp/.cs) already being there, on a coding assistant. Fixed by
+    # adding ".py": "text/plain" to that allowlist -- this is the
+    # regression guard.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._stage_artifact_write(
+        {"type": "tool_use", "id": "tu_x", "name": "Write", "input": {"file_path": "script.py"}}
+    )
+    assert adapter._pending_artifact_writes == {"tu_x": "script.py"}
 
 
 def test_stage_artifact_write_ignores_non_write_edit_tools(tmp_path: Path) -> None:
@@ -541,6 +605,45 @@ async def test_aclose_force_kills_a_process_that_ignores_terminate(
     assert proc.terminate_called is True
     assert proc.kill_called is True
     assert adapter._proc is None
+
+
+# --- _write_line: a broken pipe mid-write (the process died but hasn't
+# been reaped, so returncode was still None and _ensure_proc trusted it)
+# must reap, respawn once, and retry -- not the same path as the
+# process-already-exited-before-send respawn test above, which never
+# touches _write_line's own try/except at all. ---
+
+
+@pytest.mark.asyncio
+async def test_write_line_reaps_and_respawns_after_a_broken_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DeadPipeStdin:
+        def write(self, data: bytes) -> None:
+            raise BrokenPipeError
+
+        async def drain(self) -> None:
+            raise AssertionError("drain() must not be reached after write() raises")
+
+    class _DeadPipeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _DeadPipeStdin()
+
+        async def wait(self) -> int | None:
+            self.returncode = -1
+            return self.returncode
+
+    adapter = ClaudeCodeAdapter(_FAKE_CLI)
+    stale_proc = _DeadPipeProcess()
+    adapter._proc = stale_proc  # type: ignore[assignment]
+    try:
+        await adapter._write_line({"type": "control_request", "request": {"subtype": "ping"}})
+        assert stale_proc.returncode is not None  # reaped via wait()
+        assert adapter._proc is not stale_proc  # respawned
+        assert adapter._proc is not None and adapter._proc.returncode is None
+    finally:
+        await _shutdown(adapter)
 
 
 # --- _safe_json_loads: malformed lines from the subprocess must not crash

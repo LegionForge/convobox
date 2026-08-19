@@ -122,6 +122,12 @@ web = [
     # dependency of fastapi itself, has to be listed explicitly or upload
     # requests fail at request time with a RuntimeError, not at import time.
     "python-multipart>=0.0.9",
+    # The "show this document" tool the backend agent can call to refocus
+    # the artifact pane (src/convobox/web/mcp_server.py) -- the official
+    # SDK, not hand-rolled JSON-RPC/SSE framing, since correctness here is
+    # judged against a real external client (claude/codex's own MCP
+    # client), not just ConvoBox's own tests.
+    "mcp>=1.0",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
@@ -187,7 +193,7 @@ platform = "linux"
 # not just src/convobox) pass, matching what
 # `mypy ... --ignore-missing-imports` already did for the whole tree.
 #
-# aec_audio_processing, piper/piper.*, fastapi/starlette/uvicorn, and
+# aec_audio_processing, piper/piper.*, fastapi/starlette/uvicorn/mcp, and
 # matplotlib are a different reason for the same fix: all are opt-in
 # extras (`uv sync --extra aec`/`--extra piper`/`--extra web`/
 # `--extra analysis`) deliberately NOT installed by CI's default lint job
@@ -226,6 +232,8 @@ module = [
     "starlette.*",
     "uvicorn",
     "uvicorn.*",
+    "mcp",
+    "mcp.*",
     "matplotlib",
     "matplotlib.*",
     "voice_picker",

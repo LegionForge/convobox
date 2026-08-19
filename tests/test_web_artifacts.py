@@ -65,10 +65,10 @@ def test_get_artifact_missing_file_returns_404(working_dir: Path) -> None:
 
 
 def test_get_artifact_rejects_a_disallowed_extension(working_dir: Path) -> None:
-    (working_dir / "script.py").write_text("print('hi')")
+    (working_dir / "notes.exe").write_bytes(b"fake")
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
     with TestClient(app, headers=_CSRF_HEADERS) as client:
-        response = client.get("/api/artifacts/script.py")
+        response = client.get("/api/artifacts/notes.exe")
     assert response.status_code == 415
 
 
@@ -140,6 +140,28 @@ def test_get_artifact_serves_a_code_file_as_text_plain(working_dir: Path) -> Non
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; charset=utf-8"
     assert response.content == b"console.log('hi');"
+
+
+# Live UAT gap-check, 2026-08-17 (same class as the .py fix above): these
+# 19 extensions were entirely absent from ARTIFACT_MEDIA_TYPES. One
+# parametrized test rather than 19 near-duplicate functions -- the
+# mechanism (a dict lookup) is identical for every extension; what's
+# worth guarding is that each specific one is actually IN the dict, not
+# 19 copies of the same assertion shape.
+@pytest.mark.parametrize(
+    "ext",
+    [
+        "css", "sh", "bash", "ps1", "toml", "sql", "go", "rs", "rb", "php",
+        "kt", "kts", "swift", "scala", "lua", "dart", "vue", "graphql", "gql",
+    ],
+)
+def test_get_artifact_serves_newly_added_extensions(working_dir: Path, ext: str) -> None:
+    (working_dir / f"sample.{ext}").write_text("content")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:
+        response = client.get(f"/api/artifacts/sample.{ext}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
 
 
 # --- "Open in editor" (.../editor-uri): resolves the same working_dir
@@ -223,14 +245,14 @@ def test_list_artifacts_with_no_working_dir_returns_503() -> None:
 def test_list_artifacts_returns_only_allowlisted_extensions(working_dir: Path) -> None:
     (working_dir / "chart.png").write_bytes(b"fake")
     (working_dir / "report.html").write_text("<html></html>")
-    (working_dir / "script.py").write_text("print('hi')")  # not in the allowlist
+    (working_dir / "script.py").write_text("print('hi')")  # in the allowlist
     (working_dir / "notes.exe").write_bytes(b"fake")  # not in the allowlist
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
     with TestClient(app) as client:
         response = client.get("/api/artifacts")
     assert response.status_code == 200
     data = response.json()
-    assert sorted(data["files"]) == ["chart.png", "report.html"]
+    assert sorted(data["files"]) == ["chart.png", "report.html", "script.py"]
     assert data["truncated"] is False
 
 
@@ -318,3 +340,120 @@ def test_list_artifacts_truncates_and_flags_it(working_dir: Path) -> None:
     data = response.json()
     assert len(data["files"]) == _MAX_BROWSE_RESULTS
     assert data["truncated"] is True
+
+
+# --- POST /api/artifacts/active (GitHub issue #280): the frontend's own
+# report of what the pane is really showing -- get_shown_artifact
+# (web/mcp_server.py) reads app.state.active_artifact_path, this route
+# is the only thing that ever writes it. ---
+
+
+def test_active_artifact_starts_unset() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")))
+    assert app.state.active_artifact_path is None
+
+
+def test_set_active_artifact_records_the_relative_path(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/artifacts/active", json={"path": "chart.png"})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "chart.png"
+
+
+def test_set_active_artifact_with_null_clears_it(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "chart.png"})
+        response = client.post("/api/artifacts/active", json={"path": None})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path is None
+
+
+def test_set_active_artifact_with_a_traversal_path_clears_rather_than_errors(
+    working_dir: Path,
+) -> None:
+    # A stale/racy or malformed report only feeds an informational MCP
+    # tool, never a security boundary (GET /api/artifacts/{path} already
+    # enforces that fence on the content this report describes) -- see
+    # add_artifact_routes()'s own comment on why this degrades to
+    # "nothing confidently known" instead of a 4xx the frontend has no
+    # useful way to act on.
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/artifacts/active", json={"path": "../../etc/passwd"})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path is None
+
+
+def test_set_active_artifact_requires_the_csrf_header(working_dir: Path) -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app) as client:  # deliberately no CSRF header
+        response = client.post("/api/artifacts/active", json={"path": None})
+    assert response.status_code == 403
+
+
+# --- sequence guard (live UAT finding, 2026-08-18): two of these POSTs
+# fired close together (a fast tab switch) have no guarantee of being
+# APPLIED in send order -- a monotonic sequence number lets the server
+# ignore anything not newer than what it's already applied, regardless
+# of arrival order. ---
+
+
+def test_set_active_artifact_ignores_an_older_sequence(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        # The newer report (sequence=2) arrives and is applied FIRST --
+        # simulating the out-of-order completion this guard exists for.
+        client.post("/api/artifacts/active", json={"path": "notes.md", "sequence": 2})
+        response = client.post(
+            "/api/artifacts/active", json={"path": "chart.png", "sequence": 1}
+        )
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "notes.md"
+
+
+def test_set_active_artifact_ignores_an_equal_sequence(working_dir: Path) -> None:
+    # Strictly greater, not >=: a duplicate/retried report for the same
+    # render must not re-apply (harmless here, but keeps the semantics
+    # exact -- "newer," not "not older").
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "notes.md", "sequence": 1})
+        response = client.post(
+            "/api/artifacts/active", json={"path": "chart.png", "sequence": 1}
+        )
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "notes.md"
+
+
+def test_set_active_artifact_applies_a_newer_sequence(working_dir: Path) -> None:
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "chart.png", "sequence": 1})
+        response = client.post(
+            "/api/artifacts/active", json={"path": "notes.md", "sequence": 2}
+        )
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "notes.md"
+
+
+def test_set_active_artifact_without_a_sequence_always_applies(working_dir: Path) -> None:
+    # Backward-compatible fallback for any caller that doesn't send one
+    # (this repo's own frontend always does) -- must not require it.
+    (working_dir / "chart.png").write_bytes(b"fake")
+    (working_dir / "notes.md").write_text("# hi")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        client.post("/api/artifacts/active", json={"path": "notes.md", "sequence": 5})
+        response = client.post("/api/artifacts/active", json={"path": "chart.png"})
+    assert response.status_code == 200
+    assert app.state.active_artifact_path == "chart.png"

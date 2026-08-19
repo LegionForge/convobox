@@ -23,11 +23,13 @@ from convobox.config import DisplayConfig, load_config, resolve_config_path
 from convobox.web.artifacts import add_artifact_routes
 from convobox.web.bridge import (
     WebApprovalBridge,
+    WebEventForwarder,
     WebListeningBridge,
     WebSafewordBridge,
     WebTextInputBridge,
 )
 from convobox.web.history import HistoryDB
+from convobox.web.mcp_server import MCP_MOUNT_PATH, add_mcp_routes
 from convobox.web.settings_api import add_settings_routes
 from convobox.web.stream import EventBroadcaster
 from convobox.web.uploads import add_upload_routes
@@ -111,6 +113,8 @@ def create_app(
     quit_handler: Callable[[], None] | None = None,
     config_path: Path | None = None,
     working_dir: Path | None = None,
+    mcp_token: str | None = None,
+    web_forwarder: WebEventForwarder | None = None,
 ) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
     display = display if display is not None else DisplayConfig()
@@ -151,12 +155,25 @@ def create_app(
         # correctly rejects for any non-loopback origin. index.html's own
         # fetch() calls all send this (CSRF_HEADERS, defined once near
         # the top of its script).
-        if request.method in _MUTATING_METHODS and _CSRF_HEADER not in request.headers:
+        #
+        # MCP_MOUNT_PATH is deliberately exempt: its client is the
+        # claude/codex CLI subprocess (web/mcp_server.py), not a browser
+        # tab -- it has no way to know about or send this header, and
+        # isn't the CSRF threat model this check exists for anyway (a
+        # malicious cross-origin PAGE riding the user's own browser
+        # session). That route carries its own bearer-token auth instead
+        # (see mcp_server.py's module docstring for why).
+        if (
+            request.method in _MUTATING_METHODS
+            and _CSRF_HEADER not in request.headers
+            and not request.url.path.startswith(MCP_MOUNT_PATH)
+        ):
             return Response(status_code=403, content="missing required header")
         return await call_next(request)
 
     add_settings_routes(app, config_path if config_path is not None else resolve_config_path())
     add_artifact_routes(app, working_dir)
+    add_mcp_routes(app, working_dir, mcp_token, web_forwarder)
 
     async def _notify_backend_of_upload(filename: str) -> None:
         # Best-effort: no live session (text_bridge unset/not ready) means
@@ -331,6 +348,8 @@ def create_app(
                 "could not deliver this decision to the backend -- the request may "
                 "have just been answered another way (voice) or timed out",
             )
+        if web_forwarder is not None:
+            web_forwarder.forward_approval_resolved(approved)
         return {"status": "approved" if approved else "denied", "explanation": None}
 
     @app.get("/api/sessions/{session_id}/export")

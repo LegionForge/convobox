@@ -15,6 +15,15 @@ from convobox.tts.base import TTSEngine
 
 logger = logging.getLogger(__name__)
 
+# stop_event_loop()'s retry-cancel mitigation (docs/field-notes/2026-08-15-
+# opencode-freeze-*.md): module-level, not inline literals, so a test can
+# monkeypatch them down to something fast rather than genuinely waiting out
+# 3-9s of real time to exercise the retry path -- same reasoning as
+# adapters/base.py's own _READLINE_STALL_FIRST_WARNING_S being a named
+# constant rather than a literal in that diagnostic.
+_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S = 3.0
+_EVENTS_TASK_CANCEL_MAX_ATTEMPTS = 3
+
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 # Markdown link: speak the text, never the URL.
@@ -167,11 +176,30 @@ class Orchestrator:
         tier_responses: bool = False,
         approval_phrase: str | None = None,
         approval_gate: ApprovalWaitCanceler | None = None,
+        kill_phrase: str | None = None,
+        on_kill_phrase: Callable[[], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
         self._tts = tts
         self._player = player
+        # Which safeword (if any) escalates to force_kill() instead of the
+        # normal hard_stop() -- see force_kill()'s own docstring. Caller
+        # (run_convobox.py) is responsible for keeping this in sync with
+        # config.safeword.kill_phrase; SafewordConfig's own validator
+        # already ensures it's one of the phrases `safeword` itself was
+        # constructed with, so `matched == self._kill_phrase` below can
+        # only ever fire on a transcript the safeword detector already
+        # confirmed matched a real configured phrase.
+        self._kill_phrase = kill_phrase
+        # Fired (synchronously, no await) after force_kill() returns, so
+        # the caller can end the whole session -- Phase 1's scope (JP's
+        # own call 2026-08-14): a kill-phrase match ends ConvoBox itself,
+        # it does not try to keep the session alive. Deliberately NOT
+        # awaited/composed into force_kill() itself: what "end the
+        # session" means is inherently caller-specific (run_convobox.py's
+        # own shutdown signal), not something Orchestrator should own.
+        self._on_kill_phrase = on_kill_phrase
         # Response tiering (docs/DESIGN-0.3.0-interaction-and-safety.md,
         # Phase 2): "voice always gives the tiered/short version." Off by
         # default (existing callers speak the full text exactly as before)
@@ -215,6 +243,12 @@ class Orchestrator:
         # abort that must win over busy/idle routing, never downgraded to an interject.
         matched = self._safeword.check(transcript)
         if matched is not None:
+            if self._kill_phrase is not None and matched == self._kill_phrase:
+                logger.warning("kill phrase matched %r -- force-killing backend", matched)
+                await self.force_kill()
+                if self._on_kill_phrase is not None:
+                    self._on_kill_phrase()
+                return
             logger.info("hard stop matched safeword %r", matched)
             await self.hard_stop()
             return
@@ -356,15 +390,99 @@ class Orchestrator:
             )
         return was_busy
 
+    async def force_kill(self) -> bool:
+        """Escalate beyond hard_stop(): genuinely terminate the backend's
+        OS process (BackendAdapter.force_kill()), not just ask it to abort
+        over its own channel.
+
+        This is "option 2 (escalating force-kill)", named as the real
+        follow-up in hard_stop()'s own docstring since 2026-08-09 and
+        built 2026-08-14 after three live freeze incidents in one session
+        where the backend subprocess itself was wedged (a blocking
+        readline() with no timeout -- docs/KNOWN-ISSUES.md) and
+        send_hard_stop()'s own polite interrupt, riding that SAME channel,
+        could not reach it either.
+
+        Deliberately does NOT call send_hard_stop() first -- waiting on a
+        channel that may itself be the thing that's stuck defeats the
+        whole purpose of this method existing. Stops playback/TTS and
+        cancels event consumption exactly like hard_stop(), then kills
+        the process directly, no RPC round-trip involved.
+
+        Returns whether the adapter was actually busy, same "honesty"
+        reasoning as hard_stop()'s own return value -- here it also means
+        "a real OS process was just killed while doing something," worth
+        a louder log level than hard_stop()'s equivalent case.
+
+        Callers are expected to end the whole ConvoBox session immediately
+        after this returns (Phase 1's scope, JP's own call 2026-08-14) --
+        this method only guarantees the backend subprocess is dead, not
+        that a fresh one gets reconnected to the same conversation (Phase
+        2: codex's real thread/resume RPC makes that technically possible
+        for the codex adapter specifically, confirmed via `codex app-server
+        generate-json-schema` 2026-08-14; claude-code's adapter runs with
+        --no-session-persistence and has no equivalent to reconnect to
+        even in principle). Not implemented here -- BackendAdapter.
+        force_kill()'s own docstring scaffolds the seam without building
+        it, per JP's own "ask smaller" scoping of this into two phases.
+        """
+        was_busy = self._adapter.is_busy()
+        if self._player is not None:
+            self._player.stop()
+        if self._tts is not None:
+            self._tts.stop()
+        await self._adapter.force_kill()
+        await self.stop_event_loop()
+        if self._approval_gate is not None:
+            self._approval_gate.cancel_wait()
+        if was_busy:
+            logger.warning(
+                "force-kill terminated the backend process while a turn "
+                "was still busy -- any in-flight work is gone, not just "
+                "discarded"
+            )
+        return was_busy
+
     async def stop_event_loop(self) -> None:
+        # Retries cancel() up to 3x (3s each) rather than a single
+        # cancel-and-await, per 2026-08-15 live evidence against the
+        # opencode backend: a task suspended inside adapter.events()'s SSE
+        # read can silently fail to honor its FIRST cancel() -- observed
+        # hanging 15-90s with a single cancel, every time, never
+        # self-resolving -- but a SECOND cancel() reliably unstuck it
+        # within seconds, 7/7 replicated trials. Root cause not confirmed
+        # (suspected: httpcore's AutoBackend always uses anyio's asyncio
+        # backend, a known interop gap for bare Task.cancel()), but this
+        # bounds what was an indefinite freeze to a few seconds regardless.
+        # See docs/field-notes/2026-08-15-opencode-freeze-*.md for the full
+        # investigation. asyncio.shield() protects `task` itself from this
+        # wait_for's own timeout -- only the wait is abandoned, not the
+        # task, so it stays alive to be re-cancelled and re-awaited.
         self._cancel_speak_task()
         if self._events_task is None:
             return
-        self._events_task.cancel()
-        try:
-            await self._events_task
-        except asyncio.CancelledError:
-            pass
+        task = self._events_task
+        task.cancel()
+        for attempt in range(_EVENTS_TASK_CANCEL_MAX_ATTEMPTS):
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=_EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S
+                )
+                break
+            except asyncio.CancelledError:
+                break
+            except TimeoutError:
+                if task.done():
+                    break
+                logger.warning(
+                    "events task did not honor cancel() after %.1fs "
+                    "(attempt %d/%d), re-cancelling -- see docs/field-notes/"
+                    "2026-08-15-opencode-freeze-repeated-cancel-mitigates-"
+                    "mechanism-and-workaround-candidate.md",
+                    _EVENTS_TASK_CANCEL_RETRY_TIMEOUT_S, attempt + 1,
+                    _EVENTS_TASK_CANCEL_MAX_ATTEMPTS,
+                )
+                task.cancel()
         self._events_task = None
 
     async def _consume_events(self) -> None:

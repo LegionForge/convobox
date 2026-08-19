@@ -4,9 +4,27 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
-## [0.3.1] — 2026-08-14
+## [Unreleased]
 
-Patch release: 107 PRs since `0.3.0`. First cycle with live macOS
+### Fixed
+- **macOS: `safeword.kill_phrase`/`force_kill()` now actually reaches a
+  spawned codex tool-call child, not just the top-level app-server
+  process.** `codex` was 0/10 on macOS at `0.3.1`'s release (disclosed
+  in `docs/KNOWN-ISSUES.md`) -- the real spawned shell child is its own
+  process-group leader regardless of sandboxing, so no signal to the
+  app-server's process group could ever reach it, and `os.killpg()`
+  (the previously-disclosed "candidate fix") was tested live and
+  confirmed to fail for the same reason. Fixed with a `ps`-based
+  command-line-matching fallback plus recursive descendant-kill (a
+  multi-statement shell script forks its later commands as separate
+  child processes, which the naive matched-PID-only kill orphaned
+  otherwise). Re-verified live 20/20 clean against real spawned
+  processes on current main. `claude-code` was already reliable
+  (10/10) and is unaffected.
+
+## [0.3.1] — 2026-08-17
+
+Patch release: 119 PRs since `0.3.0`. First cycle with live macOS
 hardware coverage alongside Windows (Apple Silicon Mac mini, AIRHUG 28
 USB mic) -- full evidence in `docs/field-notes/` and summarized in
 `docs/STATUS.md`. No config schema breaks -- every existing
@@ -56,6 +74,39 @@ new setting below.
   settings chrome, including a pause/resume icon with screen-reader-safe
   labeling and live-reloading display settings with a restart-required
   indicator. (#227, #229, #233)
+- **`safeword.kill_phrase`** (opt-in, unset by default) -- a genuine
+  OS-level `terminate()`/`kill()` of the backend process, no RPC
+  round-trip, for when the polite `send_hard_stop()` path is itself
+  wedged (it rides the same stdin/stdout pipe a frozen backend can't
+  answer). Must be one of `hard_stop_phrases`; JP's own config sets it
+  to `"eject eject eject"`. Live-verified through the real mic pipeline
+  on Windows/codex during an actual freeze, not a staged one --
+  `docs/field-notes/2026-08-15-kill-phrase-live-verified-during-a-
+  genuine-freeze-resume-word-stt-unreliable.md`. **macOS gap found the
+  same evening: unreliable for `codex` there** (Apple Seatbelt sandboxing
+  reparents the real child process to `launchd` before the kill signal
+  can reach it, and macOS signals don't cascade to children the way
+  Windows' `TerminateProcess()` does) -- `claude-code` stays reliable on
+  both platforms. See `docs/KNOWN-ISSUES.md`'s force-kill entry before
+  relying on this on macOS with a codex backend. (#277)
+- **Web UI: agent-initiated artifact-pane tools.** The backend LLM gets
+  two new tools over a small local MCP server ConvoBox now hosts
+  alongside its existing FastAPI web UI (`src/convobox/web/mcp_server.py`,
+  bearer-token-authenticated, loopback-only): `show_document(path)` to
+  push/refocus a specific file in the artifact pane, and
+  `get_shown_artifact()` to answer "what's currently showing?" grounded
+  in real UI state (closes #280) rather than the model's own guess.
+  Live-verified end to end against a real `claude` CLI and a real
+  browser, including the edge case where the user manually closes the
+  pane (which would defeat a naive "last broadcast" implementation).
+  **Known limitation:** `backend.permission_mode: plan` (the default)
+  reliably blocks both tools headless, since the model's own
+  `ExitPlanMode` approval mechanism doesn't work in `--print` mode --
+  see `docs/ARTIFACT-PANE-SCOPE.md`. (#283, #285)
+- **Web UI: a distinct "session ended" status** for when Quit or the
+  kill phrase ends the whole ConvoBox process, instead of the composer
+  and buttons just spinning in an endless "reconnecting…" state
+  indistinguishable from an ordinary dropped connection. (#288)
 
 ### Changed
 - **Safeword folded into the Interaction tab**, both the Settings TUI and
@@ -186,6 +237,31 @@ new setting below.
 - **Web UI: SSE subscriber queues are now bounded**, evicting the oldest
   entry and signaling drops instead of growing unbounded. (#241)
 - **Web UI: history DB writes offloaded off the event loop.** (#242)
+- **A safeword match in a transcript no longer skips checking that same
+  transcript for a pause phrase.** A long, rapid-fire safeword utterance
+  fired the hard stop correctly but silently dropped a "stop listening"
+  pause intent present in the same transcript, since the entire
+  pause/resume check lived inside the hard-stop branch's `if not
+  is_hard_stop:` guard. `listening_gate.observe()` now runs
+  unconditionally; on a hard-stop transcript only its state change is
+  applied, not its own redundant stop-sequence side effects. Never a
+  safety gap -- the hard stop itself always fired correctly regardless.
+  Live-verified: both the hard stop and the paused state now register
+  from the same chained utterance --
+  `docs/field-notes/2026-08-15-pause-phrase-fix-live-verified-hard-stop-
+  and-pause-both-register.md`. (#276)
+- **Web UI: artifact pane wide content was permanently half-clipped, and
+  the pane couldn't be widened at all.** The native CSS `resize:
+  horizontal` handle had zero drag room since the pane sits flush
+  against the browser window edge, and `align-items:
+  center`/`justify-content: center` on the pane body was silently
+  swallowing overflow instead of scrolling to it. Replaced with a custom
+  drag handle (mouse + arrow-key resizable, clamped 240px-85vw) and
+  `margin: auto` centering, which scrolls correctly once content
+  overflows. (#282)
+- **Web UI: approval-action buttons now grey out immediately once a
+  voice approve/deny decision resolves**, instead of staying clickable
+  indefinitely; the "explain" action stays active as intended. (#287)
 
 ### Security
 - **`claude-code` backend approval-gate gaps fixed** (issue #235, A1+A2).
@@ -224,21 +300,32 @@ new setting below.
   can't fully cancel. See `docs/KNOWN-ISSUES.md` and
   `docs/field-notes/2026-08-11-self-barge-in-combined-mitigation-and-
   hardware-notes.md`.
-- **Unresolved, safety-relevant freeze: the app can go totally
-  unresponsive, including both hard-stop paths.** Escalated 2026-08-12
-  as likely two distinct bugs. #269's dedicated executors targeted the
-  leading hypothesis (thread-pool contention) and did not fix it --
-  three clean live reproductions the same day, #269's own new stall
-  diagnostic never fired. Two variants confirmed: short capture stalls
-  (1-4s, zero queue backlog) and a 12+ minute freeze that resisted every
-  recovery path (web resume, hard-stop API, even killing the hung
-  backend subprocess) -- only a full process kill ended it, with the
-  target process pinned at 0% CPU throughout, pointing at a genuine
-  blocking wait with no timeout, likely in backend-subprocess I/O. A
-  same-day 10-cycle batch with confounds removed measured a real ~30%
-  stall rate. `docs/KNOWN-ISSUES.md`'s own words: **"treat this as
-  safety-relevant and unresolved -- not a release candidate until at
-  least the long-freeze variant is understood."**
+- **The safety-relevant freeze flagged in the previous cycle is now
+  mostly understood, and the opencode-specific mechanism is mitigated.**
+  Escalated 2026-08-12 as likely two distinct bugs; a 2026-08-15
+  investigation (`docs/KNOWN-ISSUES.md`'s VAD-freeze entry, "2026-08-15
+  investigation, final status") found most of what looked like a
+  widespread freeze was either (a) a test-harness volume confound and
+  harmless idle time misread as a hang by diagnostics that didn't yet
+  distinguish the two, or (b) codex blocking on its own stdin -- not
+  ConvoBox's event loop. For (b), `Orchestrator.stop_event_loop()` now
+  retries `cancel()` up to 3 times (3s timeout each) instead of once,
+  turning what used to be an indefinite hang into a ~9s-bounded one;
+  validated live against 143 automated hard-stops on Windows, zero
+  timeouts. **One genuinely new, still-open variant was also caught the
+  same evening**: a mic-layer-only freeze with no codex subprocess
+  involved, 6+ minutes, the first time this shape self-resolved rather
+  than requiring intervention -- root cause not established, rare (one
+  occurrence to date), tracked in `docs/KNOWN-ISSUES.md`. (#289)
+- **`safeword.kill_phrase` is unreliable on macOS with a `codex`
+  backend.** Apple's Seatbelt sandboxing reparents the real spawned
+  child process to `launchd` almost immediately, detaching it from the
+  process tree before `force_kill()` can reach it, and macOS signals
+  don't cascade to children the way Windows' `TerminateProcess()` does
+  -- codex was 0/10 in live testing. `claude-code` stays reliable (10/10)
+  on both platforms. A process-group kill (`os.killpg()`) is a candidate
+  fix, not yet built or confirmed. See `docs/KNOWN-ISSUES.md`'s
+  force-kill entry.
 
 ## [0.3.0] — 2026-07-28
 

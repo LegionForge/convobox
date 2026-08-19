@@ -47,6 +47,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -559,11 +560,18 @@ class ListeningGate:
     "Pause/resume listening").
 
     Pure state machine, like BargeInMonitor, so it's unit-testable independent
-    of the mic loop. Call observe() once per transcript that the SAFEWORD DID
-    NOT match -- the caller checks the safeword first, unconditionally, outside
-    this class, because pause state and hard-stop are orthogonal axes (a
-    paused session must still be hard-stoppable; the safeword's own check
-    already runs regardless of anything this class does).
+    of the mic loop. Call observe() once per transcript -- the caller checks
+    the safeword first, unconditionally, outside this class, because pause
+    state and hard-stop are orthogonal axes (a paused session must still be
+    hard-stoppable; the safeword's own check already runs regardless of
+    anything this class does). observe() has no side effects beyond its own
+    is_paused flag, so it's safe to call even on a transcript that ALSO
+    matched the safeword -- the caller applies observe()'s state change but
+    not its usual side effects (the "pause" action's own stop sequence, any
+    `continue`) when a hard stop is also in play, since the hard-stop path
+    already stops everything and must not be skipped (docs/field-notes/
+    2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-
+    utterance.md).
     """
 
     def __init__(self, pause_detector: PauseListeningDetector, wake_detector: ResumeWordDetector) -> None:
@@ -1232,6 +1240,8 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
                     "declined pending backend approval after %.1fs of silence",
                     approval_gate.timeout_s,
                 )
+                if web_forwarder is not None:
+                    web_forwarder.forward_approval_resolved(False)
                 if tui_state is not None:
                     tui_state.warning = None
             else:
@@ -1664,6 +1674,25 @@ def _check_backend_permission_mode(backend: object, interaction: object) -> None
     log.info("backend permission_mode: %s (%s)", mode, name)
 
 
+def _check_plan_mode_blocks_artifact_tools(backend: object) -> None:
+    """Warn that the show_document/get_shown_artifact MCP tools
+    (web/mcp_server.py) won't respond headless under claude-code's
+    default permission_mode. Only called when the MCP server is actually
+    being mounted (config.web.enabled and backend.working_dir both set --
+    see the call site), so this only fires when it's actually relevant."""
+    name = getattr(backend, "name", "")
+    mode = getattr(backend, "permission_mode", "plan")
+    if name == "claude-code" and mode == "plan":
+        log.warning(
+            "backend.permission_mode=plan reliably blocks the "
+            "show_document/get_shown_artifact MCP tools headless -- "
+            "ExitPlanMode doesn't work in --print mode. The artifact pane "
+            "will still work for files the backend writes; it just won't "
+            "respond to agent-initiated show/what's-showing requests. See "
+            "docs/ARTIFACT-PANE-SCOPE.md.",
+        )
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -1853,7 +1882,35 @@ async def run(args: argparse.Namespace) -> None:
     _check_backend_working_dir(config.backend)
     if args.web:
         config.web.enabled = True
-    adapter = create_backend_adapter(config.backend)
+    # The "show_document" MCP tool (web/mcp_server.py, docs/ARTIFACT-PANE-
+    # SCOPE.md's "Agent-Initiated Artifacts" section) -- generated here,
+    # BEFORE create_backend_adapter(), because config.web.port/enabled are
+    # already final at this point (unlike the server's actual bound
+    # SOCKET, which doesn't exist yet -- but the port is a fixed config
+    # value, not OS-assigned, so the URL is known without waiting for the
+    # server to actually start). None/None (mounts nothing, adds no CLI
+    # flags) unless BOTH web.enabled and backend.working_dir are set --
+    # matches add_mcp_routes()'s own condition: no pane to show anything
+    # in without the former, nothing to fence a path against without the
+    # latter. Always 127.0.0.1 for the CONNECT address regardless of
+    # web.bind_address (which only controls what interface the server
+    # LISTENS on) -- the backend CLI is a same-machine subprocess, so
+    # loopback always reaches it even when bind_address is 0.0.0.0.
+    mcp_url: str | None = None
+    mcp_token: str | None = None
+    if config.web.enabled and config.backend.working_dir:
+        mcp_token = secrets.token_hex(16)
+        # Trailing slash deliberate: the mounted MCP sub-app's own route
+        # lives at exactly that path, and Starlette's redirect-to-add-a-
+        # slash behavior only fires for GET/HEAD, never POST (redirecting
+        # a POST would silently drop its body) -- live-confirmed 2026-08-
+        # 1x: a bare "/mcp" POST 404s/405s depending on the exact mount
+        # wrapping, never redirects. Sending the correctly-slashed URL up
+        # front avoids relying on a redirect that was never going to
+        # happen for this client's request method anyway.
+        mcp_url = f"http://127.0.0.1:{config.web.port}/mcp/"
+        _check_plan_mode_blocks_artifact_tools(config.backend)
+    adapter = create_backend_adapter(config.backend, mcp_url=mcp_url, mcp_token=mcp_token)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): voice-gated
     # tool approval. The GATE (this) is backend-agnostic -- it just needs
     # a phrase to recognize, and does nothing if the active backend never
@@ -1992,6 +2049,8 @@ async def run(args: argparse.Namespace) -> None:
             working_dir=(
                 Path(config.backend.working_dir) if config.backend.working_dir else None
             ),
+            mcp_token=mcp_token,
+            web_forwarder=web_forwarder,
         )
         web_uvicorn_config = uvicorn.Config(
             web_app,
@@ -2052,6 +2111,17 @@ async def run(args: argparse.Namespace) -> None:
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
         approval_gate=approval_gate,
+        kill_phrase=config.safeword.kill_phrase,
+        # Reuses the exact same real-interrupt mechanism the web UI's Quit
+        # button and the TUI's Ctrl+C workaround already use (see this
+        # function's own docstring) -- Orchestrator.force_kill() has
+        # already synchronously killed the backend's OS process by the
+        # time this fires, so unlike Quit alone, ending the session here
+        # does not depend on this signal actually being delivered/handled
+        # promptly for the one thing that actually mattered (the
+        # subprocess being dead). This just asks the rest of the app
+        # (mic stream, web server) to unwind the same way Quit does.
+        on_kill_phrase=_self_signal_interrupt,
     )
     continue_gate = ContinuePromptGate(ContinueDetector(), config.interaction.continue_timeout_s)
     if approval_bridge is not None:
@@ -2065,6 +2135,12 @@ async def run(args: argparse.Namespace) -> None:
         config.safeword.hard_stop_phrases[0],
         os.getpid(),
     )
+    if config.safeword.kill_phrase is not None:
+        log.info(
+            "kill phrase %r configured -- force-kills the backend process "
+            "and ends this session, instead of the normal hard-stop",
+            config.safeword.kill_phrase,
+        )
 
     if args.text is not None:
         # Scriptable single-shot validation: the full Orchestrator/backend/
@@ -2506,6 +2582,36 @@ async def run(args: argparse.Namespace) -> None:
 
                 # Safeword is checked on the raw transcript BEFORE any quality
                 # gate or half-duplex drop: a hard stop must never be swallowed.
+                if is_hard_stop:
+                    # The SAME transcript can also contain the pause phrase
+                    # (or, if already paused, the resume word) -- a long
+                    # hallucinated run of repeated safewords realistically
+                    # chains "stop listening" in too (docs/field-notes/
+                    # 2026-08-12-safeword-and-pause-phrase-are-mutually-
+                    # exclusive-within-one-utterance.md, live-caught). Pause
+                    # state and hard-stop are orthogonal axes per
+                    # ListeningGate's own docstring -- the hard stop still
+                    # falls straight through unconditionally below (never
+                    # swallowed or delayed), but that's no reason to also
+                    # silently drop a pause/resume intent genuinely present
+                    # in the same words. Only the STATE change is applied
+                    # here (ListeningGate.observe() is a pure state machine
+                    # with no side effects of its own) -- NOT the "pause"
+                    # branch's own stop sequence below (redundant: the
+                    # hard-stop path already stops everything) and NOT a
+                    # `continue` (which would skip the hard-stop path
+                    # entirely).
+                    also_gate_action = listening_gate.observe(text)
+                    if also_gate_action == "pause":
+                        log.info(
+                            "also paused listening (pause phrase matched in "
+                            "the same utterance as the hard stop): %r", text,
+                        )
+                    elif also_gate_action == "resume":
+                        log.info(
+                            "also resumed listening (resume word matched in "
+                            "the same utterance as the hard stop): %r", text,
+                        )
                 if not is_hard_stop:
                     # Echo-tail guard (stage-2 echo handling): if this
                     # utterance's audio landed inside the reverb/echo tail
@@ -2695,6 +2801,15 @@ async def run(args: argparse.Namespace) -> None:
                                     "%s pending backend approval: %r",
                                     "approved" if approved else "declined", text,
                                 )
+                                # Web UI has no row-level view into a
+                                # VOICE decision otherwise -- its own
+                                # approval-actions row would stay
+                                # clickable indefinitely. See
+                                # WebEventForwarder.forward_approval_
+                                # resolved's own docstring; live UAT
+                                # gap, 2026-08-17.
+                                if web_forwarder is not None:
+                                    web_forwarder.forward_approval_resolved(approved)
                                 if approved:
                                     # Delayed, not immediate: the resumed
                                     # turn starts running the tool call
@@ -3037,8 +3152,43 @@ def _print_clean_exit_note(web_active: bool) -> None:
         )
 
 
+def _restore_default_sigint_handler() -> None:
+    """Force SIGINT back to Python's normal KeyboardInterrupt-raising
+    handler, unconditionally. POSIX-only -- see _self_signal_interrupt()'s
+    own POSIX/Windows split for why.
+
+    Root cause of the 2026-08-18 live-voice finding (kill_phrase's own
+    "ends this session" claim not holding, docs/field-notes/2026-08-18-
+    kill-phrase-live-voice-test-finds-two-real-gaps.md): when a POSIX
+    shell launches a command as a background job (`&`, which is how this
+    project's own scripted TTS-to-mic test sessions run it -- see
+    docs/field-notes/2026-08-15-vad-mic-freeze-live-reproduced-on-macos.
+    md), it sets SIGINT's disposition to SIG_IGN for that child BEFORE
+    exec'ing it, so a real terminal Ctrl+C (which only reaches the
+    terminal's foreground process group anyway) can't kill a background
+    job by accident. SIG_IGN survives exec, and CPython's own startup
+    deliberately leaves an inherited SIG_IGN alone rather than overriding
+    it -- confirmed live via `signal.getsignal(signal.SIGINT)`:
+    <default_int_handler> when run interactively, <Handlers.SIG_IGN> when
+    run as `cmd &`, with no nohup involved at all. With SIGINT ignored,
+    _self_signal_interrupt()'s `os.kill(os.getpid(), SIGINT)` (the
+    kill_phrase/Quit-button/Windows-Ctrl+C-workaround exit path) is a true
+    no-op: no exception, no log line, the process and its mic loop simply
+    keep running. Since this project deliberately runs backgrounded/
+    detached for real UAT sessions and may be launched the same way by
+    real users (a process manager, `&`, systemd-style supervision), the
+    self-signal exit path must work in that mode too -- restoring the
+    default handler here makes it so, and does not change real-terminal
+    Ctrl+C behavior at all (that was already gated on being the
+    terminal's foreground process group, independent of this).
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def main() -> None:
     use_utf8_console()
+    if sys.platform != "win32":
+        _restore_default_sigint_handler()
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

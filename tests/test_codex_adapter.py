@@ -101,6 +101,96 @@ async def test_aclose_force_kills_a_process_that_ignores_terminate(
     assert adapter._proc is None
 
 
+# --- force_kill(): "option 2 (escalating force-kill)" -- shares
+# _terminate_and_kill_process() with aclose() (same real terminate()/kill()
+# sequence), so these mirror the aclose() tests above. The one thing that
+# actually matters and can't be shown by a plain call-count assertion: this
+# path never touches _request()/the RPC channel at all -- see the "doesn't
+# wait on send_hard_stop" test below. ---
+
+
+@pytest.mark.asyncio
+async def test_force_kill_terminates_the_appserver() -> None:
+    adapter = _adapter()
+    await adapter.send_text("hi")
+    proc = adapter._proc
+    assert proc is not None and proc.returncode is None
+    await adapter.force_kill()
+    assert adapter._proc is None
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_without_a_process_is_a_safe_noop() -> None:
+    adapter = _adapter()
+    await adapter.force_kill()
+    await adapter.force_kill()
+
+
+@pytest.mark.asyncio
+async def test_force_kill_kills_a_process_that_ignores_terminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.codex as mod
+
+    class _StubbornProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.terminate_called = False
+            self.kill_called = False
+
+        def terminate(self) -> None:
+            self.terminate_called = True
+
+        def kill(self) -> None:
+            self.kill_called = True
+            self.returncode = -9
+
+        async def wait(self) -> int | None:
+            return self.returncode
+
+    async def _fake_wait_for(coro: object, timeout: float) -> None:
+        coro.close()  # type: ignore[attr-defined]
+        raise TimeoutError
+
+    monkeypatch.setattr(mod.asyncio, "wait_for", _fake_wait_for)
+
+    adapter = _adapter()
+    proc = _StubbornProcess()
+    adapter._proc = proc  # type: ignore[assignment]
+
+    await adapter.force_kill()
+
+    assert proc.terminate_called is True
+    assert proc.kill_called is True
+    assert adapter._proc is None
+
+
+@pytest.mark.asyncio
+async def test_force_kill_does_not_send_a_polite_interrupt_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole reason force_kill() exists: send_hard_stop()'s
+    # "turn/interrupt" RPC rides the same pipe a wedged backend has
+    # already stopped reading -- waiting on it (even with its own 30s
+    # _RESPONSE_TIMEOUT_S) defeats the purpose. Assert force_kill() never
+    # calls _request() at all, not just that it eventually succeeds.
+    adapter = _adapter()
+    await adapter.send_text("hi")
+
+    called = False
+
+    async def _fail_if_called(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+        raise AssertionError("force_kill() must not call _request()")
+
+    monkeypatch.setattr(adapter, "_request", _fail_if_called)
+    await adapter.force_kill()
+    assert called is False
+
+
 @pytest.mark.asyncio
 async def test_send_text_yields_text_then_done_and_busy_lifecycle() -> None:
     adapter = _adapter()
@@ -154,7 +244,7 @@ async def test_successful_file_change_yields_artifact_events_for_renderable_path
     tmp_path: Path,
 ) -> None:
     # The fake server's "write a file" scenario reports three changes:
-    # notes.md (renderable, inside working_dir), script.py (not a
+    # notes.md (renderable, inside working_dir), binary.exe (not a
     # renderable extension), and ../outside.md (renderable extension but
     # outside working_dir) -- only notes.md should produce an ARTIFACT.
     adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
@@ -212,7 +302,7 @@ async def test_successful_file_change_with_no_working_dir_configured_yields_no_a
 def test_resolve_artifact_writes_ignores_a_non_renderable_extension(tmp_path: Path) -> None:
     adapter = CodexAdapter(_FAKE_CODEX, working_dir=str(tmp_path))
     result = adapter._resolve_artifact_writes(
-        {"status": "completed", "changes": [{"path": "script.py"}]}
+        {"status": "completed", "changes": [{"path": "binary.exe"}]}
     )
     assert result == []
 
@@ -879,9 +969,9 @@ def test_permission_config_args_unknown_mode_passes_no_overrides() -> None:
     # BackendConfig and CodexAdapter's constructor -- an unrecognized
     # value (typo, future mode not yet wired here) must degrade to no
     # -c overrides rather than raising or silently picking a posture.
-    from convobox.adapters.codex import _permission_config_args
+    import convobox.adapters.codex as mod
 
-    assert _permission_config_args("nonexistent-mode") == []
+    assert mod._permission_config_args("nonexistent-mode") == []
 
 
 def test_describe_approval_request_file_change_uses_the_changes_field() -> None:
@@ -905,3 +995,63 @@ def test_describe_approval_request_includes_cwd_and_reason_when_present() -> Non
     )
     assert "Working directory: /home/user/project" in text
     assert "Reason: cleanup" in text
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    ["zsh", "-zsh", "sh", "bash", "/bin/zsh", "/usr/bin/sh", "fish"],
+)
+def test_is_bare_generic_shell_true_for_a_bare_shell_name(command_line: str) -> None:
+    import convobox.adapters.codex as mod
+
+    assert mod._is_bare_generic_shell(command_line) is True
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    [
+        "sleep 90",
+        "ls -la",
+        "pwd",
+        "/bin/zsh -lc 'echo hi'",
+        "zsh-completion-helper",
+    ],
+)
+def test_is_bare_generic_shell_false_for_a_real_command(command_line: str) -> None:
+    import convobox.adapters.codex as mod
+
+    assert mod._is_bare_generic_shell(command_line) is False
+
+
+def test_kill_by_command_text_matches_a_short_legitimate_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test for the 2026-08-18 live-voice finding: a bare,
+    # unwrapped short command like "sleep 90" (8 chars) must still be
+    # matched and killed, while an unrelated bare shell process that
+    # only coincidentally shares a substring ("zsh") with the reported
+    # invocation text must NOT be -- see docs/field-notes/2026-08-18-
+    # kill-phrase-live-voice-test-finds-two-real-gaps.md.
+    import convobox.adapters.codex as mod
+
+    ps_output = (
+        "  PID  PPID COMMAND\n"
+        "49230     1 codex app-server\n"
+        "50564 49230 /bin/zsh -lc sleep 90\n"
+        "50565 50564 sleep 90\n"
+        "60001     1 zsh\n"  # unrelated bare shell -- must NOT be killed
+    )
+
+    class _FakeCompleted:
+        stdout = ps_output
+
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()  # noqa: ARG005
+    )
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)  # noqa: ARG005
+
+    result = mod._kill_by_command_text("/bin/zsh -lc 'sleep 90'")
+
+    assert 50564 in result  # the shell wrapper, matched directly
+    assert 50565 in result  # its child, killed via descendant expansion
+    assert 60001 not in result

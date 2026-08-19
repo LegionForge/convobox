@@ -483,6 +483,51 @@ def test_forward_status_with_no_broadcaster_does_not_raise() -> None:
     forwarder.forward_status("working")  # must not raise
 
 
+# --- forward_approval_resolved: the web UI's own approval-actions row has
+# no way to know a pending approval was decided by voice (or a DIFFERENT
+# browser tab's click) without this -- live UAT gap, 2026-08-17: a
+# voice-approved request left its row clickable indefinitely. Same
+# never-persisted-to-history posture as forward_status. ---
+
+
+@pytest.mark.asyncio
+async def test_forward_approval_resolved_broadcasts_approved() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder.forward_approval_resolved(True)
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait() == {"type": "approval_resolved", "approved": True}
+
+
+@pytest.mark.asyncio
+async def test_forward_approval_resolved_broadcasts_denied() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+
+    forwarder.forward_approval_resolved(False)
+    await asyncio.sleep(0)
+
+    assert queue.get_nowait() == {"type": "approval_resolved", "approved": False}
+
+
+def test_forward_approval_resolved_never_touches_history(db: HistoryDB) -> None:
+    session_id = new_session_id()
+    forwarder = WebEventForwarder(session_id, history=db, broadcaster=None)
+
+    forwarder.forward_approval_resolved(True)  # must not raise or persist
+
+    assert db.get_session_events(session_id) == []
+
+
+def test_forward_approval_resolved_with_no_broadcaster_does_not_raise() -> None:
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=None)
+    forwarder.forward_approval_resolved(True)  # must not raise
+
+
 @pytest.mark.asyncio
 async def test_forward_transcript_broadcasts_to_a_subscriber() -> None:
     broadcaster = EventBroadcaster()

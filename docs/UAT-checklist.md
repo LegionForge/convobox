@@ -1306,3 +1306,142 @@ falling back again for some other reason.
   `claude-code`, then switch back to `opencode`. Confirm the model is
   still there (per-backend memory, `backend_profiles`), not reset to
   unset.
+
+## 13. Agent-initiated artifacts via voice (`show_document` MCP tool, PR #283; resize fix, PR #282)
+
+Both merged 2026-08-16/17, claude-code only (see
+`docs/ARTIFACT-PANE-SCOPE.md`'s "Agent-Initiated Artifacts" section for
+the full design). Everything below this line has been live-verified
+EXCEPT the voice/STT path itself, same gap pattern as [U*]'s own
+"scripted test confirms the mechanism, not the trigger" items elsewhere
+in this file:
+
+- The tool mechanism end to end: real `claude` CLI discovers and calls
+  `show_document`, real SSE delivery to the pane -- verified via a
+  scripted `adapter.send_text(...)` call and via `--text` mode, not a
+  live mic utterance.
+- The resize fix: verified via BrowserOS driving synthetic mouse events
+  against a real running server, not a live UAT session's actual mouse.
+
+**[AP5], resolved -- status diagnosed, 2026-08-17: `permission_mode:
+plan` reliably blocks both artifact-pane MCP tools.** JP's real voice
+UAT confirmed this on a live mic session ("plan mode blocks artifact
+pane mcp calls"), matching the earlier scripted signal (one decline,
+one success across two `--text`-mode runs on 2026-08-16 -- the success
+was the outlier, not the decline). Root cause: `claude_code.py`'s own
+module docstring already documented, before `show_document` even
+existed, that plan mode makes Claude draft a plan and attempt
+`ExitPlanMode` instead of executing a tool -- and `ExitPlanMode` is
+disabled in headless mode, so there is no way to grant the approval it's
+asking for. This is the model's own plan-mode system-prompt behavior,
+a DIFFERENT layer from `_ensure_extra_cli_flags`'s `--settings`
+`permissions.allow` grant -- the grant is real and mechanically present
+either way (it's what makes `permissive`/`approve` mode work reliably),
+but it only affects the CLI harness's own allow/deny gate, not whether
+the model chooses to attempt the call at all under plan mode's
+"draft first, ask before acting" instructions. **Practical
+consequence: `show_document`/`get_shown_artifact` should be treated as
+unavailable under `permission_mode: plan`** -- use `permissive` or
+`approve` for artifact-pane testing/use. See
+`docs/ARTIFACT-PANE-SCOPE.md`'s "Answering 'what artifact is showing?'"
+section for the full writeup; the code comment claiming these tools are
+usable "regardless of permission_mode" is corrected there too.
+
+### Setup
+
+A scratch working_dir with a few different artifact types makes the
+test cases below concrete. PowerShell, recreate anywhere:
+
+```powershell
+$wd = "$env:TEMP\convobox-uat-artifacts"
+New-Item -ItemType Directory -Force $wd | Out-Null
+'{"q1_revenue": 128400, "q2_revenue": 141200, "notes": "padding_padding_padding_padding_padding_padding"}' |
+  Out-File -Encoding utf8 "$wd\quarterly_report.json"
+"# Architecture`n`nThe orchestrator wires VAD -> STT -> backend -> TTS." |
+  Out-File -Encoding utf8 "$wd\notes.md"
+"<html><body><h1>Demo chart</h1><p>placeholder</p></body></html>" |
+  Out-File -Encoding utf8 "$wd\dashboard.html"
+```
+
+`convobox.yaml` (or `--working-dir`/`--permission-mode` flags):
+
+```yaml
+backend:
+  name: claude-code
+  permission_mode: permissive   # also try approve ([AP7]) -- plan is a known dead end for these tools, see [AP5]
+  working_dir: "%TEMP%/convobox-uat-artifacts"
+web:
+  enabled: true
+```
+
+Then a normal live mic session: `python scripts/run_convobox.py --config convobox.yaml --web`,
+open `http://127.0.0.1:5173/` in a browser, and talk.
+
+### Test items
+
+- **[AP1] A direct voice request opens the pane.** Say something like
+  "Show me the quarterly report" or "Open dashboard.html in the
+  artifact pane." Confirm the pane opens unprompted (not because you
+  asked the agent to write/edit anything) and shows the right file.
+- **[AP2] Vague/natural phrasing still resolves correctly.** Say "show
+  me the report" (no filename) or "pull up that HTML file" without
+  naming `dashboard.html` explicitly. Confirm the agent picks the
+  right file from context (it has to Read/Glob the directory first,
+  same as any file lookup) rather than guessing wrong or refusing.
+- **[AP3] Refocusing an already-shown artifact doesn't duplicate.**
+  With `quarterly_report.json` already open, discuss something else,
+  then say "show me that report again" or "go back to the quarterly
+  report." Confirm the SAME tab is reselected/refreshed (Chooser's
+  existing identity-key behavior), not a second tab.
+- **[AP4] False-positive check.** Have an ordinary conversation that
+  mentions a filename in passing ("I was looking at notes.md
+  earlier") without actually asking to see it. Confirm the agent does
+  NOT reflexively call `show_document` just because a filename was
+  spoken -- this is model judgment, not a hard gate, so a live check is
+  the only way to know.
+- **[AP5] RESOLVED, 2026-08-17: does not fire under
+  `permission_mode: plan`.** JP's live voice UAT confirmed a reliable
+  block, not intermittent hesitancy -- see this section's own opening
+  paragraph and `docs/ARTIFACT-PANE-SCOPE.md`'s "Plan mode blocks both
+  artifact-pane tools" for the full root-cause writeup. Use
+  `permissive` or `approve` for artifact-pane testing/use; `plan` is a
+  known, architectural dead end for these two tools, not a bug to keep
+  probing.
+- **[AP6] Resize is usable mid-conversation, not just via scripted
+  drag.** With the pane open, actually grab the left-edge handle with
+  a real mouse (cursor should show `col-resize` on hover) and drag it
+  both directions while a session is live. Confirm it doesn't visibly
+  fight with anything else redrawing (new events arriving, TTS
+  captions, etc).
+- **[AP7] `permission_mode: approve` doesn't prompt for
+  `show_document`.** Switch to `approve` mode and repeat [AP1].
+  Confirm the tool fires WITHOUT a voice approval prompt (it's granted
+  unconditionally, unlike Write/Edit under this mode) -- if it
+  unexpectedly gates on approval, that's a real bug in the grant, not
+  the hesitancy pattern [AP5] is tracking.
+
+`get_shown_artifact` (GitHub issue #280) is the read-side
+complement -- "what's showing" grounded in the real UI state, not just
+this session's own memory of the last thing it opened. Already
+live-verified via a scripted `adapter.send_text(...)` harness with a
+real connected browser tab (see `docs/ARTIFACT-PANE-SCOPE.md`'s
+"Answering 'what artifact is showing?'" section) -- same gap as
+[AP1]-[AP7] above: the voice/STT trigger path itself is untested.
+
+- **[AP8] A direct voice question is answered correctly.** With
+  `quarterly_report.json` already open (from [AP1]), ask "what's
+  showing in the artifact pane?" or "which file am I looking at?".
+  Confirm the answer names the right file, not a guess from
+  conversation history.
+- **[AP9] Closing the pane (or switching tabs) by hand, then asking, is
+  answered correctly -- not stale.** With an artifact open, manually
+  click the pane's close button (or click an older tab in the Chooser),
+  THEN ask "what's showing now?". Confirm the answer reflects the
+  ACTUAL current UI state (nothing shown, or the older tab), not the
+  last thing the agent itself opened -- this is the specific case a
+  naive "last broadcast" implementation would get wrong, and the whole
+  point of this tool per the issue's own framing.
+- **[AP10] Asking before anything has ever been shown.** Fresh session,
+  no artifact opened yet. Ask "what's in the artifact pane?". Confirm a
+  clear "nothing is currently shown" answer, not an error or a
+  hallucinated file name.

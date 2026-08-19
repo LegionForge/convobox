@@ -330,12 +330,12 @@
     /* flex-basis is deliberately "auto" (via "0 0 auto", NOT a fixed
        value like the old "0 0 min(420px, 40vw)") -- a flex item's
        explicit flex-basis overrides `width` entirely on the main axis,
-       which would make the native resize handle's own inline `width` it
-       sets on drag silently do nothing. With flex-basis: auto, `width`
-       below supplies the initial size AND stays live as the resize
-       handle overwrites it via inline style (inline always wins over
-       this stylesheet rule). Confirmed live: the "0 0 min(...)" version
-       accepted a manual style.width write with zero visible effect. */
+       which would make a JS-driven inline `width` write silently do
+       nothing. With flex-basis: auto, `width` below supplies the
+       initial size AND stays live as the resize handle overwrites it
+       via inline style (inline always wins over this stylesheet rule).
+       Confirmed live: the "0 0 min(...)" version accepted a manual
+       style.width write with zero visible effect. */
     flex: 0 0 auto;
     width: min(420px, 40vw);
     min-height: 0;
@@ -343,19 +343,32 @@
     flex-direction: column;
     border-left: 1px solid var(--border);
     background: var(--ribbon-bg);
-    /* Native browser resize handle (bottom-right corner) -- dragging it
-       sets an explicit inline width on this element. `main`'s own
-       `flex: 1 1 auto` (unchanged) already shrinks/grows to fill
-       whatever's left in `.body-row`, so both panes adjust together
-       with no JS needed. overflow: auto is required for `resize` to
-       apply at all -- browsers silently ignore it on `overflow: visible`
-       (the default). */
-    resize: horizontal;
-    overflow: auto;
     min-width: 240px;
     max-width: 85vw;
+    position: relative;
   }
   #artifact-pane[hidden] { display: none; }
+  /* Resize handle: a custom JS-driven drag strip straddling the pane's
+     LEFT border, not CSS `resize` (tried first, reverted -- this pane
+     is always the last flex item, docked flush against the BROWSER
+     WINDOW'S own right edge with zero px of slack past it. The native
+     `resize` handle renders at an element's bottom-RIGHT corner, so
+     "drag right to widen" has nowhere to go: the cursor hits the window
+     edge after ~1-2px, structurally regardless of screen size or
+     zoom -- live-confirmed (viewport width == pane's own right edge to
+     the pixel). Shrinking "worked" only because dragging LEFT, into the
+     page, has normal room; the same handle could never widen the pane
+     in this docked layout. A left-edge handle has no such problem --
+     both directions drag into open space (the chat pane shrinking/
+     growing on one side, nothing constraining the other). */
+  #artifact-resize-handle {
+    position: absolute; left: -4px; top: 0; bottom: 0; width: 9px;
+    cursor: col-resize; z-index: 5; touch-action: none;
+  }
+  #artifact-resize-handle:hover, #artifact-resize-handle.dragging {
+    background: linear-gradient(to right, transparent 3px, var(--dim) 3px 5px, transparent 5px);
+    opacity: 0.8;
+  }
   .artifact-pane-header {
     display: flex; align-items: center; gap: 0.5rem;
     padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border);
@@ -380,9 +393,22 @@
   #artifact-pane-editor-link[hidden] { display: none; }
   #artifact-pane-body {
     flex: 1 1 auto; min-height: 0; overflow: auto;
-    display: flex; align-items: center; justify-content: center;
+    display: flex;
     padding: 0.8rem;
   }
+  /* Center content that fits, WITHOUT clipping content that doesn't.
+     align-items/justify-content: center on the container (the old rule)
+     centers the scrollable range itself around the content's midpoint,
+     which for anything wider/taller than the pane makes half the
+     overflow permanently unreachable by scrolling no matter how far the
+     pane is resized -- live-confirmed: a wide artifact rendered with
+     ~13000px of content had ~6700px of scrollable range, i.e. the left
+     half was never reachable. margin: auto on the child is the standard
+     fix -- it absorbs free space (so small content still centers) but
+     collapses to 0 rather than going negative once the item is bigger
+     than the container, leaving the item flush at the scroll origin
+     with its FULL extent inside the scrollable range. */
+  #artifact-pane-body > * { margin: auto; }
   #artifact-pane-body img {
     max-width: 100%; max-height: 100%; object-fit: contain;
   }
@@ -404,15 +430,33 @@
   }
   #artifact-tabs[hidden] { display: none; }
   .artifact-tab {
-    flex: 0 0 auto; max-width: 140px; padding: 0.4rem 0.7rem;
+    display: flex; align-items: center; gap: 0.3rem;
+    flex: 0 0 auto; max-width: 140px; padding: 0.4rem 0.4rem 0.4rem 0.7rem;
     font-size: 0.72rem; background: none; border: none;
     border-bottom: 2px solid transparent; color: var(--dim);
-    cursor: pointer; white-space: nowrap; overflow: hidden;
-    text-overflow: ellipsis;
+    cursor: pointer; white-space: nowrap;
   }
   .artifact-tab:hover { background: var(--assistant-bg); color: var(--fg); }
   .artifact-tab.active {
     color: var(--fg); border-bottom-color: var(--fg); font-weight: 600;
+  }
+  .artifact-tab-label {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Hidden until hover/focus, matching the pane's own close button --
+     JP asked directly, 2026-08-18: no way to drop a single tab, only
+     the whole pane via the pane's own [x]. */
+  .artifact-tab-close {
+    flex: 0 0 auto; opacity: 0; width: 1.1rem; height: 1.1rem;
+    line-height: 1; padding: 0; border: none; border-radius: 3px;
+    background: none; color: inherit; font-size: 0.85rem; cursor: pointer;
+  }
+  .artifact-tab:hover .artifact-tab-close,
+  .artifact-tab:focus-within .artifact-tab-close {
+    opacity: 0.7;
+  }
+  .artifact-tab-close:hover, .artifact-tab-close:focus {
+    opacity: 1; background: var(--border);
   }
 
   /* --- Working-directory file browser: a filtered, flat list of files in
@@ -446,6 +490,11 @@
   .artifact-browse-warning {
     font-size: 0.72rem; opacity: 0.85; padding: 0.5rem 1rem;
     border-bottom: 1px solid var(--border);
+  }
+  .artifact-html-warning {
+    font-size: 0.72rem; opacity: 0.85; padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--assistant-bg);
   }
   .artifact-browse-list {
     overflow-y: auto; padding: 0.4rem 0;
@@ -595,12 +644,19 @@
   </form>
 </main>
 <aside id="artifact-pane" hidden>
+  <div id="artifact-resize-handle" role="separator" aria-orientation="vertical"
+       aria-label="Resize artifact pane" tabindex="0"></div>
   <div id="artifact-tabs" role="tablist" aria-label="Open artifacts" hidden></div>
   <div class="artifact-pane-header">
     <span id="artifact-pane-title"></span>
     <a id="artifact-pane-editor-link" href="#" target="_blank" rel="noopener noreferrer" hidden
        title="Open this file in VS Code (requires VS Code installed with its vscode:// URI handler registered -- the default on a normal install)">Open in editor</a>
     <button id="artifact-pane-close-btn" type="button" aria-label="Close artifact pane" title="Close the artifact pane">&times;</button>
+  </div>
+  <div id="artifact-html-warning" class="artifact-html-warning" role="alert" hidden>
+    This HTML file may contain scripts. It renders sandboxed (no access to
+    ConvoBox's own page or your other tabs), but its contents have not been
+    reviewed for safety -- treat it as untrusted.
   </div>
   <div id="artifact-pane-body"></div>
 </aside>
@@ -675,7 +731,9 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const artifactBodyEl = document.getElementById("artifact-pane-body");
   const artifactCloseBtn = document.getElementById("artifact-pane-close-btn");
   const artifactEditorLink = document.getElementById("artifact-pane-editor-link");
+  const artifactHtmlWarningEl = document.getElementById("artifact-html-warning");
   const artifactTabsEl = document.getElementById("artifact-tabs");
+  const artifactResizeHandle = document.getElementById("artifact-resize-handle");
   const artifactBrowseBtn = document.getElementById("artifact-browse-btn");
   const artifactBrowseOverlay = document.getElementById("artifact-browse-overlay");
   const artifactBrowseCloseBtn = document.getElementById("artifact-browse-close-btn");
@@ -713,15 +771,74 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTabsEl.innerHTML = "";
     artifactTabsEl.hidden = artifactTabs.length < 2;
     for (const tab of artifactTabs) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "artifact-tab" + (tab.path === activeArtifactPath ? " active" : "");
-      btn.textContent = tab.label;
-      btn.title = tab.path;
-      btn.setAttribute("role", "tab");
-      btn.setAttribute("aria-selected", tab.path === activeArtifactPath ? "true" : "false");
-      btn.addEventListener("click", () => renderArtifact(tab.path));
-      artifactTabsEl.appendChild(btn);
+      // A <div role="tab"> wrapping a real <button> close control -- not a
+      // <button> itself, since a <button> can't legally contain another
+      // <button> (invalid HTML, breaks event handling). tabindex+keydown
+      // below replaces the native button activation this element no
+      // longer gets for free.
+      const tabEl = document.createElement("div");
+      tabEl.className = "artifact-tab" + (tab.path === activeArtifactPath ? " active" : "");
+      tabEl.title = tab.path;
+      tabEl.setAttribute("role", "tab");
+      tabEl.setAttribute("tabindex", "0");
+      tabEl.setAttribute("aria-selected", tab.path === activeArtifactPath ? "true" : "false");
+      tabEl.addEventListener("click", () => renderArtifact(tab.path));
+      tabEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          renderArtifact(tab.path);
+        }
+      });
+
+      const labelSpan = document.createElement("span");
+      labelSpan.className = "artifact-tab-label";
+      labelSpan.textContent = tab.label;
+      tabEl.appendChild(labelSpan);
+
+      // Hidden until hover/focus (CSS) -- JP asked directly, 2026-08-18:
+      // no way to drop a single tab before this, only the whole pane via
+      // the pane's own [x]. Older tabs stay open/rendered; this only
+      // removes the ONE tab clicked. stopPropagation() so this doesn't
+      // also fire the tab's own click-to-select handler above.
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "artifact-tab-close";
+      closeBtn.textContent = "×";
+      closeBtn.setAttribute("aria-label", `Close ${tab.label}`);
+      closeBtn.title = `Close ${tab.label}`;
+      closeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeArtifactTab(tab.path);
+      });
+      tabEl.appendChild(closeBtn);
+
+      artifactTabsEl.appendChild(tabEl);
+    }
+  }
+
+  function closeArtifactTab(path) {
+    const idx = artifactTabs.findIndex((t) => t.path === path);
+    if (idx === -1) return;
+    const wasActive = path === activeArtifactPath;
+    artifactTabs.splice(idx, 1);
+    if (artifactTabs.length === 0) {
+      // No tabs left -- same end state as the pane's own close button.
+      activeArtifactPath = null;
+      artifactPaneEl.hidden = true;
+      artifactLoadCounter += 1;
+      reportActiveArtifact(null, artifactLoadCounter);
+      renderArtifactTabs();
+      return;
+    }
+    if (wasActive) {
+      // Closed the tab currently showing -- switch to whichever REMAINING
+      // tab was viewed most recently (highest timestamp), not just the
+      // next one in array order, matching how tabs are already implicitly
+      // ordered by recency via upsertArtifactTab's own timestamp field.
+      const next = artifactTabs.reduce((a, b) => (a.timestamp > b.timestamp ? a : b));
+      renderArtifact(next.path);
+    } else {
+      renderArtifactTabs();
     }
   }
 
@@ -755,6 +872,30 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     ["json", "json"],
     ["xml", "xml"],
     ["md", "markdown"],
+    // Added 2026-08-18 alongside the extensions themselves (#297) --
+    // vendoring one grammar file per language, same cdnjs 11.11.1
+    // release as the ones above. .toml and .vue deliberately NOT
+    // mapped here: highlight.js has no clean dedicated grammar for
+    // either (TOML has no real equivalent to the "ini" approximation
+    // some other tools use; Vue's single-file-component format mixes
+    // HTML/JS/CSS in one file, which a single language grammar can't
+    // represent) -- both fall through to renderCodeArtifact's own
+    // plain-text fallback instead of rendering wrong.
+    ["py", "python"],
+    ["css", "css"],
+    ["sh", "bash"], ["bash", "bash"],
+    ["ps1", "powershell"],
+    ["sql", "sql"],
+    ["go", "go"],
+    ["rs", "rust"],
+    ["rb", "ruby"],
+    ["php", "php"],
+    ["kt", "kotlin"], ["kts", "kotlin"],
+    ["swift", "swift"],
+    ["scala", "scala"],
+    ["lua", "lua"],
+    ["dart", "dart"],
+    ["graphql", "graphql"], ["gql", "graphql"],
   ]);
   let artifactLoadCounter = 0;
 
@@ -789,9 +930,19 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   async function renderCodeArtifact(url, filename, lang) {
+    // lang is null/undefined for any renderable extension with no vendored
+    // highlight.js grammar (docs/ARTIFACT-PANE-SCOPE.md's own comment: this
+    // decides HOW to render an already-allowed extension, never WHETHER --
+    // that's ARTIFACT_MEDIA_TYPES's job, server-side). Live UAT finding,
+    // 2026-08-18: .py (and every other newly-added extension with no
+    // grammar -- .css/.sh/.toml/.go/etc.) fell all the way through to the
+    // plain download-link fallback below instead of rendering at all, since
+    // the old dispatch only reached this function when a grammar existed.
+    // Renders as plain, unstyled <pre> text in that case -- still readable
+    // inline, just without syntax colors -- rather than forcing a download.
     const pre = document.createElement("pre");
     const code = document.createElement("code");
-    code.className = `language-${lang}`;
+    if (lang) code.className = `language-${lang}`;
     pre.appendChild(code);
     artifactBodyEl.appendChild(pre);
     try {
@@ -804,8 +955,10 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       // already-set textContent and wraps it in ITS OWN generated
       // markup; it never re-parses this text as HTML itself.
       code.textContent = text;
-      await ensureHighlighter(lang);
-      window.hljs.highlightElement(code);
+      if (lang) {
+        await ensureHighlighter(lang);
+        window.hljs.highlightElement(code);
+      }
     } catch (err) {
       console.error("code artifact render failed", err);
       code.textContent = `Failed to load ${filename}: ${err}`;
@@ -840,6 +993,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTitleEl.title = path;
     artifactBodyEl.innerHTML = "";
     artifactEditorLink.hidden = true;
+    artifactHtmlWarningEl.hidden = !_ARTIFACT_HTML_EXTENSIONS.has(ext);
 
     if (_ARTIFACT_IMAGE_EXTENSIONS.has(ext)) {
       const img = document.createElement("img");
@@ -852,7 +1006,14 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       iframe.title = filename;
       iframe.sandbox = "allow-scripts";
       artifactBodyEl.appendChild(iframe);
-    } else if (_ARTIFACT_CODE_LANGUAGES.has(ext)) {
+    } else if (ext !== "pdf") {
+      // Everything else the backend allowlist (ARTIFACT_MEDIA_TYPES) lets
+      // through is text -- render it, with syntax highlighting when a
+      // grammar exists and plain <pre> text when it doesn't (see
+      // renderCodeArtifact's own comment). PDF is the one exception: not
+      // plain text, and browsers already handle it fine via "Open in new
+      // tab" -- no bespoke viewer needed (docs/ARTIFACT-PANE-SCOPE.md's
+      // Rendering section).
       renderCodeArtifact(url, filename, _ARTIFACT_CODE_LANGUAGES.get(ext));
     } else {
       const link = document.createElement("a");
@@ -888,10 +1049,96 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       })
       .catch((err) => console.error("editor-uri fetch failed", err));
 
+    reportActiveArtifact(path, loadId);
     artifactPaneEl.hidden = false;
   }
 
-  artifactCloseBtn.addEventListener("click", () => { artifactPaneEl.hidden = true; });
+  // GitHub issue #280: the backend agent has no visibility into what
+  // the pane is actually displaying unless the browser -- the only
+  // place that truly knows (tab clicks, Browse-files opens, the pane
+  // being closed) -- tells it. Fire-and-forget, same posture as the
+  // editor-uri fetch above: this only feeds an informational MCP tool
+  // (get_shown_artifact, web/mcp_server.py), never anything the pane's
+  // own rendering depends on, so a failed report should never block or
+  // visibly break the UI.
+  //
+  // `sequence` reuses artifactLoadCounter -- the same staleness-guard
+  // shape as the editor-uri fetch above, but server-side instead of
+  // client-side, since this POST has no response body to gate on.
+  // Live UAT finding, 2026-08-18: switching tabs quickly could report
+  // the OLDER path, not the newly-selected one, some fraction of the
+  // time ("works on the 2nd/3rd try") -- two POSTs fired close together
+  // have no guarantee they're APPLIED server-side in the order they
+  // were sent (Starlette awaits body-parsing before this route's own
+  // code runs, which is enough of a scheduling gap for two in-flight
+  // requests to complete out of order). Sending a monotonic sequence
+  // number and having the server ignore anything not newer than what
+  // it already applied removes the race regardless of processing order.
+  function reportActiveArtifact(path, sequence) {
+    fetch("/api/artifacts/active", {
+      method: "POST",
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ path, sequence }),
+    }).catch((err) => console.error("report active artifact failed", err));
+  }
+
+  artifactCloseBtn.addEventListener("click", () => {
+    artifactPaneEl.hidden = true;
+    artifactLoadCounter += 1;
+    reportActiveArtifact(null, artifactLoadCounter);
+  });
+
+  // Drag-to-resize on the pane's left border (see the CSS comment on
+  // #artifact-resize-handle for why this replaced the native `resize`
+  // CSS property). Plain mouse events, not Pointer Events -- verified
+  // live that Chrome's CDP-driven automation input (used by this
+  // project's own BrowserOS-based UAT) dispatches mousedown/mousemove/
+  // mouseup but does not reliably synthesize the pointerdown/pointermove
+  // compatibility events a first draft of this handler relied on, which
+  // made the handle silently inert under automation while still working
+  // for a real physical mouse. Mouse events work under both.
+  (function initArtifactResize() {
+    const MIN_WIDTH = 240; // matches #artifact-pane's min-width
+    const MAX_WIDTH_FRACTION = 0.85; // matches #artifact-pane's max-width: 85vw
+    let startX = 0;
+    let startWidth = 0;
+
+    function clamp(width) {
+      return Math.min(Math.max(width, MIN_WIDTH), window.innerWidth * MAX_WIDTH_FRACTION);
+    }
+
+    function onMouseMove(e) {
+      // Dragging LEFT (cursor moves to a smaller clientX) grows the
+      // pane -- it's docked against the window's right edge, so its
+      // left border is the only edge that actually moves.
+      artifactPaneEl.style.width = `${clamp(startWidth + (startX - e.clientX))}px`;
+    }
+
+    function onMouseUp() {
+      artifactResizeHandle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    }
+
+    artifactResizeHandle.addEventListener("mousedown", (e) => {
+      startX = e.clientX;
+      startWidth = artifactPaneEl.getBoundingClientRect().width;
+      artifactResizeHandle.classList.add("dragging");
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      e.preventDefault();
+    });
+
+    // Keyboard equivalent for the role="separator" contract -- arrow
+    // keys nudge the width in fixed steps rather than requiring a drag.
+    artifactResizeHandle.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const current = artifactPaneEl.getBoundingClientRect().width;
+      const step = e.key === "ArrowLeft" ? 20 : -20;
+      artifactPaneEl.style.width = `${clamp(current + step)}px`;
+      e.preventDefault();
+    });
+  })();
 
   // --- Working-directory file browser (docs/ARTIFACT-PANE-SCOPE.md's
   // "Working-Directory File Browser" section): a small modal listing
@@ -993,6 +1240,20 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       row.appendChild(note);
     }
     note.textContent = message;
+  }
+
+  // WebEventForwarder.forward_approval_resolved (bridge.py): fires the
+  // instant a pending approval is decided, however it was decided --
+  // voice (no row of its own to update) or a click, possibly from a
+  // DIFFERENT tab than the one showing the still-live row. Only ever
+  // touches pendingApprovalActions -- an older, already-superseded row
+  // (see that variable's own comment) is left alone; it's not the one
+  // this resolution was about. Live UAT gap, 2026-08-17: a voice-approved
+  // request left its web-UI row clickable indefinitely.
+  function handleApprovalResolved(approved) {
+    if (!pendingApprovalActions) return;
+    disableApprovalActions(pendingApprovalActions, approved ? "Approved." : "Denied.");
+    pendingApprovalActions = null;
   }
 
   function buildApprovalActions() {
@@ -1240,6 +1501,8 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactTabs = [];
     activeArtifactPath = null;
     artifactPaneEl.hidden = true;
+    artifactLoadCounter += 1;
+    reportActiveArtifact(null, artifactLoadCounter);
     renderArtifactTabs();
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
@@ -1291,21 +1554,74 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     setListeningButton(status === "paused");
   }
 
+  // How long to stay on the plain "reconnecting..." message before
+  // upgrading it to something that admits this might not be a passing
+  // blip -- EventSource keeps retrying either way (this never stops it),
+  // it only changes the wording once a retry stretch has gone on longer
+  // than an ordinary network hiccup would.
+  const _STALE_RECONNECT_MS = 8000;
+
   function connectStream() {
     const source = new EventSource("/api/events/stream");
+    let staleReconnectTimer = null;
+
+    function clearStaleReconnectTimer() {
+      if (staleReconnectTimer !== null) {
+        clearTimeout(staleReconnectTimer);
+        staleReconnectTimer = null;
+      }
+    }
+
+    // GitHub issue / live UAT ask, 2026-08-17: on Quit or the kill_phrase
+    // ending the whole ConvoBox process, this page just sat on
+    // "reconnecting..." forever -- indistinguishable from an ordinary
+    // network blip, when the server had actually said goodbye on
+    // purpose (WebEventForwarder's underlying EventBroadcaster.close_all()
+    // now sends this before closing every stream). Closing the
+    // EventSource outright (not just updating text) matters: there is no
+    // point auto-retrying against a server that just told us it's
+    // leaving, and leaving it running would race a PAGE RELOAD after
+    // ConvoBox restarts against this stale connection's own retry.
+    function handleSessionEnded() {
+      clearStaleReconnectTimer();
+      source.close();
+      statusEl.textContent = "session ended — restart ConvoBox and reload this page to reconnect";
+      statusEl.className = "disconnected";
+      composerInput.disabled = true;
+      composerSendBtn.disabled = true;
+      listeningBtn.disabled = true;
+      stopBtn.disabled = true;
+      artifactBrowseBtn.disabled = true;
+      quitBtn.disabled = true;
+    }
+
     source.onopen = () => {
+      clearStaleReconnectTimer();
       statusEl.textContent = "live";
       statusEl.className = "connected";
     };
     source.onerror = () => {
       statusEl.textContent = "reconnecting…";
       statusEl.className = "disconnected";
+      if (staleReconnectTimer === null) {
+        staleReconnectTimer = setTimeout(() => {
+          staleReconnectTimer = null;
+          // Still disconnected after a real stretch, not just a blip --
+          // onopen (above) would already have cleared this timer the
+          // moment a retry actually succeeded.
+          statusEl.textContent = "can't reach ConvoBox — still retrying…";
+        }, _STALE_RECONNECT_MS);
+      }
     };
     source.onmessage = (e) => {
       try {
         const payload = JSON.parse(e.data);
         if (payload.type === "status") {
           renderActivityStatus(payload.status, payload.detail);
+        } else if (payload.type === "approval_resolved") {
+          handleApprovalResolved(payload.approved);
+        } else if (payload.type === "session_ended") {
+          handleSessionEnded();
         } else {
           renderEvent(payload);
         }

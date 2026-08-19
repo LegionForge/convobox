@@ -127,14 +127,44 @@ class _BrowseResponse(BaseModel):
     truncated: bool
 
 
+class _SetActiveArtifactRequest(BaseModel):
+    # None clears it -- the pane closed, or nothing has ever been shown.
+    path: str | None = None
+    # Client-side artifactLoadCounter at the time this report was fired --
+    # a monotonic per-page-load sequence number, not a timestamp. None
+    # (any caller that doesn't send one) always applies, for robustness
+    # against any other client; this repo's own frontend always sends one.
+    # See the route handler below for why this exists.
+    sequence: int | None = None
+
+
 def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
-    """Registers GET /api/artifacts/{path}, .../editor-uri, and GET
+    """Registers GET /api/artifacts/{path}, .../editor-uri, GET
     /api/artifacts (the working-directory file browser -- see
-    _list_browsable_files). working_dir is None unless backend.working_dir
-    is explicitly configured -- unlike settings/listening, there is
-    deliberately no fallback to ConvoBox's own directory here; an
-    unconfigured working_dir means artifacts are unavailable, not "serve
-    from somewhere unexpected"."""
+    _list_browsable_files), and POST /api/artifacts/active (see below).
+    working_dir is None unless backend.working_dir is explicitly
+    configured -- unlike settings/listening, there is deliberately no
+    fallback to ConvoBox's own directory here; an unconfigured
+    working_dir means artifacts are unavailable, not "serve from
+    somewhere unexpected"."""
+
+    # app.state.active_artifact_path (GitHub issue #280): "what artifact
+    # is currently showing" has no single, obvious source of truth --
+    # the pane's own tab-switch/close state lives entirely in the
+    # browser's JS, not anywhere the backend agent (or this server) can
+    # see. Rather than have the server guess from its own broadcast
+    # history (wrong the moment a user manually clicks an OLDER tab, or
+    # closes the pane, without a fresh ARTIFACT event), the FRONTEND
+    # reports its own real state here -- renderArtifact() (index.html)
+    # is already the single chokepoint every path funnels through (live
+    # SSE events, tab clicks, Browse-files opens), so one fetch() call
+    # there keeps this in sync with the truth, not a guess reconstructed
+    # server-side. web/mcp_server.py's get_shown_artifact tool reads
+    # this same field.
+    app.state.active_artifact_path = None
+    # Highest `sequence` applied so far -- see set_active_artifact below.
+    # -1 (not 0) so a legitimate first report with sequence=0 still applies.
+    app.state.active_artifact_sequence = -1
 
     # No route-ordering hazard here (unlike editor-uri below): this is an
     # exact path with no {artifact_path:path} segment, so it can never be
@@ -145,6 +175,51 @@ def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
         base = _resolve_working_dir(working_dir)
         files, truncated = _list_browsable_files(base)
         return _BrowseResponse(files=files, truncated=truncated)
+
+    # Also registered before the catch-all, same reasoning as above --
+    # "active" as a literal path segment can't collide with it (a POST,
+    # while the catch-all is GET-only, so this specific pair couldn't
+    # actually collide either way; kept adjacent to list_artifacts for
+    # readability, not because ordering matters here).
+    @app.post("/api/artifacts/active")
+    async def set_active_artifact(body: _SetActiveArtifactRequest) -> dict[str, bool]:
+        # Staleness guard, same shape as the frontend's own editor-uri
+        # fetch (index.html) but server-side: two of these POSTs fired
+        # close together (a fast tab switch) have no guarantee of being
+        # APPLIED in the order they were sent -- Starlette awaits
+        # request-body parsing before this function's own code runs, and
+        # that's enough of a scheduling gap for two concurrent requests
+        # to complete out of order. Live UAT finding, 2026-08-18: this
+        # showed up as get_shown_artifact intermittently reporting the
+        # PREVIOUS tab right after switching ("works on the 2nd/3rd
+        # try"). Ignoring anything not newer than the highest sequence
+        # already applied removes the race regardless of arrival order.
+        if (
+            body.sequence is not None
+            and body.sequence <= app.state.active_artifact_sequence
+        ):
+            return {"ok": True}
+        if body.sequence is not None:
+            app.state.active_artifact_sequence = body.sequence
+        if body.path is None:
+            app.state.active_artifact_path = None
+            return {"ok": True}
+        try:
+            candidate = _resolve_artifact(working_dir, body.path)
+        except HTTPException:
+            # Defense in depth, not a hard failure: this report only
+            # feeds an informational MCP tool, never a security
+            # boundary (that's GET /api/artifacts/{path}'s own fence,
+            # already enforced when the browser fetched the content
+            # this report describes). A stale/racy report shouldn't
+            # break the UI -- treat an unresolvable path as "nothing
+            # confidently known" rather than surfacing an error the
+            # frontend has no useful way to act on.
+            app.state.active_artifact_path = None
+            return {"ok": True}
+        base = _resolve_working_dir(working_dir)
+        app.state.active_artifact_path = candidate.relative_to(base).as_posix()
+        return {"ok": True}
 
     # Registered BEFORE the greedy catch-all route below on purpose:
     # {artifact_path:path} matches an entire remaining path including
