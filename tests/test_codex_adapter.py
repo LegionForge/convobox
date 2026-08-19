@@ -995,3 +995,63 @@ def test_describe_approval_request_includes_cwd_and_reason_when_present() -> Non
     )
     assert "Working directory: /home/user/project" in text
     assert "Reason: cleanup" in text
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    ["zsh", "-zsh", "sh", "bash", "/bin/zsh", "/usr/bin/sh", "fish"],
+)
+def test_is_bare_generic_shell_true_for_a_bare_shell_name(command_line: str) -> None:
+    import convobox.adapters.codex as mod
+
+    assert mod._is_bare_generic_shell(command_line) is True
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    [
+        "sleep 90",
+        "ls -la",
+        "pwd",
+        "/bin/zsh -lc 'echo hi'",
+        "zsh-completion-helper",
+    ],
+)
+def test_is_bare_generic_shell_false_for_a_real_command(command_line: str) -> None:
+    import convobox.adapters.codex as mod
+
+    assert mod._is_bare_generic_shell(command_line) is False
+
+
+def test_kill_by_command_text_matches_a_short_legitimate_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test for the 2026-08-18 live-voice finding: a bare,
+    # unwrapped short command like "sleep 90" (8 chars) must still be
+    # matched and killed, while an unrelated bare shell process that
+    # only coincidentally shares a substring ("zsh") with the reported
+    # invocation text must NOT be -- see docs/field-notes/2026-08-18-
+    # kill-phrase-live-voice-test-finds-two-real-gaps.md.
+    import convobox.adapters.codex as mod
+
+    ps_output = (
+        "  PID  PPID COMMAND\n"
+        "49230     1 codex app-server\n"
+        "50564 49230 /bin/zsh -lc sleep 90\n"
+        "50565 50564 sleep 90\n"
+        "60001     1 zsh\n"  # unrelated bare shell -- must NOT be killed
+    )
+
+    class _FakeCompleted:
+        stdout = ps_output
+
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()  # noqa: ARG005
+    )
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)  # noqa: ARG005
+
+    result = mod._kill_by_command_text("/bin/zsh -lc 'sleep 90'")
+
+    assert 50564 in result  # the shell wrapper, matched directly
+    assert 50565 in result  # its child, killed via descendant expansion
+    assert 60001 not in result
