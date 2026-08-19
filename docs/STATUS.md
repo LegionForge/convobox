@@ -205,12 +205,16 @@ artifact-pane MCP tools:
   the backend process for when the polite hard-stop path is itself
   wedged. Live-verified through the real mic pipeline on Windows/codex
   during an actual freeze. **A real macOS gap was found the same
-  evening and is disclosed in `docs/KNOWN-ISSUES.md`: `codex` is 0/10
-  on macOS** (Apple Seatbelt reparents the real child to `launchd`
-  before the kill signal reaches it; macOS signals don't cascade the
-  way Windows' `TerminateProcess()` does) -- `claude-code` stays
-  reliable (10/10) on both platforms. `os.killpg()` is a candidate fix,
-  not yet built.
+  evening (`codex` was 0/10 on macOS -- Apple Seatbelt reparents the
+  real child to `launchd` before the kill signal reaches it, and
+  macOS signals don't cascade the way Windows' `TerminateProcess()`
+  does) and has since been FIXED (2026-08-18).** `os.killpg()` was
+  tested and confirmed to fail (the real child is its own
+  process-group leader regardless of sandboxing); a `ps`-based
+  command-line-matching fallback with recursive descendant-kill closes
+  the gap instead, re-verified live 20/20 against real spawned
+  processes on current main. `claude-code` stays reliable (10/10) on
+  both platforms, unaffected.
 - **The freeze investigation above is now mostly resolved.** A
   2026-08-15 session found most of what looked like a widespread,
   safety-relevant freeze was either a test-harness volume confound, or

@@ -151,15 +151,19 @@ from a genuine hang; the one real mechanism found (an opencode
 event-loop hang) was root-caused and mitigated (bounds what used to be
 an indefinite freeze to ~9s, validated against 143 automated
 hard-stops). One rare, self-resolving mic-layer freeze variant remains
-open. Separately, a genuine **macOS-specific safety gap** was found in
-the `safeword.kill_phrase` force-kill escalation: reliable for
-`claude-code` (10/10), but **`codex` is 0/10 on macOS** — Apple's
-Seatbelt sandboxing reparents the real spawned child to `launchd`
-before the kill signal can reach it, and macOS signals don't cascade to
-children the way Windows' `TerminateProcess()` does. Treat
-`kill_phrase` as unreliable on macOS with a codex backend until this is
-fixed. See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)'s force-kill
-entry and [docs/STATUS.md](docs/STATUS.md) for full detail.
+open. Separately, a genuine **macOS-specific safety gap** was found (and has
+since been fixed, 2026-08-18) in the `safeword.kill_phrase` force-kill
+escalation: reliable for `claude-code` (10/10) throughout, but `codex`
+was originally 0/10 on macOS — Apple's Seatbelt sandboxing reparents
+the real spawned child to `launchd` before the kill signal can reach
+it, and macOS signals don't cascade to children the way Windows'
+`TerminateProcess()` does (confirmed `os.killpg()` does not fix this —
+the real child is its own process-group leader regardless of
+sandboxing). A `ps`-based command-line-matching fallback with
+recursive descendant-kill now closes the gap, re-verified live 20/20
+against real spawned processes. See
+[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)'s force-kill entry and
+[docs/STATUS.md](docs/STATUS.md) for full detail.
 
 Known problems (and workarounds, like the WASAPI audio-output issue on
 Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).

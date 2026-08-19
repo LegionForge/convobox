@@ -4,6 +4,24 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
+## [Unreleased]
+
+### Fixed
+- **macOS: `safeword.kill_phrase`/`force_kill()` now actually reaches a
+  spawned codex tool-call child, not just the top-level app-server
+  process.** `codex` was 0/10 on macOS at `0.3.1`'s release (disclosed
+  in `docs/KNOWN-ISSUES.md`) -- the real spawned shell child is its own
+  process-group leader regardless of sandboxing, so no signal to the
+  app-server's process group could ever reach it, and `os.killpg()`
+  (the previously-disclosed "candidate fix") was tested live and
+  confirmed to fail for the same reason. Fixed with a `ps`-based
+  command-line-matching fallback plus recursive descendant-kill (a
+  multi-statement shell script forks its later commands as separate
+  child processes, which the naive matched-PID-only kill orphaned
+  otherwise). Re-verified live 20/20 clean against real spawned
+  processes on current main. `claude-code` was already reliable
+  (10/10) and is unaffected.
+
 ## [0.3.1] — 2026-08-17
 
 Patch release: 119 PRs since `0.3.0`. First cycle with live macOS
