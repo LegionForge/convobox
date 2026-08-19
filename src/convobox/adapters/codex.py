@@ -117,7 +117,7 @@ import logging
 import os
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404 -- see _kill_by_command_text()'s own use for why
 import sys
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
@@ -287,7 +287,16 @@ def _kill_by_command_text(command: str) -> list[int]:
     """
     stripped_command = _strip_shell_quotes(command)
     try:
-        out = subprocess.run(
+        # Fixed argv list (shell=True deliberately NOT used, so there's no
+        # shell-injection surface); "ps" resolves via $PATH rather than an
+        # absolute path because this needs to work identically across
+        # macOS's /bin/ps and Linux distros' varying ps locations (see
+        # this function's own docstring on Linux support) -- a hardcoded
+        # /bin/ps would silently break there. A PATH-hijacked "ps" binary
+        # implies the attacker already has arbitrary local code
+        # execution, at which point this specific call is not the weak
+        # link.
+        out = subprocess.run(  # nosec B603 B607
             ["ps", "-eo", "pid,ppid,command"],
             capture_output=True, text=True, timeout=5, check=False,
         ).stdout
