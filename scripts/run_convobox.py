@@ -3152,8 +3152,43 @@ def _print_clean_exit_note(web_active: bool) -> None:
         )
 
 
+def _restore_default_sigint_handler() -> None:
+    """Force SIGINT back to Python's normal KeyboardInterrupt-raising
+    handler, unconditionally. POSIX-only -- see _self_signal_interrupt()'s
+    own POSIX/Windows split for why.
+
+    Root cause of the 2026-08-18 live-voice finding (kill_phrase's own
+    "ends this session" claim not holding, docs/field-notes/2026-08-18-
+    kill-phrase-live-voice-test-finds-two-real-gaps.md): when a POSIX
+    shell launches a command as a background job (`&`, which is how this
+    project's own scripted TTS-to-mic test sessions run it -- see
+    docs/field-notes/2026-08-15-vad-mic-freeze-live-reproduced-on-macos.
+    md), it sets SIGINT's disposition to SIG_IGN for that child BEFORE
+    exec'ing it, so a real terminal Ctrl+C (which only reaches the
+    terminal's foreground process group anyway) can't kill a background
+    job by accident. SIG_IGN survives exec, and CPython's own startup
+    deliberately leaves an inherited SIG_IGN alone rather than overriding
+    it -- confirmed live via `signal.getsignal(signal.SIGINT)`:
+    <default_int_handler> when run interactively, <Handlers.SIG_IGN> when
+    run as `cmd &`, with no nohup involved at all. With SIGINT ignored,
+    _self_signal_interrupt()'s `os.kill(os.getpid(), SIGINT)` (the
+    kill_phrase/Quit-button/Windows-Ctrl+C-workaround exit path) is a true
+    no-op: no exception, no log line, the process and its mic loop simply
+    keep running. Since this project deliberately runs backgrounded/
+    detached for real UAT sessions and may be launched the same way by
+    real users (a process manager, `&`, systemd-style supervision), the
+    self-signal exit path must work in that mode too -- restoring the
+    default handler here makes it so, and does not change real-terminal
+    Ctrl+C behavior at all (that was already gated on being the
+    terminal's foreground process group, independent of this).
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def main() -> None:
     use_utf8_console()
+    if sys.platform != "win32":
+        _restore_default_sigint_handler()
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
