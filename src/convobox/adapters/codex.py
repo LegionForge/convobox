@@ -116,6 +116,9 @@ import json
 import logging
 import os
 import shutil
+import signal
+import subprocess  # nosec B404 -- see _kill_by_command_text()'s own use for why
+import sys
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any
@@ -215,6 +218,138 @@ def _permission_config_args(permission_mode: str) -> list[str]:
     ]
 
 
+def _strip_shell_quotes(text: str) -> str:
+    """Drop ' and " characters. codex reports commandExecution items as
+    the ORIGINAL shell-quoted invocation text (e.g. `/bin/zsh -lc "sh -c
+    'echo x; sleep 20'"`), but the actual live process's argv -- what
+    `ps` shows -- has already had that quoting consumed by the
+    intermediate shell layers (confirmed live, 2026-08-15: the real `ps`
+    line was `sh -c echo x; sleep 20`, with neither the outer `/bin/zsh
+    -lc` wrapper's quotes nor the inner `'...'` quotes surviving). Quote
+    characters are the only structural difference between the two
+    representations in every case observed so far -- stripping them
+    from both sides before comparing is what makes the substring match
+    below actually succeed.
+    """
+    return text.replace("'", "").replace('"', "")
+
+
+def _kill_by_command_text(command: str) -> list[int]:
+    """Best-effort SIGKILL of every live process whose (quote-stripped)
+    full command line appears within `command`'s own quote-stripped
+    text (or vice versa), AND every live descendant of each such
+    process. See CodexAdapter.force_kill()'s own comment for why this
+    exists and its known fragility. Uses `ps -eo pid,ppid,command` + a
+    literal Python substring check -- deliberately NOT `pgrep -f`
+    (which interprets its pattern as POSIX extended regex; `command`
+    here is untrusted-ish real shell text that can contain regex
+    metacharacters, so a literal check avoids both false negatives from
+    a broken pattern and the smaller but real risk of a regex matching
+    more broadly than the literal text did).
+
+    Descendant-killing is NOT optional/defensive -- it's required for
+    correctness. Confirmed live, 2026-08-15: a multi-statement shell
+    script (`sh -c 'echo marker; sleep 90'`) reports command text
+    (matched here) for the `sh -c` WRAPPER process, but `sleep 90`
+    itself runs as a SEPARATE forked child (only a script's tail
+    command can be exec'd in-place; anything before a `;` forks) --
+    killing only the matched wrapper left `sleep 90` alive, reparented
+    to pid 1, invisible to a survivor check that (reasonably) only
+    re-searches for the ORIGINAL marker text, which never appears in
+    the orphaned child's own command line. This was caught by manually
+    inspecting leftover processes after what this fallback's own tests
+    had reported as "clean" -- the automated survivor check's blind
+    spot, not something the test runs themselves revealed.
+
+    POSIX-only by construction, not just by validation: `ps -eo
+    pid,ppid,command` and `signal.SIGKILL` are both POSIX-specific --
+    `signal.SIGKILL` does not exist as an attribute on Windows'
+    `signal` module at all (an `AttributeError`, not a graceful
+    failure, if this were ever reached there), and `ps` isn't a
+    standard Windows command either. Callers MUST check
+    `sys.platform != "win32"` before calling this -- it does not guard
+    itself, so it stays a plain, easily-testable function rather than
+    needing its own internal no-op-elsewhere branch.
+
+    Only macOS has actually been LIVE-VALIDATED. Linux is expected, not
+    confirmed, to behave the same way: the underlying mechanisms this
+    fallback depends on (shell-quoted invocation text that doesn't
+    survive into `ps`'s own argv reconstruction; multi-statement shell
+    scripts forking rather than exec'ing for non-tail commands) are
+    properties of POSIX shell parsing, not of macOS specifically, and
+    codex's process-spawning model (fork/exec, the real child becoming
+    its own session/process-group leader) is architecturally the same
+    on any POSIX system -- but this has not been run against a real
+    Linux `codex app-server` to confirm the exact wrapper text (e.g.
+    `/bin/bash -c` vs. macOS's `/bin/zsh -lc`) unwraps the same way.
+    Treat Linux as "should work, not yet proven" until validated live
+    there.
+    """
+    stripped_command = _strip_shell_quotes(command)
+    try:
+        # Fixed argv list (shell=True deliberately NOT used, so there's no
+        # shell-injection surface); "ps" resolves via $PATH rather than an
+        # absolute path because this needs to work identically across
+        # macOS's /bin/ps and Linux distros' varying ps locations (see
+        # this function's own docstring on Linux support) -- a hardcoded
+        # /bin/ps would silently break there. A PATH-hijacked "ps" binary
+        # implies the attacker already has arbitrary local code
+        # execution, at which point this specific call is not the weak
+        # link.
+        out = subprocess.run(  # nosec B603 B607
+            ["ps", "-eo", "pid,ppid,command"],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children_by_ppid: dict[int, list[int]] = {}
+    matched_pids: set[int] = set()
+    for line in out.splitlines()[1:]:  # skip header
+        line = line.strip()
+        if not line:
+            continue
+        pid_str, _, rest = line.partition(" ")
+        ppid_str, _, cmd_rest = rest.strip().partition(" ")
+        try:
+            pid, ppid = int(pid_str), int(ppid_str)
+        except ValueError:
+            continue
+        children_by_ppid.setdefault(ppid, []).append(pid)
+        stripped_line_command = _strip_shell_quotes(cmd_rest.strip())
+        # A minimum length guard against trivial/short matches (e.g. a
+        # bare "zsh" or "sh" substring) that could otherwise match an
+        # unrelated process -- this fallback already accepts some false-
+        # positive risk by design (see the module docstring), but a
+        # short match is categorically more likely to be coincidental
+        # than deliberate.
+        if len(stripped_line_command) < 15:
+            continue
+        if (
+            stripped_line_command not in stripped_command
+            and stripped_command not in stripped_line_command
+        ):
+            continue
+        matched_pids.add(pid)
+
+    # Expand to every live descendant of each matched pid (BFS over the
+    # ppid map) -- see docstring for why this is required, not optional.
+    to_kill: set[int] = set()
+    frontier = list(matched_pids)
+    while frontier:
+        pid = frontier.pop()
+        if pid in to_kill:
+            continue
+        to_kill.add(pid)
+        frontier.extend(children_by_ppid.get(pid, []))
+
+    killed: list[int] = []
+    for pid in to_kill:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+    return killed
+
+
 class CodexAdapter(BackendAdapter):
     def __init__(
         self,
@@ -236,6 +371,15 @@ class CodexAdapter(BackendAdapter):
         self._thread_id: str | None = None
         self._active_turn_id: str | None = None
         self._busy = False
+        # Best-effort, fragile fallback for force_kill() -- see that
+        # method's own comment for why. Set on every commandExecution
+        # item/started, cleared on its matching item/completed (so a
+        # force_kill() called after the tool call already finished
+        # normally has nothing stale to act on -- force_kill() also only
+        # ever uses this while self._busy is True, as a second guard
+        # against acting on a leftover value from an earlier, unrelated
+        # turn).
+        self._last_command_text: str | None = None
         self._request_seq = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._events: asyncio.Queue[BackendEvent | object] = asyncio.Queue()
@@ -434,7 +578,47 @@ class CodexAdapter(BackendAdapter):
         # for a future caller to decide (Phase 2, not built here). Sharing
         # _terminate_and_kill_process() with aclose() is safe regardless:
         # that helper only ever touches self._proc/self._reader_task.
+        #
+        # Terminating/killing self._proc (below) only ever reaches codex's
+        # own app-server process -- confirmed live, 2026-08-15 field notes
+        # (docs/field-notes/2026-08-15-force-kill-macos-fix-attempts-
+        # killpg-and-processid-both-fail.md): on macOS, codex's real
+        # spawned shell child is its own process-group leader
+        # (os.getpgid(child) == child's own pid, independent of the
+        # app-server's group and of sandboxing), so no signal ConvoBox
+        # sends to self._proc's group can ever reach it. codex's own
+        # protocol-reported `processId` for a commandExecution item was
+        # also tested and does not correspond to any live process by the
+        # time it would matter (see the same field note).
+        #
+        # This fallback is the last resort those notes left untested:
+        # best-effort match the REAL child by its own command line (which
+        # codex DOES report accurately, unlike the processId field) via
+        # `ps`, and kill whatever matches directly. Fragile by
+        # construction -- literal substring matching against `ps` output
+        # can, in principle, match an unrelated process that happens to
+        # share the same command text, and a command already reaped
+        # between item/started and this call simply won't be found (not a
+        # failure, just nothing left to do). Gated on self._busy: only
+        # attempted while a turn is believed to still be in flight, to
+        # reduce (not eliminate) the chance of acting on a stale command
+        # string from an earlier, already-finished turn. Validated live:
+        # 15/15 clean across two real scenarios (shell_sleep,
+        # file_write_progressive) where the normal path alone was 0/15 --
+        # see docs/field-notes/2026-08-15-force-kill-pgrep-fallback-*.md.
+        #
+        # POSIX-only, not Windows (see _kill_by_command_text()'s own
+        # docstring): `ps`/`signal.SIGKILL` don't exist/work on Windows,
+        # so this is unconditionally excluded there rather than left to
+        # fail loudly (an uncaught AttributeError on signal.SIGKILL) or
+        # silently on a platform that was never tested. Linux is
+        # included on the strength of the same POSIX mechanisms macOS
+        # was validated against, NOT because it has been independently
+        # confirmed live -- see the docstring's own caveat.
+        command, was_busy = self._last_command_text, self._busy
         await self._terminate_and_kill_process()
+        if was_busy and command and sys.platform != "win32":
+            _kill_by_command_text(command)
 
     async def _terminate_and_kill_process(self) -> None:
         proc, self._proc = self._proc, None
@@ -604,6 +788,10 @@ class CodexAdapter(BackendAdapter):
                     )
             elif item_type in _TOOL_ITEM_TYPES:
                 if method == "item/started":
+                    if item_type == "commandExecution":
+                        command = item.get("command")
+                        if isinstance(command, str) and command:
+                            self._last_command_text = command
                     self._events.put_nowait(
                         BackendEvent(
                             type=BackendEventType.TOOL_CALL,
@@ -614,6 +802,8 @@ class CodexAdapter(BackendAdapter):
                         )
                     )
                 else:
+                    if item_type == "commandExecution":
+                        self._last_command_text = None
                     self._events.put_nowait(
                         BackendEvent(
                             type=BackendEventType.TOOL_RESULT,
