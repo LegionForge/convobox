@@ -353,6 +353,99 @@ write loop, the same way the 2026-08-18 field note found that natural
 phrasing (vs. an explicit dictated one-liner) produces meaningfully
 different process shapes than scripted tests anticipate.
 
+## Automated follow-up (2026-08-20): four more hypotheses tested, all ruled out
+
+Extending `_test_force_kill_stops_a_real_tool_call.py`, four more candidate
+differentiators between the 8/8-passing automated harness and this note's
+5/5-failing live reproductions were each isolated as the SOLE variable
+against an already-passing baseline (`detached_background_sleep_freeform_
+long_delay`, 2/2 pass) and tested. All four passed again -- each is now
+ruled out as the mechanism on its own:
+
+- **Process-tree location (inside vs. outside Claude Code's own process
+  tree).** The prior correction above (round dated 2026-08-19) flagged
+  this as the strongest surviving candidate by elimination -- every
+  automated pass to that point had run from inside Claude Code's own Bash
+  tool; every live failure ran from a plain interactive terminal. Re-run
+  identically (`detached_background_sleep`, `_long_delay`,
+  `_freeform`, `_freeform_long_delay`, 2 iterations each = 8 runs) from a
+  plain PowerShell window the operator opened directly, no Claude Code
+  involved at all. **8/8 passed.** Ruled out.
+- **`permission_mode` mismatch.** Before assuming the harness's hardcoded
+  `permission_mode="permissive"` matched what live UAT actually ran under,
+  this was checked directly rather than assumed: `convobox-UAT/
+  convobox-tui.log` shows every live session on 2026-08-19, including
+  every failing one, logged `backend permission_mode: permissive (codex)`.
+  Separately, loading the harness's own config confirmed its
+  `make_adapter()` hardcodes `permission_mode="permissive"` for codex
+  regardless of whatever `convobox.yaml` happens to be loaded (the config
+  file's own `backend.permission_mode` field, which resolved to `"plan"`
+  in the dev repo's `convobox.yaml`, is silently ignored for this path) --
+  resolving to the same `-c approval_policy=never -c
+  sandbox_mode=workspace-write` overrides either way. Confirmed equivalent,
+  not just assumed. Ruled out before it cost more test cycles.
+- **Session depth / turn count.** Every prior automated run created a
+  brand-new `CodexAdapter` (and therefore a fresh codex session) per
+  iteration, so the real prompt was always turn 1. Every live failure
+  happened deep into an evening-long session. New scenario
+  `detached_background_sleep_freeform_warm_session`: 5 unrelated filler
+  turns sent through the SAME adapter/session before the real prompt (turn
+  6, not turn 1). This generalizes the earlier "prior failed attempt"
+  candidate (round 3 vs. round 4 above) into turn-depth itself, not just
+  one specific failure-shaped prior turn. **3/3 passed.** Ruled out.
+- **Bypassing `Orchestrator` entirely.** The harness always called
+  `CodexAdapter.send_text()`/`force_kill()` directly, with a one-shot event
+  consumer that stops reading `adapter.events()` the instant it sees
+  `TOOL_CALL` -- reading nothing for the rest of `kill_delay_seconds`. The
+  real app instead calls `Orchestrator.handle_transcript()`
+  (`orchestrator.py:234`), which runs `_consume_events()` as a background
+  task that drains `adapter.events()` CONTINUOUSLY for the whole session,
+  and only reaches `force_kill()` via `SafewordDetector` matching the kill
+  phrase inside that same method -- a structurally different I/O and
+  call-path shape, and plausibly relevant given this harness's own runs
+  already log recurring `readline() still pending` warnings (cross-
+  referenced to docs/KNOWN-ISSUES.md's VAD-freeze entry) that suggest the
+  app-server's stdout pipe is sensitive to how continuously it gets read.
+  New scenario `detached_background_sleep_freeform_via_orchestrator`:
+  constructs a real `Orchestrator` (same `SafewordDetector`,
+  `kill_phrase="eject eject eject"`) and routes BOTH the prompt and the
+  kill through `handle_transcript()`, exactly as `run_convobox.py` does,
+  instead of calling the adapter directly. The real log line `kill phrase
+  matched 'eject eject eject' -- force-killing backend` confirmed the real
+  code path fired, not a silent bypass. **3/3 passed.** Ruled out.
+
+A fifth candidate was added and tested the same day:
+
+- **CPU contention from real-time STT inference.** Every automated run to
+  this point had an essentially idle CPU; every live failure ran with
+  real-time Whisper transcription competing for cycles on the same
+  machine, and Windows process creation/detachment timing is exactly the
+  kind of thing that can differ under real contention. New scenario
+  `detached_background_sleep_freeform_cpu_load`: spawns `os.cpu_count()`
+  CPU-bound worker processes (repeated SHA-256 hashing, no I/O -- genuine
+  multi-core saturation, not a token load) for the scenario's whole
+  duration, simulating the load real Whisper CPU inference puts on the
+  machine, no mic required. **3/3 passed.** `force_kill()`'s own elapsed
+  time did visibly increase under load (0.14s/0.47s/0.20s vs. the usual
+  ~0.05s baseline) -- a real, measurable effect of the contention -- but
+  not enough to flip the outcome. Ruled out.
+
+Running tally after this round: **25/25 automated passes, 5/5 live
+failures.** Every cheaply-scriptable difference identified by reading the
+code, including a genuine CPU-saturation stress test, has now been tested
+and closed. What remains untested is structurally different from anything
+above and not further scriptable: the real audio/STT/VAD pipeline (not
+just prompt text but real concurrent mic capture, VAD segmentation, and
+Whisper inference timing/scheduling interacting with process creation in
+ways a synthetic CPU load doesn't replicate) and real TTS/audio playback
+active concurrently (the harness passes `tts=None, player=None` to
+`Orchestrator`; live sessions run a real Piper engine). At this point the
+honest read is that closing this gap needs an actual live-voice re-run,
+not another scripted variant -- five independently-varied hypotheses
+(process-tree location, permission_mode, session depth, event-draining
+path, CPU contention) have each been ruled out in isolation without
+finding the mechanism.
+
 ## Why this matters
 
 This is the Windows counterpart to the documented macOS gap, reached by
@@ -413,3 +506,23 @@ process would not have one.
   directory used successfully in round 1's session.
 - Did not test the equivalent scenario on claude-code or opencode
   backends, or on macOS/Linux.
+- (2026-08-20) Did not yet test the real audio/STT/VAD pipeline in the
+  loop -- every automated scenario to date, including all four in the
+  follow-up section above, sends the prompt as plain text
+  (`send_text()`/`handle_transcript()` called directly with a Python
+  string), never through real mic capture, VAD segmentation, or Whisper
+  transcription. This is the largest remaining untested difference from
+  every live failure and may require an actual live voice re-run to
+  close, not further scripting.
+- (2026-08-20) Did not yet test with a real TTS engine/player wired into
+  `Orchestrator` -- every scenario so far passes `tts=None, player=None`,
+  while live sessions run a real Piper engine speaking responses
+  concurrently with the backend's tool call.
+- (2026-08-20) Five automated hypotheses (process-tree location,
+  permission_mode, session depth, Orchestrator event-draining path, CPU
+  contention) were each individually ruled out -- 25/25 automated passes
+  vs. 5/5 live failures. No further scripted variant is planned; next
+  step is an actual live-voice re-run of the original reproduction (see
+  the "Automated follow-up (2026-08-20)" section above), since the
+  remaining candidates (real audio/STT/VAD pipeline, real TTS/player
+  concurrently active) are not meaningfully testable without one.
