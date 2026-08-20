@@ -497,6 +497,89 @@ happened. Same mechanism, same outcome, a full day after the original
 without finding what differs. Whatever the automated harness still isn't
 replicating, it isn't something that stopped reproducing over time.
 
+## How codex and claude-code themselves handle killing a tool call (2026-08-20 research)
+
+Prompted by the claude-code reproduction above: do either backend CLI offer
+their own, better mechanism for reaching a spawned tool call's real process
+that ConvoBox simply isn't using yet? Researched both this project's own
+prior findings and current upstream sources (GitHub issues, official app-
+server docs) rather than assuming either is a dead end.
+
+**Both CLIs' own polite interrupt is turn-level, not process-level --
+already known, and this is WHY `force_kill()` exists at all.** `codex.py`'s
+and `claude_code.py`'s own docstrings (grounded in a 2026-08-09 field note,
+docs/field-notes/2026-08-09-hard-stop-does-not-cancel-an-in-flight-tool-
+call.md, which directly motivated building `force_kill()`/`kill_phrase`)
+already document: codex's `turn/interrupt {threadId, turnId}` and claude-
+code's `{"type":"control_request","request":{"subtype":"interrupt"}}` both
+reliably cancel the CONVERSATIONAL TURN (confirmed live for codex: 5/5
+incidents, one session), but neither reliably cancels an already-dispatched
+shell command's real OS process -- live-confirmed for codex, the real
+command kept running 16-48+ seconds after a "successful" interrupt, on its
+own schedule. `force_kill()` was built specifically to route AROUND this
+via a direct OS process handle instead of the CLI's own polite RPC channel.
+The 2026-08-09 note explicitly flagged this as "shared by all three backend
+adapters... inspected code, not yet independently live-tested against
+Claude Code or opencode specifically" -- this session's claude-code
+reproduction above is that live confirmation, for the detached-descendant
+case specifically.
+
+**External research confirms this is upstream's own known bug, not a
+ConvoBox-specific gap:**
+- [openai/codex#4337](https://github.com/openai/codex/issues/4337) --
+  codex's own cancellation only kills the shell wrapper (`bash -lc`), not
+  its children; orphaned children keep stdout/stderr pipes open.
+- [openai/codex#26382](https://github.com/openai/codex/issues/26382) -- a
+  canceled codex task's underlying worker can keep running/restarting in
+  the background and saturate CPU. Same shape as this note's own finding,
+  reported independently upstream.
+- [PR #22729](https://github.com/openai/codex/pull/22729) -- a partial fix
+  (SIGTERM then hard-kill the process group on cancellation) has landed for
+  Linux sandbox commands specifically; no equivalent exists for Windows.
+- [anthropics/claude-code#32553](https://github.com/anthropics/claude-code/issues/32553)
+  and [#17466](https://github.com/anthropics/claude-code/issues/17466) --
+  rejected/cancelled Bash commands still execute (the process already
+  started), and ESC/Ctrl+C don't reliably interrupt during active tool
+  calls. Same underlying class of problem on claude-code's side too.
+
+**A real, untried lever exists for codex specifically -- `thread/
+backgroundTerminals/list` and `thread/backgroundTerminals/clean`.** These
+are genuine CLIENT-invokable JSON-RPC methods on codex's app-server (not
+agent tools), confirmed from current upstream documentation:
+`{"method":"thread/backgroundTerminals/clean","params":{"threadId":"thr_..."}}`
+asks codex's OWN app-server to clean up whatever it tracks as background
+terminals for a thread; `.../list` enumerates them first (paginated,
+returns each one's `processId`). Requires `capabilities.experimentalApi =
+true` at handshake. `codex.py` calls neither today (confirmed: zero
+references in the adapter). This is a genuinely different approach from
+the Windows Job Object direction already scoped below -- it asks codex
+itself what it thinks is running, rather than ConvoBox reconstructing the
+OS process tree.
+
+**Caveat that matters, not yet tested:** this only helps if codex tracks
+the orphaned process as one of ITS OWN background terminals in the first
+place. Every live reproduction in this note had the agent background the
+process ad hoc via `Start-Process -PassThru` inside an ordinary,
+synchronous `commandExecution` tool call -- not through any native
+"background terminal" tool-call mode codex itself might offer. From
+codex's own perspective, that `commandExecution` already completed
+(`Start-Process` returns immediately) with no reason to track anything
+further. Whether `thread/backgroundTerminals/list` would even see these
+specific orphans is an open, empirical question -- worth a cheap probe
+before investing further in it.
+
+**Decision (2026-08-20): not pursuing anything on the claude-code side for
+this.** Claude Code exposes `KillBash`/`BashOutput` for background-process
+control, but both are AGENT tools (Claude calls them itself as part of its
+own tool-use turn) -- there is no client-side control_request equivalent to
+codex's `backgroundTerminals/*` methods. Reaching a backgrounded claude-
+code process this way would require prompting the agent to call `KillBash`
+itself, i.e. another full turn, which defeats the purpose of an immediate
+kill switch. Pursuing this further on codex only, where a real
+client-invokable lever exists; claude-code's coverage of this specific gap
+stays exactly where the OS-level Windows Job Object direction (or nothing,
+for now) would leave it.
+
 ## Why this matters
 
 This is the Windows counterpart to the documented macOS gap, reached by
@@ -555,8 +638,11 @@ process would not have one.
 - Did not determine why round 2's session `working_dir` reverted to the
   source tree (`convobox-UAT`) instead of the isolated scratch
   directory used successfully in round 1's session.
-- Did not test the equivalent scenario on claude-code or opencode
-  backends, or on macOS/Linux.
+- (2026-08-20) claude-code now tested and reproduced live (see the sixth/
+  seventh reproduction section above) -- no longer open for that backend.
+  opencode is architecturally not applicable (never owns an OS process,
+  see `_test_force_kill_stops_a_real_tool_call.py`'s own module
+  docstring). Still not tested on macOS/Linux for either backend.
 - (2026-08-20) Did not yet test the real audio/STT/VAD pipeline in the
   loop -- every automated scenario to date, including all four in the
   follow-up section above, sends the prompt as plain text
@@ -577,3 +663,11 @@ process would not have one.
   the "Automated follow-up (2026-08-20)" section above), since the
   remaining candidates (real audio/STT/VAD pipeline, real TTS/player
   concurrently active) are not meaningfully testable without one.
+- (2026-08-20) `thread/backgroundTerminals/list`/`clean` -- a real,
+  client-invokable codex app-server lever this project has never called
+  -- has NOT been tested against tonight's live reproductions. Untested
+  whether codex tracks an ad-hoc `Start-Process`-backgrounded process as
+  one of its own "background terminals" at all (see the research section
+  above). Decision made not to pursue an equivalent for claude-code --
+  its `KillBash`/`BashOutput` are agent-only tools with no client-side
+  control path.
