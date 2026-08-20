@@ -156,12 +156,28 @@ since been fixed, 2026-08-18) in the `safeword.kill_phrase` force-kill
 escalation: reliable for `claude-code` (10/10) throughout, but `codex`
 was originally 0/10 on macOS — Apple's Seatbelt sandboxing reparents
 the real spawned child to `launchd` before the kill signal can reach
-it, and macOS signals don't cascade to children the way Windows'
-`TerminateProcess()` does (confirmed `os.killpg()` does not fix this —
-the real child is its own process-group leader regardless of
-sandboxing). A `ps`-based command-line-matching fallback with
-recursive descendant-kill now closes the gap, re-verified live 20/20
-against real spawned processes. See
+it, and macOS signals don't cascade to children the way a *live,
+still-attached* Windows process tree usually does (confirmed
+`os.killpg()` does not fix this — the real child is its own
+process-group leader regardless of sandboxing). A `ps`-based
+command-line-matching fallback with recursive descendant-kill now
+closes the gap on macOS, re-verified live 20/20 against real spawned
+processes.
+
+**A separate, still-open Windows-specific gap** (found 2026-08-19,
+`codex` backend, live voice UAT — not yet tested against `claude-code`
+or `opencode`): `kill_phrase` reliably ends the ConvoBox session and
+kills whatever the backend process still has structurally attached, but
+a process the agent deliberately backgrounds/detaches (e.g. via
+PowerShell's `Start-Process`) can survive indefinitely — reproduced
+live 5/5 times, including one case where the detachment also confused
+codex's own PID tracking badly enough that it launched a duplicate
+copy of the same background process. The `ps`-based fallback that
+closes the macOS gap above does not apply on Windows (`signal.SIGKILL`
+doesn't exist there); an automated test harness driving the identical
+scenario has so far NOT reproduced this failure (8/8 passed), so the
+automated suite alone should not be trusted as a stand-in for live
+verification of this specific gap. See
 [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)'s force-kill entry and
 [docs/STATUS.md](docs/STATUS.md) for full detail.
 
