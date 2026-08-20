@@ -1848,6 +1848,140 @@ same `ps`-based approach holds on Linux (architecturally expected to,
 not yet independently verified there); root-causing WHY claude-code
 never showed the same failure mode codex did.
 
+## `kill_phrase` ends the ConvoBox session cleanly on Windows, but does not reach an orphaned/detached child process it spawned
+
+**Status:** validated-live, 2026-08-19, Windows 11 (helios), codex
+backend ONLY (claude-code/opencode not yet tested), real mic sessions,
+reproduced 5/5 independently in the same evening -- 0 live successes.
+An automated harness testing the identical scenario passed 8/8, a
+confirmed and still-unexplained divergence (see "Final tally" below) --
+do not treat the automated result as predictive for this gap. Not
+fixed -- capture-and-diagnose only, with a recommended fix direction
+(Windows Job Object wrapper) scoped below. This is the Windows
+counterpart to the macOS gap documented just above, reached by a
+different mechanism (detachment/orphaning, not codex's own
+process-group behavior), and currently has **no mitigation at all on
+Windows**: the `ps`-based fallback that closes the macOS gap is
+explicitly excluded there (`codex.py:634-645` -- `signal.SIGKILL`/`ps`
+don't exist on Windows, so `force_kill()` only ever does
+`proc.terminate()`/`proc.kill()` against the single top-level process
+handle).
+
+**Symptom.** A CPU- and disk-heavy background process spawned by codex
+(a PowerShell loop hashing an incrementing counter and appending
+records to a file) kept running -- still burning CPU, still growing the
+file -- for over two minutes after `kill_phrase` fired, the log said
+`force-killing backend`, and the entire ConvoBox process had already
+exited (confirmed: no `codex.exe`, no ConvoBox python process, anywhere
+on the system). The spawned process was already an orphan by the time
+it was checked (its own immediate parent process was already gone,
+independent of and unaffected by the kill), meaning it had detached
+from whatever process tree `force_kill()`'s single top-level kill could
+ever reach. A companion test the same evening showed a *plain*
+`Start-Sleep -Seconds 90` spawned by codex *does* die correctly within
+seconds of the same kill -- so this is not "Windows never cascades a
+kill," it's specifically that a detached/orphaned descendant is
+invisible to it, same as the underlying class of bug the macOS fix
+addressed, just reached by a different path here.
+
+**Reproduction (repeatable "known failure" check).** Ask codex, in
+natural language, something like:
+
+> "Write a PowerShell script to a file called `writer.ps1` in this
+> directory. It should loop continuously -- computing a SHA256 hash of
+> an incrementing counter each iteration, and appending a line with the
+> counter, the current UTC timestamp, and the hash to `hashlog.txt`,
+> flushing to disk after every single write -- but stop itself
+> automatically after 10 minutes OR if `hashlog.txt` exceeds 2 GB,
+> whichever comes first, as a safety cap. Then run `writer.ps1` as a
+> background process using `Start-Process pwsh -ArgumentList
+> '-File','writer.ps1' -PassThru`, and tell me the resulting process
+> ID."
+
+Getting a working process this way has taken multiple attempts both
+times this was tried (nested-quoting errors in an inline `-Command`
+one-liner, a .NET method unavailable in this PowerShell's runtime) --
+writing to a real `.ps1` file first and running it with `-File` avoids
+the quoting failures specifically. Once codex reports a PID, confirm it
+is real (`Get-Process`/`Get-CimInstance Win32_Process` showing a
+growing `hashlog.txt`), say the kill phrase, then check the PID again:
+if it is still alive and the file is still growing, the gap has
+reproduced. A well-formed record is `<counter> <UTC timestamp>
+<64-hex-char SHA256>` -- the counter enables detecting gaps/duplicates
+from a torn write anywhere in the file, not just at the tail.
+
+**Corruption check, done once (2026-08-19):** force-killing the
+orphaned process directly (`Stop-Process -Force`, not `kill_phrase`,
+since `kill_phrase` never reached it) while it was actively writing did
+**not** produce a torn record -- the last line was complete and
+well-formed even with the file growing at the instant of the kill. This
+is a narrow result: each write is a single small (~93-byte)
+`StreamWriter.WriteLine()` call with `AutoFlush`, which appears to
+complete as one atomic syscall faster than `TerminateProcess` can land
+mid-call. It does not establish that a larger single write (a
+multi-KB buffered write, or a batch written without per-line flushing)
+would survive the same kind of interruption equally cleanly -- that
+variant has not been tried.
+
+Full detail, exact timestamps, and the live log excerpts:
+`docs/field-notes/2026-08-19-kill-phrase-windows-orphaned-descendant-
+survives-force-kill.md`.
+
+**All testing to date is codex-only.** `claude-code` and `opencode`
+have not been tested against this specific gap at all -- unknown
+whether either shares it, is immune (different sandboxing/spawn
+model), or is worse.
+
+**Final tally after a full evening's live + automated testing:** 5/5
+live voice reproductions (codex, real STT/TUI pipeline, varied scripts
+and phrasings), 0/5 live successes at killing a detached background
+process. Against that, 8/8 automated attempts (a harness driving
+`adapter.force_kill()` directly, bypassing voice) all succeeded --
+dictated launch command, freeform codex-chosen command, short delay,
+and long (75s) delay were each tried, and each time the automated kill
+worked while the equivalent live attempt failed. Neither launch
+method, elapsed time, nor "a prior failed attempt in the same session"
+survived as a sufficient explanation once tested directly. The
+strongest surviving candidate, untested as of this writing: the
+automated harness has always run from inside Claude Code's own process
+tree (via its Bash tool), and every live failure has always run from a
+plain interactive terminal -- if Claude Code's own subprocess handling
+happens to use a Windows Job Object, that could incidentally catch and
+kill children that would otherwise escape, making the harness an
+accidentally-safer environment than real usage. **Practical
+consequence: do not treat this automated harness's pass rate as
+predictive for this specific scenario -- it has been directly
+contradicted by live testing every time tried.** It remains useful for
+everything else it covers (synchronous commands, the no-corruption
+data, cleanup logic).
+
+One live round also surfaced a second, worse failure mode: codex's own
+PID tracking got confused by the same detachment (it checked a PID
+that had already exited while the real worker's log was still visibly
+advancing), concluded the launch had failed, and **launched a second,
+duplicate copy of the same background process** -- both survived the
+kill phrase independently, both still writing to the same log file
+with no coordination. Not just an unkillable process, but a doubled
+one.
+
+**Recommended fix direction, not yet built:** rather than continuing
+to chase individual detachment patterns (an unbounded reactive game --
+`Start-Process`, `Start-Job`, and whatever else an agent invents all
+have to be handled separately under the current approach), wrap the
+codex process in a Windows Job Object at spawn time
+(`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, breakaway disabled). This is a
+structural, one-time fix at the point ConvoBox creates the subprocess
+-- it would force everything that process tree ever spawns, regardless
+of how it detaches, to die when the job closes. Scoped as real
+follow-up work, not built here.
+
+**Still open:** why this session's `working_dir` reverted to the
+source tree instead of the isolated scratch directory used
+successfully in an earlier session the same evening; whether a
+larger-single-write shape tears under a forced kill; the equivalent
+scenario on claude-code and opencode backends, and on macOS/Linux for
+this specific orphaning-not-process-group mechanism.
+
 ---
 
 ## `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it
