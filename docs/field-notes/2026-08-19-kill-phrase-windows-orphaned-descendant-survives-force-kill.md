@@ -446,6 +446,57 @@ not another scripted variant -- five independently-varied hypotheses
 path, CPU contention) have each been ruled out in isolation without
 finding the mechanism.
 
+### Sixth live reproduction (2026-08-20, next day, real-time independently verified)
+
+The requested live re-run (the honest conclusion of the automated follow-up
+above) happened the same day it was written, on a real voice session:
+`run_convobox.py --tui --web --aec-dump -v --working-dir d:\LegionForge\
+_uat-force-kill-scratch`, backend codex, `permission_mode: permissive`
+(confirmed from the session's own startup log line). The operator asked,
+in natural language: "Write a small script that keeps hashing some data
+and appending timestamped entries to a log file, and run it as a
+background process that keeps going after you respond -- don't wait for
+it to finish, just tell me the process ID once it's running." Codex's own
+report inside the session named PID 39972 as current, after first
+reporting and then replacing an earlier PID 46960 -- the same PID-
+confusion flavor as the fifth reproduction above, though this time
+resolving to a single correct final process rather than a duplicate.
+
+Unlike every prior round in this note, this one was checked with an
+independent observer running the whole time (this session's own AI
+assistant, polling `Get-Process`/`Get-CimInstance` directly against the
+real PIDs -- not trusting codex's in-session report, and not the automated
+harness):
+
+- **Before the kill phrase**: PID 39972 confirmed real
+  (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  D:\LegionForge\_uat-force-kill-scratch\hash-loop.ps1`, created
+  17:35:22) -- and already orphaned from its own launcher at that point:
+  its parent (PID 22816) was already dead before the kill phrase was even
+  said, same detachment shape as every prior round. PID 46960 (the
+  earlier, replaced PID) independently confirmed already dead.
+- **Kill phrase fired** ("killed," operator's own words, matching this
+  note's `eject eject eject`). Independently confirmed: no `python.exe`
+  or `codex.exe` process remained anywhere on the system immediately
+  after -- the ConvoBox session itself, and codex's app-server, both
+  genuinely exited, exactly as every prior round found.
+- **PID 39972 survived.** Confirmed alive 4+ seconds after the kill via a
+  direct `Get-Process` check, CPU time climbing (0.61s -> 0.64s), and
+  `hash-loop.log` actively growing (5,120 -> 7,620 bytes) with fresh
+  timestamps (`17:36:31`, `17:36:32`) -- unambiguous proof it was still
+  live and working, not a stale handle.
+- Cleaned up afterward: `Stop-Process -Id 39972 -Force`, confirmed dead,
+  scratch files removed.
+
+This is the first reproduction in this note verified by an independent
+observer polling the real OS process/file state directly, in real time,
+rather than relying on the operator's or the agent's own report of what
+happened. Same mechanism, same outcome, a full day after the original
+5/5 -- **6/6 live failures to date**, and the first one to happen after
+25/25 automated passes had already ruled out five separate hypotheses
+without finding what differs. Whatever the automated harness still isn't
+replicating, it isn't something that stopped reproducing over time.
+
 ## Why this matters
 
 This is the Windows counterpart to the documented macOS gap, reached by
