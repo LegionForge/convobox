@@ -1884,6 +1884,54 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     o[keys[keys.length - 1]] = value;
   }
 
+  // Mirrors scripts/settings_tui.py's _switch_backend/_apply_backend_profile/
+  // _backend_profile_from_active exactly. settings_api.py's docstring lists
+  // which TUI functions the web routes reuse for parity (SECTION_SPECS,
+  // _visible_fields_for_section, _choices_for, validate_config,
+  // save_with_backup, probe_*) -- those three aren't on that list, so
+  // picking a new backend here previously fell through to the generic
+  // setPath() below and left backend.command/url/model stale from whatever
+  // backend was active before. Real bug found live 2026-08-20: selecting
+  // claude-code in this picker left backend.command pointing at codex.cmd,
+  // and /api/settings/save's own escalation guard (settings_api.py's
+  // _detect_web_settings_escalation) never caught it because command
+  // genuinely hadn't changed from what was already on disk.
+  const BACKEND_PROFILE_DEFAULTS = {
+    opencode: { url: "http://localhost:4096", command: null, model: null },
+    "claude-code": { url: "http://localhost:4096", command: ["claude"], model: null },
+    codex: { url: "http://localhost:4096", command: ["codex"], model: null },
+  };
+
+  function switchBackend(newName) {
+    const currentName = draft.backend.name;
+    if (newName === currentName) return;
+    if (!draft.backend_profiles) draft.backend_profiles = {};
+
+    // Remember the CURRENT backend's live values before switching away --
+    // only the fields that backend type actually uses.
+    draft.backend_profiles[currentName] =
+      currentName === "opencode"
+        ? { url: draft.backend.url ?? null, command: null, model: draft.backend.model ?? null }
+        : {
+            url: draft.backend.url ?? null,
+            command: draft.backend.command ? [...draft.backend.command] : null,
+            model: null,
+          };
+
+    const saved = draft.backend_profiles[newName] || {};
+    const defaults = BACKEND_PROFILE_DEFAULTS[newName] || { url: null, command: null, model: null };
+    draft.backend.name = newName;
+    draft.backend.url = saved.url != null ? saved.url : defaults.url;
+    if (newName === "opencode") {
+      draft.backend.command = null;
+      draft.backend.model = saved.model != null ? saved.model : defaults.model;
+    } else {
+      draft.backend.model = null;
+      draft.backend.command =
+        saved.command != null ? [...saved.command] : defaults.command ? [...defaults.command] : null;
+    }
+  }
+
   // Not full shlex: handles the common "quoted argument with spaces"
   // case (matches backend.command's own help text example, e.g.
   // `codex.cmd --model gpt-5.6-terra`) but not shlex's escape-sequence
@@ -1988,7 +2036,11 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       select.disabled = field.choices.length === 1 && field.choices[0] === field.unavailable_value;
       select.addEventListener("change", () => {
         const picked = select.value;
-        setPath(draft, path, picked === field.unset_value ? null : picked);
+        if (path === "backend.name") {
+          switchBackend(picked);
+        } else {
+          setPath(draft, path, picked === field.unset_value ? null : picked);
+        }
         fetchSchema();
       });
       return select;
@@ -2191,8 +2243,19 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const detail = data.detail || {};
-        errorsEl.textContent = (detail.errors || ["Save failed."]).join(" | ");
+        // detail is a plain string for the escalation guard's 403
+        // (settings_api.py's _detect_web_settings_escalation returns a
+        // message directly, not {errors: [...]}), but an {errors, warnings}
+        // object for a 422 validation failure -- previously only the
+        // object shape was handled, so a real escalation message (e.g.
+        // "use the TUI instead") silently fell through to a generic
+        // "Save failed." with no way to tell what actually went wrong.
+        const detail = data.detail;
+        const message =
+          typeof detail === "string"
+            ? detail
+            : (detail && detail.errors ? detail.errors.join(" | ") : null) || "Save failed.";
+        errorsEl.textContent = message;
         errorsEl.hidden = false;
         return;
       }
