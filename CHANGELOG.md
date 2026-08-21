@@ -4,7 +4,25 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
-## [Unreleased]
+## [0.4.0] — 2026-08-22
+
+First tagged and published release since `0.3.0` -- `0.3.1` was never
+actually tagged/shipped (two release-candidate tags were cut and
+abandoned; this release supersedes both and folds in everything that
+would have been `0.3.1`). First release published to PyPI.
+
+### Added
+- **`scripts/acoustic_calibration.py --volume-candidates`**: automates
+  the amplitude axis of AEC calibration on Windows via pycaw's
+  `IAudioEndpointVolume`, sweeping real system output volume (not
+  `tts.volume` -- the physical driver distorting at real playback
+  volume is what's under test) and restoring the original volume in a
+  `finally` block regardless of how the run ends. Confirmed live that
+  "AEC gets worse than AEC-off at high volume" (established on macOS)
+  reproduces on completely different Windows hardware; found Windows'
+  own Audio Enhancements setting has a genuinely mixed effect on the
+  result, not simply good or bad -- see
+  `docs/field-notes/2026-08-20-windows-amplitude-sweep-audio-enhancements-mixed-effect.md`.
 
 ### Changed
 - **Default resume word changed from `"Athena"` to `"resume listening"`;
@@ -37,8 +55,48 @@ minor versions carry feature and behavior changes.
   otherwise). Re-verified live 20/20 clean against real spawned
   processes on current main. `claude-code` was already reliable
   (10/10) and is unaffected.
+- **`force_kill()`'s pgrep fallback no longer misses legitimate short
+  commands.** A blanket 15-character minimum-length guard (meant to
+  avoid matching a bare shell name by coincidence) also silently
+  excluded real short commands like `sleep 90` (8 chars) from ever
+  being matched. Replaced with `_is_bare_generic_shell()`, which only
+  excludes a `ps` line that is nothing but a generic shell's own name
+  (`zsh`, `sh`, `bash`, etc.) with no arguments -- the actual
+  coincidental-false-positive case the guard was meant to prevent.
+- **`kill_phrase` now actually ends the session when ConvoBox is
+  launched as a backgrounded shell job**, not just when run in the
+  foreground. `_self_signal_interrupt()`'s `SIGINT` never reached
+  `asyncio.run()`'s handler in that launch mode -- root-caused to a
+  POSIX shell setting `SIGINT` to `SIG_IGN` for background jobs before
+  exec, a disposition that survives exec and that CPython's own
+  startup deliberately leaves alone. Fixed by forcing `SIGINT` back to
+  Python's default handler at startup (POSIX only); real-terminal
+  Ctrl+C behavior is unaffected.
+- **Web UI: switching `backend.name` in the settings modal now updates
+  `command`/`model`/`url` to match**, instead of leaving them at the
+  previous backend's values (e.g. selecting `claude-code` while
+  `command` silently stayed pointed at `codex.cmd`). Also fixed the
+  save-error handler to surface the real reason a blocked save was
+  rejected (e.g. an escalation guard) instead of a generic "Save
+  failed."
 
 ### Known issues
+- **Windows: `kill_phrase` does not reach a process the agent
+  deliberately detached.** Found 2026-08-19 in live voice UAT against a
+  `codex` backend; not yet tested against `claude-code` or `opencode`.
+  The kill reliably ends the ConvoBox session and takes down whatever
+  the backend still has structurally attached, but a child the agent
+  backgrounds on purpose (e.g. via PowerShell's `Start-Process`)
+  survives indefinitely -- reproduced live 5/5, including one case where
+  the detachment confused codex's own PID tracking badly enough that it
+  launched a duplicate copy of the same background process. The
+  `ps`-based fallback that closes the analogous macOS gap does not apply
+  here (`signal.SIGKILL` doesn't exist on Windows). **An automated
+  harness driving the identical scenario has NOT reproduced this (8/8
+  passed)**, so the automated suite should not be treated as a stand-in
+  for live verification of this gap. See `docs/KNOWN-ISSUES.md`'s
+  force-kill entry and `docs/field-notes/2026-08-19-kill-phrase-windows-
+  orphaned-descendant-survives-force-kill.md`.
 - **Windows: `kill_phrase` does not reach a process the agent
   deliberately detached.** Found 2026-08-19 in live voice UAT against a
   `codex` backend; not yet tested against `claude-code` or `opencode`.

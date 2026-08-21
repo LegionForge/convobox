@@ -7,7 +7,7 @@ tested-vs-implemented table, see the README's [Status](../README.md#status)
 section; for the formal per-release changelog, see
 [../CHANGELOG.md](../CHANGELOG.md).
 
-## Since 0.3.1 (in progress, not yet tagged)
+## 0.4.0 — 2026-08-22 (first tagged/published release since 0.3.0; 0.3.1 was never tagged)
 
 **First macOS live-hardware UAT pass, 2026-08-10.** Everything below
 this note through 0.3.1's Windows-only history predates any live
