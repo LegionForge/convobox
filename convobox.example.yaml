@@ -30,10 +30,28 @@ backend:
   # command: ["claude", "--model", "claude-haiku-4-5"]
   # command: ["codex"]
   # -- claude-code only: to remove specific tools entirely (rather than
-  #    accepting the safe default --permission-mode plan's blanket
-  #    no-writes stance), pass --disallowedTools yourself -- ConvoBox
-  #    doesn't reject or reinterpret anything already in `command`:
+  #    accepting the safe default permission_mode: plan's blanket
+  #    no-writes stance), pass --disallowedTools yourself -- tool-SCOPING
+  #    flags compose fine with any permission_mode and are not rejected:
   # command: ["claude", "--disallowedTools", "Bash", "Write", "Edit"]
+  # -- what the agent is ALLOWED to do. The single source of truth for the
+  #    write/execute posture; see docs/PERMISSION-MODEL.md for the full
+  #    per-backend mapping and the two gotchas that bite people.
+  #      plan       (default) read/explore/explain only -- no edits, no
+  #                 commands. Safe because a headless agent has no way to
+  #                 answer a permission prompt at runtime.
+  #      approve    the agent acts, but each risky call blocks on your
+  #                 spoken interaction.approval_phrase (required, or this
+  #                 is a hard config error on claude-code).
+  #      permissive BYPASSES ALL PERMISSION CHECKS -- Bash, web fetches,
+  #                 MCP tools, file edits, everything. Only in a workspace
+  #                 you'd trust an unsupervised agent with.
+  #    Putting an equivalent posture flag in `command` instead (e.g.
+  #    --dangerously-skip-permissions, codex's --sandbox) is a hard error:
+  #    two sources of truth for a safety control is not allowed.
+  #    No effect on opencode -- its permissions are fixed by wherever
+  #    `opencode serve` was launched; setting this for opencode warns.
+  # permission_mode: plan
   # -- codex / claude-code: the directory the agent runs and EDITS files in.
   #    SECURITY: unset (the default) means the agent inherits ConvoBox's own
   #    directory -- a voice session could then modify ConvoBox's source.

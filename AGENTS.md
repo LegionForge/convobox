@@ -90,3 +90,51 @@ tree.
 separate `ConvoBox-auto` worktree while the operator's live tree stayed
 untouched across dozens of merged PRs — zero clobbering. This rule
 generalizes that separation for the multi-agent collaboration ahead.*
+
+## 11. Long-lived branches: merge yourself into main, prefer that over
+merging main into yourself
+
+A branch that's going to live longer than a day or two should land on
+`main` in small increments, not accumulate repeated
+`Merge origin/main into <branch>` commits while staying parked. A PR that
+reviews and merges cleanly is usually a sign the underlying branch is
+ready for `main` too — if a merged PR's base isn't `main`, ask why before
+building anything else on top of that assumption.
+
+*Incident (issue #126): `wip/approval-echotailguard` accumulated
+merge-forwards for weeks instead of landing; three real, reviewed,
+CI-passed PRs (#109, #112, #116) merged against that branch, not `main`,
+making a shipped-feeling feature invisible to anything working from
+`main` — including a fresh session that built an equivalent feature for a
+different backend, unaware the first one existed, until a sync surfaced a
+6-file conflict.*
+
+## 12. Close out staged-but-uncommitted structural changes same-session
+
+A structural change sitting staged-but-uncommitted (a file removed from
+tracking, a `.gitignore` edit, a rename) is easy to forget and hard to
+tell apart later from "in-progress work I still need." Commit it or
+revert it before moving on to something else — don't let it carry
+forward as ambient working-tree state.
+
+*Incident (issue #126): a `CLAUDE.md` swap plus a `.gitignore` edit
+excluding it sat staged-but-uncommitted in the UAT checkout for a while,
+until it finally blocked a sync.*
+
+## 13. Working across multiple checkouts sharing a venv: verify which one
+you're actually testing
+
+Before treating "a feature that should work doesn't" as a regression, run
+`python scripts/check_venv_identity.py` from the checkout you meant to
+test. A venv shared across checkouts (e.g. this repo's dev/UAT split, a
+directory junction to skip installing the audio/ML stack twice) silently
+repoints its editable `convobox` install to whichever checkout last ran
+`uv sync`/`uv run` — the other checkout's own scripts keep running, but
+every `import convobox` inside them resolves against the wrong tree, with
+no error at import time.
+
+*Incident (issue #126, docs/field-notes/2026-07-22-shared-venv-editable-
+install-cross-contamination.md): this bit the project 3+ times in one
+evening — a config field that "should" exist but didn't, and a live "I
+can't scroll anymore" report that turned out to be the UAT checkout's
+older script running against dev's newer library.*

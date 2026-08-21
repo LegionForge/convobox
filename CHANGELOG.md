@@ -38,6 +38,24 @@ minor versions carry feature and behavior changes.
   processes on current main. `claude-code` was already reliable
   (10/10) and is unaffected.
 
+### Known issues
+- **Windows: `kill_phrase` does not reach a process the agent
+  deliberately detached.** Found 2026-08-19 in live voice UAT against a
+  `codex` backend; not yet tested against `claude-code` or `opencode`.
+  The kill reliably ends the ConvoBox session and takes down whatever
+  the backend still has structurally attached, but a child the agent
+  backgrounds on purpose (e.g. via PowerShell's `Start-Process`)
+  survives indefinitely -- reproduced live 5/5, including one case where
+  the detachment confused codex's own PID tracking badly enough that it
+  launched a duplicate copy of the same background process. The
+  `ps`-based fallback that closes the analogous macOS gap does not apply
+  here (`signal.SIGKILL` doesn't exist on Windows). **An automated
+  harness driving the identical scenario has NOT reproduced this (8/8
+  passed)**, so the automated suite should not be treated as a stand-in
+  for live verification of this gap. See `docs/KNOWN-ISSUES.md`'s
+  force-kill entry and `docs/field-notes/2026-08-19-kill-phrase-windows-
+  orphaned-descendant-survives-force-kill.md`.
+
 ## [0.3.1] — 2026-08-17
 
 Patch release: 119 PRs since `0.3.0`. First cycle with live macOS
