@@ -2,8 +2,8 @@
 
 Your pause phrase (`interaction.pause_phrases`, default `"stop listening"`/
 `"pause listening"`), resume word (`interaction.resume_word`, default
-`"Athena"`), and safeword (`safeword.hard_stop_phrases`, default
-`"stop stop stop"`) all work the same way under the hood: a **deterministic,
+`"resume listening"`), and safeword (`safeword.hard_stop_phrases`, default
+`"stop stop stop"`/`"abort abort abort"`) all work the same way under the hood: a **deterministic,
 normalized-substring match against the raw transcript** — no fuzzy matching,
 no ML, no LLM (`SafewordDetector`/`PauseListeningDetector`/
 `ResumeWordDetector`, see `docs/DESIGN-barge-in.md`). That's deliberate: a
@@ -18,7 +18,7 @@ the *only* real fix is choosing a phrase faster-whisper transcribes well for
 your own voice — a corrections-glossary entry can't help here, even though it
 can for ordinary conversation.
 
-## Why "Athena" and not something else
+## Why "resume listening" and not "Athena"
 
 The shipped default resume word used to be "ConvoBox" itself (the smart-
 speaker convention — Alexa, Siri, Cortana). It shipped for two PRs without
@@ -28,12 +28,31 @@ Box" every time — a compound word splitting into two more common real words,
 which the language model prefers. The resume word silently never matched,
 and there was no way to resume a paused session by voice at all.
 
-"Athena" was chosen by actually testing candidates through the real
-Piper → faster-whisper round-trip pipeline, not guessing. Words that failed
-that same test (`ResumeWordDetector.ROUNDTRIP_REJECTED_RESUME_WORDS`):
-`"ConvoBox"` (→ "Control Box"), `"Copilot"`/`"co-pilot"` (→ "co-pilot" split
-oddly), `"Voicebox"` (→ "Boyspicks"). All are compound/portmanteau words —
-that's the pattern to avoid.
+"Athena" was chosen next by testing candidates through the real
+Piper → faster-whisper round-trip pipeline (5/5 correct) — a real
+improvement over guessing, but it turned out not to be the full story.
+**Live testing with real human speech (not synthesized Piper audio) later
+found the bare word "Athena" mistranscribed roughly 3/5 attempts**, on two
+separate platforms — see `docs/field-notes/2026-08-15-safety-phrase-
+reliability-battery-halt-and-bare-athena-unreliable.md` and
+`2026-08-18-bare-athena-stt-unreliable-real-voice-windows.md`. The same
+word embedded in a longer utterance ("I want to say the word Athena to wake
+up") transcribed reliably, and so did the plain multi-word phrase "resume
+listening" on its own. **A synthetic round-trip test can rule out words
+broken for everyone, but it systematically over-predicts reliability for
+short, low-phonetic-context utterances against real speech** — the gap
+between a synthesized "Athena" and someone actually saying it turned out to
+matter. `"resume listening"` is now the default for that reason: a short
+multi-word phrase gives the STT decoder more to work with than even a
+multisyllabic single word does. "Athena"/"Hey Athena" is still a perfectly
+good personal choice if you verify it against your own real voice first
+(see below) — it just no longer ships as the default nobody has checked.
+
+Words that failed the original round-trip test
+(`ResumeWordDetector.ROUNDTRIP_REJECTED_RESUME_WORDS`): `"ConvoBox"`
+(→ "Control Box"), `"Copilot"`/`"co-pilot"` (→ "co-pilot" split oddly),
+`"Voicebox"` (→ "Boyspicks"). All are compound/portmanteau words — that
+pattern is still worth avoiding, on top of the short-utterance lesson above.
 
 ## Picking a word/phrase that transcribes well
 

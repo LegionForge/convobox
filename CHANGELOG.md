@@ -6,6 +6,22 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+### Changed
+- **Default resume word changed from `"Athena"` to `"resume listening"`;
+  `"halt halt halt"` removed from the default `safeword.hard_stop_phrases`
+  set.** Both were validated at ship time against a synthetic Piper ->
+  faster-whisper round-trip test, which turned out to systematically
+  over-predict reliability for short utterances against real human
+  speech: live testing found bare `"Athena"` mistranscribed ~3/5
+  attempts (`docs/field-notes/2026-08-15-safety-phrase-reliability-
+  battery-halt-and-bare-athena-unreliable.md`,
+  `2026-08-18-bare-athena-stt-unreliable-real-voice-windows.md`) and
+  `"halt halt halt"` failed 4/5. Both remain fully supported as opt-in
+  choices for anyone whose own voice/mic/room transcribes them
+  reliably -- see `docs/TROUBLESHOOTING.md` for how to verify a
+  candidate phrase against your own real voice, not just a synthesized
+  test, before relying on it.
+
 ### Fixed
 - **macOS: `safeword.kill_phrase`/`force_kill()` now actually reaches a
   spawned codex tool-call child, not just the top-level app-server

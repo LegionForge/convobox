@@ -443,22 +443,33 @@ class InteractionConfig(BaseModel):
 class SafewordConfig(BaseModel):
     # Each phrase is a word tripled, not a single word -- the anti-false-
     # positive mechanism (a bare "stop" is common in normal conversation;
-    # nobody says a word three times in a row by accident). "abort" and
-    # "halt" were added 2026-08-09 as universal, en-US-broad emergency-
-    # stop vocabulary with minimal overlap with this project's OWN
-    # domain vocabulary (unlike candidates considered and rejected --
-    # "kill"/"freeze" -- both of which are extremely common phrasing in
-    # normal conversation ABOUT a coding-agent tool, e.g. "kill the
-    # process"/"it froze", elevating false-positive risk specifically
-    # here). Deliberately NOT added to any default stt.hotwords list --
-    # docs/field-notes/2026-08-06-resume-word-hallucination-and-runaway-
-    # repetition.md validated-live that hotwording a phrase makes it
-    # both easier to say AND easier for the STT decoder to hallucinate
-    # into a runaway repetition loop that falls through into a real
-    # hard-stop; more default safewords is a deliberate stop-coverage
-    # tradeoff, not something to also amplify via hotwords by default.
+    # nobody says a word three times in a row by accident). "abort" was
+    # added 2026-08-09 as universal, en-US-broad emergency-stop vocabulary
+    # with minimal overlap with this project's OWN domain vocabulary
+    # (unlike candidates considered and rejected -- "kill"/"freeze" --
+    # both of which are extremely common phrasing in normal conversation
+    # ABOUT a coding-agent tool, e.g. "kill the process"/"it froze",
+    # elevating false-positive risk specifically here). Deliberately NOT
+    # added to any default stt.hotwords list -- docs/field-notes/
+    # 2026-08-06-resume-word-hallucination-and-runaway-repetition.md
+    # validated-live that hotwording a phrase makes it both easier to say
+    # AND easier for the STT decoder to hallucinate into a runaway
+    # repetition loop that falls through into a real hard-stop; more
+    # default safewords is a deliberate stop-coverage tradeoff, not
+    # something to also amplify via hotwords by default.
+    #
+    # "halt halt halt" was ALSO added 2026-08-09 alongside "abort abort
+    # abort", then removed from the default set 2026-08-21: docs/field-
+    # notes/2026-08-15-safety-phrase-reliability-battery-halt-and-bare-
+    # athena-unreliable.md found it failed real round-trip transcription
+    # 4/5 times, against a codebase claim of 5/5 that only reproduced with
+    # surrounding sentence context -- a safeword the STT layer mishears
+    # 80% of the time is not a working safety control. Still fully
+    # supported as an opt-in phrase for anyone whose own voice/mic/room
+    # transcribes it more reliably; just no longer shipped as a default a
+    # user is relying on without having verified it themselves.
     hard_stop_phrases: list[str] = Field(
-        default_factory=lambda: ["stop stop stop", "abort abort abort", "halt halt halt"]
+        default_factory=lambda: ["stop stop stop", "abort abort abort"]
     )
     # Opt-in, unset by default: which ONE of hard_stop_phrases (if any)
     # escalates beyond a normal hard stop to Orchestrator.force_kill() --

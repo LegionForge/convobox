@@ -52,11 +52,32 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # engine, a different feature from this resume word), ruled out for
 # exactly that reason).
 #
+# CORRECTED AGAIN, 2026-08-21: the 5/5 result above was a synthetic
+# Piper -> faster-whisper round-trip, not real human speech, and that gap
+# turned out to matter -- docs/field-notes/2026-08-15-safety-phrase-
+# reliability-battery-halt-and-bare-athena-unreliable.md and 2026-08-18-
+# bare-athena-stt-unreliable-real-voice-windows.md both found the BARE
+# word "Athena" mistranscribed by real speech roughly 3/5 attempts (macOS
+# synthetic-speech and Windows real-voice sessions respectively), while
+# the identical word embedded in a longer utterance ("I want to say the
+# word Athena to wake up") transcribed reliably, and the existing
+# alternate phrase "resume listening" transcribed reliably standalone.
+# The pattern matches this project's broader short-utterance-STT-
+# reliability finding elsewhere (see hard_stop_phrases' own tripled-word
+# design in config.py): a short, low-phonetic-context utterance is
+# structurally harder for the STT decoder than a longer one, independent
+# of which specific word is chosen. DEFAULT_RESUME_WORD is now the
+# multi-word phrase below instead of the bare name for exactly that
+# reason. "Athena"/"Hey Athena" remains fully supported as a
+# personalization choice for anyone whose own voice/mic/room transcribes
+# it reliably -- it just no longer ships as the default nobody has
+# verified for themselves.
+#
 # Any user-CHOSEN resume word still needs the same verification -- that's the
 # setup-wizard "test-transcribe a few times" UX named in
-# docs/DESIGN-barge-in.md, not yet built. This constant being wrong for two
-# PRs is the concrete argument for building it.
-DEFAULT_RESUME_WORD = "Athena"
+# docs/DESIGN-barge-in.md, not yet built. This constant being wrong for
+# three rounds now is the concrete argument for building it.
+DEFAULT_RESUME_WORD = "resume listening"
 
 # Words that FAILED the real Piper -> faster-whisper round-trip test above
 # (normalized form). Not a construction-time rejection -- the safety-tier
