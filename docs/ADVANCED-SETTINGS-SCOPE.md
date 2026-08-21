@@ -7,6 +7,11 @@ friction and a warning rather than being one more plain field in the normal
 list. Written as a design pass before code, same reasoning as
 `docs/SETTINGS-TUI-SCOPE.md` and `docs/ARTIFACT-PANE-SCOPE.md`.
 
+> For what `backend.permission_mode` actually does across the three
+> backends, see [PERMISSION-MODEL.md](PERMISSION-MODEL.md) — the canonical
+> reference. This document covers only how the setting should be
+> *presented* in the two settings UIs, not what it means.
+
 ## Origin
 
 Came up while scoping the artifact-pane chooser (`docs/ARTIFACT-PANE-
