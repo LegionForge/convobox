@@ -510,20 +510,25 @@ sections were added).
 
 ## Claude Code permission mode
 
+**Canonical reference: [PERMISSION-MODEL.md](PERMISSION-MODEL.md).** The
+short version of why the default is what it is:
+
 Headless (`--print`) mode has no way to answer a tool-permission prompt at
 runtime — a gated tool call would hang the session forever with no signal
 (see `src/convobox/adapters/claude_code.py`'s module docstring for the
 live-probed root cause). ConvoBox therefore defaults Claude Code to
 `--permission-mode plan`: it can read, explore, and explain, but never
-edit files or run commands on its own. For full write/execute access, set
-your own `--permission-mode bypassPermissions` (or the equivalent
-`--dangerously-skip-permissions`) in `backend.command` —
-**this bypasses every permission check**, which is risky on a
-voice-driven channel (misheard words, no per-action confirmation yet);
-only use it in a context you'd trust an unsupervised agent with. An
-explicit `--permission-mode` you set always wins over ConvoBox's default.
-Per-action voice approval is on the roadmap ([ROADMAP.md](ROADMAP.md)'s
-"Safety tiers for destructive actions").
+edit files or run commands on its own.
+
+For full write/execute access, set `backend.permission_mode: permissive`.
+Note this is a change from an earlier instruction in this document, which
+said to put `--permission-mode bypassPermissions` (or
+`--dangerously-skip-permissions`) in `backend.command` directly: that is
+now a **hard config error**. `detect_permission_conflict()` rejects any
+posture-setting flag in `backend.command` rather than let it silently
+disagree with `permission_mode`, which is the single source of truth.
+Per-action voice approval is no longer roadmap-only either — it shipped as
+`permission_mode: approve`.
 
 ## Progress log
 
