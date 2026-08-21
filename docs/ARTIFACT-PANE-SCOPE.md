@@ -444,6 +444,10 @@ ARTIFACT handling already consumes.
 The "Granted regardless of `permission_mode`" design decision above
 does not deliver on its own intent for `permission_mode: plan`
 specifically -- corrected here rather than left as a quiet inaccuracy.
+(This limitation is summarized for users in
+[PERMISSION-MODEL.md](PERMISSION-MODEL.md), which is the canonical
+reference for `permission_mode` generally; the full root-cause account
+stays here.)
 
 **Timeline:** a 2026-08-16 scripted `--text`-mode demo run had Claude
 explicitly decline to call `show_document` under `plan`

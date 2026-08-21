@@ -1406,7 +1406,8 @@ open `http://127.0.0.1:5173/` in a browser, and talk.
   artifact-pane tools" for the full root-cause writeup. Use
   `permissive` or `approve` for artifact-pane testing/use; `plan` is a
   known, architectural dead end for these two tools, not a bug to keep
-  probing.
+  probing. (Mode semantics generally:
+  [docs/PERMISSION-MODEL.md](PERMISSION-MODEL.md).)
 - **[AP6] Resize is usable mid-conversation, not just via scripted
   drag.** With the pane open, actually grab the left-edge handle with
   a real mouse (cursor should show `col-resize` on hover) and drag it

@@ -4,6 +4,14 @@
 
 ConvoBox **never publishes sensitive data to git or public repos without explicit user opt-in**. This document explains what data ConvoBox collects, what's sensitive, and how to safely use history tracking in private repos.
 
+> **Looking for what the agent is allowed to do?** That's the other half of
+> the security model and lives in
+> [PERMISSION-MODEL.md](PERMISSION-MODEL.md) — the canonical reference for
+> `backend.permission_mode` (`plan`/`approve`/`permissive`), how each mode
+> maps onto Claude Code, Codex, and OpenCode, and the startup guards that
+> refuse to let a safety control be silently misconfigured. This document
+> covers data handling; that one covers agent authority.
+
 ---
 
 ## What Data ConvoBox Collects
