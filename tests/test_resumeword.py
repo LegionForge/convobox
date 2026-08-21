@@ -57,8 +57,12 @@ def test_resume_word_property_returns_original() -> None:
 def test_default_resume_word() -> None:
     detector = ResumeWordDetector()
     assert detector.resume_word == DEFAULT_RESUME_WORD
-    assert DEFAULT_RESUME_WORD == "Athena"  # pins the value the round-trip STT test verified
-    assert detector.check("hey Athena, hold on") is True
+    # Pins the value real-voice reliability testing settled on -- see
+    # DEFAULT_RESUME_WORD's own comment for the 2026-08-21 correction
+    # (bare "Athena" mistranscribed ~3/5 with real speech; this multi-word
+    # phrase transcribed reliably standalone).
+    assert DEFAULT_RESUME_WORD == "resume listening"
+    assert detector.check("okay, resume listening now") is True
 
 
 # --- the construction guard (shared with Safeword/Confirmword) ---

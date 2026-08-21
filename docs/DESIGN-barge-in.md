@@ -192,11 +192,15 @@ Human turn-transitions cluster around **~200 ms** (Stivers et al. 2009). So:
 
 ```yaml
 interaction:
-  resume_word: "Athena"            # shared: push-word barge-in trigger AND pause/resume
+  resume_word: "resume listening"  # shared: push-word barge-in trigger AND pause/resume
                                   # (default was "ConvoBox" -- confidently
                                   # mis-heard as "Control Box" by Whisper
-                                  # every time; verify any custom choice
-                                  # round-trips through STT before relying on it)
+                                  # every time; then bare "Athena", which
+                                  # a synthetic round-trip test cleared but
+                                  # real speech mistranscribed ~3/5 --
+                                  # see docs/TROUBLESHOOTING.md. Verify any
+                                  # custom choice against your OWN real
+                                  # voice, not just a synthesized test.)
   pause_listening_phrases:       # enters the paused (resume-word-only) state; hard-stops in flight
     - "stop listening"
     - "pause listening"

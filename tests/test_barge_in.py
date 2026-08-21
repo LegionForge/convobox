@@ -122,7 +122,7 @@ def test_interrupt_preset_rejects_unknown_values() -> None:
 
 def test_interaction_config_resume_word_and_pause_phrase_defaults() -> None:
     config = AppConfig()
-    assert config.interaction.resume_word == "Athena"
+    assert config.interaction.resume_word == "resume listening"
     assert config.interaction.pause_listening_phrases == ["stop listening", "pause listening"]
 
 
