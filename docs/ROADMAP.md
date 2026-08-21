@@ -238,6 +238,14 @@ Scoped, not yet built:
   `web.*`) boolean setting, exposed in both Settings surfaces, not just
   a frontend-only visual tweak.
 
+### Per-file-type "open in editor" choice (proposed, not prioritized)
+Raised by JP 2026-08-21: the artifact pane's existing "open in editor"
+action (`vscode://file/...` URI) is currently one hardcoded target.
+Idea -- let the target editor vary per file extension, and be a real
+user choice (VS Code, Notepad++, Sublime Text, vim, jed, emacs, etc.),
+not just VS Code assumed for everyone. Explicitly flagged as a
+someday/nice-to-have, not something to scope or build now.
+
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response
   routing: VERBALIZE vs DISPLAY (spoken summary + full text on screen).
@@ -247,6 +255,33 @@ Scoped, not yet built:
   Phase 2 -- voice always gives the tiered/short version, a new TUI's
   full-detail pane always shows the untruncated response, and a
   `ContinueDetector` is the eyes-free "tell me more" escape hatch.
+
+### Optional local redaction for stored transcripts/logs (proposed, not yet decided)
+Raised by JP 2026-08-21, prompted by [flare-collection/flare-redact](https://github.com/flare-collection/flare-redact)
+-- a tool he's evaluating for reducing the odds of sensitive data sitting
+in local storage unencrypted, being considered across multiple
+LegionForge projects, not ConvoBox-specific. Not immediately actionable
+-- capturing the idea now so it isn't lost, not scoping it yet.
+
+The idea: an opt-in setting a user can enable so ConvoBox actively
+redacts sensitive-looking content from what it stores locally, rather
+than relying on the operator to remember not to say/paste anything
+sensitive. Real local-storage surfaces this would apply to:
+- The web UI's `HistoryDB` (SQLite, `history_tracking_enabled`, opt-in
+  already) -- raw transcripts, tool-call inputs/outputs, approved
+  commands.
+- `convobox-tui.log` and other log output.
+- `--capture-incidents` WAV/diagnostic captures.
+
+Open questions, not answered here: redact at write-time (permanent,
+can't recover the original later) vs. redact-on-display (original stays
+on disk, only the rendered/exported view is scrubbed) -- very different
+privacy/utility tradeoffs; what a false-positive redaction costs
+(unreadable debugging history) vs. what a false negative costs (the
+whole point of the feature failing silently); whether this becomes a
+small shared LegionForge library other projects also depend on, given
+the stated cross-project interest, rather than a ConvoBox-only
+integration.
 
 ### Safety tiers for destructive actions (decided; design sketch)
 When the agent is about to do something destructive-classed and the
