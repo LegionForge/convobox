@@ -51,6 +51,49 @@ from convobox.interrupt_presets import resolve_preset
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.vad.segmenter import UtteranceSegmenter
 
+def _get_pycaw_endpoint_volume() -> Any:
+    """Import pycaw and return the default output endpoint's
+    IAudioEndpointVolume interface, lazily -- keeps this module importable
+    (and every non-volume-sweep run working exactly as before) on Linux/
+    macOS or a Windows install that never opted into the `calibration`
+    extra. Only ever called from the --volume-candidates path.
+
+    pycaw>=20240210's AudioUtilities.GetSpeakers() already returns a
+    pycaw.utils.AudioDevice wrapper with a ready-to-use .EndpointVolume
+    property (a comtypes POINTER(IAudioEndpointVolume)) -- no manual
+    Activate()/CLSCTX_ALL/cast dance needed (live-verified 2026-08-20;
+    an earlier version of this function hand-rolled that and broke
+    against the actually-installed pycaw's real API).
+    """
+    if sys.platform != "win32":
+        raise NotImplementedError(
+            "--volume-candidates controls the SYSTEM output volume via pycaw, "
+            "which wraps a Windows-only COM interface (Core Audio "
+            "IAudioEndpointVolume). Not available on this platform -- sweep "
+            "tts.volume in convobox.yaml by hand between runs instead."
+        )
+    try:
+        from pycaw.pycaw import AudioUtilities
+    except ImportError as exc:
+        raise ImportError(
+            "--volume-candidates requires pycaw: `uv sync --extra calibration` "
+            "(or `pip install pycaw`)."
+        ) from exc
+    return AudioUtilities.GetSpeakers().EndpointVolume
+
+
+def _get_system_volume_percent() -> float:
+    endpoint = _get_pycaw_endpoint_volume()
+    return round(endpoint.GetMasterVolumeLevelScalar() * 100.0, 2)
+
+
+def _set_system_volume_percent(percent: float) -> None:
+    if not 0.0 <= percent <= 100.0:
+        raise ValueError(f"system volume percent must be 0-100, got {percent}")
+    endpoint = _get_pycaw_endpoint_volume()
+    endpoint.SetMasterVolumeLevelScalar(percent / 100.0, None)
+
+
 _TEST_TEXT = (
     "This is an automated acoustic echo cancellation test. The assistant is "
     "speaking through the configured output while the configured microphone "
@@ -101,6 +144,10 @@ class TrialResult:
     raw_wav: str
     processed_wav: str
     diagnostics_npz: str
+    # None when no --volume-candidates sweep is active (the default,
+    # unchanged path) -- set to the system output volume (0-100) this
+    # trial ran at otherwise. See _set_system_volume_percent below.
+    system_volume_percent: float | None = None
 
 
 def _rms(audio: np.ndarray) -> float:
@@ -314,6 +361,7 @@ def _run_trial(
     barge_in_min_speech_ms: int,
     tail_seconds: float,
     output_dir: Path,
+    system_volume_percent: float | None = None,
 ) -> TrialResult:
     auto = requested_delay_ms is None
     canceller = EchoCanceller(delay_ms=requested_delay_ms or 100)
@@ -451,6 +499,7 @@ def _run_trial(
         raw_wav=str(raw_path),
         processed_wav=str(processed_path),
         diagnostics_npz=str(diagnostics_path),
+        system_volume_percent=system_volume_percent,
     )
     print(
         f"trial {label}: delay={result.delay_ms}ms attenuation={result.attenuation_db}dB "
@@ -573,7 +622,9 @@ def run(args: argparse.Namespace) -> Path:
                 ambient_thresholds[f"{threshold:.2f}"] = asdict(outcome)
                 print(f"ambient VAD threshold={threshold:.2f}: utterances={outcome.utterances}")
 
-            def execute_trial(label: str, delay: int | None) -> TrialResult:
+            def execute_trial(
+                label: str, delay: int | None, volume_percent: float | None
+            ) -> TrialResult:
                 return _run_trial(
                     label=label,
                     requested_delay_ms=delay,
@@ -588,40 +639,82 @@ def run(args: argparse.Namespace) -> Path:
                     barge_in_min_speech_ms=config.interaction.barge_in_min_speech_ms,
                     tail_seconds=args.tail_seconds,
                     output_dir=output_dir,
+                    system_volume_percent=volume_percent,
                 )
 
-            trials: list[TrialResult] = []
-            if args.delay_candidates:
-                candidate_tokens = [item.strip().lower() for item in args.delay_candidates.split(",")]
-                for token in candidate_tokens:
-                    if token == "auto":
-                        delay = None
-                    else:
-                        delay = int(token)
-                        if not 0 <= delay <= 500:
-                            raise ValueError("delay candidates must be between 0 and 500ms")
-                    for repeat in range(1, args.repeat_each + 1):
-                        trials.append(execute_trial(f"{token}-r{repeat}", delay))
-            else:
-                auto_trial = execute_trial("auto", None)
-                trials.append(auto_trial)
-                ceiling = auto_trial.measurable_ceiling_db
-                if args.force_delay_sweep or (
-                    ceiling is not None and ceiling >= AEC_MEASURABLE_ECHO_DB
-                ):
-                    offsets = (-100, -50, 50, 100)
-                    delays = []
-                    for offset in offsets:
-                        value = max(0, min(500, auto_trial.delay_ms + offset))
-                        if value != auto_trial.delay_ms and value not in delays:
-                            delays.append(value)
-                    for delay in delays[: max(0, args.max_trials - 1)]:
-                        trials.append(execute_trial(f"delay-{delay}ms", delay))
+            def run_delay_sweep_at(volume_percent: float | None) -> list[TrialResult]:
+                # Identical to the pre-volume-sweep logic below, just with
+                # trial labels prefixed when a volume sweep is active (so
+                # e.g. two "auto-r1" trials at different volumes stay
+                # distinguishable in the report/filenames) and
+                # volume_percent threaded through to each trial.
+                prefix = "" if volume_percent is None else f"vol{volume_percent:g}-"
+                collected: list[TrialResult] = []
+                if args.delay_candidates:
+                    candidate_tokens = [
+                        item.strip().lower() for item in args.delay_candidates.split(",")
+                    ]
+                    for token in candidate_tokens:
+                        if token == "auto":
+                            delay = None
+                        else:
+                            delay = int(token)
+                            if not 0 <= delay <= 500:
+                                raise ValueError("delay candidates must be between 0 and 500ms")
+                        for repeat in range(1, args.repeat_each + 1):
+                            collected.append(
+                                execute_trial(f"{prefix}{token}-r{repeat}", delay, volume_percent)
+                            )
                 else:
-                    print(
-                        "no measurable speaker echo reached the mic; "
-                        "skipping meaningless delay sweep"
-                    )
+                    auto_trial = execute_trial(f"{prefix}auto", None, volume_percent)
+                    collected.append(auto_trial)
+                    ceiling = auto_trial.measurable_ceiling_db
+                    if args.force_delay_sweep or (
+                        ceiling is not None and ceiling >= AEC_MEASURABLE_ECHO_DB
+                    ):
+                        offsets = (-100, -50, 50, 100)
+                        delays = []
+                        for offset in offsets:
+                            value = max(0, min(500, auto_trial.delay_ms + offset))
+                            if value != auto_trial.delay_ms and value not in delays:
+                                delays.append(value)
+                        for delay in delays[: max(0, args.max_trials - 1)]:
+                            collected.append(
+                                execute_trial(f"{prefix}delay-{delay}ms", delay, volume_percent)
+                            )
+                    else:
+                        print(
+                            "no measurable speaker echo reached the mic; "
+                            "skipping meaningless delay sweep"
+                        )
+                return collected
+
+            trials: list[TrialResult] = []
+            if args.volume_candidates:
+                # GitHub issue #119 follow-up: automate the amplitude axis
+                # the 2026-08-11 macOS volume sweep did by hand (system
+                # output volume, NOT tts.volume -- the finding being tested
+                # is specifically about the physical speaker driver
+                # distorting at high real-world playback volume, which a
+                # digital pre-DAC gain doesn't reproduce the same way).
+                # Windows-only (pycaw); see _get_pycaw_endpoint_volume.
+                volume_levels = [float(v.strip()) for v in args.volume_candidates.split(",")]
+                for v in volume_levels:
+                    if not 0.0 <= v <= 100.0:
+                        raise ValueError("volume candidates must be between 0 and 100")
+                original_volume = _get_system_volume_percent()
+                print(f"system output volume before sweep: {original_volume}% (will be restored after)")
+                try:
+                    for volume in volume_levels:
+                        _set_system_volume_percent(volume)
+                        actual = _get_system_volume_percent()
+                        print(f"--- volume {volume}% (readback: {actual}%) ---")
+                        trials.extend(run_delay_sweep_at(volume))
+                finally:
+                    _set_system_volume_percent(original_volume)
+                    print(f"system output volume restored to {original_volume}%")
+            else:
+                trials.extend(run_delay_sweep_at(None))
     finally:
         # Free the single-instance port (47613, shared with run_convobox.py)
         # even on a crash -- otherwise no voice session can start until the
@@ -688,6 +781,17 @@ def main() -> None:
         "--force-delay-sweep",
         action="store_true",
         help="test delays around auto even when the current echo-to-noise ceiling is low",
+    )
+    parser.add_argument(
+        "--volume-candidates",
+        help=(
+            "comma-separated SYSTEM output volume percentages to sweep (0-100, "
+            "for example 100,75,50,40,35,30,25,20) -- runs the full delay-"
+            "candidate logic once per volume level, restoring the original "
+            "system volume afterward. Windows-only (pycaw, `uv sync --extra "
+            "calibration`); automates GitHub issue #119's manual macOS volume "
+            "sweep."
+        ),
     )
     parser.add_argument("--output-dir", default="uat-acoustic-calibration")
     args = parser.parse_args()
