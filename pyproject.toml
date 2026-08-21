@@ -136,6 +136,15 @@ web = [
 analysis = [
     "matplotlib>=3.8",
 ]
+# Windows-only system output volume control (pycaw wraps the Core Audio
+# IAudioEndpointVolume COM interface) for scripts/acoustic_calibration.py's
+# --volume-candidates sweep (GitHub issue #119 follow-up: automate the
+# amplitude axis the 2026-08-11 macOS volume sweep did by hand). A separate
+# extra: Windows-only wheel, never imported by the running product, only
+# needed when actually running an amplitude sweep.
+calibration = [
+    "pycaw>=20230407; sys_platform == 'win32'",
+]
 
 [project.scripts]
 convobox = "scripts.run_convobox:main"
