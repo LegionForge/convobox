@@ -111,88 +111,41 @@ voice pipeline has already been through. See
 
 <img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, new voice-gated approval), Codex (app-server JSON-RPC, tested live, real approval channel not yet voice-wired). Windows 11 tested end-to-end; Linux/macOS implemented, not yet voice-validated.">
 
-| Axis        | Tested end-to-end                                                   | Implemented, not yet voice-validated |
-|-------------|----------------------------------------------------------------------|---------------------------------------|
-| **Platform**| Windows 11                                                            | Linux, macOS<sup>†</sup>              |
-| **Backend** | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server)   | —                                     |
-| **STT**     | faster-whisper                                                        | —                                     |
-| **TTS**     | Piper                                                                 | Kokoro (default since 2026-07-24; live voice session with real speakers confirmed on macOS 2026-08-10, not yet on Windows/Linux) |
+| Component | Status | Detail |
+|---|---|---|
+| **Windows 11** | Validated end to end | The reference platform. |
+| **macOS** | Mostly validated | AEC, Kokoro TTS, the real mic loop, all three backends, and — with a real human speaker — the safeword hard-stop and barge-in are all confirmed live. Stays here pending browser-driven web-UI testing and sustained everyday use. |
+| **Linux** | Implemented, not voice-validated | Same adapters and pipeline as the others; no live voice pass yet. |
+| **Backends** | All three validated | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server) — each driven through the full voice loop, including tool use. |
+| **STT** | faster-whisper | Validated on both tested platforms. |
+| **TTS** | Kokoro (default), Piper (opt-in) | Kokoro confirmed in live voice sessions with real speakers. |
 
-<sup>†</sup> macOS: as of 2026-08-10/11, signal-level AEC (real
-mic+speaker, 41 live trials), the Claude Code / Codex backends, Kokoro
-TTS, the real mic loop, and — with a REAL human speaker as of
-2026-08-11 — the safeword hard-stop (3 live firings) and barge-in have
-all been confirmed working end to end (see
-[docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md](docs/field-notes/2026-08-11-macos-live-human-demo-safeword-bargein-and-self-echo-loop.md)
-and [docs/STATUS.md](docs/STATUS.md)'s "Since 0.3.1" section, which
-links every field note from this pass). That same live demo also
-surfaced a real self-triggered barge-in loop in `conversational` mode
-under rapid-fire conditions (diagnosed, not yet fixed) and reconfirmed
-`[E6]`'s far-field STT-accuracy challenge with real (not synthetic)
-speech. **opencode**, initially blocked on that machine for lack of
-provider credentials, was later configured with real credentials and
-put through a genuine multi-part investigation (2026-08-11): opencode's
-own *built-in* auth (`opencode auth login`, OAuth or API-key) is broken
-in `serve` mode — the interface ConvoBox actually talks to — across
-three independently-confirmed causes, but a manually-declared custom
-provider in `opencode.jsonc` works completely end-to-end through
-ConvoBox, including real tool-calling (a file genuinely created via a
-voice command, not just a spoken description of doing so). Still open:
-Chrome/browser-driven web UI testing (tooling unavailable across every
-session that's tried so far, not just this one) and sustained
-everyday-use reliability — macOS stays in this column until those
-close.
+Two open gaps worth knowing before you lean on the safety path:
 
-**Update, 2026-08-14 through 08-17:** a follow-up investigation session
-found most of what had looked like a widespread, safety-relevant
-macOS/Windows freeze was actually a test-harness volume confound or
-harmless idle time that earlier diagnostics couldn't yet distinguish
-from a genuine hang; the one real mechanism found (an opencode
-event-loop hang) was root-caused and mitigated (bounds what used to be
-an indefinite freeze to ~9s, validated against 143 automated
-hard-stops). One rare, self-resolving mic-layer freeze variant remains
-open. Separately, a genuine **macOS-specific safety gap** was found (and has
-since been fixed, 2026-08-18) in the `safeword.kill_phrase` force-kill
-escalation: reliable for `claude-code` (10/10) throughout, but `codex`
-was originally 0/10 on macOS — Apple's Seatbelt sandboxing reparents
-the real spawned child to `launchd` before the kill signal can reach
-it, and macOS signals don't cascade to children the way a *live,
-still-attached* Windows process tree usually does (confirmed
-`os.killpg()` does not fix this — the real child is its own
-process-group leader regardless of sandboxing). A `ps`-based
-command-line-matching fallback with recursive descendant-kill now
-closes the gap on macOS, re-verified live 20/20 against real spawned
-processes.
+- **`kill_phrase` does not reach a deliberately detached process on
+  Windows.** It ends the session and kills whatever the backend still has
+  structurally attached, but a child the agent backgrounds on purpose can
+  survive. Confirmed live against `codex`; not yet tested on the other two
+  backends. Note an automated harness does *not* reproduce this, so the
+  test suite alone doesn't cover it.
+- **A rare mic-layer freeze** — one occurrence to date, self-resolving,
+  root cause not established.
 
-**A separate, still-open Windows-specific gap** (found 2026-08-19,
-`codex` backend, live voice UAT — not yet tested against `claude-code`
-or `opencode`): `kill_phrase` reliably ends the ConvoBox session and
-kills whatever the backend process still has structurally attached, but
-a process the agent deliberately backgrounds/detaches (e.g. via
-PowerShell's `Start-Process`) can survive indefinitely — reproduced
-live 5/5 times, including one case where the detachment also confused
-codex's own PID tracking badly enough that it launched a duplicate
-copy of the same background process. The `ps`-based fallback that
-closes the macOS gap above does not apply on Windows (`signal.SIGKILL`
-doesn't exist there); an automated test harness driving the identical
-scenario has so far NOT reproduced this failure (8/8 passed), so the
-automated suite alone should not be trusted as a stand-in for live
-verification of this specific gap. See
-[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)'s force-kill entry and
-[docs/STATUS.md](docs/STATUS.md) for full detail.
+Both are detailed in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md), which
+also covers the WASAPI audio-output issue on Windows and every other
+diagnosed problem, indexed by component, platform, and severity.
+[docs/STATUS.md](docs/STATUS.md) carries the dated narrative of how the
+project got here; [CHANGELOG.md](CHANGELOG.md) is the formal per-release
+log.
 
-Known problems (and workarounds, like the WASAPI audio-output issue on
-Windows) are tracked in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
-
-**A safety note before you configure a backend:** by default ConvoBox runs
-Claude Code with `--permission-mode plan` (read/explore/explain only, no
-edits or commands) because headless mode has no way to answer a
-permission prompt at runtime. Setting your own `--permission-mode
-bypassPermissions` (or `--dangerously-skip-permissions`) in
-`backend.command` removes every permission check — only do this in a
-context you'd trust an unsupervised agent with, since voice input can be
-misheard and there's no per-action confirmation yet. Details in
-[docs/STATUS.md](docs/STATUS.md).
+**A safety note before you configure a backend:** ConvoBox defaults to
+`permission_mode: plan` — read, explore, and explain only, no edits and no
+commands — because a headless agent has no way to answer a permission
+prompt at runtime. `approve` lets it act but gates each risky call on a
+spoken approval phrase. `permissive` removes every check, so only use it in
+a context you'd trust an unsupervised agent with: voice input can be
+misheard. Full per-backend behavior, and the two gotchas that bite people,
+in [docs/PERMISSION-MODEL.md](docs/PERMISSION-MODEL.md).
 
 ## Uninstallation
 
@@ -266,19 +219,18 @@ coding-agent CLI already fits into how you work.
 
 ## Status
 
-All three backend adapters (OpenCode, Claude Code, Codex) have been
-driven through the full live voice loop, including tool use, on Windows
-11. Linux/macOS parity is on the roadmap
-([docs/ROADMAP.md](docs/ROADMAP.md)); the support matrix above shows
-exactly what's tested versus implemented-but-not-yet-validated.
+**0.3.1 — a working, extensively live-tested prototype, not a packaged
+release.** All three backend adapters run the full voice loop including
+tool use; the support matrix above is the current picture of what's
+validated where. Linux parity and remaining macOS validation are on the
+roadmap ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
-Since the 0.2.0 release, a substantial interaction/safety bundle
-(barge-in presets, a live conversation TUI, response tiering, a real
-safety bug fixed in the Codex adapter, and more) has landed on `main` —
-see [docs/STATUS.md](docs/STATUS.md) for the full narrative and
-[CHANGELOG.md](CHANGELOG.md) for the formal per-release log. The same
-document also covers the security + performance audit (7 bugs found and
-fixed) and the full progress history.
+The voice pipeline is the hardened part. The web UI is the newest and
+least-hardened, and the safety path has two open gaps listed above. For how
+the project got here — the interaction/safety bundle, the security and
+performance audit, the freeze investigation — see
+[docs/STATUS.md](docs/STATUS.md) for the narrative and
+[CHANGELOG.md](CHANGELOG.md) for the per-release log.
 
 ## Architecture
 

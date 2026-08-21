@@ -1,12 +1,676 @@
 # Known issues
 
-Diagnosed problems we've chosen to defer, with enough detail to pick up
-without re-investigating. Fixed issues move out of here into the changelog /
-PR history.
+Diagnosed problems, with enough detail to pick up without
+re-investigating. Most are deferred; a few are **fixed** and kept here
+anyway, because the mechanism is subtle enough to be worth having on
+hand if the symptom ever returns — those are marked `Fixed` in the index
+below and in their own status line. [CHANGELOG.md](../CHANGELOG.md) is
+the formal record of what shipped when; this file is the record of *why*
+something broke.
+
+Severity reflects consequence to a live session, not effort to fix.
+**High** means it can affect whether the agent actually stops when told
+to. Entries in [Safety-critical](#safety-critical) are the ones to read
+before trusting a voice session with write access; see also
+[PERMISSION-MODEL.md](PERMISSION-MODEL.md).
+
+## Index
+
+| Issue | Component | Platform | Status | Severity |
+|---|---|---|---|---|
+| **Safety-critical** | | | | |
+| [A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops](#a-hard-stop-safeword-or-pause-phrase-does-not-guarantee-an-in-flight-tool-call-actually-stops) | Orchestrator | All | Validated-live | High |
+| [`kill_phrase` ends the ConvoBox session cleanly on Windows, but does not reach an orphaned/detached child process it spawned](#kill_phrase-ends-the-convobox-session-cleanly-on-windows-but-does-not-reach-an-orphaneddetached-child-process-it-spawned) | Force-kill | Windows | Validated-live | High |
+| [`--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it](#--text-mode--permission_mode-approve-abandons-a-pending-approval-instead-of-denying-it) | Approvals | All | Diagnosed | Medium |
+| [STT error-ladder rejection gates on language probability, not decode confidence](#stt-error-ladder-rejection-gates-on-language-probability-not-decode-confidence----a-low-confidence-hallucination-can-slip-through) | STT gating | All | Validated-live | Medium |
+| ["halt halt halt" (a default hard-stop phrase) failed round-trip transcription 4/5 times; bare "Athena" (default resume word) failed 3/5](#halt-halt-halt-a-default-hard-stop-phrase-failed-round-trip-transcription-45-times-bare-athena-default-resume-word-failed-35) | Safeword STT | All | Validated-live | Medium |
+| [A misheard safeword can land on the pause phrase instead of the safeword](#a-misheard-safeword-can-land-on-the-pause-phrase-instead-of-the-safeword----same-hard-stop-effect-different-resulting-state) | Safeword | All | Diagnosed | Low |
+| [A safeword match in a transcript skips checking that same transcript for a pause phrase](#a-safeword-match-in-a-transcript-skips-checking-that-same-transcript-for-a-pause-phrase----fixed) | Safeword | All | Fixed | — |
+| **Stability, freezes, and crashes** | | | | |
+| [faster-whisper's native allocator can fail during a long session](#faster-whispers-native-allocator-can-fail-during-a-long-session) | STT | All (Windows-observed) | Mitigated | Medium |
+| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows | Mostly resolved | Medium |
+| [Backend can go silently busy for minutes with zero output](#backend-can-go-silently-busy-for-minutes-with-zero-output----root-cause-unconfirmed) | Backend | All | Diagnosed | Medium |
+| **Speech pipeline (STT / TTS / AEC)** | | | | |
+| [Kokoro can't synthesize past ~510 phonemes](#kokoro-cant-synthesize-past-510-phonemes----hard-model-limit-not-a-configmode-issue) | TTS (Kokoro) | All | Diagnosed | Low |
+| [WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)](#webrtc-apms-noise-suppression--auto-gain-control-are-unused-candidate-awaiting-go-ahead) | AEC | All | Candidate | — |
+| **Platform and compatibility** | | | | |
+| [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
+| [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
+| **Backend integration (including upstream bugs)** | | | | |
+| [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
+| **Web UI** | | | | |
+| [Web UI: artifact pane gaps (0.3.0)](#web-ui-artifact-pane-gaps-030) | Web UI | All | Deferred | Low |
+| [Web UI: a short CancelledError traceback can appear on quit/Ctrl+C](#web-ui-a-short-cancellederror-traceback-can-appear-on-quitctrlc) | Web UI | All | Mostly mitigated | Low |
+| ["Open in editor" occasionally opens a different file than the one clicked](#open-in-editor-occasionally-opens-a-different-file-than-the-one-clicked----fixed) | Web UI | All | Fixed | — |
+| **Cosmetic and diagnostic** | | | | |
+| [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
 
 ---
 
-## faster-whisper's native allocator can fail during a long session
+## Safety-critical
+
+Anything touching the hard-stop path, the kill phrase, or tool approval.
+These are the entries to read before trusting a voice session with write
+access.
+
+### A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops
+
+**Status:** validated-live, 2026-08-09. Option 1 (honesty fix) was built
+shortly after. Option 2 (escalating force-kill) got a Phase 1 build
+2026-08-14 -- see below; the "escalating" part (automatic, timeout-based)
+was deliberately NOT what got built. **The Windows 90/90 result below does
+NOT transfer to macOS -- codex is 0/10 there; see the macOS finding
+further down before assuming this mechanism works cross-platform.** Full
+evidence, exact timestamps, and
+the mechanism writeup: `docs/field-notes/2026-08-09-hard-stop-does-not-
+cancel-an-in-flight-tool-call.md`.
+
+**Symptom.** During a real ~1h38m live voice UAT session (codex backend,
+real headset), saying the pause phrase or a safeword while a
+`commandExecution` tool call was in flight consistently produced this
+sequence: the interrupt RPC (`turn/interrupt` for codex; the equivalent
+`control_request interrupt` / `POST .../interrupt` for claude-code /
+opencode) succeeds with no error, and ConvoBox's own state (pause/resume,
+safeword-matched, "resumed listening") transitions cleanly and
+immediately -- but the tool call's real `tool_result` doesn't arrive
+until the underlying shell command finishes on its own schedule, **16 to
+48+ seconds later**, across 5 separate incidents. Reproduces identically
+whether triggered by voice or the web UI's Stop-listening button (rules
+out an STT-timing explanation), and stacking multiple hard-stop signals
+in a row during the same wait doesn't shorten it.
+
+**Why:** all three backend adapters' `send_hard_stop()` only signal the
+agent's own conversational/orchestration layer to stop -- none of the
+three vendor APIs is documented to guarantee killing a shell subprocess
+the agent already spawned for a tool call, and ConvoBox never has a
+process handle on that subprocess (it only observes the eventual
+`tool_result` the agent chooses to report). This directly relates to,
+but is a different mechanism than, the entry above (a misheard safeword
+landing on the pause phrase) -- that entry's "in-flight work is
+cancelled either way" claim is about ConvoBox's OWN turn-level state,
+which this finding doesn't contradict; the gap here is one level deeper,
+at the tool call's own OS process.
+
+**Unlike this repo's other "can't force-kill" findings (STT/AEC thread
+offload), this one is solvable** -- an OS process (unlike an in-process
+Python thread) can always be force-killed, and ConvoBox already holds a
+real process handle on each backend's own CLI subprocess (used cleanly
+in every adapter's `aclose()` on shutdown). The capability exists;
+hard-stop just doesn't currently escalate to using it.
+
+**Two follow-up options identified, neither built yet:**
+1. **Honesty fix (small, low-risk):** don't let the UI say "resumed
+   listening" as if everything stopped when a hard-stop was sent but no
+   corresponding `tool_result`/turn-completion has arrived yet -- track
+   and surface that pending-cleanup state truthfully instead of
+   silently going quiet about it.
+2. **Escalating force-kill (bigger, needs its own scoping/UAT pass):**
+   if no completion arrives within a grace period after the polite
+   interrupt, escalate to killing and respawning the backend process.
+   Trades the whole session/thread's context for an actual guarantee --
+   should be a deliberate, probably config-gated choice, not a silent
+   default. Candidate follow-up test scenarios (from a same-session
+   discussion with the codex backend itself, live-testing its own
+   cancellation semantics): does the process actually die and stop
+   performing side effects after an abort, or does aborting-then-
+   restarting the same command produce duplicate/detached execution;
+   how does a natural timeout compare to a manual abort; does a command
+   with its own restart policy resist cancellation; what happens to
+   output ordering (pre-delay vs. post-delay messages) when a delayed
+   command is interrupted mid-stream.
+
+**Option 2, Phase 1 built 2026-08-14** -- a *manual* escalation, not the
+automatic timeout-based one described above. Motivated by three real
+freeze incidents the same evening (`readline()` hung 65.5s+/236.7s+/
+unresolved-until-killed) where `send_hard_stop()`'s own polite interrupt
+rode the SAME channel that was stuck, so it couldn't reach the backend
+either. `BackendAdapter.force_kill()` (default: delegates to `aclose()`;
+`CodexAdapter`/`ClaudeCodeAdapter` override with a real OS-level
+`terminate()` -> wait 5s -> `kill()`, no RPC round-trip attempted at
+all) + `Orchestrator.force_kill()` + an opt-in `safeword.kill_phrase`
+config field (must be one of `hard_stop_phrases`; unset by default) that
+routes ONE specific configured safeword to this instead of the normal
+polite `hard_stop()`. JP's own config: `kill_phrase: "eject eject
+eject"`. Ends the whole ConvoBox session afterward (same as Quit) --
+does NOT attempt to keep the session alive by respawning and
+reconnecting.
+
+**Not done in Phase 1, scoped for a possible Phase 2:** reconnecting a
+freshly-spawned backend to the SAME conversation after a kill, instead of
+ending the session. Checked whether this is even possible 2026-08-14 via
+`codex.cmd app-server generate-json-schema`: codex's real protocol has a
+`thread/resume` RPC (`{threadId: string, ...}` params) that could
+reconnect to an existing server-side thread -- genuinely unverified
+whether resuming a thread whose last turn was violently killed mid-flight
+behaves cleanly, and `codex.py`'s adapter doesn't call it today
+(`_ensure_thread()` always calls `thread/start`, a fresh thread, when
+`self._thread_id is None`). `claude_code.py`'s adapter runs with
+`--no-session-persistence` and has no equivalent capability to reconnect
+to even in principle. `force_kill()`'s own docstring on both adapters
+scaffolds this seam (deliberately doesn't clear any resumable identifier)
+without implementing it.
+
+**Also not done:** an automatic, timeout-based escalation (the original
+"if no completion arrives within a grace period, escalate" framing above)
+-- what got built is an explicit, separate, operator-triggered phrase,
+not a fallback that fires on its own after `hard_stop()` seems to be
+taking too long. That would need its own scoping (what grace period, does
+it also default to ending the session) and hasn't happened.
+
+**Mechanism verified live, 2026-08-14, 30/30 -- voice/STT trigger reliability still open.** Two
+separable questions here: (1) once force_kill() runs, does it actually
+kill the real spawned subprocess (not just the app-server's own
+top-level process, potentially leaving a shell/tool-call child as an
+orphan)? (2) does saying "eject eject eject" out loud reliably reach
+force_kill() at all -- correct STT transcription, no false positives on
+normal speech, no false negatives from a misheard phrase? Only (1) is
+verified so far.
+
+A scratch reliability harness (`_test_force_kill_stops_a_real_tool_call.py`,
+not committed -- JP's own request: "test it at least 10 times... try
+multiple types") drove a REAL codex CLI (not the fake app-server the unit
+suite uses) through `adapter.force_kill()` directly, 10 times each across
+three real long-running tool-call shapes: a plain shell sleep, a
+shell loop progressively writing a file (to also confirm genuine
+mid-flight interruption, not just process death after the work already
+finished), and a real outbound web fetch (`httpbin.org/delay/N`). Each
+run located the actual spawned OS process(es) via Windows/WMI
+`CommandLine` matching (no psutil dependency), called `force_kill()`,
+and confirmed via `Get-Process` that every spawned process -- not just
+the codex app-server's own top-level PID -- was actually dead afterward.
+**Result: 30/30 passed**, zero orphaned processes in any run (verified
+via a full post-run process-tree sweep, not just the harness's own
+per-iteration check). The file-write scenario's "confirm genuine
+mid-flight interruption" check never actually caught partial progress in
+any of the 10 runs -- force_kill() fired before the shell loop's first
+write in every case (real spawn latency eating most of the harness's
+wait window), so that specific piece of evidence is unconfirmed even
+though the underlying PASS/FAIL (process death) is solid across all 30.
+
+A fourth type JP asked about, an MCP tool call, wasn't separately built:
+by mechanism, a stdio-based MCP call spawns a real child OS process (same
+class already covered above); an HTTP-based MCP call makes no separate
+process at all (same shape as the web-fetch case). Flagged rather than
+silently skipped -- standing up a real/mock MCP server would be new
+infrastructure with no different mechanism to actually observe.
+
+**Extended to claude-code and opencode, same evening (JP's own
+follow-up request).** claude-code: identical methodology, **30/30**,
+same "never caught mid-write partial progress" limitation, plus one
+useful outlier -- a single `shell_sleep` run took `force_kill()` 4.92s
+(every other run: 0.01-0.48s), live confirmation the `terminate()`
+-ignored-so-escalate-to-`kill()` fallback path actually fires for real,
+not just in the unit suite's mocked-timeout test.
+
+opencode is architecturally different -- `OpenCodeAdapter` never owns an
+OS process at all (an HTTP client to an already-running `opencode
+serve`), so its `force_kill()` is the `BackendAdapter` default
+(`aclose()`: close the connection, nothing more). Expected the real
+spawned process to survive every time. **Actual: 23/30 matched that
+expectation; 7/30 the spawned process died anyway** (highest on
+`web_fetch_slow`, 4/10) even though `force_kill()` did the exact same
+thing (an instant, ~0.00s local connection close) in every single run.
+Root cause not established -- flagged as a real open question, not
+guessed at further; needs opencode's own server internals to explain.
+**Net: opencode's kill behavior is unpredictable and must not be relied
+upon** -- the architectural limitation this section already named is
+confirmed real, but "the process always survives" is not the accurate
+description of what happens; "sometimes, unpredictably, it doesn't" is.
+
+Full data (all three backends, three scenario types, 10 runs each, raw
+per-iteration results) in `docs/field-notes/2026-08-14-force-kill-
+reliability-across-all-three-backends.md`.
+
+**macOS did NOT reproduce the Windows result when first checked
+(2026-08-15) -- codex 0/10, claude-code 10/10, opposite split -- but the
+codex gap is now CLOSED (fixed 2026-08-18, re-verified live against
+current main).** The Windows 90/90 result does not transfer:
+`terminate()`/`kill()` both map to Windows' `TerminateProcess()`, but
+map to genuinely different POSIX signals (`SIGTERM`/`SIGKILL`) on
+macOS, which do not cascade to children by default. For codex, every
+spawned shell child originally survived `force_kill()` -- root cause
+isolated to two stacked issues: (1) codex's default sandboxing (Apple
+Seatbelt) reparents the real leaf process to `launchd` almost
+immediately, detaching it from the app-server's process tree before
+`force_kill()` ever runs; (2) even with sandboxing disabled and the
+child genuinely still a live child of the process tree, `force_kill()`
+still didn't reach it, since signaling only the top-level PID doesn't
+cascade on POSIX. **`os.killpg()` was tried as the obvious candidate
+fix and tested live -- it FAILS**: `os.getpgid()` on the real spawned
+child confirmed it is its own process-group leader (`pgid` equals its
+own `pid`), independent of the app-server's process group, true even
+with sandboxing off (ruling out Seatbelt as the mechanism) -- this is
+codex's own process-spawning behavior on macOS, not something a
+process-group signal from ConvoBox's side can ever reach. claude-code
+did not show either failure mode -- 10/10 clean, same as its own
+Windows result.
+
+**The actual fix**: `CodexAdapter.force_kill()` now falls back to a
+`ps`-based command-line match (quote-stripped substring comparison
+against the live process table, since codex reports the shell-quoted
+INVOCATION text but the real process's argv has already had that
+quoting consumed by intermediate shells) plus a recursive
+descendant-kill (a multi-statement shell script forks its later
+commands as separate child processes -- killing only the matched
+top-level match orphans them otherwise). Re-verified live,
+2026-08-18, against current main: 20/20 clean across two real
+scenarios (`shell_sleep`, `file_write_progressive`), correctly showing
+the full process tree (wrapper + forked children) confirmed dead, not
+just the matched PID. Fragile by construction (depends on codex
+continuing to report accurate command text) but closes the practical
+gap: `safeword.kill_phrase` against a codex backend on macOS now
+reliably stops a runaway spawned tool-call child, not just the
+top-level process.
+
+**Still open:** the voice/STT-trigger reliability question -- does
+saying "eject eject eject" live, through the real mic pipeline, actually
+match and route to `force_kill()` reliably, and does normal conversation
+ever false-positive on it? That needs a real mic session, not scriptable
+the way the process-kill mechanism above was. Also open: whether the
+same `ps`-based approach holds on Linux (architecturally expected to,
+not yet independently verified there); root-causing WHY claude-code
+never showed the same failure mode codex did.
+
+---
+
+### `kill_phrase` ends the ConvoBox session cleanly on Windows, but does not reach an orphaned/detached child process it spawned
+
+**Status:** validated-live, 2026-08-19, Windows 11 (helios), codex
+backend ONLY (claude-code/opencode not yet tested), real mic sessions,
+reproduced 5/5 independently in the same evening -- 0 live successes.
+An automated harness testing the identical scenario passed 8/8, a
+confirmed and still-unexplained divergence (see "Final tally" below) --
+do not treat the automated result as predictive for this gap. Not
+fixed -- capture-and-diagnose only, with a recommended fix direction
+(Windows Job Object wrapper) scoped below. This is the Windows
+counterpart to the macOS gap documented just above, reached by a
+different mechanism (detachment/orphaning, not codex's own
+process-group behavior), and currently has **no mitigation at all on
+Windows**: the `ps`-based fallback that closes the macOS gap is
+explicitly excluded there (`codex.py:634-645` -- `signal.SIGKILL`/`ps`
+don't exist on Windows, so `force_kill()` only ever does
+`proc.terminate()`/`proc.kill()` against the single top-level process
+handle).
+
+**Symptom.** A CPU- and disk-heavy background process spawned by codex
+(a PowerShell loop hashing an incrementing counter and appending
+records to a file) kept running -- still burning CPU, still growing the
+file -- for over two minutes after `kill_phrase` fired, the log said
+`force-killing backend`, and the entire ConvoBox process had already
+exited (confirmed: no `codex.exe`, no ConvoBox python process, anywhere
+on the system). The spawned process was already an orphan by the time
+it was checked (its own immediate parent process was already gone,
+independent of and unaffected by the kill), meaning it had detached
+from whatever process tree `force_kill()`'s single top-level kill could
+ever reach. A companion test the same evening showed a *plain*
+`Start-Sleep -Seconds 90` spawned by codex *does* die correctly within
+seconds of the same kill -- so this is not "Windows never cascades a
+kill," it's specifically that a detached/orphaned descendant is
+invisible to it, same as the underlying class of bug the macOS fix
+addressed, just reached by a different path here.
+
+**Reproduction (repeatable "known failure" check).** Ask codex, in
+natural language, something like:
+
+> "Write a PowerShell script to a file called `writer.ps1` in this
+> directory. It should loop continuously -- computing a SHA256 hash of
+> an incrementing counter each iteration, and appending a line with the
+> counter, the current UTC timestamp, and the hash to `hashlog.txt`,
+> flushing to disk after every single write -- but stop itself
+> automatically after 10 minutes OR if `hashlog.txt` exceeds 2 GB,
+> whichever comes first, as a safety cap. Then run `writer.ps1` as a
+> background process using `Start-Process pwsh -ArgumentList
+> '-File','writer.ps1' -PassThru`, and tell me the resulting process
+> ID."
+
+Getting a working process this way has taken multiple attempts both
+times this was tried (nested-quoting errors in an inline `-Command`
+one-liner, a .NET method unavailable in this PowerShell's runtime) --
+writing to a real `.ps1` file first and running it with `-File` avoids
+the quoting failures specifically. Once codex reports a PID, confirm it
+is real (`Get-Process`/`Get-CimInstance Win32_Process` showing a
+growing `hashlog.txt`), say the kill phrase, then check the PID again:
+if it is still alive and the file is still growing, the gap has
+reproduced. A well-formed record is `<counter> <UTC timestamp>
+<64-hex-char SHA256>` -- the counter enables detecting gaps/duplicates
+from a torn write anywhere in the file, not just at the tail.
+
+**Corruption check, done once (2026-08-19):** force-killing the
+orphaned process directly (`Stop-Process -Force`, not `kill_phrase`,
+since `kill_phrase` never reached it) while it was actively writing did
+**not** produce a torn record -- the last line was complete and
+well-formed even with the file growing at the instant of the kill. This
+is a narrow result: each write is a single small (~93-byte)
+`StreamWriter.WriteLine()` call with `AutoFlush`, which appears to
+complete as one atomic syscall faster than `TerminateProcess` can land
+mid-call. It does not establish that a larger single write (a
+multi-KB buffered write, or a batch written without per-line flushing)
+would survive the same kind of interruption equally cleanly -- that
+variant has not been tried.
+
+Full detail, exact timestamps, and the live log excerpts:
+`docs/field-notes/2026-08-19-kill-phrase-windows-orphaned-descendant-
+survives-force-kill.md`.
+
+**All testing to date is codex-only.** `claude-code` and `opencode`
+have not been tested against this specific gap at all -- unknown
+whether either shares it, is immune (different sandboxing/spawn
+model), or is worse.
+
+**Final tally after a full evening's live + automated testing:** 5/5
+live voice reproductions (codex, real STT/TUI pipeline, varied scripts
+and phrasings), 0/5 live successes at killing a detached background
+process. Against that, 8/8 automated attempts (a harness driving
+`adapter.force_kill()` directly, bypassing voice) all succeeded --
+dictated launch command, freeform codex-chosen command, short delay,
+and long (75s) delay were each tried, and each time the automated kill
+worked while the equivalent live attempt failed. Neither launch
+method, elapsed time, nor "a prior failed attempt in the same session"
+survived as a sufficient explanation once tested directly. The
+strongest surviving candidate, untested as of this writing: the
+automated harness has always run from inside Claude Code's own process
+tree (via its Bash tool), and every live failure has always run from a
+plain interactive terminal -- if Claude Code's own subprocess handling
+happens to use a Windows Job Object, that could incidentally catch and
+kill children that would otherwise escape, making the harness an
+accidentally-safer environment than real usage. **Practical
+consequence: do not treat this automated harness's pass rate as
+predictive for this specific scenario -- it has been directly
+contradicted by live testing every time tried.** It remains useful for
+everything else it covers (synchronous commands, the no-corruption
+data, cleanup logic).
+
+One live round also surfaced a second, worse failure mode: codex's own
+PID tracking got confused by the same detachment (it checked a PID
+that had already exited while the real worker's log was still visibly
+advancing), concluded the launch had failed, and **launched a second,
+duplicate copy of the same background process** -- both survived the
+kill phrase independently, both still writing to the same log file
+with no coordination. Not just an unkillable process, but a doubled
+one.
+
+**Recommended fix direction, not yet built:** rather than continuing
+to chase individual detachment patterns (an unbounded reactive game --
+`Start-Process`, `Start-Job`, and whatever else an agent invents all
+have to be handled separately under the current approach), wrap the
+codex process in a Windows Job Object at spawn time
+(`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, breakaway disabled). This is a
+structural, one-time fix at the point ConvoBox creates the subprocess
+-- it would force everything that process tree ever spawns, regardless
+of how it detaches, to die when the job closes. Scoped as real
+follow-up work, not built here.
+
+**Still open:** why this session's `working_dir` reverted to the
+source tree instead of the isolated scratch directory used
+successfully in an earlier session the same evening; whether a
+larger-single-write shape tears under a forced kill; the equivalent
+scenario on claude-code and opencode backends, and on macOS/Linux for
+this specific orphaning-not-process-group mechanism.
+
+---
+
+### `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it
+
+**Status:** diagnosed live 2026-08-11, macOS (Mac mini M4), both claude-code
+and codex backends. Not fixed this pass -- fail-safe in practice (nothing
+ever gets written without a real answer) but the mechanism is misleading
+and worth a real fix.
+
+**Symptom.** Ask either backend (in `--text` mode, `permission_mode: approve`)
+to write a file: the approval prompt fires correctly
+(`Approval needed to run Write. Say <phrase> to approve...` for claude-code;
+`item/fileChange/requestApproval` for codex), then **exactly 120 seconds of
+silence**, then `backend still busy after 120s; giving up the wait` and the
+process exits. No file is ever created, on either backend, confirmed twice
+for codex and once (to full resolution) for claude-code.
+
+**Root cause.** `ApprovalPromptGate`'s own `approval_timeout_s` (default
+30s), the thing that's supposed to auto-deny a silently-abandoned approval
+prompt, is only ever ticked by `_working_watchdog` -- and
+`scripts/run_convobox.py` only constructs `watchdog_task` in the mic-loop
+setup path, well after `--text` mode's own early `return`. So in `--text`
+mode, `approval_gate.observe_timeout()` is never called at all; the
+approval just sits pending until an unrelated, generic 120s
+"`backend still busy`" bail-out in `_drain_until_idle` gives up and the
+script calls `adapter.aclose()`, disconnecting the backend without ever
+sending an explicit decline.
+
+**Why this matters even though nothing unsafe happens.** The net effect is
+safe today (no destructive action executes without a real answer), but
+what looks like "the system denied my request" is actually "the system
+gave up waiting and disconnected" -- a real distinction if this approval
+channel is ever built on further (e.g. surfaced to a caller who cares
+*why* a request didn't go through, or a future mode where abandon and
+deny should behave differently).
+
+**Fix candidates, neither built yet:** either construct a lightweight
+version of the watchdog (or just call `approval_gate.observe_timeout()`
+on a bare timer) in `--text` mode too, or have `--text` mode's own exit
+path call `resolve_pending_approval(False)` explicitly before
+`adapter.aclose()`.
+
+**Also attempted, inconclusive:** the live mic-loop voice-approval flow
+itself (the thing `--text` mode structurally can't exercise) -- 4 live
+synthetic-injection attempts, blocked by real, loud ambient background
+noise in the test room that session (not a code issue). Full detail,
+plus the clean `plan`/`permissive` mode confirmations on both backends
+(N=2 each) and a re-confirmation that opencode remains untestable
+(0 configured credentials): `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
+
+---
+
+### STT error-ladder rejection gates on language probability, not decode confidence -- a low-confidence hallucination can slip through
+
+**Status:** validated-live, 2026-08-12, single instance -- not yet
+confirmed as a systematic gap across more samples.
+
+**Symptom.** JP was speaking live, deliberately only saying variations
+on "stop listening"/"resume listening". The pipeline transcribed
+`'mayday listening resume alpha bravo'` (`lang=en (0.62) dec=0.31`) --
+words he never said, not a garbled version of what he did say (confirmed
+by direct comparison against his own real-time report). It was not
+rejected; it went to the backend as ordinary conversation.
+
+**Why it wasn't caught.** The error ladder's low-confidence rejection
+(`stt.min_language_probability`, 0.4 in this config) checks the
+**language-detection probability**, not the separately-logged **decode
+confidence** (`dec=...`). This hallucination's language probability
+(0.62) was comfortably above threshold even though its decode confidence
+(0.31) was lower than two other transcripts the SAME session correctly
+rejected minutes earlier (`'stop brake'` lang=0.40, `'stop please'`
+lang=0.37). "Confident this is English" and "confident these are the
+right words" are different signals; only the first currently gates
+rejection.
+
+**Why this matters beyond STT accuracy in general.** The hallucinated
+content -- `"alpha bravo"` -- is two of the three words in this session's
+real `approval_phrase` (`"alpha bravo delta"`). It fell one word short
+and nothing unsafe happened, but it's a genuine near-miss on a
+security-relevant phrase, produced by hallucination rather than real
+speech, on a gate that measured the wrong confidence signal.
+
+**Not yet done:** checking whether adding `dec` as a second gate
+condition would catch cases like this without materially increasing
+false rejections on good transcripts -- needs real distribution data
+across both accepted and rejected transcripts, not just this one sample.
+Full evidence: `docs/field-notes/2026-08-12-stt-hallucination-bypasses-the-language-probability-gate-near-miss-on-approval-phrase.md`.
+
+---
+
+### "halt halt halt" (a default hard-stop phrase) failed round-trip transcription 4/5 times; bare "Athena" (default resume word) failed 3/5
+
+**Status:** diagnosed live 2026-08-15, macOS, real Piper TTS -> faster-
+whisper round-trip testing (`stt.model: base`). Not yet fixed or
+decided -- see recommendations below.
+
+**Symptom.** A safety-phrase reliability battery (23 hand-labeled test
+cases, gibberish and foreign-language phrasing included) found zero
+false positives anywhere, but two real false-negative gaps:
+`"halt halt halt"` -- one of only three default `hard_stop_phrases` --
+was misheard 4/5 times (`"Hold, hold, hold"` dominant, `"HOT POT POT"`
+once), phonetically close enough to be a plausible genuine STT
+confusion, not obviously a synthesis-only artifact. The default resume
+word `"Athena"` said bare/alone (the simplest, most natural usage) was
+misheard 3/5 times (`"patina"`, `"Adina"`, `"Aficino"`) -- notably worse
+than the `resumeword/detector.py` module's own documented "5/5" claim,
+which used varied multi-word phrasings; re-testing that same varied-
+phrasing set here reproduced a comparable 4/5. `"stop stop stop"` and
+`"abort abort abort"` were fully reliable (5/5 each).
+
+**Why this matters.** `resumeword/detector.py` already documents a
+round-trip verification discipline (`ROUNDTRIP_REJECTED_RESUME_WORDS`) --
+applied once, when "Athena" was chosen 2026-07-13, but never repeated
+for `hard_stop_phrases` when "abort"/"halt" were added 2026-08-09 (that
+addition's own comment reasons about vocabulary collision with the
+project's domain terms, not STT transcription reliability), and never
+re-applied to the bare-word resume-word case specifically.
+
+**Recommendations (not yet reviewed/decided by JP):**
+1. Re-evaluate `"halt halt halt"` as a default -- drop it, keep it with
+   a Settings-TUI warning (same shape as
+   `ROUNDTRIP_REJECTED_RESUME_WORDS`), or verify against real human
+   speech before deciding (this note's evidence is Piper-only).
+2. Document that a resume word said WITH a little surrounding phrase is
+   more reliable than said bare/alone.
+3. Extend the not-yet-built setup-wizard "test-transcribe a few times"
+   UX to hard-stop phrases too, not just the resume word.
+4. This is NOT evidence for gating safewords/hotwords broadly behind an
+   advanced-config warning -- the false-positive side is clean across
+   this whole battery. The gap is narrow (one phrase, one usage
+   pattern), not architectural.
+
+Full data, methodology, and the false-positive-side results (all clean):
+`docs/field-notes/2026-08-15-safety-phrase-reliability-battery-halt-and-
+bare-athena-unreliable.md`.
+
+---
+
+### A misheard safeword can land on the pause phrase instead of the safeword -- same hard-stop effect, different resulting state
+
+**Status:** diagnosed live 2026-08-01, not a safety gap, no fix planned
+(STT-accuracy category, same underlying risk already noted for
+`resume_word`/`pause_listening_phrases` in `docs/UAT-checklist.md`'s [P7]
+enhancement idea). Documented so the distinction between "safe" and
+"expected state" isn't lost.
+
+**Symptom.** Live UAT, `convobox-UAT` @ `3d9d4b9`, `20:07:08`: an
+utterance intended (per JP's own live report) as the safeword ("stop stop
+stop") was transcribed by STT as `'Stop listening.'` instead --
+```
+20:07:08,019 Detected language 'en' with probability 0.97
+20:07:08,570 paused listening (matched 'Stop listening.') -- hard-stopped
+in-flight work; say 'Athena' to resume
+```
+Both `SafewordDetector` and `PauseListeningDetector` check the same raw
+STT transcript (`docs/DESIGN-barge-in.md`, "Pause/resume listening" --
+safeword checked first, then the pause phrase); when STT mishears one
+configured phrase as a different, *also*-configured phrase, whichever one
+the transcript actually matches is the one that fires. There's no gap
+where the utterance is silently swallowed -- it always resolves to
+whatever ConvoBox actually heard.
+
+**Why this is not a safety gap.** The pause path calls the exact same
+`send_hard_stop()` the safeword path does (see `scripts/run_convobox.py`'s
+pause branch), so in-flight work is cancelled either way -- confirmed in
+this same session, where the mis-heard "stop listening" correctly
+hard-stopped the bogus in-flight "Stop listing." call from the entry
+above. The real, user-visible difference is state, not safety: the
+safeword returns to normal listening immediately, while landing on the
+pause phrase instead leaves the session paused, requiring the resume word
+before it hears anything else again -- an extra step someone reaching for
+the emergency-stop phrase likely didn't intend.
+
+**No fix proposed.** This is the same STT-reliability category already
+tracked for `resume_word` (docs/UAT-checklist.md's [P7] entry: "STT is
+unreliable enough live that one exact phrase can be hard to hit
+reliably"), not a new problem this feature introduced. Worth keeping in
+mind if `pause_listening_phrases`/`hard_stop_phrases` are ever tuned
+closer together in pronunciation.
+
+---
+
+### A safeword match in a transcript skips checking that same transcript for a pause phrase -- fixed
+
+**Status:** validated-live, 2026-08-12; fixed 2026-08-14, not yet
+live-reproduced against the patched code (unit-level + full-suite
+verification only so far -- see below). Never a safety gap (the
+hard-stop itself always fired correctly regardless, before or after
+this fix) -- this was a real, code-confirmed interaction gap between two
+independent control mechanisms.
+
+**Symptom.** JP spoke a long, rapid-fire safeword sequence live; STT
+transcribed it as one continuous 11.8s utterance containing multiple
+safewords AND the pause phrase: `'break break break cancel cancel
+cancel ... abort abort abort stop listening cancel cancel cancel ...'`.
+The hard-stop fired correctly on `'break break break'` (first match).
+`'stop listening'`, present verbatim later in the same transcript, was
+never separately evaluated -- the session never entered the paused
+state from this utterance.
+
+**Mechanism, confirmed in code** (`scripts/run_convobox.py:2507-2547`):
+the entire pause/resume check (`listening_gate.observe(text)`) lived
+inside `if not is_hard_stop:`. When a safeword matched a transcript,
+that whole block -- including the pause check -- was skipped entirely
+for that transcript, not just reordered after the hard-stop.
+`PauseListeningDetector` itself was unaffected and would have found the
+phrase if asked; the gap was in the caller never asking.
+
+**Why this is realistic, not contrived:** this project already has a
+documented hallucination pattern (2026-08-06) where a single STT segment
+can span many seconds of repeated/garbled phrases -- exactly the shape
+that lets two different trigger phrases land in one utterance. This
+session hit it live.
+
+**JP's decision (2026-08-14):** run the pause/resume check
+unconditionally, even on a hard-stop transcript -- not because the two
+should race, but because the spoken pause path already performs its own
+full stop sequence as a side effect of registering the pause
+(`gate_action == "pause"` at `scripts/run_convobox.py:2573-2609` calls
+`player.stop()`/`tts.stop()`/`adapter.send_hard_stop()`, mirrored by
+`WebListeningBridge.pause()` calling `Orchestrator.hard_stop()`
+directly, `src/convobox/web/bridge.py:441`) -- so "stop listening"
+already implies "hard stop" as one bundled action, on both the spoken
+and web-button paths. The gap was that a safeword present in the same
+utterance short-circuited past that pause branch entirely, losing the
+paused-state transition even though an equivalent stop was about to
+happen anyway via the hard-stop path.
+
+**Fix:** `listening_gate.observe(text)` now also runs when
+`is_hard_stop` is true, applying only the STATE change (pause/resume is
+a pure state machine with no side effects of its own) -- not the
+"pause" branch's own stop sequence (redundant, the hard-stop path
+already stops everything) and not a `continue` (which would skip the
+hard-stop path entirely, the one guarantee that must never change). The
+existing safeword-hard-stop path is untouched: still checked first,
+still falls through unconditionally, still "never swallowed." New log
+lines ("also paused listening" / "also resumed listening") give live
+signal when this branch actually fires. `ListeningGate`'s own docstring
+updated to drop the now-stale "only call this when the safeword did NOT
+match" claim.
+
+**Verification so far:** full suite green (1412 passed / 2 pre-existing
+unrelated Windows symlink-privilege failures, same as before this
+change) and `mypy src/convobox scripts` clean. No unit test added --
+`run()` itself has no existing test harness (real mic/segmenter
+dependency; every fix to this exact function in this project's history
+has been live-UAT-verified, not unit-tested, including the original
+finding this fixes). **Not yet live-reproduced**: next real step is
+repeating the same rapid-fire chained-safeword-plus-"stop listening"
+utterance live and confirming both the hard-stop fires AND the session
+actually ends up in the paused state afterward (observable via a
+follow-up utterance being gated, or the new "also paused listening" log
+line). Full original evidence:
+`docs/field-notes/2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-utterance.md`.
+
+---
+
+## Stability, freezes, and crashes
+
+Conditions where the process hangs, stalls, or dies. The VAD-freeze
+entry is the long one; most of what it originally described turned out
+to be measurement confounds, and it records which parts survived.
+
+### faster-whisper's native allocator can fail during a long session
 
 **Status:** mitigated (2026-07-14), root cause is upstream and unfixed.
 `LocalTranscriber` (`src/convobox/stt/transcriber.py`) now catches this and
@@ -180,7 +844,7 @@ bug rather than working around it).
 
 ---
 
-## VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
+### VAD segmenter's per-window model call is synchronous with no offload/timeout -- can plausibly freeze the whole app
 
 **Status:** narrowed and mostly resolved as of 2026-08-15 -- see the
 "2026-08-15 investigation, final status" summary near the end of this
@@ -606,7 +1270,174 @@ than caught incidentally.
 
 ---
 
-## WASAPI output plays speech an octave too high ("static chipmunk")
+### Backend can go silently busy for minutes with zero output -- root cause unconfirmed
+
+**Status:** diagnosed live 2026-07-31 (claude-code backend), root cause
+**not** confirmed. Recorded now so it isn't lost, not because a fix is
+ready -- the concrete next step is re-running with `--verbose` next time
+this recurs (see below), not a code change.
+
+**Symptom.** Live UAT session, `convobox-UAT` checkout @ `20181be`,
+`backend.name: claude-code`, `--tui --aec-dump`, default (INFO) log
+level. Three silent-busy stretches in one session, each ending in real
+spoken output rather than a crash, error, or reconnect:
+- 18:47:52 -> 19:01:29 (**822s / ~13.7 minutes**), resolved with audio at
+  19:01:41.
+- 19:02:12 -> 19:03:37 (90s), resolved with a fresh turn at 19:04:01.
+- 19:04:01 -> 19:08:13 (270s), resolved with audio at 19:08:39.
+
+All three immediately followed a plain-text (no-tool-call) response --
+the live backend itself, mid-session, characterized its own stuck turn
+as "both following a plain-text response with no tool call." No file in
+the working tree changed timestamp during the worst stretch (checked via
+`find . -newermt "2026-07-31 18:47:00" ! -newermt "2026-07-31 19:02:00"`,
+zero matches outside the always-updating log/AEC-dump files) -- consistent
+with either genuine extended "thinking" with no tool use, or a stuck
+state producing nothing at all. Both are equally consistent with the
+evidence gathered so far.
+
+**Why root cause is unconfirmed.** `WorkingIndicator`
+(`scripts/run_convobox.py`) only observes `adapter.is_busy()` and
+`player.is_playing()` -- by design, it never times out or takes action
+itself (the safeword is the intended abort path), so a long heartbeat is
+not itself a bug, just a faithful report that `is_busy()` stayed `True`.
+At the default INFO log level, individual backend stream events (tool
+calls, thinking deltas) aren't logged, so a genuinely slow backend turn
+and a ConvoBox-side state bug (`is_busy()` failing to clear after the
+backend actually finished) look identical after the fact -- there's
+currently no way to tell them apart from `convobox-tui.log` alone. No
+native `claude` session transcript was found for this run either (the
+project's own `~/.claude/projects/` entry for this working dir has no
+`.jsonl` matching the session), so that avenue didn't help this time.
+
+**Next step, not yet done:** re-run with `--verbose` (DEBUG logging)
+next time a stall like this happens, so tool-call/thinking-level events
+are actually captured during the stall. If a future occurrence shows
+real backend events streaming the whole time, that confirms genuine
+long-running backend work (not a ConvoBox bug, just a UX/observability
+gap worth its own fix -- e.g. surfacing *what* the backend is doing, not
+just how long). If a future occurrence shows zero backend-side events
+for minutes at DEBUG level too, that would point at a real `is_busy()`
+staleness bug and justify a code investigation this entry didn't have
+enough evidence to start.
+
+**Current guidance (JP, 2026-07-30):** Piper for long responses; Kokoro
+is fine for short conversational replies where phoneme count won't
+approach the limit. No code change proposed by this entry -- documenting
+the finding so the ~500 number isn't re-diagnosed from scratch later.
+
+**Sources:** Kokoro-82M-v1.0-ONNX context length / 510-phoneme limit --
+[Hugging Face model card](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX);
+chunking workaround precedent --
+[Kokoro-FastAPI README](https://github.com/remsky/Kokoro-FastAPI/blob/master/README.md).
+
+---
+
+## Speech pipeline (STT / TTS / AEC)
+
+Limits of the local speech stack itself, independent of any backend.
+
+### Kokoro can't synthesize past ~510 phonemes -- hard model limit, not a config/mode issue
+
+**Status:** diagnosed (root cause 2026-07-24; confirmed against upstream
+docs 2026-07-30), unfixed. Workaround: use Piper for long responses.
+
+**Symptom.** Live-confirmed 2026-07-30 (JP, manual A/B while testing
+Piper): Piper reads long text fine; Kokoro reliably fails at around
+~500 phonemes. This is the same mechanism already root-caused 2026-07-24
+in `KokoroTTSEngine.synthesize_stream` (`src/convobox/tts/kokoro.py`):
+kokoro-onnx's own `create_stream()` runs a detached background task with
+no exception handling; text producing more than the model's phoneme
+limit raises `IndexError` inside that task (`voice = voice[len(tokens)]`),
+the task dies silently, and the consumer's `await queue.get()` hangs
+forever at 0% CPU. ConvoBox bounds the hang with a 30s timeout
+(`_CHUNK_TIMEOUT_S`) that turns it into a catchable `RuntimeError`
+instead of an indefinite hang.
+
+**Root cause: a confirmed hard architectural limit, not a runtime mode.**
+Web-checked 2026-07-30 against Kokoro-82M's model card and the
+kokoro-onnx source: the model's context length is 512 tokens, and with
+mandatory pad tokens at the start and end, the effective max is **510
+phoneme tokens per synthesis call** -- consistent with the ~500 JP
+observed. This isn't a batching mode or config flag ConvoBox is missing;
+projects that give Kokoro long-text support (e.g. Kokoro-FastAPI) do it
+by pre-chunking text client-side into windows well under the limit (its
+own defaults: ~175-250 target tokens, 450 absolute max) and stitching
+the resulting audio, not by raising a limit on the model itself.
+
+**Not yet built:** that pre-chunking layer. PR #175 (merged 2026-07-30)
+makes the failure *visible* -- surfaces it as a logged error plus a
+`BackendEvent(ERROR)` instead of a silent gap in the transcript -- but
+its own scope note is explicit that it does not make Kokoro handle the
+long text; a real fix means splitting text into safe-sized chunks
+before each `synthesize_stream()` call, which needs a live mic session
+to verify audio quality across chunk boundaries (naturalness/pacing at
+the seam). Discussed and deliberately deferred (2026-07-30): a simpler,
+lower-risk alternative if this becomes worth revisiting is auto-routing
+by estimated phoneme/char count (Piper for long text, Kokoro for short)
+rather than chunking Kokoro itself -- same benefit, none of the
+audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
+later becomes a reason to keep everything on the permissively-licensed
+engine.
+
+---
+
+### WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
+
+**Status:** candidate, not built. Offered to JP directly (2026-07-15
+evening, in response to his live report that mic+speaker AEC is still
+leaking despite the delay-hint fix); awaiting his go-ahead before
+touching this. The original "why not now" reasoning below is stale (it
+predated the extensive AEC investigation this session has since done)
+and is kept for history, not as the current blocker.
+
+**What's there but unused, with more real detail than previously
+recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
+constructs `AudioProcessor(enable_aec=True, enable_ns=False,
+enable_agc=False, enable_vad=False)`. Re-inspected the installed
+package's real constructor signature (2026-07-16, `inspect.signature`,
+not assumed): `AudioProcessor.__init__(self, enable_aec=True,
+enable_ns=True, ns_level=2, enable_agc=True, agc_mode=1,
+enable_vad=True)` -- the binding's OWN defaults have NS and AGC ON,
+with real tunable aggressiveness parameters (`ns_level`, `agc_mode`)
+neither previously documented here nor exposed anywhere in ConvoBox.
+`aec.py` deliberately overrides both to off. This means a future PR
+needs to pick real values for `ns_level`/`agc_mode`, not just flip two
+booleans -- worth live-testing a couple of settings rather than
+guessing at the "right" level, same discipline as everything else this
+session has verified against real hardware before committing to it.
+
+**Why this might matter, concretely, not speculatively.** AGC directly
+targets an already-documented, real finding: PR #74's live hardware
+smoke test (`probe_audio()`, Settings TUI) reported `"mic: ... very
+quiet -- raise the input gain or move closer"` against this machine's
+actual default mic -- the exact condition AGC exists to correct. More
+recently (2026-07-15 evening), JP's own live mic+speaker UAT log showed
+persistently erratic, often poor echo attenuation (0.5-12dB, swinging
+response to response) even with a correct AEC delay hint -- a genuinely
+hard open-air acoustic coupling problem, not a leftover config bug (see
+`docs/UAT-checklist.md` **[E8]**/**[E9]**). NS/AGC won't fix delay
+estimation, but AGC in particular could reduce how hot the mic signal
+runs from close speaker proximity, which plausibly makes AEC3's own
+adaptive filter's job easier -- untested, not asserted as a fix.
+
+**Original "why not now" reasoning (2026-07-14, superseded, kept for
+history).** This touches the exact same `AudioProcessor` construction
+JP was then actively mid-assessment on for a different reason (his own
+PR #78 `[L3]` finding: AEC produces artifacts and drops real barge-in
+with a headset, "recorded for assessment," not yet decided at the
+time). That assessment has since resolved through extensive live UAT
+(`[L4]`-`[L6]`, `[E8]`, `[E9]`) -- the attribution-ambiguity concern
+that justified waiting no longer applies. The live JP go-ahead question
+is the only remaining gate now.
+
+---
+
+## Platform and compatibility
+
+Issues that only appear on one OS or one audio API.
+
+### WASAPI output plays speech an octave too high ("static chipmunk")
 
 **Status:** deferred (2026-07-12). Mitigation: use an **MME** output device.
 WASAPI is documented as low-latency-but-finicky in
@@ -665,7 +1496,7 @@ doing carefully, not rushing mid-UAT.
 
 ---
 
-## AEC builds from source on macOS — PyPI just doesn't ship a wheel for it
+### AEC builds from source on macOS — PyPI just doesn't ship a wheel for it
 
 **Status:** verified 2026-07-16 on Apple Silicon (M4, macOS 26.5). Not a
 bug — a gap in what was previously assumed. `aec.py`'s docstring and the
@@ -845,58 +1676,12 @@ built artifacts live and how they're kept in sync with the pinned
 
 ---
 
-## WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
+## Backend integration (including upstream bugs)
 
-**Status:** candidate, not built. Offered to JP directly (2026-07-15
-evening, in response to his live report that mic+speaker AEC is still
-leaking despite the delay-hint fix); awaiting his go-ahead before
-touching this. The original "why not now" reasoning below is stale (it
-predated the extensive AEC investigation this session has since done)
-and is kept for history, not as the current blocker.
+Problems in or at the boundary with a coding-agent CLI. Upstream entries
+are not ours to fix; they are documented so the symptom is recognizable.
 
-**What's there but unused, with more real detail than previously
-recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
-constructs `AudioProcessor(enable_aec=True, enable_ns=False,
-enable_agc=False, enable_vad=False)`. Re-inspected the installed
-package's real constructor signature (2026-07-16, `inspect.signature`,
-not assumed): `AudioProcessor.__init__(self, enable_aec=True,
-enable_ns=True, ns_level=2, enable_agc=True, agc_mode=1,
-enable_vad=True)` -- the binding's OWN defaults have NS and AGC ON,
-with real tunable aggressiveness parameters (`ns_level`, `agc_mode`)
-neither previously documented here nor exposed anywhere in ConvoBox.
-`aec.py` deliberately overrides both to off. This means a future PR
-needs to pick real values for `ns_level`/`agc_mode`, not just flip two
-booleans -- worth live-testing a couple of settings rather than
-guessing at the "right" level, same discipline as everything else this
-session has verified against real hardware before committing to it.
-
-**Why this might matter, concretely, not speculatively.** AGC directly
-targets an already-documented, real finding: PR #74's live hardware
-smoke test (`probe_audio()`, Settings TUI) reported `"mic: ... very
-quiet -- raise the input gain or move closer"` against this machine's
-actual default mic -- the exact condition AGC exists to correct. More
-recently (2026-07-15 evening), JP's own live mic+speaker UAT log showed
-persistently erratic, often poor echo attenuation (0.5-12dB, swinging
-response to response) even with a correct AEC delay hint -- a genuinely
-hard open-air acoustic coupling problem, not a leftover config bug (see
-`docs/UAT-checklist.md` **[E8]**/**[E9]**). NS/AGC won't fix delay
-estimation, but AGC in particular could reduce how hot the mic signal
-runs from close speaker proximity, which plausibly makes AEC3's own
-adaptive filter's job easier -- untested, not asserted as a fix.
-
-**Original "why not now" reasoning (2026-07-14, superseded, kept for
-history).** This touches the exact same `AudioProcessor` construction
-JP was then actively mid-assessment on for a different reason (his own
-PR #78 `[L3]` finding: AEC produces artifacts and drops real barge-in
-with a headset, "recorded for assessment," not yet decided at the
-time). That assessment has since resolved through extensive live UAT
-(`[L4]`-`[L6]`, `[E8]`, `[E9]`) -- the attribution-ambiguity concern
-that justified waiting no longer applies. The live JP go-ahead question
-is the only remaining gate now.
-
----
-
-## opencode 1.18.3: session-level model pin silently never generates (upstream)
+### opencode 1.18.3: session-level model pin silently never generates (upstream)
 
 **Status:** diagnosed live 2026-07-18, upstream bug, no fix available
 (1.18.3 is the latest release as of this entry). ConvoBox's
@@ -1184,7 +1969,12 @@ retry may also be needed the first time a server starts. Full write-up:
 
 ---
 
-## Web UI: artifact pane gaps (0.3.0)
+## Web UI
+
+The optional browser companion (`--web`). Newest and least-hardened
+subsystem.
+
+### Web UI: artifact pane gaps (0.3.0)
 
 **Status:** diagnosed/scoped, deferred. The web UI (docs/WEB-UI-USAGE.md)
 is new in 0.3.0 -- these are known rough edges, not silently-missed bugs.
@@ -1271,7 +2061,7 @@ implemented, still a design note, not a blind port of the codex pattern.
 
 ---
 
-## Web UI: a short CancelledError traceback can appear on quit/Ctrl+C
+### Web UI: a short CancelledError traceback can appear on quit/Ctrl+C
 
 **Status:** mostly mitigated (2026-07-29), one small residual known and
 accepted. `EventBroadcaster.close_all()` (`src/convobox/web/stream.py`)
@@ -1308,251 +2098,7 @@ in the same place the traceback, if any, appeared.
 
 ---
 
-## Kokoro can't synthesize past ~510 phonemes -- hard model limit, not a config/mode issue
-
-**Status:** diagnosed (root cause 2026-07-24; confirmed against upstream
-docs 2026-07-30), unfixed. Workaround: use Piper for long responses.
-
-**Symptom.** Live-confirmed 2026-07-30 (JP, manual A/B while testing
-Piper): Piper reads long text fine; Kokoro reliably fails at around
-~500 phonemes. This is the same mechanism already root-caused 2026-07-24
-in `KokoroTTSEngine.synthesize_stream` (`src/convobox/tts/kokoro.py`):
-kokoro-onnx's own `create_stream()` runs a detached background task with
-no exception handling; text producing more than the model's phoneme
-limit raises `IndexError` inside that task (`voice = voice[len(tokens)]`),
-the task dies silently, and the consumer's `await queue.get()` hangs
-forever at 0% CPU. ConvoBox bounds the hang with a 30s timeout
-(`_CHUNK_TIMEOUT_S`) that turns it into a catchable `RuntimeError`
-instead of an indefinite hang.
-
-**Root cause: a confirmed hard architectural limit, not a runtime mode.**
-Web-checked 2026-07-30 against Kokoro-82M's model card and the
-kokoro-onnx source: the model's context length is 512 tokens, and with
-mandatory pad tokens at the start and end, the effective max is **510
-phoneme tokens per synthesis call** -- consistent with the ~500 JP
-observed. This isn't a batching mode or config flag ConvoBox is missing;
-projects that give Kokoro long-text support (e.g. Kokoro-FastAPI) do it
-by pre-chunking text client-side into windows well under the limit (its
-own defaults: ~175-250 target tokens, 450 absolute max) and stitching
-the resulting audio, not by raising a limit on the model itself.
-
-**Not yet built:** that pre-chunking layer. PR #175 (merged 2026-07-30)
-makes the failure *visible* -- surfaces it as a logged error plus a
-`BackendEvent(ERROR)` instead of a silent gap in the transcript -- but
-its own scope note is explicit that it does not make Kokoro handle the
-long text; a real fix means splitting text into safe-sized chunks
-before each `synthesize_stream()` call, which needs a live mic session
-to verify audio quality across chunk boundaries (naturalness/pacing at
-the seam). Discussed and deliberately deferred (2026-07-30): a simpler,
-lower-risk alternative if this becomes worth revisiting is auto-routing
-by estimated phoneme/char count (Piper for long text, Kokoro for short)
-rather than chunking Kokoro itself -- same benefit, none of the
-audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
-later becomes a reason to keep everything on the permissively-licensed
-engine.
-
----
-
-## Backend can go silently busy for minutes with zero output -- root cause unconfirmed
-
-**Status:** diagnosed live 2026-07-31 (claude-code backend), root cause
-**not** confirmed. Recorded now so it isn't lost, not because a fix is
-ready -- the concrete next step is re-running with `--verbose` next time
-this recurs (see below), not a code change.
-
-**Symptom.** Live UAT session, `convobox-UAT` checkout @ `20181be`,
-`backend.name: claude-code`, `--tui --aec-dump`, default (INFO) log
-level. Three silent-busy stretches in one session, each ending in real
-spoken output rather than a crash, error, or reconnect:
-- 18:47:52 -> 19:01:29 (**822s / ~13.7 minutes**), resolved with audio at
-  19:01:41.
-- 19:02:12 -> 19:03:37 (90s), resolved with a fresh turn at 19:04:01.
-- 19:04:01 -> 19:08:13 (270s), resolved with audio at 19:08:39.
-
-All three immediately followed a plain-text (no-tool-call) response --
-the live backend itself, mid-session, characterized its own stuck turn
-as "both following a plain-text response with no tool call." No file in
-the working tree changed timestamp during the worst stretch (checked via
-`find . -newermt "2026-07-31 18:47:00" ! -newermt "2026-07-31 19:02:00"`,
-zero matches outside the always-updating log/AEC-dump files) -- consistent
-with either genuine extended "thinking" with no tool use, or a stuck
-state producing nothing at all. Both are equally consistent with the
-evidence gathered so far.
-
-**Why root cause is unconfirmed.** `WorkingIndicator`
-(`scripts/run_convobox.py`) only observes `adapter.is_busy()` and
-`player.is_playing()` -- by design, it never times out or takes action
-itself (the safeword is the intended abort path), so a long heartbeat is
-not itself a bug, just a faithful report that `is_busy()` stayed `True`.
-At the default INFO log level, individual backend stream events (tool
-calls, thinking deltas) aren't logged, so a genuinely slow backend turn
-and a ConvoBox-side state bug (`is_busy()` failing to clear after the
-backend actually finished) look identical after the fact -- there's
-currently no way to tell them apart from `convobox-tui.log` alone. No
-native `claude` session transcript was found for this run either (the
-project's own `~/.claude/projects/` entry for this working dir has no
-`.jsonl` matching the session), so that avenue didn't help this time.
-
-**Next step, not yet done:** re-run with `--verbose` (DEBUG logging)
-next time a stall like this happens, so tool-call/thinking-level events
-are actually captured during the stall. If a future occurrence shows
-real backend events streaming the whole time, that confirms genuine
-long-running backend work (not a ConvoBox bug, just a UX/observability
-gap worth its own fix -- e.g. surfacing *what* the backend is doing, not
-just how long). If a future occurrence shows zero backend-side events
-for minutes at DEBUG level too, that would point at a real `is_busy()`
-staleness bug and justify a code investigation this entry didn't have
-enough evidence to start.
-
-**Current guidance (JP, 2026-07-30):** Piper for long responses; Kokoro
-is fine for short conversational replies where phoneme count won't
-approach the limit. No code change proposed by this entry -- documenting
-the finding so the ~500 number isn't re-diagnosed from scratch later.
-
-**Sources:** Kokoro-82M-v1.0-ONNX context length / 510-phoneme limit --
-[Hugging Face model card](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX);
-chunking workaround precedent --
-[Kokoro-FastAPI README](https://github.com/remsky/Kokoro-FastAPI/blob/master/README.md).
-
----
-
-## A hard-stopped in-flight turn can show as a generic "error_during_execution" turn -- cosmetic mislabel
-
-**Status:** diagnosed (first noted 2026-08-01 during PR #191's live UAT),
-unfixed. Cosmetic only -- never logged via this project's own logging,
-never spoken, and doesn't affect the hard-stop itself, which works
-correctly. Scoped fix identified, not built.
-
-**Symptom.** Live-confirmed again 2026-08-01 (`convobox-UAT` @ `3d9d4b9`,
-`backend.name: claude-code`, `--tui --web`): a `[TUI]` turn labeled
-`error_during_execution` appears whenever a hard-stop (pause or safeword)
-interrupts an in-flight `claude-code` CLI call. Concrete example from
-this session's `convobox-tui.log`:
-- `20:06:29,364 transcript='Stop listing.' ... busy=False` -- STT
-  mis-transcribed "stop listening" as "Stop listing.", which matched
-  neither the pause phrase nor the safeword, so it was sent to the
-  backend as a real (nonsensical) query.
-- `20:06:35 - 20:06:36` -- a second attempt correctly transcribed as
-  `'Stop listening.'`, matched the pause phrase, and hard-stopped the
-  still-busy "Stop listing." call via `send_hard_stop()`.
-- The interrupted `claude-code` CLI process's own interrupt-confirmation
-  text is what surfaces as the `error_during_execution` turn -- it's the
-  CLI's own output, not a real ConvoBox error, and it's real behavior
-  visible in the TUI turn history, not written to `convobox-tui.log` via
-  this project's own `log.*()` calls at all (confirmed: the exact string
-  `error_during_execution` does not appear anywhere in the text log for
-  this session, only in the on-screen TUI transcript pane).
-
-**Root cause.** `claude-code`'s headless-mode interrupt path (see
-`src/convobox/adapters/claude_code.py`'s own module docstring on how this
-adapter builds hard-stop since there's no native per-call channel) emits
-its own confirmation output when a call is interrupted mid-execution.
-`_on_backend_event` in `scripts/run_convobox.py` has no special case for
-this and falls through to the generic ERROR system-turn tag ([U10]'s
-convention for session-level events worth showing inline), the same
-fallthrough noted for [T6]'s TTS-failure-in-`--tui` gap.
-
-**Not yet decided:** whether to give this its own recognizable turn label
-(distinguishing "backend confirms it was interrupted, as expected" from
-"something actually errored") or leave it as-is since it's cosmetic and
-never misleads about whether the hard-stop itself worked. Web UI behavior
-not yet separately confirmed -- this session's evidence is TUI-only.
-
----
-
-## A misheard safeword can land on the pause phrase instead of the safeword -- same hard-stop effect, different resulting state
-
-**Status:** diagnosed live 2026-08-01, not a safety gap, no fix planned
-(STT-accuracy category, same underlying risk already noted for
-`resume_word`/`pause_listening_phrases` in `docs/UAT-checklist.md`'s [P7]
-enhancement idea). Documented so the distinction between "safe" and
-"expected state" isn't lost.
-
-**Symptom.** Live UAT, `convobox-UAT` @ `3d9d4b9`, `20:07:08`: an
-utterance intended (per JP's own live report) as the safeword ("stop stop
-stop") was transcribed by STT as `'Stop listening.'` instead --
-```
-20:07:08,019 Detected language 'en' with probability 0.97
-20:07:08,570 paused listening (matched 'Stop listening.') -- hard-stopped
-in-flight work; say 'Athena' to resume
-```
-Both `SafewordDetector` and `PauseListeningDetector` check the same raw
-STT transcript (`docs/DESIGN-barge-in.md`, "Pause/resume listening" --
-safeword checked first, then the pause phrase); when STT mishears one
-configured phrase as a different, *also*-configured phrase, whichever one
-the transcript actually matches is the one that fires. There's no gap
-where the utterance is silently swallowed -- it always resolves to
-whatever ConvoBox actually heard.
-
-**Why this is not a safety gap.** The pause path calls the exact same
-`send_hard_stop()` the safeword path does (see `scripts/run_convobox.py`'s
-pause branch), so in-flight work is cancelled either way -- confirmed in
-this same session, where the mis-heard "stop listening" correctly
-hard-stopped the bogus in-flight "Stop listing." call from the entry
-above. The real, user-visible difference is state, not safety: the
-safeword returns to normal listening immediately, while landing on the
-pause phrase instead leaves the session paused, requiring the resume word
-before it hears anything else again -- an extra step someone reaching for
-the emergency-stop phrase likely didn't intend.
-
-**No fix proposed.** This is the same STT-reliability category already
-tracked for `resume_word` (docs/UAT-checklist.md's [P7] entry: "STT is
-unreliable enough live that one exact phrase can be hard to hit
-reliably"), not a new problem this feature introduced. Worth keeping in
-mind if `pause_listening_phrases`/`hard_stop_phrases` are ever tuned
-closer together in pronunciation.
-
----
-
-## "halt halt halt" (a default hard-stop phrase) failed round-trip transcription 4/5 times; bare "Athena" (default resume word) failed 3/5
-
-**Status:** diagnosed live 2026-08-15, macOS, real Piper TTS -> faster-
-whisper round-trip testing (`stt.model: base`). Not yet fixed or
-decided -- see recommendations below.
-
-**Symptom.** A safety-phrase reliability battery (23 hand-labeled test
-cases, gibberish and foreign-language phrasing included) found zero
-false positives anywhere, but two real false-negative gaps:
-`"halt halt halt"` -- one of only three default `hard_stop_phrases` --
-was misheard 4/5 times (`"Hold, hold, hold"` dominant, `"HOT POT POT"`
-once), phonetically close enough to be a plausible genuine STT
-confusion, not obviously a synthesis-only artifact. The default resume
-word `"Athena"` said bare/alone (the simplest, most natural usage) was
-misheard 3/5 times (`"patina"`, `"Adina"`, `"Aficino"`) -- notably worse
-than the `resumeword/detector.py` module's own documented "5/5" claim,
-which used varied multi-word phrasings; re-testing that same varied-
-phrasing set here reproduced a comparable 4/5. `"stop stop stop"` and
-`"abort abort abort"` were fully reliable (5/5 each).
-
-**Why this matters.** `resumeword/detector.py` already documents a
-round-trip verification discipline (`ROUNDTRIP_REJECTED_RESUME_WORDS`) --
-applied once, when "Athena" was chosen 2026-07-13, but never repeated
-for `hard_stop_phrases` when "abort"/"halt" were added 2026-08-09 (that
-addition's own comment reasons about vocabulary collision with the
-project's domain terms, not STT transcription reliability), and never
-re-applied to the bare-word resume-word case specifically.
-
-**Recommendations (not yet reviewed/decided by JP):**
-1. Re-evaluate `"halt halt halt"` as a default -- drop it, keep it with
-   a Settings-TUI warning (same shape as
-   `ROUNDTRIP_REJECTED_RESUME_WORDS`), or verify against real human
-   speech before deciding (this note's evidence is Piper-only).
-2. Document that a resume word said WITH a little surrounding phrase is
-   more reliable than said bare/alone.
-3. Extend the not-yet-built setup-wizard "test-transcribe a few times"
-   UX to hard-stop phrases too, not just the resume word.
-4. This is NOT evidence for gating safewords/hotwords broadly behind an
-   advanced-config warning -- the false-positive side is clean across
-   this whole battery. The gap is narrow (one phrase, one usage
-   pattern), not architectural.
-
-Full data, methodology, and the false-positive-side results (all clean):
-`docs/field-notes/2026-08-15-safety-phrase-reliability-battery-halt-and-
-bare-athena-unreliable.md`.
-
----
-
-## "Open in editor" occasionally opens a different file than the one clicked -- fixed
+### "Open in editor" occasionally opens a different file than the one clicked -- fixed
 
 **Status:** fixed, 2026-08-11 (PR #260) -- a stale-fetch race in
 `renderArtifact()`'s editor-uri lookup, live-reproduced on the real running
@@ -1630,517 +2176,49 @@ the stale response is now discarded and the href stays correct.
 
 ---
 
-## A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops
+## Cosmetic and diagnostic
 
-**Status:** validated-live, 2026-08-09. Option 1 (honesty fix) was built
-shortly after. Option 2 (escalating force-kill) got a Phase 1 build
-2026-08-14 -- see below; the "escalating" part (automatic, timeout-based)
-was deliberately NOT what got built. **The Windows 90/90 result below does
-NOT transfer to macOS -- codex is 0/10 there; see the macOS finding
-further down before assuming this mechanism works cross-platform.** Full
-evidence, exact timestamps, and
-the mechanism writeup: `docs/field-notes/2026-08-09-hard-stop-does-not-
-cancel-an-in-flight-tool-call.md`.
+Real but low-consequence: wrong labels, noisy output, nothing
+functionally broken.
 
-**Symptom.** During a real ~1h38m live voice UAT session (codex backend,
-real headset), saying the pause phrase or a safeword while a
-`commandExecution` tool call was in flight consistently produced this
-sequence: the interrupt RPC (`turn/interrupt` for codex; the equivalent
-`control_request interrupt` / `POST .../interrupt` for claude-code /
-opencode) succeeds with no error, and ConvoBox's own state (pause/resume,
-safeword-matched, "resumed listening") transitions cleanly and
-immediately -- but the tool call's real `tool_result` doesn't arrive
-until the underlying shell command finishes on its own schedule, **16 to
-48+ seconds later**, across 5 separate incidents. Reproduces identically
-whether triggered by voice or the web UI's Stop-listening button (rules
-out an STT-timing explanation), and stacking multiple hard-stop signals
-in a row during the same wait doesn't shorten it.
+### A hard-stopped in-flight turn can show as a generic "error_during_execution" turn -- cosmetic mislabel
 
-**Why:** all three backend adapters' `send_hard_stop()` only signal the
-agent's own conversational/orchestration layer to stop -- none of the
-three vendor APIs is documented to guarantee killing a shell subprocess
-the agent already spawned for a tool call, and ConvoBox never has a
-process handle on that subprocess (it only observes the eventual
-`tool_result` the agent chooses to report). This directly relates to,
-but is a different mechanism than, the entry above (a misheard safeword
-landing on the pause phrase) -- that entry's "in-flight work is
-cancelled either way" claim is about ConvoBox's OWN turn-level state,
-which this finding doesn't contradict; the gap here is one level deeper,
-at the tool call's own OS process.
+**Status:** diagnosed (first noted 2026-08-01 during PR #191's live UAT),
+unfixed. Cosmetic only -- never logged via this project's own logging,
+never spoken, and doesn't affect the hard-stop itself, which works
+correctly. Scoped fix identified, not built.
 
-**Unlike this repo's other "can't force-kill" findings (STT/AEC thread
-offload), this one is solvable** -- an OS process (unlike an in-process
-Python thread) can always be force-killed, and ConvoBox already holds a
-real process handle on each backend's own CLI subprocess (used cleanly
-in every adapter's `aclose()` on shutdown). The capability exists;
-hard-stop just doesn't currently escalate to using it.
+**Symptom.** Live-confirmed again 2026-08-01 (`convobox-UAT` @ `3d9d4b9`,
+`backend.name: claude-code`, `--tui --web`): a `[TUI]` turn labeled
+`error_during_execution` appears whenever a hard-stop (pause or safeword)
+interrupts an in-flight `claude-code` CLI call. Concrete example from
+this session's `convobox-tui.log`:
+- `20:06:29,364 transcript='Stop listing.' ... busy=False` -- STT
+  mis-transcribed "stop listening" as "Stop listing.", which matched
+  neither the pause phrase nor the safeword, so it was sent to the
+  backend as a real (nonsensical) query.
+- `20:06:35 - 20:06:36` -- a second attempt correctly transcribed as
+  `'Stop listening.'`, matched the pause phrase, and hard-stopped the
+  still-busy "Stop listing." call via `send_hard_stop()`.
+- The interrupted `claude-code` CLI process's own interrupt-confirmation
+  text is what surfaces as the `error_during_execution` turn -- it's the
+  CLI's own output, not a real ConvoBox error, and it's real behavior
+  visible in the TUI turn history, not written to `convobox-tui.log` via
+  this project's own `log.*()` calls at all (confirmed: the exact string
+  `error_during_execution` does not appear anywhere in the text log for
+  this session, only in the on-screen TUI transcript pane).
 
-**Two follow-up options identified, neither built yet:**
-1. **Honesty fix (small, low-risk):** don't let the UI say "resumed
-   listening" as if everything stopped when a hard-stop was sent but no
-   corresponding `tool_result`/turn-completion has arrived yet -- track
-   and surface that pending-cleanup state truthfully instead of
-   silently going quiet about it.
-2. **Escalating force-kill (bigger, needs its own scoping/UAT pass):**
-   if no completion arrives within a grace period after the polite
-   interrupt, escalate to killing and respawning the backend process.
-   Trades the whole session/thread's context for an actual guarantee --
-   should be a deliberate, probably config-gated choice, not a silent
-   default. Candidate follow-up test scenarios (from a same-session
-   discussion with the codex backend itself, live-testing its own
-   cancellation semantics): does the process actually die and stop
-   performing side effects after an abort, or does aborting-then-
-   restarting the same command produce duplicate/detached execution;
-   how does a natural timeout compare to a manual abort; does a command
-   with its own restart policy resist cancellation; what happens to
-   output ordering (pre-delay vs. post-delay messages) when a delayed
-   command is interrupted mid-stream.
+**Root cause.** `claude-code`'s headless-mode interrupt path (see
+`src/convobox/adapters/claude_code.py`'s own module docstring on how this
+adapter builds hard-stop since there's no native per-call channel) emits
+its own confirmation output when a call is interrupted mid-execution.
+`_on_backend_event` in `scripts/run_convobox.py` has no special case for
+this and falls through to the generic ERROR system-turn tag ([U10]'s
+convention for session-level events worth showing inline), the same
+fallthrough noted for [T6]'s TTS-failure-in-`--tui` gap.
 
-**Option 2, Phase 1 built 2026-08-14** -- a *manual* escalation, not the
-automatic timeout-based one described above. Motivated by three real
-freeze incidents the same evening (`readline()` hung 65.5s+/236.7s+/
-unresolved-until-killed) where `send_hard_stop()`'s own polite interrupt
-rode the SAME channel that was stuck, so it couldn't reach the backend
-either. `BackendAdapter.force_kill()` (default: delegates to `aclose()`;
-`CodexAdapter`/`ClaudeCodeAdapter` override with a real OS-level
-`terminate()` -> wait 5s -> `kill()`, no RPC round-trip attempted at
-all) + `Orchestrator.force_kill()` + an opt-in `safeword.kill_phrase`
-config field (must be one of `hard_stop_phrases`; unset by default) that
-routes ONE specific configured safeword to this instead of the normal
-polite `hard_stop()`. JP's own config: `kill_phrase: "eject eject
-eject"`. Ends the whole ConvoBox session afterward (same as Quit) --
-does NOT attempt to keep the session alive by respawning and
-reconnecting.
-
-**Not done in Phase 1, scoped for a possible Phase 2:** reconnecting a
-freshly-spawned backend to the SAME conversation after a kill, instead of
-ending the session. Checked whether this is even possible 2026-08-14 via
-`codex.cmd app-server generate-json-schema`: codex's real protocol has a
-`thread/resume` RPC (`{threadId: string, ...}` params) that could
-reconnect to an existing server-side thread -- genuinely unverified
-whether resuming a thread whose last turn was violently killed mid-flight
-behaves cleanly, and `codex.py`'s adapter doesn't call it today
-(`_ensure_thread()` always calls `thread/start`, a fresh thread, when
-`self._thread_id is None`). `claude_code.py`'s adapter runs with
-`--no-session-persistence` and has no equivalent capability to reconnect
-to even in principle. `force_kill()`'s own docstring on both adapters
-scaffolds this seam (deliberately doesn't clear any resumable identifier)
-without implementing it.
-
-**Also not done:** an automatic, timeout-based escalation (the original
-"if no completion arrives within a grace period, escalate" framing above)
--- what got built is an explicit, separate, operator-triggered phrase,
-not a fallback that fires on its own after `hard_stop()` seems to be
-taking too long. That would need its own scoping (what grace period, does
-it also default to ending the session) and hasn't happened.
-
-**Mechanism verified live, 2026-08-14, 30/30 -- voice/STT trigger reliability still open.** Two
-separable questions here: (1) once force_kill() runs, does it actually
-kill the real spawned subprocess (not just the app-server's own
-top-level process, potentially leaving a shell/tool-call child as an
-orphan)? (2) does saying "eject eject eject" out loud reliably reach
-force_kill() at all -- correct STT transcription, no false positives on
-normal speech, no false negatives from a misheard phrase? Only (1) is
-verified so far.
-
-A scratch reliability harness (`_test_force_kill_stops_a_real_tool_call.py`,
-not committed -- JP's own request: "test it at least 10 times... try
-multiple types") drove a REAL codex CLI (not the fake app-server the unit
-suite uses) through `adapter.force_kill()` directly, 10 times each across
-three real long-running tool-call shapes: a plain shell sleep, a
-shell loop progressively writing a file (to also confirm genuine
-mid-flight interruption, not just process death after the work already
-finished), and a real outbound web fetch (`httpbin.org/delay/N`). Each
-run located the actual spawned OS process(es) via Windows/WMI
-`CommandLine` matching (no psutil dependency), called `force_kill()`,
-and confirmed via `Get-Process` that every spawned process -- not just
-the codex app-server's own top-level PID -- was actually dead afterward.
-**Result: 30/30 passed**, zero orphaned processes in any run (verified
-via a full post-run process-tree sweep, not just the harness's own
-per-iteration check). The file-write scenario's "confirm genuine
-mid-flight interruption" check never actually caught partial progress in
-any of the 10 runs -- force_kill() fired before the shell loop's first
-write in every case (real spawn latency eating most of the harness's
-wait window), so that specific piece of evidence is unconfirmed even
-though the underlying PASS/FAIL (process death) is solid across all 30.
-
-A fourth type JP asked about, an MCP tool call, wasn't separately built:
-by mechanism, a stdio-based MCP call spawns a real child OS process (same
-class already covered above); an HTTP-based MCP call makes no separate
-process at all (same shape as the web-fetch case). Flagged rather than
-silently skipped -- standing up a real/mock MCP server would be new
-infrastructure with no different mechanism to actually observe.
-
-**Extended to claude-code and opencode, same evening (JP's own
-follow-up request).** claude-code: identical methodology, **30/30**,
-same "never caught mid-write partial progress" limitation, plus one
-useful outlier -- a single `shell_sleep` run took `force_kill()` 4.92s
-(every other run: 0.01-0.48s), live confirmation the `terminate()`
--ignored-so-escalate-to-`kill()` fallback path actually fires for real,
-not just in the unit suite's mocked-timeout test.
-
-opencode is architecturally different -- `OpenCodeAdapter` never owns an
-OS process at all (an HTTP client to an already-running `opencode
-serve`), so its `force_kill()` is the `BackendAdapter` default
-(`aclose()`: close the connection, nothing more). Expected the real
-spawned process to survive every time. **Actual: 23/30 matched that
-expectation; 7/30 the spawned process died anyway** (highest on
-`web_fetch_slow`, 4/10) even though `force_kill()` did the exact same
-thing (an instant, ~0.00s local connection close) in every single run.
-Root cause not established -- flagged as a real open question, not
-guessed at further; needs opencode's own server internals to explain.
-**Net: opencode's kill behavior is unpredictable and must not be relied
-upon** -- the architectural limitation this section already named is
-confirmed real, but "the process always survives" is not the accurate
-description of what happens; "sometimes, unpredictably, it doesn't" is.
-
-Full data (all three backends, three scenario types, 10 runs each, raw
-per-iteration results) in `docs/field-notes/2026-08-14-force-kill-
-reliability-across-all-three-backends.md`.
-
-**macOS did NOT reproduce the Windows result when first checked
-(2026-08-15) -- codex 0/10, claude-code 10/10, opposite split -- but the
-codex gap is now CLOSED (fixed 2026-08-18, re-verified live against
-current main).** The Windows 90/90 result does not transfer:
-`terminate()`/`kill()` both map to Windows' `TerminateProcess()`, but
-map to genuinely different POSIX signals (`SIGTERM`/`SIGKILL`) on
-macOS, which do not cascade to children by default. For codex, every
-spawned shell child originally survived `force_kill()` -- root cause
-isolated to two stacked issues: (1) codex's default sandboxing (Apple
-Seatbelt) reparents the real leaf process to `launchd` almost
-immediately, detaching it from the app-server's process tree before
-`force_kill()` ever runs; (2) even with sandboxing disabled and the
-child genuinely still a live child of the process tree, `force_kill()`
-still didn't reach it, since signaling only the top-level PID doesn't
-cascade on POSIX. **`os.killpg()` was tried as the obvious candidate
-fix and tested live -- it FAILS**: `os.getpgid()` on the real spawned
-child confirmed it is its own process-group leader (`pgid` equals its
-own `pid`), independent of the app-server's process group, true even
-with sandboxing off (ruling out Seatbelt as the mechanism) -- this is
-codex's own process-spawning behavior on macOS, not something a
-process-group signal from ConvoBox's side can ever reach. claude-code
-did not show either failure mode -- 10/10 clean, same as its own
-Windows result.
-
-**The actual fix**: `CodexAdapter.force_kill()` now falls back to a
-`ps`-based command-line match (quote-stripped substring comparison
-against the live process table, since codex reports the shell-quoted
-INVOCATION text but the real process's argv has already had that
-quoting consumed by intermediate shells) plus a recursive
-descendant-kill (a multi-statement shell script forks its later
-commands as separate child processes -- killing only the matched
-top-level match orphans them otherwise). Re-verified live,
-2026-08-18, against current main: 20/20 clean across two real
-scenarios (`shell_sleep`, `file_write_progressive`), correctly showing
-the full process tree (wrapper + forked children) confirmed dead, not
-just the matched PID. Fragile by construction (depends on codex
-continuing to report accurate command text) but closes the practical
-gap: `safeword.kill_phrase` against a codex backend on macOS now
-reliably stops a runaway spawned tool-call child, not just the
-top-level process.
-
-**Still open:** the voice/STT-trigger reliability question -- does
-saying "eject eject eject" live, through the real mic pipeline, actually
-match and route to `force_kill()` reliably, and does normal conversation
-ever false-positive on it? That needs a real mic session, not scriptable
-the way the process-kill mechanism above was. Also open: whether the
-same `ps`-based approach holds on Linux (architecturally expected to,
-not yet independently verified there); root-causing WHY claude-code
-never showed the same failure mode codex did.
-
-## `kill_phrase` ends the ConvoBox session cleanly on Windows, but does not reach an orphaned/detached child process it spawned
-
-**Status:** validated-live, 2026-08-19, Windows 11 (helios), codex
-backend ONLY (claude-code/opencode not yet tested), real mic sessions,
-reproduced 5/5 independently in the same evening -- 0 live successes.
-An automated harness testing the identical scenario passed 8/8, a
-confirmed and still-unexplained divergence (see "Final tally" below) --
-do not treat the automated result as predictive for this gap. Not
-fixed -- capture-and-diagnose only, with a recommended fix direction
-(Windows Job Object wrapper) scoped below. This is the Windows
-counterpart to the macOS gap documented just above, reached by a
-different mechanism (detachment/orphaning, not codex's own
-process-group behavior), and currently has **no mitigation at all on
-Windows**: the `ps`-based fallback that closes the macOS gap is
-explicitly excluded there (`codex.py:634-645` -- `signal.SIGKILL`/`ps`
-don't exist on Windows, so `force_kill()` only ever does
-`proc.terminate()`/`proc.kill()` against the single top-level process
-handle).
-
-**Symptom.** A CPU- and disk-heavy background process spawned by codex
-(a PowerShell loop hashing an incrementing counter and appending
-records to a file) kept running -- still burning CPU, still growing the
-file -- for over two minutes after `kill_phrase` fired, the log said
-`force-killing backend`, and the entire ConvoBox process had already
-exited (confirmed: no `codex.exe`, no ConvoBox python process, anywhere
-on the system). The spawned process was already an orphan by the time
-it was checked (its own immediate parent process was already gone,
-independent of and unaffected by the kill), meaning it had detached
-from whatever process tree `force_kill()`'s single top-level kill could
-ever reach. A companion test the same evening showed a *plain*
-`Start-Sleep -Seconds 90` spawned by codex *does* die correctly within
-seconds of the same kill -- so this is not "Windows never cascades a
-kill," it's specifically that a detached/orphaned descendant is
-invisible to it, same as the underlying class of bug the macOS fix
-addressed, just reached by a different path here.
-
-**Reproduction (repeatable "known failure" check).** Ask codex, in
-natural language, something like:
-
-> "Write a PowerShell script to a file called `writer.ps1` in this
-> directory. It should loop continuously -- computing a SHA256 hash of
-> an incrementing counter each iteration, and appending a line with the
-> counter, the current UTC timestamp, and the hash to `hashlog.txt`,
-> flushing to disk after every single write -- but stop itself
-> automatically after 10 minutes OR if `hashlog.txt` exceeds 2 GB,
-> whichever comes first, as a safety cap. Then run `writer.ps1` as a
-> background process using `Start-Process pwsh -ArgumentList
-> '-File','writer.ps1' -PassThru`, and tell me the resulting process
-> ID."
-
-Getting a working process this way has taken multiple attempts both
-times this was tried (nested-quoting errors in an inline `-Command`
-one-liner, a .NET method unavailable in this PowerShell's runtime) --
-writing to a real `.ps1` file first and running it with `-File` avoids
-the quoting failures specifically. Once codex reports a PID, confirm it
-is real (`Get-Process`/`Get-CimInstance Win32_Process` showing a
-growing `hashlog.txt`), say the kill phrase, then check the PID again:
-if it is still alive and the file is still growing, the gap has
-reproduced. A well-formed record is `<counter> <UTC timestamp>
-<64-hex-char SHA256>` -- the counter enables detecting gaps/duplicates
-from a torn write anywhere in the file, not just at the tail.
-
-**Corruption check, done once (2026-08-19):** force-killing the
-orphaned process directly (`Stop-Process -Force`, not `kill_phrase`,
-since `kill_phrase` never reached it) while it was actively writing did
-**not** produce a torn record -- the last line was complete and
-well-formed even with the file growing at the instant of the kill. This
-is a narrow result: each write is a single small (~93-byte)
-`StreamWriter.WriteLine()` call with `AutoFlush`, which appears to
-complete as one atomic syscall faster than `TerminateProcess` can land
-mid-call. It does not establish that a larger single write (a
-multi-KB buffered write, or a batch written without per-line flushing)
-would survive the same kind of interruption equally cleanly -- that
-variant has not been tried.
-
-Full detail, exact timestamps, and the live log excerpts:
-`docs/field-notes/2026-08-19-kill-phrase-windows-orphaned-descendant-
-survives-force-kill.md`.
-
-**All testing to date is codex-only.** `claude-code` and `opencode`
-have not been tested against this specific gap at all -- unknown
-whether either shares it, is immune (different sandboxing/spawn
-model), or is worse.
-
-**Final tally after a full evening's live + automated testing:** 5/5
-live voice reproductions (codex, real STT/TUI pipeline, varied scripts
-and phrasings), 0/5 live successes at killing a detached background
-process. Against that, 8/8 automated attempts (a harness driving
-`adapter.force_kill()` directly, bypassing voice) all succeeded --
-dictated launch command, freeform codex-chosen command, short delay,
-and long (75s) delay were each tried, and each time the automated kill
-worked while the equivalent live attempt failed. Neither launch
-method, elapsed time, nor "a prior failed attempt in the same session"
-survived as a sufficient explanation once tested directly. The
-strongest surviving candidate, untested as of this writing: the
-automated harness has always run from inside Claude Code's own process
-tree (via its Bash tool), and every live failure has always run from a
-plain interactive terminal -- if Claude Code's own subprocess handling
-happens to use a Windows Job Object, that could incidentally catch and
-kill children that would otherwise escape, making the harness an
-accidentally-safer environment than real usage. **Practical
-consequence: do not treat this automated harness's pass rate as
-predictive for this specific scenario -- it has been directly
-contradicted by live testing every time tried.** It remains useful for
-everything else it covers (synchronous commands, the no-corruption
-data, cleanup logic).
-
-One live round also surfaced a second, worse failure mode: codex's own
-PID tracking got confused by the same detachment (it checked a PID
-that had already exited while the real worker's log was still visibly
-advancing), concluded the launch had failed, and **launched a second,
-duplicate copy of the same background process** -- both survived the
-kill phrase independently, both still writing to the same log file
-with no coordination. Not just an unkillable process, but a doubled
-one.
-
-**Recommended fix direction, not yet built:** rather than continuing
-to chase individual detachment patterns (an unbounded reactive game --
-`Start-Process`, `Start-Job`, and whatever else an agent invents all
-have to be handled separately under the current approach), wrap the
-codex process in a Windows Job Object at spawn time
-(`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, breakaway disabled). This is a
-structural, one-time fix at the point ConvoBox creates the subprocess
--- it would force everything that process tree ever spawns, regardless
-of how it detaches, to die when the job closes. Scoped as real
-follow-up work, not built here.
-
-**Still open:** why this session's `working_dir` reverted to the
-source tree instead of the isolated scratch directory used
-successfully in an earlier session the same evening; whether a
-larger-single-write shape tears under a forced kill; the equivalent
-scenario on claude-code and opencode backends, and on macOS/Linux for
-this specific orphaning-not-process-group mechanism.
-
----
-
-## `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it
-
-**Status:** diagnosed live 2026-08-11, macOS (Mac mini M4), both claude-code
-and codex backends. Not fixed this pass -- fail-safe in practice (nothing
-ever gets written without a real answer) but the mechanism is misleading
-and worth a real fix.
-
-**Symptom.** Ask either backend (in `--text` mode, `permission_mode: approve`)
-to write a file: the approval prompt fires correctly
-(`Approval needed to run Write. Say <phrase> to approve...` for claude-code;
-`item/fileChange/requestApproval` for codex), then **exactly 120 seconds of
-silence**, then `backend still busy after 120s; giving up the wait` and the
-process exits. No file is ever created, on either backend, confirmed twice
-for codex and once (to full resolution) for claude-code.
-
-**Root cause.** `ApprovalPromptGate`'s own `approval_timeout_s` (default
-30s), the thing that's supposed to auto-deny a silently-abandoned approval
-prompt, is only ever ticked by `_working_watchdog` -- and
-`scripts/run_convobox.py` only constructs `watchdog_task` in the mic-loop
-setup path, well after `--text` mode's own early `return`. So in `--text`
-mode, `approval_gate.observe_timeout()` is never called at all; the
-approval just sits pending until an unrelated, generic 120s
-"`backend still busy`" bail-out in `_drain_until_idle` gives up and the
-script calls `adapter.aclose()`, disconnecting the backend without ever
-sending an explicit decline.
-
-**Why this matters even though nothing unsafe happens.** The net effect is
-safe today (no destructive action executes without a real answer), but
-what looks like "the system denied my request" is actually "the system
-gave up waiting and disconnected" -- a real distinction if this approval
-channel is ever built on further (e.g. surfaced to a caller who cares
-*why* a request didn't go through, or a future mode where abandon and
-deny should behave differently).
-
-**Fix candidates, neither built yet:** either construct a lightweight
-version of the watchdog (or just call `approval_gate.observe_timeout()`
-on a bare timer) in `--text` mode too, or have `--text` mode's own exit
-path call `resolve_pending_approval(False)` explicitly before
-`adapter.aclose()`.
-
-**Also attempted, inconclusive:** the live mic-loop voice-approval flow
-itself (the thing `--text` mode structurally can't exercise) -- 4 live
-synthetic-injection attempts, blocked by real, loud ambient background
-noise in the test room that session (not a code issue). Full detail,
-plus the clean `plan`/`permissive` mode confirmations on both backends
-(N=2 each) and a re-confirmation that opencode remains untestable
-(0 configured credentials): `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
-
----
-
-## STT error-ladder rejection gates on language probability, not decode confidence -- a low-confidence hallucination can slip through
-
-**Status:** validated-live, 2026-08-12, single instance -- not yet
-confirmed as a systematic gap across more samples.
-
-**Symptom.** JP was speaking live, deliberately only saying variations
-on "stop listening"/"resume listening". The pipeline transcribed
-`'mayday listening resume alpha bravo'` (`lang=en (0.62) dec=0.31`) --
-words he never said, not a garbled version of what he did say (confirmed
-by direct comparison against his own real-time report). It was not
-rejected; it went to the backend as ordinary conversation.
-
-**Why it wasn't caught.** The error ladder's low-confidence rejection
-(`stt.min_language_probability`, 0.4 in this config) checks the
-**language-detection probability**, not the separately-logged **decode
-confidence** (`dec=...`). This hallucination's language probability
-(0.62) was comfortably above threshold even though its decode confidence
-(0.31) was lower than two other transcripts the SAME session correctly
-rejected minutes earlier (`'stop brake'` lang=0.40, `'stop please'`
-lang=0.37). "Confident this is English" and "confident these are the
-right words" are different signals; only the first currently gates
-rejection.
-
-**Why this matters beyond STT accuracy in general.** The hallucinated
-content -- `"alpha bravo"` -- is two of the three words in this session's
-real `approval_phrase` (`"alpha bravo delta"`). It fell one word short
-and nothing unsafe happened, but it's a genuine near-miss on a
-security-relevant phrase, produced by hallucination rather than real
-speech, on a gate that measured the wrong confidence signal.
-
-**Not yet done:** checking whether adding `dec` as a second gate
-condition would catch cases like this without materially increasing
-false rejections on good transcripts -- needs real distribution data
-across both accepted and rejected transcripts, not just this one sample.
-Full evidence: `docs/field-notes/2026-08-12-stt-hallucination-bypasses-the-language-probability-gate-near-miss-on-approval-phrase.md`.
-
----
-
-## A safeword match in a transcript skips checking that same transcript for a pause phrase -- fixed
-
-**Status:** validated-live, 2026-08-12; fixed 2026-08-14, not yet
-live-reproduced against the patched code (unit-level + full-suite
-verification only so far -- see below). Never a safety gap (the
-hard-stop itself always fired correctly regardless, before or after
-this fix) -- this was a real, code-confirmed interaction gap between two
-independent control mechanisms.
-
-**Symptom.** JP spoke a long, rapid-fire safeword sequence live; STT
-transcribed it as one continuous 11.8s utterance containing multiple
-safewords AND the pause phrase: `'break break break cancel cancel
-cancel ... abort abort abort stop listening cancel cancel cancel ...'`.
-The hard-stop fired correctly on `'break break break'` (first match).
-`'stop listening'`, present verbatim later in the same transcript, was
-never separately evaluated -- the session never entered the paused
-state from this utterance.
-
-**Mechanism, confirmed in code** (`scripts/run_convobox.py:2507-2547`):
-the entire pause/resume check (`listening_gate.observe(text)`) lived
-inside `if not is_hard_stop:`. When a safeword matched a transcript,
-that whole block -- including the pause check -- was skipped entirely
-for that transcript, not just reordered after the hard-stop.
-`PauseListeningDetector` itself was unaffected and would have found the
-phrase if asked; the gap was in the caller never asking.
-
-**Why this is realistic, not contrived:** this project already has a
-documented hallucination pattern (2026-08-06) where a single STT segment
-can span many seconds of repeated/garbled phrases -- exactly the shape
-that lets two different trigger phrases land in one utterance. This
-session hit it live.
-
-**JP's decision (2026-08-14):** run the pause/resume check
-unconditionally, even on a hard-stop transcript -- not because the two
-should race, but because the spoken pause path already performs its own
-full stop sequence as a side effect of registering the pause
-(`gate_action == "pause"` at `scripts/run_convobox.py:2573-2609` calls
-`player.stop()`/`tts.stop()`/`adapter.send_hard_stop()`, mirrored by
-`WebListeningBridge.pause()` calling `Orchestrator.hard_stop()`
-directly, `src/convobox/web/bridge.py:441`) -- so "stop listening"
-already implies "hard stop" as one bundled action, on both the spoken
-and web-button paths. The gap was that a safeword present in the same
-utterance short-circuited past that pause branch entirely, losing the
-paused-state transition even though an equivalent stop was about to
-happen anyway via the hard-stop path.
-
-**Fix:** `listening_gate.observe(text)` now also runs when
-`is_hard_stop` is true, applying only the STATE change (pause/resume is
-a pure state machine with no side effects of its own) -- not the
-"pause" branch's own stop sequence (redundant, the hard-stop path
-already stops everything) and not a `continue` (which would skip the
-hard-stop path entirely, the one guarantee that must never change). The
-existing safeword-hard-stop path is untouched: still checked first,
-still falls through unconditionally, still "never swallowed." New log
-lines ("also paused listening" / "also resumed listening") give live
-signal when this branch actually fires. `ListeningGate`'s own docstring
-updated to drop the now-stale "only call this when the safeword did NOT
-match" claim.
-
-**Verification so far:** full suite green (1412 passed / 2 pre-existing
-unrelated Windows symlink-privilege failures, same as before this
-change) and `mypy src/convobox scripts` clean. No unit test added --
-`run()` itself has no existing test harness (real mic/segmenter
-dependency; every fix to this exact function in this project's history
-has been live-UAT-verified, not unit-tested, including the original
-finding this fixes). **Not yet live-reproduced**: next real step is
-repeating the same rapid-fire chained-safeword-plus-"stop listening"
-utterance live and confirming both the hard-stop fires AND the session
-actually ends up in the paused state afterward (observable via a
-follow-up utterance being gated, or the new "also paused listening" log
-line). Full original evidence:
-`docs/field-notes/2026-08-12-safeword-and-pause-phrase-are-mutually-exclusive-within-one-utterance.md`.
+**Not yet decided:** whether to give this its own recognizable turn label
+(distinguishing "backend confirms it was interrupted, as expected" from
+"something actually errored") or leave it as-is since it's cosmetic and
+never misleads about whether the hard-stop itself worked. Web UI behavior
+not yet separately confirmed -- this session's evidence is TUI-only.

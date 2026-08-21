@@ -1,691 +1,364 @@
 # ConvoBox Web UI Architecture
 
-## Overview
+What the optional browser companion actually is, as built. For using it see
+[WEB-UI-USAGE.md](WEB-UI-USAGE.md); for working on it see
+[WEB-UI-DEV.md](WEB-UI-DEV.md).
 
-A lightweight, local-only web UI that streams live ConvoBox events to a browser while maintaining persistent history in SQLite. Shares the event model with the existing TUI.
+**In one sentence:** a FastAPI app that taps the orchestrator's existing
+`on_event` hook, fans events out to any number of browser tabs over
+Server-Sent Events, optionally persists them to SQLite, and serves a single
+static HTML file as the entire frontend.
 
-**Design principles:**
-- Local-only by default (127.0.0.1, not 0.0.0.0)
-- Persistent history via SQLite (working directory)
-- Real-time event streaming (Server-Sent Events)
-- Reuse existing Orchestrator event stream
-- Privacy-first: history is sensitive, gitignored by default
-- Optional: users can enable history tracking in private repos
-
----
-
-## Storage Layer
-
-### SQLite Schema
-
-```sql
--- Single session's entire history
-CREATE TABLE events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,                      -- UUID, e.g., 2026-07-23T143022
-    timestamp REAL NOT NULL,                       -- time.monotonic(), for ordering
-    event_type TEXT NOT NULL,                      -- "transcript", "response", "approval", "tool_call", etc.
-    user_transcript TEXT,                          -- STT output (user spoke this)
-    backend_response TEXT,                         -- LLM/agent response
-    tool_name TEXT,                                -- approval: tool being called
-    tool_input TEXT,                               -- approval: JSON input
-    approval_explanation TEXT,                     -- what was shown to user before approval
-    user_decision TEXT,                            -- "approve", "deny", "explain"
-    backend_event_json TEXT NOT NULL,              -- full BackendEvent as JSON (for replay/export)
-    created_at TEXT NOT NULL                       -- ISO 8601 timestamp, for UI/export
-);
-
-CREATE INDEX idx_session_timestamp ON events(session_id, timestamp);
-CREATE INDEX idx_event_type ON events(event_type);
-```
-
-### Session Lifecycle
-
-```python
-# convobox/web/history.py
-class HistoryDB:
-    """SQLite-backed event storage and query interface."""
-    
-    def __init__(self, db_path: Path = Path(".convobox-history/events.db")):
-        self.db = sqlite3.connect(db_path)
-        self._ensure_schema()
-    
-    def append_event(
-        self,
-        session_id: str,
-        backend_event: BackendEvent,
-        approval_explanation: str | None = None,
-        user_decision: str | None = None
-    ) -> None:
-        """Write event to database."""
-        # Extract fields from backend_event
-        # Store full JSON in backend_event_json for replay
-        # Store parsed fields for indexing/filtering
-    
-    def get_session_events(
-        self,
-        session_id: str,
-        limit: int = 1000,
-        offset: int = 0
-    ) -> list[Event]:
-        """Load events for a session, most recent first."""
-    
-    def get_active_session(self) -> str:
-        """Return the most recent session_id."""
-    
-    def list_sessions(self) -> list[tuple[str, datetime]]:
-        """List all sessions: [(session_id, last_activity), ...]."""
-    
-    def export_session_json(self, session_id: str) -> str:
-        """Export session as JSON for backup/sharing."""
-    
-    def clear_session(self, session_id: str) -> None:
-        """Delete all events for a session."""
-    
-    def close(self) -> None:
-        """Close database connection."""
-```
+It is **opt-in** (`web.enabled` or `--web`), **loopback-only**, and
+**unauthenticated by design** — a same-machine trust model, not an
+oversight. When unused it has zero effect on the core voice pipeline; the
+`fastapi`/`uvicorn` imports are lazy, behind the optional `web` extra.
 
 ---
 
-## Backend (FastAPI)
+## Component map
 
-### Server Structure
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'background': '#0d1117', 'mainBkg': '#161b22', 'primaryColor': '#1c2938', 'primaryBorderColor': '#30363d', 'primaryTextColor': '#e6edf3', 'lineColor': '#6e7681', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'edgeLabelBackground': '#161b22', 'titleColor': '#e6edf3'}}}%%
+flowchart TB
+    classDef core     fill:#0d1f15,stroke:#3fb950,stroke-width:2px,color:#7ee787
+    classDef web      fill:#0a1e1e,stroke:#39c5cf,stroke-width:2px,color:#79e8ef
+    classDef store    fill:#1f1808,stroke:#e3b341,stroke-width:2px,color:#f0c842
+    classDef browser  fill:#16112b,stroke:#a371f7,stroke-width:2px,color:#d2a8ff
+    classDef guard    fill:#1f160d,stroke:#f0883e,stroke-width:2px,color:#ffa657
 
-```
-convobox/web/
-├── app.py              # FastAPI app, routes, startup/shutdown
-├── history.py          # SQLite access layer
-├── events.py           # Event model, normalization
-├── stream.py           # SSE event broadcasting (in-memory for now)
-└── config.py           # Web config (bind_address, port, history_dir)
-```
+    subgraph CORE["Core voice pipeline · unchanged, unaware of the web UI"]
+        ORCH["Orchestrator · on_event hook"]:::core
+        GATES["ApprovalGate · ListeningGate · Safeword"]:::core
+    end
 
-### Core Server (`convobox/web/app.py`)
+    subgraph WEB["convobox.web · optional, lazily imported"]
+        FWD["bridge.py · WebEventForwarder<br/>plugs into on_event, no Orchestrator change needed"]:::web
+        BRIDGES["bridge.py · Approval / Listening / Safeword / TextInput bridges<br/>browser decisions back INTO the running session"]:::web
+        BC["stream.py · EventBroadcaster<br/>per-subscriber bounded queue, oldest-evicting"]:::web
+        APP["app.py · create_app()<br/>no global state; caller owns db + broadcaster lifetime"]:::web
+        SET["settings_api.py · reuses scripts/settings_tui.py directly"]:::web
+        MCP["mcp_server.py · show_document / get_shown_artifact<br/>bearer-token, loopback"]:::web
+        ART["artifacts.py · uploads.py"]:::web
+    end
 
-```python
-from fastapi import FastAPI, BackgroundTasks
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import json
+    subgraph GUARDS["Trust boundary"]
+        CORS["CORS: loopback origin regex"]:::guard
+        CSRF["CSRF: x-convobox-client header on every mutating method"]:::guard
+        ESC["Settings escalation guard<br/>backend.command · web.bind_address"]:::guard
+    end
 
-app = FastAPI()
+    DB[("SQLite · .convobox-history<br/>WAL · single events table")]:::store
+    UI["static/index.html<br/>ONE file · inline CSS+JS · no build step"]:::browser
+    TAB2["another browser tab"]:::browser
 
-# CORS: localhost only by default
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://127.0.0.1:*", "http://localhost:*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    ORCH -->|"BackendEvent"| FWD
+    FWD --> BC
+    FWD --> DB
+    BC -->|"SSE · /api/events/stream"| UI
+    BC -->|"same events, own queue"| TAB2
+    APP --- SET & MCP & ART
+    APP --- BC
+    UI -->|"REST · POST"| CSRF --> CORS --> APP
+    APP --> BRIDGES --> GATES
+    SET --> ESC
+    APP -->|"StaticFiles mount at / · registered LAST"| UI
 
-db: HistoryDB | None = None
-event_queue: asyncio.Queue = asyncio.Queue()
-
-@app.on_event("startup")
-async def startup():
-    global db
-    db = HistoryDB(Path(".convobox-history/events.db"))
-    db.db.execute("PRAGMA journal_mode=WAL")  # Allow concurrent reads
-
-@app.on_event("shutdown")
-async def shutdown():
-    if db:
-        db.close()
-
-# ===== REST API =====
-
-@app.get("/api/sessions")
-async def list_sessions():
-    """List all sessions."""
-    sessions = db.list_sessions()
-    return {"sessions": [{"id": s[0], "last_activity": s[1].isoformat()} for s in sessions]}
-
-@app.get("/api/sessions/{session_id}/events")
-async def get_session_events(session_id: str, limit: int = 100, offset: int = 0):
-    """Load historical events for a session."""
-    events = db.get_session_events(session_id, limit, offset)
-    return {"events": [e.dict() for e in events]}
-
-@app.post("/api/sessions/{session_id}/clear")
-async def clear_session(session_id: str):
-    """Delete all events for a session (security/cleanup)."""
-    db.clear_session(session_id)
-    return {"status": "cleared"}
-
-@app.get("/api/sessions/{session_id}/export")
-async def export_session(session_id: str):
-    """Export session as JSON (for backup/sharing via secure channel)."""
-    json_data = db.export_session_json(session_id)
-    return StreamingResponse(
-        iter([json_data]),
-        media_type="application/json",
-        headers={"Content-Disposition": f"attachment; filename={session_id}.json"}
-    )
-
-# ===== Server-Sent Events (live stream) =====
-
-@app.get("/api/events/stream")
-async def stream_events(session_id: str = ""):
-    """
-    SSE stream: push live backend events to browser as they happen.
-    
-    Browser stays connected; on reconnect, client requests GET /api/sessions/{session_id}/events
-    to fill gaps.
-    """
-    async def generate():
-        while True:
-            try:
-                event = await asyncio.wait_for(event_queue.get(), timeout=30)
-                yield f"data: {json.dumps(event.dict())}\n\n"
-            except asyncio.TimeoutError:
-                # Keep-alive heartbeat every 30s
-                yield ": heartbeat\n\n"
-    
-    return StreamingResponse(generate(), media_type="text/event-stream")
-
-# ===== Integration hook =====
-
-def on_backend_event_for_web(
-    event: BackendEvent,
-    session_id: str,
-    approval_explanation: str | None = None,
-    user_decision: str | None = None
-) -> None:
-    """
-    Called from run_convobox.py's _on_backend_event (or new web callback).
-    Appends to history and broadcasts to connected browsers.
-    """
-    db.append_event(session_id, event, approval_explanation, user_decision)
-    # Queue for live SSE broadcast
-    asyncio.create_task(event_queue.put(event))
-
-# ===== Health check =====
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+    style CORE fill:#0a130d,stroke:#3fb950,stroke-width:2px,color:#e6edf3
+    style WEB fill:#08191a,stroke:#39c5cf,stroke-width:2px,color:#e6edf3
+    style GUARDS fill:#1a1208,stroke:#f0883e,stroke-width:2px,color:#e6edf3
 ```
 
-### Integration with run_convobox.py
+### Why it attaches this way
 
-Add a new callback alongside the existing TUI callback:
+`Orchestrator` already had an `on_event` extension point, so wiring the web
+UI required **no change to the orchestrator at all** — `WebEventForwarder`
+is just a callable that plugs into it. That is the reason the web UI can
+claim zero effect on the core pipeline: there is no core-pipeline code that
+knows it exists.
 
-```python
-# In scripts/run_convobox.py, around line ~1500 (where on_event is wired):
-
-def _on_backend_event_web(
-    event: BackendEvent,
-    db_handler: WebUIEventHandler | None = None,
-    session_id: str | None = None,
-) -> None:
-    """Forward events to the web UI history."""
-    if db_handler and session_id:
-        db_handler.append_event(event, session_id)
-
-# Then wire it up:
-if config.web and config.web.enabled:
-    web_handler = WebUIEventHandler(...)
-    # Create second callback that forwards to web
-    original_on_event = on_event_func
-    on_event = lambda e: (original_on_event(e), _on_backend_event_web(e, web_handler, session_id))
-```
-
-Or simpler: modify the existing `_on_backend_event` to also call web storage if enabled.
+Traffic in the other direction (a browser approving a tool call, pausing
+listening, hard-stopping, typing text) does not go back through
+`on_event`. It goes through dedicated bridge objects that hold references to
+the live gates, so a browser decision and a spoken decision land on exactly
+the same mechanism.
 
 ---
 
-## Frontend (React/Vue)
+## The frontend is one file
 
-### Project Structure
+`src/convobox/web/static/index.html` — inline CSS and JavaScript, no
+framework, no bundler, no `package.json` anywhere in the repository, no
+build step in CI or packaging. It is mounted by `create_app()` as a
+Starlette `StaticFiles` mount at `/`, registered **after** every `/api/*`
+route so ordinary route-registration order (not special-casing) keeps it
+from shadowing the API. A dedicated test,
+`test_static_mount_does_not_shadow_api_routes`, asserts exactly that.
 
-```
-web/frontend/
-├── src/
-│   ├── components/
-│   │   ├── Transcript.tsx      # Chat-like scrollable history
-│   │   ├── ApprovalPanel.tsx   # Pending approvals with explain button
-│   │   ├── EventLog.tsx        # Raw event view
-│   │   └── SessionList.tsx     # Switch between sessions
-│   ├── hooks/
-│   │   ├── useEvents.ts        # Fetch + stream events
-│   │   └── useApproval.ts      # Local approval decision logic
-│   ├── App.tsx
-│   └── index.css
-├── public/
-│   └── index.html
-└── package.json
-```
+All event content is written with `textContent`, never `innerHTML` —
+backend responses, tool output, and transcripts are untrusted content.
 
-### Core Components (Simplified)
-
-**useEvents hook:**
-```typescript
-// Fetch historical events + subscribe to live stream
-const useEvents = (sessionId: string) => {
-    const [events, setEvents] = useState<BackendEvent[]>([]);
-    const [isConnected, setIsConnected] = useState(false);
-    
-    useEffect(() => {
-        // Load historical events
-        fetch(`/api/sessions/${sessionId}/events?limit=100`)
-            .then(r => r.json())
-            .then(data => setEvents(data.events));
-        
-        // Subscribe to live events
-        const eventSource = new EventSource(`/api/events/stream?session_id=${sessionId}`);
-        eventSource.onmessage = (e) => {
-            const event = JSON.parse(e.data);
-            setEvents(prev => [...prev, event]);
-        };
-        eventSource.onerror = () => setIsConnected(false);
-        
-        return () => eventSource.close();
-    }, [sessionId]);
-    
-    return { events, isConnected };
-};
-```
-
-**Transcript component:**
-```typescript
-// Chat-like UI: user utterances + backend responses
-const Transcript = ({ events }: { events: BackendEvent[] }) => {
-    return (
-        <div className="transcript">
-            {events.map(event => {
-                if (event.type === "transcript") {
-                    return <UserMessage key={event.id}>{event.user_transcript}</UserMessage>;
-                }
-                if (event.type === "response") {
-                    return <AssistantMessage key={event.id}>{event.backend_response}</AssistantMessage>;
-                }
-                return null;
-            })}
-        </div>
-    );
-};
-```
-
-**Approval panel:**
-```typescript
-// Shows pending approval with context + buttons
-const ApprovalPanel = ({ event, onDecide }: { event: ApprovalEvent, onDecide: (decision: string) => void }) => {
-    return (
-        <div className="approval">
-            <h3>⚠️ Approval Needed</h3>
-            <div className="context">
-                <p><strong>Tool:</strong> {event.tool_name}</p>
-                <p><strong>What:</strong> {event.approval_explanation}</p>
-            </div>
-            <div className="buttons">
-                <button onClick={() => onDecide("explain")}>Explain</button>
-                <button onClick={() => onDecide("approve")}>Approve</button>
-                <button onClick={() => onDecide("deny")}>Deny</button>
-            </div>
-        </div>
-    );
-};
-```
+The single-file choice is deliberate and load-bearing: it survives
+`uv build --wheel` with no packaging configuration (hatchling includes it by
+default), and it means a contributor can edit the UI with no toolchain
+installed.
 
 ---
 
-## Configuration
+## Event fan-out
 
-### Config Schema
+One `EventBroadcaster`, one bounded `asyncio.Queue` per subscribed browser
+tab. A shared single queue would deliver each event to whichever *one*
+consumer drained it first — silently wrong the moment a second tab opens.
 
-```yaml
-# convobox.yaml
-web:
-  enabled: false                             # Opt-in (default off)
-  bind_address: 127.0.0.1                    # Localhost only
-  port: 5173                                 # Vue/React dev port convention
-  history_tracking_enabled: false            # Opt-in (requires privacy acknowledgment)
-  history_dir: .convobox-history             # Gitignored
-  cors_origins: ["http://127.0.0.1:*"]      # Whitelist browsers
+Queues are bounded (`max_queue_size`, default 200) because a subscriber that
+stops draining — a backgrounded or suspended tab that is still TCP-connected
+— would otherwise grow its queue for the rest of the session.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'background': '#0d1117', 'mainBkg': '#161b22', 'primaryColor': '#1c2938', 'primaryBorderColor': '#30363d', 'primaryTextColor': '#e6edf3', 'lineColor': '#6e7681', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'edgeLabelBackground': '#161b22', 'titleColor': '#e6edf3'}}}%%
+flowchart TB
+    classDef step   fill:#0d1f15,stroke:#3fb950,stroke-width:2px,color:#7ee787
+    classDef dec    fill:#1f1808,stroke:#e3b341,stroke-width:2px,color:#f0c842
+    classDef drop   fill:#1f160d,stroke:#f0883e,stroke-width:2px,color:#ffa657
+    classDef out    fill:#16112b,stroke:#a371f7,stroke-width:2px,color:#d2a8ff
+
+    EV["BackendEvent from the orchestrator"]:::step
+    BR["broadcast(payload)"]:::step
+    LOOP["for each subscriber queue"]:::step
+    PEND{"does this subscriber owe<br/>a 'dropped' marker?"}:::dec
+    MARK["deliver {type: dropped, count: N} first<br/>so the tab KNOWS it missed events"]:::drop
+    FULL{"queue full?"}:::dec
+    EVICT["evict the OLDEST item, not the newest<br/>never block delivery to other subscribers"]:::drop
+    PUT["enqueue payload"]:::step
+    SSE["sse_lines() → 'data: {...}'<br/>idle gap → ': heartbeat' every 15s"]:::out
+    TAB["browser tab renders"]:::out
+
+    EV --> BR --> LOOP --> PEND
+    PEND -->|yes| MARK --> FULL
+    PEND -->|no| FULL
+    FULL -->|yes| EVICT --> PUT
+    FULL -->|no| PUT
+    PUT --> SSE --> TAB
 ```
 
-### Config Class
+Two details that exist for real reasons:
 
-```python
-# src/convobox/config.py
+- **Evict oldest, not newest.** Dropping the newest would make a stalled tab
+  permanently stuck in the past; dropping the oldest keeps it current.
+- **The `dropped` marker.** An evicted subscriber receives
+  `{"type": "dropped", "count": N}` on its next delivery, so the frontend can
+  say it missed events rather than silently falling behind with no signal.
+- **Heartbeats.** An idle SSE connection emits a `: heartbeat` comment every
+  15s, because some proxies and browsers close a connection with no bytes
+  for 30–60s.
 
-class WebConfig(BaseModel):
-    enabled: bool = False
-    bind_address: str = "127.0.0.1"
-    port: int = 5173
-    history_tracking_enabled: bool = False
-    history_dir: str = ".convobox-history"
-    
-    @field_validator("bind_address")
-    @classmethod
-    def _validate_bind_address(cls, v: str) -> str:
-        if v not in ("127.0.0.1", "localhost", "0.0.0.0"):
-            if not v.startswith("127.") and v != "::1":  # IPv4 loopback or IPv6
-                raise ValueError(
-                    f"bind_address {v!r} is remote. "
-                    "Set to 127.0.0.1 (localhost) for safety. "
-                    "To allow remote access, explicitly set to 0.0.0.0 (and ensure private network)."
-                )
-        return v
+---
 
-class ConvoBoxConfig(BaseModel):
-    # ... existing fields ...
-    web: WebConfig | None = None
+## HTTP surface
+
+All routes are registered by `create_app()` in `app.py` unless noted.
+
+| Group | Routes | Notes |
+|---|---|---|
+| Health | `GET /health` | |
+| Session data | `GET /api/sessions`, `GET /api/sessions/{id}/events`, `POST /api/sessions/{id}/clear`, `GET /api/sessions/{id}/export` | History read/clear/export |
+| Live stream | `GET /api/events/stream` | SSE; one queue per connection |
+| Session control | `POST /api/quit`, `POST /api/stop`, `GET`/`POST /api/listening`, `POST /api/text` | Drives the live session |
+| Approvals | `POST /api/sessions/{id}/approval` | `approve` / `deny` / `explain` |
+| Display config | `GET /api/config` | Per-role colors/names |
+| Settings | `GET /api/settings`, `POST /api/settings/{schema,validate,save,test}` | `settings_api.py` |
+| Artifacts | `GET /api/artifacts`, `POST /api/artifacts/active`, `GET /api/artifacts/{path}`, `GET /api/artifacts/{path}/editor-uri` | `artifacts.py` |
+| Uploads | `POST /api/upload` | `uploads.py` |
+| MCP | mount at `/mcp` | `mcp_server.py`, bearer-token gated |
+| Frontend | `StaticFiles` mount at `/` | Registered last |
+
+---
+
+## Settings: parity by reuse, not reimplementation
+
+`settings_api.py` does **not** reimplement validation or saving. It imports
+`scripts/settings_tui.py` and calls that module's own
+`SECTION_SPECS`, `_visible_fields_for_section`, `_choices_for`,
+`validate_config`, `save_with_backup`, and `probe_*` functions directly.
+
+This is the mechanism that makes the browser editor and the terminal TUI
+incapable of silently drifting apart on what counts as valid, or on how a
+save is written (`exclude_defaults`, backup-then-atomic-replace). Field
+choices come from the TUI's own live enumeration — real connected devices,
+real downloaded voices — and its sentinel strings (e.g. `(system default)`
+for a `None` device) are surfaced to the frontend as `unset_value` /
+`unavailable_value` rather than being hardcoded in JavaScript where they
+would drift.
+
+`scripts.settings_tui` is imported lazily **inside each route body**, not at
+module top level: importing it pulls in faster-whisper, kokoro, and
+sounddevice, which is needless weight for the many routes, tests, and
+`app.py` imports that never touch settings.
+
+Every save writes `config_path` directly and reloads fresh on every `GET`.
+There is no hot-reload — `run_convobox.py` reads `convobox.yaml` only at
+startup — so a save here needs a manual restart to take effect, exactly like
+a TUI save.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'background': '#0d1117', 'mainBkg': '#161b22', 'primaryColor': '#1c2938', 'primaryBorderColor': '#30363d', 'primaryTextColor': '#e6edf3', 'lineColor': '#6e7681', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'edgeLabelBackground': '#161b22', 'titleColor': '#e6edf3'}}}%%
+flowchart TB
+    classDef step  fill:#0d1f15,stroke:#3fb950,stroke-width:2px,color:#7ee787
+    classDef dec   fill:#1f1808,stroke:#e3b341,stroke-width:2px,color:#f0c842
+    classDef stop  fill:#1f160d,stroke:#f0883e,stroke-width:2px,color:#ffa657
+    classDef reuse fill:#0a1e1e,stroke:#39c5cf,stroke-width:2px,color:#79e8ef
+
+    POST["POST /api/settings/save"]:::step
+    DRAFT["AppConfig.model_validate(values)<br/>422 if the payload itself is invalid"]:::step
+    CUR["load_config(config_path)<br/>the currently-SAVED config"]:::step
+    ESC{"_detect_web_settings_escalation<br/>did the draft CHANGE backend.command<br/>or web.bind_address?"}:::dec
+    DENY["403 — use the settings TUI<br/>(requires real local console access)"]:::stop
+    VAL["settings_tui.validate_config()<br/>the TUI's own validator, not a copy"]:::reuse
+    ERR{"errors?"}:::dec
+    E422["422 with errors + warnings"]:::stop
+    SAVE["settings_tui.save_with_backup()<br/>the TUI's own writer, not a copy"]:::reuse
+    OK["200 · saved + backup path + warnings<br/>restart required to take effect"]:::step
+
+    POST --> DRAFT --> CUR --> ESC
+    ESC -->|yes| DENY
+    ESC -->|no| VAL --> ERR
+    ERR -->|yes| E422
+    ERR -->|no| SAVE --> OK
 ```
 
----
+### The escalation guard
 
-## Startup & Integration
+Two fields are categorically higher-stakes than everything else in the
+config, and this route refuses to change either:
 
-### Minimal Launch Script
+- **`backend.command`** is a list passed straight to
+  `asyncio.create_subprocess_exec` — editing it is
+  arbitrary-command-execution-on-next-start.
+- **`web.bind_address`** controls whether this same unauthenticated server
+  is reachable beyond loopback — editing it is self-escalation to LAN
+  exposure.
 
-```bash
-# Start ConvoBox with web UI:
-python scripts/run_convobox.py --web
+Both stay fully editable through `scripts/settings_tui.py`, which requires
+real local console access. The restriction is specific to the *web route*,
+not to the config model or the save mechanism.
 
-# Or enable via config:
-# web:
-#   enabled: true
-```
-
-### Multi-Process Launch (Optional)
-
-For development, can run web server in separate process:
-
-```bash
-# Terminal 1: Start ConvoBox normally
-python scripts/run_convobox.py
-
-# Terminal 2: Start web server (reads from same .convobox-history DB)
-python -m convobox.web.app --port 5173
-```
-
-Decoupling is optional; can also embed in run_convobox.py with asyncio background tasks.
+The check compares the draft against the currently-saved config rather than
+merely testing whether the payload *contains* those fields: the save flow
+round-trips the full config back with edits merged in, so the fields are
+always present in a normal payload. Only an actual attempted change is
+rejected. (GitHub issue #235, finding A4.)
 
 ---
 
-## Security Considerations
+## Security model
 
-### Network
-- Bind to 127.0.0.1 by default (localhost only)
-- Config validator warns if attempting 0.0.0.0 without explicit acknowledgment
-- No authentication (local device trust model)
+The whole surface assumes **one trusted user on one machine**. There is no
+authentication and no plan for one at this layer; remote access is a
+different design problem (see [ROADMAP.md](ROADMAP.md)'s deployment phases),
+not a missing feature here.
 
-### CSRF (added 2026-08-08, GitHub issue #235 finding A3)
-"Loopback-only" is a control against *remote* attackers -- it is not a
-control against the operator's own browser, which is the one client this
-UI is actually built for. Any page the operator has open in another tab
-could otherwise reach this server. Body-less mutating routes
-(`/api/quit`, `/api/stop`, `/api/sessions/{id}/clear`) are CORS "simple
-requests" without a custom header: a cross-origin page's
-`fetch(url, {method:"POST"})` reaches them with no preflight at all --
-CORS only controls whether the *attacking page* can read the response,
-never whether the browser sends a simple request in the first place.
-Every mutating route (`app.py`'s `require_csrf_header` middleware) now
-requires a custom header (`X-ConvoBox-Client`) that forces a real
-preflight, which the existing loopback-only origin check then correctly
-rejects for any non-local origin. `index.html`'s own `fetch()` calls all
-send it.
+- **Bind address.** Defaults to loopback. `WebConfig`'s validator rejects a
+  specific non-loopback address outright, while still permitting `0.0.0.0`
+  as a deliberate explicit choice.
+- **CORS.** Loopback origins only, matched by regex
+  (`^https?://(127\.0\.0\.1|localhost)(:\d+)?$`). A plain
+  `allow_origins=["http://127.0.0.1:*"]` does **not** work —
+  `CORSMiddleware.allow_origins` is an exact string match with no
+  mid-string wildcard — so matching an arbitrary dev-server port needs
+  `allow_origin_regex`.
+- **CSRF.** Every mutating method (`POST`/`PUT`/`PATCH`/`DELETE`) requires an
+  `x-convobox-client` header. CORS alone was not enough: `/api/quit`,
+  `/api/stop`, and `/api/sessions/{id}/clear` take no request body, which
+  makes a cross-origin `fetch(url, {method:"POST"})` a CORS *simple request*
+  that the browser sends with no preflight. CORS controls whether an
+  attacking page can **read** the response; it never stops the request being
+  sent. Those three routes' real side effects — kill the session, hard-stop,
+  wipe history — were reachable from any tab. The JSON-bodied routes were
+  protected only incidentally (a JSON content-type forces a preflight), an
+  accident of body shape rather than a designed control, and a future
+  body-less route would have silently reopened the gap. (GitHub issue #235,
+  finding A3.)
+- **Settings escalation guard.** As above.
+- **MCP server.** Mounted at `/mcp` behind a random per-session bearer
+  token, generated in `run_convobox.py` and handed to the CLI via
+  `--mcp-config`'s `headers` field.
+- **XSS.** Frontend renders exclusively via `textContent`.
+- **Data at rest.** History is plain unencrypted SQLite (WAL) in the working
+  directory, gitignored by default, and contains raw transcripts, approved
+  commands, and tool output. See [SECURITY.md](SECURITY.md).
 
-### Settings-write surface (added 2026-08-08, GitHub issue #235 finding A4)
-`/api/settings/save` shares this same no-auth trust boundary, but its
-write surface is categorically higher-stakes than the rest: it can set
-`backend.command` (a list passed straight to a subprocess call --
-arbitrary command execution on next start) and `web.bind_address`
-(self-escalation to expose this same unauthenticated server beyond
-loopback). Both fields are rejected specifically by this web route
-(`settings_api.py`'s `_detect_web_settings_escalation`) if a save
-attempts to change them from their currently-saved value; both remain
-fully editable via the settings TUI, which requires real local console
-access rather than this server's implicit trust model.
-
-### Data at Rest
-- SQLite in `.convobox-history/` (gitignored by default)
-- File permissions: 600 on Unix/macOS (owner-readable only)
-- No encryption (to-do for future if repo goes remote)
-
-### Data in Transit
-- SSE over HTTP (localhost only, so no HTTPS needed)
-- Full BackendEvent JSON streamed (contains transcripts, approvals)
-- Users responsible for not exposing the web server to untrusted networks
-
-### XSS Prevention
-- Escape tool_input, command output before rendering
-- Sanitize user transcripts (unlikely to contain HTML, but defensive)
+Every control-plane capability the browser has — approve/deny, quit,
+stop/resume listening, settings-save — was a deliberate, individually
+reviewed extension of this trust model rather than incidental scope creep.
+The riskiest of them (stop/resume listening, which hard-stops in-flight work
+exactly as a spoken pause phrase does) shipped in its own commit with its
+re-verification stated, per this repo's safety-critical-rides-alone rule.
 
 ---
 
-## Phase 1 MVP
+## Storage
 
-**Scope (Phase 1):**
-- ✅ SQLite schema + HistoryDB class (2026-07-25)
-- ✅ FastAPI app with /api/sessions, /api/events/stream (2026-07-25)
-- ✅ Frontend: plain HTML/JS (not React -- see "Next Steps" #4 below for
-  why), served as a static mount at "/". Transcript view + live SSE
-  render live; ApprovalPanel (approve/deny from the browser) is
-  deliberately still out of scope, see Out of scope below. (2026-07-26;
-  every line in this checklist was wrongly pre-checked in this doc's
-  very first version, before any of it existed -- fixed across two
-  sessions to reflect what's actually built.)
-- ✅ Integration: run_convobox.py → HistoryDB, + a real uvicorn server
-  started via `--web`/web.enabled (2026-07-25)
-- ✅ Config: web.enabled, web.history_tracking_enabled (2026-07-25)
-- ✅ Security: localhost-only bind (validated, 0.0.0.0 allowed only as an
-  explicit choice); privacy docs still TODO (usage/dev docs, see #6 below)
+One table, `events`, in a WAL-mode SQLite database. Columns:
+`id`, `session_id`, `timestamp` (REAL, sub-second), `event_type`,
+`user_transcript`, `backend_response`, `tool_name`, `tool_input`,
+`approval_explanation`, `user_decision`, `backend_event_json`, `created_at`.
+Indexed on `(session_id, timestamp)` and on `event_type`.
 
-**Out of scope (Phase 2+):**
-- Persistent browser UI state (sidebar collapse, scroll position)
-- Advanced filtering/search
-- Session comparison
-- Export to PDF/CSV
-- Remote access (requires encryption, auth)
+Two ordering details, both discovered through real test failures rather than
+designed up front:
 
-(Approval UI wiring shipped in Phase 2 — see below — it's no longer out of
-scope.)
+- `list_sessions()` / `get_active_session()` order by the sub-second
+  `timestamp` REAL column, **not** `MAX(created_at)` — that column is
+  second-resolution text, which ties and then sorts unspecified for two
+  sessions touched within the same second.
+- `get_session_events()` returns **oldest first**, chat reading order.
+
+History persistence is itself opt-in (`web.history_tracking_enabled`,
+default off), separately from the web UI being enabled.
 
 ---
 
-## Phase 2 (Web UI v2)
+## Current state
 
-Built on `feat/web-ui-v2`, several independently-committed slices, after
-Phase 1's viewing-only scope above:
+Built and live-verified: transcript view, live SSE, bubble-chat layout,
+branded ribbon, per-role colors/names, approve/deny/explain, quit,
+stop/resume listening, activity-status indicator, session picker, clear
+history, export, full settings editing with Test-probe wiring, PWA install
+support, file upload, and the artifact pane.
 
-- **Bubble-chat layout + branded top ribbon** — scrollable, mobile-texting-
-  style transcript (user right-aligned, everything else left-aligned),
-  replacing the old flat bordered-box list. Ribbon: LegionForge logo +
-  wordmark, session picker, working "Clear history" button.
-- **Configurable per-role bubble colors** — `display.user_color` /
-  `display.assistant_color` (hex, `#RGB`/`#RRGGBB`), applied as inline CSS
-  custom properties so they override the theme default in both light and
-  dark mode.
-- **Real Approve/Deny/Explain buttons** on a pending `APPROVAL_REQUEST`
-  bubble (`POST /api/sessions/{id}/approval`) — the first web UI capability
-  that *mutates* a live session rather than observing it. `WebApprovalBridge`
-  (`bridge.py`) answers the same `ApprovalPromptGate`/
-  `Orchestrator.resolve_pending_approval` path a spoken approval phrase
-  does; a race with a simultaneous voice answer fails closed (409, "already
-  resolved") rather than double-deciding.
-- **Quit button** (`POST /api/quit`) — ends the whole process (mic loop,
-  backend, web server), not just one decision. Client-side arm/confirm
-  (first click arms, second click within ~4s fires). Signals the real OS
-  process (`os.kill`) the same way a terminal Ctrl+C does, rather than
-  raising anything locally.
-- **Settings-editing REST API + frontend** (`settings_api.py`: `GET
-  /api/settings`, `POST /api/settings/schema` / `/validate` / `/save` /
-  `/test`) — full parity target with `scripts/settings_tui.py`'s own
-  edit/validate/save/test contract, reusing that file's `SECTION_SPECS`,
-  `validate_config`, `save_with_backup`, and `probe_*` test hooks
-  directly so the TUI and web UI can never silently drift on what counts
-  as valid. Like the TUI, saves write `convobox.yaml` (backup + atomic
-  replace) but need a restart to take effect — there is no hot-reload.
-  The frontend Settings modal is a fully generic renderer driven by the
-  schema endpoint — no per-field markup, so a new `FieldSpec` on the
-  Python side just works.
-- **Configurable user/assistant display names** — `display.user_name` /
-  `display.assistant_name`, shown in a bubble's meta line instead of the
-  raw event type.
-- **Stop/Resume listening button** (`WebListeningBridge`, `bridge.py`) —
-  does exactly what a spoken pause phrase does (hard-stops in-flight
-  playback/backend work via `ListeningGate`), not just a future-transcript
-  gate. Shipped in its own commit per the safety-critical-rides-alone
-  rule.
-- **A live activity-status indicator** — `WebEventForwarder.
-  forward_status()`, broadcast only on change from `_working_watchdog`'s
-  now-unconditional status computation.
-- **PWA install support** — `static/manifest.json` + `sw.js`
-  (app-shell-only caching, never touches `/api/*`).
-- **An artifact pane** — `BackendEventType.ARTIFACT` +
-  `GET /api/artifacts/{path}` (fenced to `backend.working_dir`), wired
-  for the Claude Code adapter (`Write`/`Edit` tool calls, confirmed via
-  the matching `tool_result`), rendered as a collapsible right-hand pane.
-  See `docs/ARTIFACT-PANE-SCOPE.md` for the full design and current
-  adapter-coverage status.
+The artifact pane is wired end to end for **Claude Code** only (`Write` /
+`Edit` tool calls, confirmed against the matching `tool_result` before an
+`ARTIFACT` event fires). **codex and opencode remain unwired** — opencode is
+blocked on one small live-verification step (confirming its `file.edited`
+event's path format), not on guesswork. See
+[ARTIFACT-PANE-SCOPE.md](ARTIFACT-PANE-SCOPE.md), and note that the
+artifact-pane MCP tools are unavailable under the default
+`permission_mode: plan` ([PERMISSION-MODEL.md](PERMISSION-MODEL.md)).
 
-Each of the above extends the no-auth, loopback-only trust model from
-view-only to a real control surface — see WEB-UI-USAGE.md's security
-section for what that means in practice. Full session-by-session build
-history: `docs/field-notes/` and the project's Obsidian session notes, not
-duplicated here.
+Known open items are tracked in [KNOWN-ISSUES.md](KNOWN-ISSUES.md)'s Web UI
+section. Restart-on-demand is deliberately not built — it is a real
+security-posture decision that has not been made, not an oversight.
 
 ---
 
-## Testing
+## A note on this document's own history
 
-### Unit Tests
-- HistoryDB: append, query, export
-- Config validation: bind_address warnings
-- Event model: normalization
+Through 0.3.1 this file led with a speculative design sketch — a
+React/Vue frontend with a `components/*.tsx` tree, a `package.json`, and
+TypeScript hooks — none of which was ever built, alongside a CORS
+configuration and an event-broadcast design that were both actively wrong.
+Corrections accumulated hundreds of lines below the claims they corrected,
+so a reader (or a model) scraping the top of the file came away believing
+ConvoBox had a React frontend.
 
-### Integration Tests
-- SSE stream: client connects, receives events
-- Session lifecycle: create, append, query, clear
-- CORS: localhost allowed, remote blocked
+It has been rewritten to describe only what exists. The corrections worth
+keeping now live at the point of implementation, as comments in `app.py`
+and `stream.py`; the dated build narrative lives in [STATUS.md](STATUS.md)
+and the git history.
 
-### Manual Testing
-1. Start ConvoBox with web UI enabled
-2. Open http://localhost:5173
-3. Speak to trigger events
-4. Verify transcript appears in browser (real-time SSE)
-5. Trigger approval, verify in panel
-6. Approve from browser or TUI (whichever works first)
-7. Refresh browser, verify history loads
-
----
-
-## Next Steps
-
-1. **Implement HistoryDB** (convobox/web/history.py) -- DONE (2026-07-25).
-   SQLite schema, CRUD, query interface, 100% test coverage. Two
-   deviations from this doc's original sketch, both confirmed necessary
-   by real test failures while building it: `list_sessions()`/
-   `get_active_session()` order by the sub-second `timestamp` REAL
-   column, not `MAX(created_at)` (second-resolution text, which ties and
-   sorts unspecified for two sessions touched in the same second); and
-   `get_session_events()` returns OLDEST first (chat reading order), not
-   "most recent first."
-
-2. **Implement FastAPI app** (convobox/web/app.py) -- DONE (2026-07-25).
-   /health, /api/sessions, /api/sessions/{id}/events, /clear, /export,
-   and a real SSE /api/events/stream, using `EventBroadcaster`
-   (convobox/web/stream.py) for proper multi-subscriber fan-out -- this
-   doc's original single shared `asyncio.Queue` sketch would only have
-   delivered each event to whichever ONE consumer drained it, silently
-   wrong the moment a second browser tab opened the stream. Also: this
-   doc's `allow_origins=["http://127.0.0.1:*"]` CORS sketch doesn't
-   actually work (`CORSMiddleware.allow_origins` does an exact string
-   match, no mid-string wildcard) -- use `allow_origin_regex` instead,
-   confirmed live against both a matching and a rejected Origin header.
-   Follow-up (2026-08-08, B5 in the overnight codebase review): each
-   subscriber's `asyncio.Queue` is now bounded (`EventBroadcaster`'s
-   `max_queue_size`, default 200) -- unbounded meant a subscriber that
-   stopped draining (a backgrounded/suspended browser tab, still TCP-
-   connected) grew its queue for the rest of the session. A full queue
-   evicts its oldest item (not the newest) rather than blocking
-   `broadcast()`'s delivery to every other subscriber; the evicted
-   subscriber gets a `{"type": "dropped", "count": N}` marker on its next
-   delivery so the frontend can surface that it missed events, instead of
-   silently falling behind with no signal.
-
-3. **Integrate with run_convobox.py** -- DONE (2026-07-25).
-   `WebEventForwarder` (convobox/web/bridge.py) is a callable that plugs
-   into `Orchestrator`'s existing `on_event` hook -- no change to
-   `Orchestrator` itself was needed, it already had exactly this
-   extension point. `run()` now starts a real `uvicorn.Server` as a
-   background asyncio task when `web.enabled` (via config or the new
-   `--web` flag), lazily importing fastapi/uvicorn (the optional "web"
-   extra) only when actually needed, and shuts it down cleanly on every
-   exit path (`--text` mode's early return, the mic loop's `finally`).
-   Live-verified end to end: a real `run_convobox.py --web --text`
-   session answered a genuine HTTP request to `/health` while running,
-   and its events landed in a real SQLite file.
-
-4. **Implement the frontend** -- DONE for Phase 1's viewing scope
-   (2026-07-26), plain HTML/JS as this section originally suggested as
-   the fallback, not React/Vite: `src/convobox/web/static/index.html`,
-   a single self-contained file (inline CSS/JS, no build step, no
-   framework), mounted by `create_app()` as a Starlette `StaticFiles`
-   mount at `"/"` -- registered LAST, after every `/api/*` route, so
-   route-registration order (not any special-casing) is what keeps it
-   from shadowing the API; a dedicated test
-   (`test_static_mount_does_not_shadow_api_routes`) asserts exactly
-   that. Renders session selection, historical events (fetched once on
-   load), and the live SSE stream appended in real time; all
-   event content is set via `textContent`, never `innerHTML`, per this
-   doc's own XSS-prevention note -- backend responses/tool
-   output/transcripts are untrusted content. No approve/deny UI (see Out
-   of scope). Live-verified: a real running server answered a genuine
-   `GET /` with the actual page (title tag confirmed) while `GET
-   /api/sessions` simultaneously still returned real JSON, not shadowed.
-   Confirmed via a real `uv build --wheel` that `static/index.html` is
-   actually packaged (hatchling includes it by default; nothing extra
-   needed in pyproject.toml).
-
-5. **Add config schema** (src/convobox/config.py) -- DONE (2026-07-25).
-   `WebConfig`: `enabled`/`history_tracking_enabled` both off by default,
-   `bind_address` validator rejects a specific non-loopback address
-   (this server has no auth) while still allowing `0.0.0.0` as an
-   explicit choice, `port` validated to a real port range.
-
-6. **Documentation** -- DONE, and kept current as each slice lands: this
-   file (the running architecture/build account), `docs/WEB-UI-USAGE.md`
-   (end-user instructions), and `docs/WEB-UI-DEV.md` (contributor-facing
-   layout/testing/extension guide) all exist and are updated alongside
-   the code, not as an afterthought.
-
----
-
-**Status:** Phase 1 (viewing) and Phase 2 (bubble UI, ribbon, per-role
-colors/names, approve/deny, quit, stop/resume-listening, a live
-activity-status indicator, a full settings-editing UI with Test-probe
-wiring, PWA install support, and an artifact pane) are all complete and
-live-verified end to end -- built across many small, independently-
-committed slices per this project's one-work-set-at-a-time convention,
-not the single ~3-4 day push this doc originally estimated.
-
-Every one of the control-plane pieces above (approve/deny, quit, stop/
-resume-listening, settings-save) was a deliberate, individually-confirmed
-extension of the no-auth loopback trust model, not silent scope creep --
-see WEB-UI-USAGE.md's security section. The riskiest of them
-(stop/resume-listening, which hard-stops in-flight work the same way a
-spoken pause phrase does) shipped in its own commit with the
-re-verification stated, per this project's safety-critical-rides-alone
-rule -- live-verified in an isolated process group specifically because
-the real Quit mechanism's `os.kill(0, CTRL_C_EVENT)` targets the whole
-console process group on Windows, not just the target process.
-
-The artifact pane (`docs/ARTIFACT-PANE-SCOPE.md`) is built end to end
-for Claude Code (`Write`/`Edit` tool calls, confirmed via the matching
-`tool_result` before an `ARTIFACT` event fires) and live-verified by JP
-himself in a real voice session -- opencode/codex remain unwired,
-opencode blocked on one small live-verification step (confirming its
-`file.edited` event's path format), not guesswork.
-
-What's left: restart-on-demand (no go-ahead given yet -- a real
-security-posture decision, not assumed), opencode/codex artifact
-wiring, and replaying a historical `ARTIFACT` event on page reload
-(today only the live-session case is handled) -- see the project's own
-quickref/session notes and `docs/ARTIFACT-PANE-SCOPE.md` for current
-status of each.
+The lesson is worth stating plainly, because this document is the evidence:
+**an architecture doc that is allowed to describe intentions in the present
+tense will eventually lie.** Its very first version pre-checked every item
+in its own implementation checklist before any of it existed. Describe what
+is built; put what is planned in [ROADMAP.md](ROADMAP.md).
