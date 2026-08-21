@@ -238,6 +238,14 @@ Scoped, not yet built:
   `web.*`) boolean setting, exposed in both Settings surfaces, not just
   a frontend-only visual tweak.
 
+### Per-file-type "open in editor" choice (proposed, not prioritized)
+Raised by JP 2026-08-21: the artifact pane's existing "open in editor"
+action (`vscode://file/...` URI) is currently one hardcoded target.
+Idea -- let the target editor vary per file extension, and be a real
+user choice (VS Code, Notepad++, Sublime Text, vim, jed, emacs, etc.),
+not just VS Code assumed for everyone. Explicitly flagged as a
+someday/nice-to-have, not something to scope or build now.
+
 ### Spoken-response contract (decided: user-selectable, later)
 - User-settable response length target (word budget) and per-response
   routing: VERBALIZE vs DISPLAY (spoken summary + full text on screen).
