@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,28 @@ def working_dir(tmp_path: Path) -> Path:
     d = tmp_path / "workspace"
     d.mkdir()
     return d
+
+
+@functools.lru_cache(maxsize=1)
+def _symlinks_supported() -> bool:
+    """Probe (not assume) whether this process can create symlinks.
+
+    Windows raises OSError [WinError 1314] on Path.symlink_to() unless the
+    process is elevated or Developer Mode is on (SeCreateSymbolicLinkPrivilege)
+    -- POSIX has no equivalent restriction. Probing directly, rather than
+    branching on sys.platform, means this stays correct if that ever changes
+    (elevated/Developer Mode Windows, a future POSIX restriction, etc.)
+    without needing another edit here.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "target"
+        target.write_bytes(b"")
+        link = Path(d) / "link"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            return False
+    return True
 
 
 def test_get_artifact_with_no_working_dir_returns_503() -> None:
@@ -292,6 +316,10 @@ def test_list_artifacts_excludes_dot_directories_entirely(working_dir: Path) -> 
     assert response.json()["files"] == ["chart.png"]
 
 
+@pytest.mark.skipif(
+    not _symlinks_supported(),
+    reason="symlink creation requires elevation or Developer Mode on this platform",
+)
 def test_list_artifacts_excludes_symlinked_files(working_dir: Path, tmp_path: Path) -> None:
     secret = tmp_path / "outside.png"
     secret.write_bytes(b"do-not-list-me")
@@ -304,6 +332,10 @@ def test_list_artifacts_excludes_symlinked_files(working_dir: Path, tmp_path: Pa
     assert response.json()["files"] == ["real.png"]
 
 
+@pytest.mark.skipif(
+    not _symlinks_supported(),
+    reason="symlink creation requires elevation or Developer Mode on this platform",
+)
 def test_list_artifacts_excludes_symlinked_directories(
     working_dir: Path, tmp_path: Path
 ) -> None:
