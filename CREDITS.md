@@ -23,11 +23,17 @@ authoritative, metadata-verified source.
 | [NumPy](https://numpy.org/) | Audio buffer math, resampling | BSD-3 |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | Voice-activity detection / utterance segmentation | MIT |
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [CTranslate2](https://github.com/OpenNMT/CTranslate2) | Speech-to-text inference | MIT |
-| [Piper](https://github.com/rhasspy/piper) (`piper-tts`) | Local text-to-speech | GPL-3.0-or-later — see audit |
+| [Piper](https://github.com/rhasspy/piper) (`piper-tts`) | Local text-to-speech, opt-in `[piper]` extra | GPL-3.0-or-later — see audit |
+| [Kokoro](https://github.com/hexgrad/kokoro) (`kokoro-onnx`) | Local text-to-speech, **default engine** | MIT (wrapper) — model weights Apache-2.0 |
 | [aec-audio-processing](https://pypi.org/project/aec-audio-processing/) (WebRTC APM / AEC3) | Acoustic echo cancellation (optional `[aec]` extra) | BSD-3 |
 | [httpx](https://www.python-httpx.org/) · [httpx-sse](https://github.com/florimondmanca/httpx-sse) | Backend HTTP + SSE transport | BSD-3 / MIT |
 | [Pydantic](https://docs.pydantic.dev/) | Config schema & validation | MIT |
 | [PyYAML](https://pyyaml.org/) | Config file parsing | MIT |
+| [FastAPI](https://fastapi.tiangolo.com/) | Web UI HTTP/SSE server, optional `[web]` extra | MIT |
+| [Uvicorn](https://www.uvicorn.org/) | ASGI server for the web UI, optional `[web]` extra | BSD-3 |
+| [python-multipart](https://github.com/Kludex/python-multipart) | Web UI file-upload form parsing, optional `[web]` extra | Apache-2.0 |
+| [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (`mcp`) | The web UI's "show this document" artifact-pane tool, optional `[web]` extra | MIT |
+| [Matplotlib](https://matplotlib.org/) | Post-hoc plotting for `scripts/analyze_incident.py`, optional `[analysis]` extra — never imported by the running product | Matplotlib License (PSF-based, BSD-style) |
 
 Dev-only tooling (not distributed): pytest, pytest-asyncio, mypy, ruff,
 bandit.
@@ -37,6 +43,8 @@ bandit.
 - **Whisper** speech-recognition models — originally by OpenAI (MIT),
   run via SYSTRAN's CTranslate2 conversions (e.g. `Systran/faster-whisper-base`).
 - **Silero VAD** model — by the [Silero Team](https://github.com/snakers4/silero-vad) (MIT).
+- **Kokoro** voices (54 bundled, e.g. `af_sarah`) — the default TTS
+  engine's model weights, Apache-2.0.
 - **Piper voices** (e.g. `en_GB-alba-medium`) — from the Piper voices
   collection; **each voice carries its own license and attribution** (varies
   per voice — check the individual voice's model card before redistributing).

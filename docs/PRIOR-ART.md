@@ -4,8 +4,20 @@ ConvoBox is not the first attempt at voice-driven coding agents. Related
 projects, and where this one differs:
 
 - **[VoiceMode](https://github.com/mbailey/voicemode)** — local-first,
-  open-source, Whisper STT + Kokoro TTS. Runs as an MCP server, so it's
-  scoped to MCP-aware hosts rather than arbitrary CLIs.
+  open-source, Whisper STT + Kokoro TTS (1.3k★, 2,147 commits as of
+  2026-08-20 — the largest project on this list by far). Ships as a
+  **Claude Code plugin** (`/voicemode:converse`), which reaches any
+  MCP-aware host, making it functionally backend-agnostic too, not just
+  local-first. The real remaining difference: VoiceMode's loop is
+  **turn-based and agent-initiated** — the agent must call a tool to
+  start a conversation turn — where ConvoBox listens continuously and
+  can barge in mid-response. "Local-first both directions" alone is no
+  longer a ConvoBox differentiator against this project specifically.
+- **[opencode-voice](https://github.com/renjfk/opencode-voice)** (58★) —
+  a community plugin doing local Whisper STT and Piper TTS for opencode
+  specifically, both directions. Directly falsifies the "durability"
+  argument below in its original form — see that note for the
+  correction.
 - **[duck_talk](https://github.com/dhuynh95/duck_talk)** — real-time voice
   interface for Claude Code specifically, built on cloud Gemini Live
   sessions rather than local STT/TTS.
@@ -24,16 +36,21 @@ projects, and where this one differs:
   aider only.
 - **[AgentsRoom](https://agentsroom.dev/)** — the closest existing
   competitor on backend-agnostic and full-duplex, and worth being honest
-  about: a priced (free tier + €6.99/mo Pro), commercial desktop app supporting
-  **8 CLIs** (Claude Code, Codex, Antigravity, OpenCode, Aider, Grok
-  Build, Mistral Vibe, Kimi Code), with real two-way voice conversation
-  *and* PreToolUse-hook-based guardrails ("block any `rm -rf`, any
-  `push --force`") that overlap with ConvoBox's own safety framing.
-  Backend-agnostic and full-duplex, yes — but voice STT/TTS routes
-  through AgentsRoom's own backend rather than confirmed on-device, so
-  it isn't local-first the way ConvoBox is, and its safety mechanism is
-  generic hook-based guardrails rather than a voice-native safeword
-  hard-stop or spoken approval gate for destructive actions.
+  about: a priced (free tier + €6.99/mo Pro), commercial desktop app,
+  now supporting **9 CLI providers** (up from 8 as of 2026-08-20 — Kimi
+  Code was the most recent addition; Claude Code, Codex, Antigravity,
+  OpenCode, Aider, Grok Build, and Mistral Vibe round out the rest),
+  with real two-way voice conversation, dictation in 19 languages, *and*
+  PreToolUse-hook-based guardrails ("block any `rm -rf`, any
+  `push --force`") that overlap with ConvoBox's own safety framing. It
+  also ships a **mobile companion app over an E2E-encrypted relay** —
+  this is ConvoBox's own Roadmap Phase 2/3 territory, already shipped
+  commercially by this competitor. Backend-agnostic and full-duplex,
+  yes — but voice STT/TTS routes through AgentsRoom's own backend rather
+  than confirmed on-device, so it isn't local-first the way ConvoBox is,
+  and its safety mechanism is generic hook-based guardrails rather than
+  a voice-native safeword hard-stop or spoken approval gate for
+  destructive actions.
 
 None of the above combine backend-agnostic *and* local-first (both
 directions, not just STT) *and* full-duplex *and* voice-native safety
@@ -42,13 +59,18 @@ destructive tool calls) in one project. That combination — not just
 "voice for a coding agent," which both Anthropic and OpenAI now ship for
 free — is the gap ConvoBox is trying to fill.
 
-**A note on durability, not just current-state comparison:** opencode's
-maintainers have explicitly closed the most-requested native-voice
-feature request as not planned. Unlike Claude Code/Codex CLI (where the
-platform vendors are actively encroaching on at least the dictation
-slice of this space), that's a standing gap third-party tools like
-ConvoBox can keep filling rather than compete against a first-party
-feature that might ship any month.
+**A note on durability, not just current-state comparison — corrected
+2026-08-21.** opencode's maintainers did explicitly close the
+most-requested native-voice feature request as not planned. This note
+previously argued that made native opencode voice support a standing
+gap third-party tools like ConvoBox could keep filling. **That argument
+is falsified**: [opencode-voice](https://github.com/renjfk/opencode-voice)
+(above) is exactly that gap, filled by a third party, already shipping.
+The real, narrower durability point that survives: opencode itself
+still won't ship first-party voice (so a third-party project filling
+that role isn't racing a vendor feature that might ship any month, the
+way the Claude Code/Codex CLI dictation slice is) — but ConvoBox is no
+longer the only project occupying that space for opencode specifically.
 
 **[RealtimeVoiceChat](https://github.com/KoljaB/RealtimeVoiceChat)**
 deserves a separate callout: it already implements almost the entire
@@ -75,6 +97,26 @@ approach ends up being preferable to forking RealtimeVoiceChat:
 - **[OpenVoiceOS](https://github.com/OpenVoiceOS/ovos-docker-stt)** —
   plugin-based STT/TTS container images, OCI-compatible (Docker, Podman,
   Kubernetes).
+
+**Also surveyed, 2026-08-20 (lighter-depth pass than the projects
+above — flagging their existence and rough shape, not a full
+comparison):**
+
+- **[jamiepine/voicebox](https://github.com/jamiepine/voicebox)** —
+  ships a pre-wired `.mcp.json` for Claude Code, similar integration
+  shape to VoiceMode.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**
+  (NousResearch) — native `/voice` support tracked in-progress as of
+  [issue #314](https://github.com/NousResearch/hermes-agent/issues/314).
+- **[HuggingFace `speech-to-speech`](https://github.com/huggingface/speech-to-speech)**
+  (v0.2.10, 2026-07-31) — a general local speech-to-speech pipeline
+  (not coding-agent-specific), relevant as a source of local STT/TTS
+  building blocks rather than a direct competitor.
+- **hns-cli**, **Aqua Voice** — voice-driven CLI/dictation tools in
+  adjacent space; not independently deep-dived here.
+- **VibeTyper** — commercial dictation tool; adjacent (general dictation,
+  not coding-agent-integrated), noted for completeness rather than as a
+  direct competitor.
 
 The Wyoming protocol / Rhasspy satellite ecosystem (Home Assistant's
 local voice stack) is the closest *conceptual* prior art for a
