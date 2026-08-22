@@ -4,7 +4,12 @@ Grounded the same way claude_code.py is: the protocol below was taken
 from the installed CLI's own schema bundle (`codex app-server
 generate-json-schema`, codex-cli 0.144.1) and then confirmed with live
 probes against a real authenticated `codex app-server` before this
-adapter was written. Key facts:
+adapter was written. NOTE (re-verified against codex-cli 0.148.0,
+2026-08-22): `--out <DIR>` is now a required argument to
+`generate-json-schema` -- the bare invocation recorded throughout this
+file's history (as used when each version-tagged comment below was
+written) now exits 2. Add `--out` if reproducing any of these checks
+against current codex-cli. Key facts:
 
 - `codex proto` no longer exists (forwards to the interactive CLI);
   `codex exec --json` is one-shot with no mid-run input or interrupt.
