@@ -25,42 +25,65 @@ for local AI-assisted commits.
 
 ## Quick Start
 
-The fastest way to hear it work, no microphone required:
+The fastest way to hear it work, no microphone required — no `git clone`
+needed either, it's a real package:
 
 ```bash
-git clone https://github.com/LegionForge/convobox
-cd convobox
-uv sync                                # or: pip install -e .
-cp convobox.example.yaml convobox.yaml # edit backend.url / tts.voice as needed
+pip install legionforge-convobox    # or: pipx install legionforge-convobox
+```
 
+Then a small `convobox.yaml` pointing at a backend you already have
+working standalone (`opencode serve`, or `claude`/`codex` on your PATH):
+
+```yaml
+backend:
+  name: opencode              # "opencode" | "claude-code" | "codex"
+  url: http://localhost:4096  # opencode only
+```
+
+```bash
 # start your backend first, e.g.: opencode serve
-python scripts/run_convobox.py --text "Reply with one short sentence: it works."
+convobox --text "Reply with one short sentence: it works."
 ```
 
-What that actually looks like (real output, `backend: codex` in this case):
+What that actually looks like (real output, `backend: claude-code` in this
+case, verified against the actual published package — not run from a
+source checkout):
 
 ```
-2026-07-22 15:25:53 WARNING backend.working_dir is unset: the codex agent will run in ConvoBox's own directory and can modify its source. Set backend.working_dir (or pass --working-dir) to an isolated workspace. See docs/DESIGN-backend-sandboxing.md.
-2026-07-22 15:25:55 INFO backend=codex  voice=en_GB-alba-medium  safeword='stop stop stop'  pid=35228
-2026-07-22 15:26:10 INFO response: it works.
+2026-08-22 10:00:17 INFO backend permission_mode: plan (claude-code)
+2026-08-22 10:00:19 INFO backend=claude-code  voice=af_sarah  safeword='stop stop stop'  pid=55596
+2026-08-22 10:00:24 INFO response: It works.
 ```
-
-(That working-dir warning is real and worth heeding — see
-[docs/DESIGN-backend-sandboxing.md](docs/DESIGN-backend-sandboxing.md).)
 
 If you hear a spoken reply, the whole pipeline (backend → TTS → speakers)
 is working. Then go live and talk to it:
 
 ```bash
-python scripts/run_convobox.py
+convobox
 ```
+
+**Set `backend.working_dir`** to an isolated workspace before you do —
+left unset, the agent runs (and can edit files) in whatever directory you
+launched `convobox` from. ConvoBox warns at startup if you skip this; see
+[docs/DESIGN-backend-sandboxing.md](docs/DESIGN-backend-sandboxing.md).
 
 For picking a voice, finding the right audio device, and everything else
 between "installed" and "talking to it comfortably," see the full
 [docs/QUICKSTART.md](docs/QUICKSTART.md) walkthrough — it also covers
 how to interrupt/abort by voice and what each listening state looks like.
 
+Optional extras (GPU inference, AEC, the web UI, Piper) install the same
+way: `pip install "legionforge-convobox[web]"`, for example — see
+[Installation](#installation) below for the full list. **Contributing?**
+That section also covers running from a source checkout.
+
 ## Installation
+
+Just want to use it? `pip install legionforge-convobox` (see
+[Quick Start](#quick-start) above) is the whole install — everything
+below is for running from a source checkout: contributing, or the `dev`
+extra's test/lint tooling, which isn't meaningful outside a clone.
 
 **Prerequisites:** Python 3.12+, [git](https://git-scm.com/), and a
 coding-agent CLI you can already reach on its own — OpenCode (runs a
@@ -80,6 +103,9 @@ uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB
 uv sync --extra web        # local browser UI for a live session (--web), see below
 uv sync --extra dev        # test/lint tooling
 ```
+
+(Not running from source? The same extras install straight from PyPI:
+`pip install "legionforge-convobox[web]"`, etc.)
 
 ConvoBox never bundles a speech engine you didn't ask for — the default
 STT model (faster-whisper) and TTS engine (Kokoro, Apache 2.0 — Piper is
@@ -150,16 +176,18 @@ in [docs/PERMISSION-MODEL.md](docs/PERMISSION-MODEL.md).
 
 ## Uninstallation
 
-ConvoBox never installs anything outside the folder you cloned it into —
-no services, daemons, or registry/system entries. To remove it:
+ConvoBox never installs any service, daemon, or registry/system entry —
+just the package (or the cloned source) plus whatever it downloaded. To
+remove it:
 
-1. **Delete the project folder.** This removes the cloned source, the
-   `uv`/`pip` virtual environment, your `convobox.yaml` config, and any
-   downloaded TTS files (Kokoro's model/voices at `.models/kokoro/`,
-   or Piper voices at `.models/piper/` if you opted into that extra).
-2. **If you installed it into a different environment** with `pip install
-   -e .` instead of `uv sync`, first run `pip uninstall convobox` in that
-   environment.
+1. **Installed via `pip`/`pipx`?** `pip uninstall legionforge-convobox`
+   (or `pipx uninstall legionforge-convobox`). Also delete `convobox.yaml`
+   wherever you kept it — it isn't installed alongside the package.
+2. **Installed from source?** Delete the project folder — this removes
+   the cloned source, the `uv`/`pip` virtual environment, your
+   `convobox.yaml`, and any downloaded TTS files (Kokoro's model/voices at
+   `.models/kokoro/`, or Piper voices at `.models/piper/` if you opted
+   into that extra).
 3. **Optional — reclaim the STT model cache.** faster-whisper downloads
    its speech-to-text model into the shared Hugging Face cache
    (`~/.cache/huggingface` on Linux/macOS, `%USERPROFILE%\.cache\huggingface`
