@@ -40,17 +40,22 @@ projects, and where this one differs:
   now supporting **9 CLI providers** (up from 8 as of 2026-08-20 — Kimi
   Code was the most recent addition; Claude Code, Codex, Antigravity,
   OpenCode, Aider, Grok Build, and Mistral Vibe round out the rest),
-  with real two-way voice conversation, dictation in 19 languages, *and*
-  PreToolUse-hook-based guardrails ("block any `rm -rf`, any
-  `push --force`") that overlap with ConvoBox's own safety framing. It
-  also ships a **mobile companion app over an E2E-encrypted relay** —
+  with real two-way voice conversation, dictation in 19 languages, a
+  hands-free mic-open mode of its own (correction, 2026-08-22 — softens
+  "full-duplex" as a unique ConvoBox claim; see below for what still
+  holds), *and* PreToolUse-hook-based guardrails ("block any `rm -rf`,
+  any `push --force`") that overlap with ConvoBox's own safety framing.
+  It also ships a **mobile companion app over an E2E-encrypted relay** —
   this is ConvoBox's own Roadmap Phase 2/3 territory, already shipped
-  commercially by this competitor. Backend-agnostic and full-duplex,
-  yes — but voice STT/TTS routes through AgentsRoom's own backend rather
-  than confirmed on-device, so it isn't local-first the way ConvoBox is,
-  and its safety mechanism is generic hook-based guardrails rather than
-  a voice-native safeword hard-stop or spoken approval gate for
-  destructive actions.
+  commercially by this competitor. Backend-agnostic and hands-free, yes —
+  but voice STT/TTS routes through AgentsRoom's own backend rather than
+  confirmed on-device, so it isn't local-first the way ConvoBox is; its
+  own product page documents no barge-in (interrupting it mid-reply); and
+  its safety mechanism is generic hook-based guardrails rather than a
+  voice-native safeword hard-stop or spoken approval gate for destructive
+  actions. The *combination* — barge-in-capable, voice-gated approvals,
+  and local-first, all at once — is what still distinguishes ConvoBox
+  here, not any single ingredient in isolation.
 
 None of the above combine backend-agnostic *and* local-first (both
 directions, not just STT) *and* full-duplex *and* voice-native safety
