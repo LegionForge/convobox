@@ -207,9 +207,16 @@ safeword:
   hard_stop_phrases:
     - "stop stop stop"    # the most STT-robust phrase; recommended primary
     - "abort abort abort" # universal, distinctive, low overlap with
-    - "halt halt halt"    # normal conversation -- add any you like, but
+                          # normal conversation -- add any you like, but
                           # a word tripled (not a single word) is the
-                          # anti-false-positive mechanism; keep that shape
+                          # anti-false-positive mechanism; keep that shape.
+                          # "halt halt halt" used to be a third default here
+                          # but was DROPPED in 0.4.0: live testing found it
+                          # misheard 4/5 times ("Hold, hold, hold" / "HOT POT
+                          # POT"). Still usable if it works for your own
+                          # voice/mic/room -- verify it round-trips first
+                          # (scripts/roundtrip_smoketest.py) before relying
+                          # on it. See docs/TROUBLESHOOTING.md.
   # Opt-in, unset by default. Must be one of the phrases listed above. A
   # normal safeword only asks the backend to abort its current turn over
   # its own channel -- if the backend process itself is wedged (see
