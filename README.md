@@ -1,6 +1,7 @@
 # LegionForge - ConvoBox
 
 [![CI](https://github.com/LegionForge/convobox/actions/workflows/ci.yml/badge.svg)](https://github.com/LegionForge/convobox/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/legionforge-convobox.svg)](https://pypi.org/project/legionforge-convobox/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
