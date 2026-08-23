@@ -200,13 +200,21 @@ def test_detached_descendant_stays_visible_after_tracked_process_exits() -> None
     job = jo.create_job()
     assert job is not None
 
+    # ONE PowerShell -Command argument value, assembled as its own named
+    # string first rather than left as adjacent-literal concatenation
+    # inline in the list -- a static-analysis pass flagged the inline
+    # form as "implicit string concatenation in a list, maybe missing a
+    # comma?" (a real, common bug elsewhere; a false positive here, since
+    # a comma here would instead pass this text as several BROKEN
+    # trailing argv entries to powershell.exe rather than one coherent
+    # command -- but not worth leaving ambiguous for the next reader).
+    detach_command = (
+        "Start-Process powershell -ArgumentList "
+        "'-NoProfile -Command \"Start-Sleep -Seconds 20\"' "
+        "-WindowStyle Hidden; exit 0"
+    )
     tracked = subprocess.Popen(
-        [
-            "powershell", "-NoProfile", "-Command",
-            "Start-Process powershell -ArgumentList "
-            "'-NoProfile -Command \"Start-Sleep -Seconds 20\"' "
-            "-WindowStyle Hidden; exit 0",
-        ],
+        ["powershell", "-NoProfile", "-Command", detach_command],
     )
     try:
         assert jo.assign_to_job(job, tracked.pid) is True
@@ -225,16 +233,18 @@ def test_detached_descendant_stays_visible_after_tracked_process_exits() -> None
         # "observation, not termination" contract.
         jo.close_job(job)
         time.sleep(0.5)
-        still_alive = [
-            pid
-            for pid in pids
-            if subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f"Get-Process -Id {pid} -ErrorAction SilentlyContinue "
-                 "| Select-Object -ExpandProperty Id"],
+        def _still_running(pid: int) -> bool:
+            check_command = (
+                f"Get-Process -Id {pid} -ErrorAction SilentlyContinue "
+                "| Select-Object -ExpandProperty Id"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", check_command],
                 capture_output=True, text=True,
-            ).stdout.strip()
-        ]
+            )
+            return bool(result.stdout.strip())
+
+        still_alive = [pid for pid in pids if _still_running(pid)]
         assert still_alive, "close_job() killed the detached process -- it must not"
     finally:
         # Test cleanup only -- not exercising kill_phrase, just not
