@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from convobox.adapters import CodexAdapter, create_backend_adapter
-from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.adapters.base import BackendEvent, BackendEventType, JobState
 from convobox.config import BackendConfig
 
 _FAKE_CODEX = [sys.executable, str(Path(__file__).with_name("fake_codex_appserver.py"))]
@@ -1061,3 +1061,156 @@ def test_kill_by_command_text_matches_a_short_legitimate_command(
     assert 50564 in result  # the shell wrapper, matched directly
     assert 50565 in result  # its child, killed via descendant expansion
     assert 60001 not in result
+
+
+# --- background_jobs() via the Windows Job Object (observation only) --
+# mocks convobox.adapters._windows_job_object directly, NOT real ctypes/
+# Win32 calls (that mechanism's own real-API and live-integration tests
+# live in tests/test_windows_job_object.py). These test the ADAPTER's own
+# wiring: when to create/assign/enumerate, and what it does with the
+# result. ---
+
+
+def _mock_windows_job_object(
+    monkeypatch: pytest.MonkeyPatch,
+    mod: object,
+    *,
+    create_job: object = lambda: 4242,
+    assign_to_job: object = lambda *_: True,
+    enumerate_job_pids: object = lambda _job: [],
+    close_job: object = lambda *_: None,
+) -> None:
+    """Mocks all FOUR _windows_job_object functions with safe defaults,
+    not just the one(s) a given test cares about.
+
+    Real bug this fixes, caught by CI (not this Windows dev machine,
+    where ctypes.windll genuinely exists and papered over the gap): a
+    test that monkeypatches sys.platform to "win32" but mocks only
+    create_job/assign_to_job still calls the REAL close_job() when
+    _shutdown()'s teardown runs aclose() -- and the real close_job() then
+    hits actual ctypes.windll, which doesn't exist on Linux CI, raising
+    AttributeError instead of gracefully degrading (the sys.platform
+    check inside _windows_job_object.py itself is fooled by the same
+    monkeypatch that's supposed to simulate Windows). Mocking every
+    function up front, with call-by-call overrides via monkeypatch AFTER
+    calling this, closes that gap structurally instead of per-test.
+    """
+    monkeypatch.setattr(mod._windows_job_object, "create_job", create_job)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mod._windows_job_object, "assign_to_job", assign_to_job)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mod._windows_job_object, "enumerate_job_pids", enumerate_job_pids)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mod._windows_job_object, "close_job", close_job)  # type: ignore[attr-defined]
+
+
+async def test_background_jobs_is_empty_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    adapter = _adapter()
+    assert adapter.background_jobs() == ()
+    await _shutdown(adapter)
+
+
+async def test_background_jobs_is_empty_before_any_spawn() -> None:
+    adapter = _adapter()
+    # Never sent anything -- no process, no job -- must not raise.
+    assert adapter.background_jobs() == ()
+
+
+async def test_spawn_on_windows_creates_and_assigns_the_job_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    calls: list[tuple[str, object]] = []
+    _mock_windows_job_object(
+        monkeypatch,
+        mod,
+        create_job=lambda: (calls.append(("create", None)), 4242)[1],
+        assign_to_job=lambda job, pid: calls.append(("assign", (job, pid))) or True,  # type: ignore[func-returns-value]
+    )
+    adapter = _adapter()
+    try:
+        await adapter.send_text("hi")
+        assert adapter._windows_job == 4242
+        assert calls[0] == ("create", None)
+        assert calls[1][0] == "assign"
+        assert calls[1][1][0] == 4242
+        assert calls[1][1][1] == adapter._proc.pid  # type: ignore[union-attr]
+    finally:
+        await _shutdown(adapter)
+
+
+async def test_spawn_reuses_the_same_job_object_across_respawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A detached descendant of an EARLIER, already-dead codex process must
+    # stay visible after a respawn -- reusing the job, not recreating it,
+    # is what makes that true (see _observe_via_windows_job_object's own
+    # comment).
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    create_calls = 0
+
+    def fake_create() -> int:
+        nonlocal create_calls
+        create_calls += 1
+        return 4242
+
+    _mock_windows_job_object(monkeypatch, mod, create_job=fake_create)
+    adapter = _adapter()
+    try:
+        await adapter.send_text("hi")
+        # Force a respawn the same way test_thread_start_with_no_id_raises
+        # etc. do elsewhere in this file -- kill the process out from under
+        # the adapter so the next send re-spawns.
+        assert adapter._proc is not None
+        adapter._proc.kill()
+        await adapter._proc.wait()
+        await adapter.send_text("hi again")
+        assert create_calls == 1  # NOT recreated on respawn
+    finally:
+        await _shutdown(adapter)
+
+
+async def test_background_jobs_excludes_codexs_own_pid_and_maps_the_rest_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    _mock_windows_job_object(monkeypatch, mod)
+    adapter = _adapter()
+    try:
+        await adapter.send_text("hi")
+        own_pid = adapter._proc.pid  # type: ignore[union-attr]
+        monkeypatch.setattr(
+            mod._windows_job_object,
+            "enumerate_job_pids",
+            lambda _job: [own_pid, own_pid + 1, own_pid + 2],
+        )
+        jobs = adapter.background_jobs()
+        ids = {job.id for job in jobs}
+        assert str(own_pid) not in ids  # codex's own process excluded
+        assert str(own_pid + 1) in ids
+        assert str(own_pid + 2) in ids
+        assert all(job.state == JobState.UNKNOWN for job in jobs)
+        assert all(job.source == "os-scan" for job in jobs)
+    finally:
+        await _shutdown(adapter)
+
+
+async def test_aclose_closes_the_job_object_and_resets_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import convobox.adapters.codex as mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    closed: list[int] = []
+    _mock_windows_job_object(monkeypatch, mod, close_job=closed.append)
+
+    adapter = _adapter()
+    await adapter.send_text("hi")
+    assert adapter._windows_job == 4242
+    await adapter.aclose()
+    assert closed == [4242]
+    assert adapter._windows_job is None

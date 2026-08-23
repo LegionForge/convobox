@@ -124,15 +124,19 @@ import shutil
 import signal
 import subprocess  # nosec B404 -- see _kill_by_command_text()'s own use for why
 import sys
+import time
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any
 
+from convobox.adapters import _windows_job_object
 from convobox.adapters.base import (
     ARTIFACT_MEDIA_TYPES,
     BackendAdapter,
     BackendEvent,
     BackendEventType,
+    BackgroundJob,
+    JobState,
     readline_with_stall_diagnostic,
 )
 
@@ -414,6 +418,12 @@ class CodexAdapter(BackendAdapter):
         self._events: asyncio.Queue[BackendEvent | object] = asyncio.Queue()
         self._interactive_approvals = False
         self._pending_approval: tuple[int, str] | None = None
+        # Windows-only observation Job Object (see _windows_job_object.py --
+        # OBSERVATION ONLY, never used to kill). Created lazily on first
+        # spawn, reused across respawns within this adapter's lifetime so a
+        # detached descendant of an earlier, already-dead codex process
+        # stays visible even after a respawn -- not recreated per spawn.
+        self._windows_job: int | None = None
 
     def set_interactive_approvals(self, enabled: bool) -> None:
         self._interactive_approvals = enabled
@@ -474,6 +484,7 @@ class CodexAdapter(BackendAdapter):
                 self._busy = False
                 self._pending = {}
                 self._pending_approval = None
+                self._observe_via_windows_job_object()
                 self._reader_task = asyncio.create_task(self._read_loop(self._proc))
                 await self._request(
                     "initialize",
@@ -594,12 +605,66 @@ class CodexAdapter(BackendAdapter):
     def is_busy(self) -> bool:
         return self._busy
 
+    def _observe_via_windows_job_object(self) -> None:
+        """Best-effort: assign the freshly-spawned codex process to this
+        adapter's observation Job Object (created lazily, reused across
+        respawns). A no-op, logged-and-swallowed failure on any non-Windows
+        platform or if the Win32 calls themselves fail -- this must never
+        prevent codex from actually starting, since it's an observability
+        enhancement, not a requirement of the adapter working at all.
+        """
+        if sys.platform != "win32" or self._proc is None or self._proc.pid is None:
+            return
+        if self._windows_job is None:
+            self._windows_job = _windows_job_object.create_job()
+        if self._windows_job is not None:
+            _windows_job_object.assign_to_job(self._windows_job, self._proc.pid)
+
+    def background_jobs(self) -> Sequence[BackgroundJob]:
+        """Codex's own protocol has no background-job concept to observe
+        (see docs/BACKGROUND-JOB-OBSERVABILITY-SCOPE.md's API audit) -- the
+        only visibility here is OS-level, via the Windows Job Object above.
+        Every PID it reports besides codex's own top-level process is
+        UNKNOWN state and "os-scan" source: this module can confirm a
+        process is alive, not what it's doing or whether it will ever
+        finish, which is the honest answer for something codex never told
+        ConvoBox about in the first place.
+        """
+        if sys.platform != "win32" or self._windows_job is None:
+            return ()
+        own_pid = self._proc.pid if self._proc is not None else None
+        now = time.time()
+        return tuple(
+            BackgroundJob(
+                id=str(pid),
+                state=JobState.UNKNOWN,
+                label=f"process {pid} (spawned by codex, not otherwise identified)",
+                pid=pid,
+                observed_at=now,
+                source="os-scan",
+            )
+            for pid in _windows_job_object.enumerate_job_pids(self._windows_job)
+            if pid != own_pid
+        )
+
     async def aclose(self) -> None:
         # Terminate the codex app-server subprocess and await it here, while
         # the loop is alive, so its pipe transports close cleanly instead of
         # being GC'd after the loop closes (which prints "Event loop is
         # closed" / "unclosed transport" tracebacks on Windows). Idempotent.
         await self._terminate_and_kill_process()
+        # Releases OUR reference to the observation Job Object -- does NOT
+        # terminate any member process (see _windows_job_object.py's module
+        # docstring: this module never sets JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE).
+        # A detached descendant that's still alive stays alive; ConvoBox
+        # simply stops being able to observe it after this point. Reset to
+        # None (not just closed) so the rare case of this adapter instance
+        # being reused after aclose() creates a fresh job on next spawn
+        # instead of silently failing every assign_to_job() against an
+        # already-closed handle.
+        if self._windows_job is not None:
+            _windows_job_object.close_job(self._windows_job)
+            self._windows_job = None
 
     async def force_kill(self) -> None:
         # Unlike aclose(), does NOT reset self._thread_id -- see
