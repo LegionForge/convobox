@@ -155,6 +155,7 @@ import os
 import secrets
 import sys
 import tempfile
+import time
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,8 @@ from convobox.adapters.base import (
     BackendAdapter,
     BackendEvent,
     BackendEventType,
+    BackgroundJob,
+    JobState,
     readline_with_stall_diagnostic,
 )
 
@@ -363,6 +366,16 @@ class ClaudeCodeAdapter(BackendAdapter):
         # once the write is confirmed to have actually succeeded, not
         # optimistically on the call itself.
         self._pending_artifact_writes: dict[str, str] = {}
+        # task_id -> BackgroundJob. Wire shape live-verified 2026-08-23
+        # against a real claude subprocess (claude 2.1.238): a
+        # backgrounded local_bash tool call emits, in order,
+        # background_tasks_changed (full current list on every change),
+        # task_started ({task_id, tool_use_id, description, is_backgrounded,
+        # task_type}), then eventually task_updated ({task_id, patch:
+        # {status, end_time}}) and task_notification ({task_id,
+        # tool_use_id, status, output_file, summary}) once it ends -- see
+        # _to_backend_events' "system" branch below for the exact handling.
+        self._background_jobs: dict[str, BackgroundJob] = {}
 
     async def _ensure_proc(self) -> asyncio.subprocess.Process:
         # Locked for the same reason OpenCodeAdapter._ensure_session is:
@@ -788,6 +801,35 @@ class ClaudeCodeAdapter(BackendAdapter):
     def is_busy(self) -> bool:
         return self._pending > 0
 
+    def background_jobs(self) -> Sequence[BackgroundJob]:
+        # Synchronous snapshot of what _observe_background_task_system_message
+        # has recorded so far -- no I/O, per BackendAdapter.background_jobs()'s
+        # own contract (safe to call from the quit/eject path).
+        return tuple(self._background_jobs.values())
+
+    async def stop_background_job(self, job_id: str) -> bool:
+        # The only adapter with a real, live-verified per-job stop channel
+        # today (control_request {subtype: "stop_task", task_id}) -- see
+        # BackendAdapter.stop_background_job()'s own docstring for why this
+        # must stay separate from force_kill()/kill_phrase.
+        if self._proc is None or self._proc.returncode is not None:
+            return False
+        if job_id not in self._background_jobs:
+            return False
+        self._request_seq += 1
+        try:
+            await self._write_line(
+                {
+                    "type": "control_request",
+                    "request_id": f"convobox-stoptask-{self._request_seq}",
+                    "request": {"subtype": "stop_task", "task_id": job_id},
+                }
+            )
+        except (OSError, ConnectionError):
+            logger.warning("claude stop_task write failed", exc_info=True)
+            return False
+        return True
+
     async def aclose(self) -> None:
         # Terminate the claude subprocess and await it here, while the loop
         # is alive, so its stdin/stdout/stderr pipe transports are closed
@@ -959,10 +1001,113 @@ class ClaudeCodeAdapter(BackendAdapter):
                 ]
             return [BackendEvent(type=BackendEventType.DONE)]
 
-        # system/*, control_response, rate_limit_event, stream_event
-        # (partial chunks), ...: protocol plumbing with no slot in our
-        # 5-value model. Narrow on purpose, like OpenCode's mapping.
+        if msg_type == "system":
+            self._observe_background_task_system_message(outer)
+            return []
+
+        # control_response, rate_limit_event, stream_event (partial
+        # chunks), ...: protocol plumbing with no slot in our 5-value
+        # model. Narrow on purpose, like OpenCode's mapping.
         return []
+
+    def _observe_background_task_system_message(self, outer: dict[str, Any]) -> None:
+        """Side-effects self._background_jobs from one of the four
+        background-task ``system`` subtypes -- never emits a BackendEvent;
+        background_jobs() is a separate synchronous accessor, not part of
+        the events() stream (see docs/BACKGROUND-JOB-OBSERVABILITY-SCOPE.md:
+        this must not enter the LLM's own context either).
+
+        Unrecognized subtypes and malformed payloads are silently ignored
+        -- this is best-effort observation, and a schema drift here must
+        degrade to UNKNOWN/missing data, never raise and break the whole
+        read loop over a field this adapter doesn't yet track.
+        """
+        subtype = outer.get("subtype")
+        now = time.time()
+
+        if subtype == "background_tasks_changed":
+            # The full current list, every time -- but tasks it lists
+            # again just confirm RUNNING; this never removes an entry
+            # that already recorded an EXITED/UNKNOWN outcome from
+            # task_updated/task_notification, since a task can drop out
+            # of this list (finish) before its own task_updated arrives.
+            for task in outer.get("tasks") or []:
+                task_id = task.get("task_id")
+                if not isinstance(task_id, str):
+                    continue
+                existing = self._background_jobs.get(task_id)
+                if existing is not None and existing.state != JobState.RUNNING:
+                    continue
+                self._background_jobs[task_id] = BackgroundJob(
+                    id=task_id,
+                    state=JobState.RUNNING,
+                    label=str(task.get("description") or task.get("task_type") or task_id),
+                    started_at=existing.started_at if existing else now,
+                    observed_at=now,
+                    source="protocol",
+                )
+            return
+
+        if subtype == "task_started":
+            task_id = outer.get("task_id")
+            if not isinstance(task_id, str):
+                return
+            self._background_jobs[task_id] = BackgroundJob(
+                id=task_id,
+                state=JobState.RUNNING,
+                label=str(outer.get("description") or outer.get("task_type") or task_id),
+                started_at=now,
+                observed_at=now,
+                source="protocol",
+            )
+            return
+
+        if subtype == "task_updated":
+            task_id = outer.get("task_id")
+            if not isinstance(task_id, str):
+                return
+            patch = outer.get("patch") or {}
+            status = patch.get("status")
+            existing = self._background_jobs.get(task_id)
+            # Any status value observed here means Claude Code itself
+            # concluded the task -- "completed"/"killed" and anything else
+            # this adapter doesn't yet recognize are all treated as
+            # EXITED, never left RUNNING on an unrecognized string. Only a
+            # genuinely absent status field falls back to UNKNOWN.
+            state = JobState.EXITED if status else JobState.UNKNOWN
+            self._background_jobs[task_id] = BackgroundJob(
+                id=task_id,
+                state=state,
+                label=existing.label if existing else task_id,
+                started_at=existing.started_at if existing else None,
+                observed_at=now,
+                source="protocol",
+            )
+            return
+
+        if subtype == "task_notification":
+            # Arrives after task_updated for a real completion and mostly
+            # reconfirms it; also the only place `summary`/`output_file`
+            # show up. Doesn't downgrade an already-EXITED record, and
+            # doesn't independently decide EXITED on its own -- task_updated
+            # is the one that carries a real status; a notification with
+            # no prior task_updated (e.g. this adapter started mid-task)
+            # is recorded as UNKNOWN rather than guessed at.
+            task_id = outer.get("task_id")
+            if not isinstance(task_id, str):
+                return
+            existing = self._background_jobs.get(task_id)
+            if existing is not None and existing.state != JobState.RUNNING:
+                return
+            self._background_jobs[task_id] = BackgroundJob(
+                id=task_id,
+                state=JobState.UNKNOWN,
+                label=existing.label if existing else str(outer.get("summary") or task_id),
+                started_at=existing.started_at if existing else None,
+                observed_at=now,
+                source="protocol",
+            )
+            return
 
     def _stage_artifact_write(self, tool_use_block: dict[str, Any]) -> None:
         """Called for every tool_use block, not just Write/Edit -- narrows

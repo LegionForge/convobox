@@ -4,7 +4,8 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,46 @@ ARTIFACT_MEDIA_TYPES: dict[str, str] = {
 }
 
 
+class JobState(str, Enum):
+    """docs/BACKGROUND-JOB-OBSERVABILITY-SCOPE.md's core pivot: this
+    exists to let an adapter tell the truth about what it can and can't
+    confirm, not to pretend confidence it doesn't have. UNKNOWN is a real,
+    first-class state (matching Kubernetes' Unknown pod phase / Docker's
+    dead) -- never silently upgraded to RUNNING or EXITED just because a
+    caller wants a definite answer.
+    """
+
+    RUNNING = "running"
+    EXITED = "exited"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class BackgroundJob:
+    """One observed backend-spawned process/task, as far as an adapter can
+    actually confirm -- see BackendAdapter.background_jobs().
+
+    ``label`` is the ONLY field that may ever reach TTS or a spoken
+    confirmation -- never ``command``. ``command`` is raw, potentially
+    attacker-influenceable text (the backend may have read it from
+    untrusted content) and may contain embedded secrets (see
+    docs/SECURITY.md's own "credentials in CLI args" category); it exists
+    for a verbose-tier visual display only, per the scope doc's Privacy
+    section, and must never be persisted to the history store or spoken
+    aloud regardless of config.
+    """
+
+    id: str
+    state: JobState
+    label: str
+    command: str | None = None
+    pid: int | None = None
+    exit_code: int | None = None
+    started_at: float | None = None
+    observed_at: float = 0.0
+    source: str = "protocol"  # "protocol" | "os-scan" | "inferred"
+
+
 class BackendEvent:
     def __init__(
         self,
@@ -328,6 +369,45 @@ class BackendAdapter(ABC):
         and CodexAdapter's own overrides for the real implementations.
         False here must always be treated as "nothing to answer / fail
         closed", never as an implicit approval.
+        """
+        return False
+
+    def background_jobs(self) -> Sequence[BackgroundJob]:
+        """Return the currently observed snapshot of backend-spawned
+        background jobs -- see docs/BACKGROUND-JOB-OBSERVABILITY-SCOPE.md.
+
+        Synchronous and does NO I/O: this returns whatever this adapter has
+        already recorded from events it's already parsed (or a prior OS
+        scan another component ran), never a fresh probe. A caller may
+        invoke this from the quit path or the eject/kill_phrase path,
+        where blocking here would reintroduce the exact "the control path
+        rides the stuck channel" failure force_kill()'s own docstring
+        already exists to avoid.
+
+        Default: empty. Same "default no-op, override where real" shape as
+        wait_listening/resolve_pending_approval -- an adapter with nothing
+        to report (or not yet wired up) must not be forced to override
+        this. Empty means "nothing observed," never "nothing is running";
+        callers must not treat it as a guarantee.
+        """
+        return ()
+
+    async def stop_background_job(self, job_id: str) -> bool:
+        """Ask the backend to stop ONE named background job -- returns
+        whether it was actually asked to stop (not whether it confirmed
+        stopping).
+
+        Deliberately separate from force_kill(): force_kill() ends the
+        whole backend/session; this targets one job a user chose from a
+        panel, and must never be reachable from the kill_phrase path (see
+        the scope doc's "Eject must NOT be gated" section -- kill_phrase
+        is the one lever that must keep working when everything else is
+        wedged, and this method has no such guarantee).
+
+        Default: no-op, returns False. Only an adapter with a real,
+        live-verified per-job stop channel should override this --
+        ClaudeCodeAdapter's ``stop_task`` control request is the only one
+        confirmed to exist today.
         """
         return False
 
