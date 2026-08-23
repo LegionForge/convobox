@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from convobox.adapters import ClaudeCodeAdapter, create_backend_adapter
-from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.adapters.base import BackendEvent, BackendEventType, JobState
 from convobox.adapters.claude_code import _resolve_flags, _safe_json_loads
 from convobox.config import BackendConfig
 
@@ -664,3 +664,164 @@ def test_safe_json_loads_returns_none_for_valid_json_that_is_not_an_object() -> 
 
 def test_safe_json_loads_returns_the_dict_for_valid_object_json() -> None:
     assert _safe_json_loads('{"type": "result"}') == {"type": "result"}
+
+
+# --- background_jobs(): the four "system" subtypes, wire shapes live-verified
+# 2026-08-23 against a real claude 2.1.238 subprocess (docs/BACKGROUND-JOB-
+# OBSERVABILITY-SCOPE.md's "Now" tier) -- these are the ACTUAL captured
+# payloads, not invented shapes, aside from trimming the real machine-specific
+# output_file path in the task_notification fixture. ---
+
+
+def test_background_tasks_changed_records_a_running_job(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [
+                {
+                    "task_id": "b64cpi75b",
+                    "task_type": "local_bash",
+                    "description": "Sleep 8 seconds then print marker",
+                }
+            ],
+            "uuid": "928ad6f3-afb9-448d-98a9-86080f1aa5b3",
+            "session_id": "6e65022f-1adf-49ab-b72c-5fba4c040fe6",
+        }
+    )
+    jobs = adapter.background_jobs()
+    assert len(jobs) == 1
+    assert jobs[0].id == "b64cpi75b"
+    assert jobs[0].state == JobState.RUNNING
+    assert jobs[0].label == "Sleep 8 seconds then print marker"
+    assert jobs[0].source == "protocol"
+
+
+def test_task_started_records_a_running_job(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "b64cpi75b",
+            "tool_use_id": "toolu_018rJrnWS7TtmDDzBr2GVqqg",
+            "description": "Sleep 8 seconds then print marker",
+            "is_backgrounded": True,
+            "task_type": "local_bash",
+            "uuid": "8d277e71-4d75-4f84-952b-f0ee0a044fc1",
+            "session_id": "6e65022f-1adf-49ab-b72c-5fba4c040fe6",
+        }
+    )
+    (job,) = adapter.background_jobs()
+    assert job.id == "b64cpi75b"
+    assert job.state == JobState.RUNNING
+
+
+def test_task_updated_with_a_status_marks_the_job_exited_and_keeps_its_label(
+    tmp_path: Path,
+) -> None:
+    # Real captured status was "killed" (the probe killed its own process
+    # before the sleep finished) -- any non-empty status is treated as
+    # EXITED, not just "completed"/"killed" specifically, since Claude
+    # Code's own status vocabulary isn't guaranteed closed (task_notification
+    # in the same capture reported a THIRD value, "stopped", for the same
+    # task) -- see this file's task_notification test below.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "b64cpi75b",
+            "description": "Sleep 8 seconds then print marker",
+            "task_type": "local_bash",
+        }
+    )
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": "b64cpi75b",
+            "patch": {"status": "killed", "end_time": 1787462083752},
+            "uuid": "d41f4f00-69b7-4b73-82a3-95d54968ec15",
+            "session_id": "6e65022f-1adf-49ab-b72c-5fba4c040fe6",
+        }
+    )
+    (job,) = adapter.background_jobs()
+    assert job.state == JobState.EXITED
+    assert job.label == "Sleep 8 seconds then print marker"  # preserved
+
+
+def test_task_updated_with_no_status_falls_back_to_unknown(tmp_path: Path) -> None:
+    # A malformed/future patch shape must never be silently treated as
+    # RUNNING or EXITED -- UNKNOWN is the honest answer per
+    # BACKGROUND-JOB-OBSERVABILITY-SCOPE.md's core pivot.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {"type": "system", "subtype": "task_updated", "task_id": "x1", "patch": {}}
+    )
+    (job,) = adapter.background_jobs()
+    assert job.state == JobState.UNKNOWN
+
+
+def test_task_notification_records_unknown_for_a_never_before_seen_task(
+    tmp_path: Path,
+) -> None:
+    # Real captured payload (task_notification's own status was "stopped" --
+    # a THIRD value beyond task_updated's "killed", confirming the status
+    # vocabulary isn't closed). task_notification never independently
+    # decides EXITED on its own; only task_updated's patch.status does.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "b64cpi75b",
+            "tool_use_id": "toolu_018rJrnWS7TtmDDzBr2GVqqg",
+            "status": "stopped",
+            "output_file": "/tmp/tasks/b64cpi75b.output",
+            "summary": "Sleep 8 seconds then print marker",
+            "uuid": "cf2a8280-2f98-43f4-8434-4ed57f501e7d",
+            "session_id": "6e65022f-1adf-49ab-b72c-5fba4c040fe6",
+        }
+    )
+    (job,) = adapter.background_jobs()
+    assert job.state == JobState.UNKNOWN
+
+
+def test_task_notification_does_not_downgrade_an_already_exited_job(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": "b64cpi75b",
+            "patch": {"status": "killed"},
+        }
+    )
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "b64cpi75b",
+            "status": "stopped",
+            "summary": "Sleep 8 seconds then print marker",
+        }
+    )
+    (job,) = adapter.background_jobs()
+    assert job.state == JobState.EXITED  # NOT downgraded back to UNKNOWN
+
+
+def test_background_jobs_returns_empty_by_default(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    assert adapter.background_jobs() == ()
+
+
+async def test_stop_background_job_returns_false_for_an_unknown_job_id(
+    tmp_path: Path,
+) -> None:
+    # No live process AND an id never observed via background_jobs() --
+    # must fail closed (False), not attempt to write to a possibly-dead
+    # or never-spawned process.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    assert await adapter.stop_background_job("never-seen") is False
