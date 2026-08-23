@@ -120,6 +120,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess  # nosec B404 -- see _kill_by_command_text()'s own use for why
@@ -243,6 +244,35 @@ def _strip_shell_quotes(text: str) -> str:
     return text.replace("'", "").replace('"', "")
 
 
+_PS_OCTAL_ESCAPE_RE = re.compile(r"\\([0-3][0-7]{2})")
+
+
+def _unescape_ps_octal(text: str) -> str:
+    """Reverse BSD `ps`'s own octal-escaping of non-printable bytes in its
+    COMMAND column (the `strvis`-family encoding it uses internally --
+    confirmed live, not just documented, since `man ps` on macOS doesn't
+    spell it out explicitly): a real embedded newline (0x0A) inside a
+    multi-line shell invocation (e.g. `python3 -c "line1\\nline2"`, a
+    real Python multi-line -c script) is rendered by `ps` as the four
+    literal ASCII characters `\\012`, not an actual newline byte.
+
+    Without reversing this, `_kill_by_command_text()`'s substring match
+    against codex's own reported `command` text (which DOES contain real
+    newline bytes -- parsed from JSON, where a `\\n` escape decodes to
+    the real byte) can never succeed for ANY multi-line command,
+    independent of _is_bare_generic_shell()'s own fix above. Confirmed
+    live, 2026-08-23: a 90-second multi-line `python3 -c` write loop
+    (hashing a counter with SHA-256 in a loop, ~2.9GB written) survived
+    `force_kill()` completely untouched -- orphaned to launchd (ppid 1),
+    still running its own independent timer well after kill_phrase
+    matched and the whole ConvoBox session had already exited. The
+    short, single-line `sleep 90` case the 2026-08-19 length-guard fix
+    covers has no embedded control characters, so `ps` renders it
+    verbatim and this bug never surfaced there.
+    """
+    return _PS_OCTAL_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 8)), text)
+
+
 _GENERIC_SHELL_NAMES = {"sh", "zsh", "bash", "ksh", "csh", "tcsh", "dash", "fish"}
 
 
@@ -340,7 +370,14 @@ def _kill_by_command_text(command: str) -> list[int]:
         except ValueError:
             continue
         children_by_ppid.setdefault(ppid, []).append(pid)
-        stripped_line_command = _strip_shell_quotes(cmd_rest.strip())
+        # Unescape BEFORE quote-stripping: ps's octal escapes for a real
+        # embedded newline/tab render as literal backslash-digit ASCII
+        # text (e.g. "\012"), which _strip_shell_quotes' quote-character
+        # removal doesn't touch either way, but must be reversed before
+        # the substring comparison below -- see _unescape_ps_octal()'s
+        # own docstring for why (a multi-line commandExecution's reported
+        # text, parsed from JSON, contains REAL newline bytes).
+        stripped_line_command = _strip_shell_quotes(_unescape_ps_octal(cmd_rest.strip()))
         # A guard against one specific coincidental false-positive: a
         # BARE generic shell name with no arguments (e.g. ps reporting
         # just "zsh", nothing else). codex's own reported invocation

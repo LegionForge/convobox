@@ -1063,6 +1063,78 @@ def test_kill_by_command_text_matches_a_short_legitimate_command(
     assert 60001 not in result
 
 
+def test_unescape_ps_octal_reverses_a_real_embedded_newline() -> None:
+    import convobox.adapters.codex as mod
+
+    # BSD ps's own COMMAND-column encoding renders a real newline byte
+    # (0x0A) as the four literal ASCII characters "\012" -- confirmed
+    # live, 2026-08-23, capturing a real multi-line `python3 -c "..."`
+    # process's actual ps output.
+    ps_rendered = 'python3 -c import hashlib, time\\012end = time.monotonic()'
+    assert mod._unescape_ps_octal(ps_rendered) == (
+        "python3 -c import hashlib, time\nend = time.monotonic()"
+    )
+
+
+def test_unescape_ps_octal_leaves_ordinary_text_unchanged() -> None:
+    import convobox.adapters.codex as mod
+
+    assert mod._unescape_ps_octal("sleep 90") == "sleep 90"
+    # A literal two-character backslash-n in real source text (as
+    # opposed to ps's own three-DIGIT octal escape) must NOT be
+    # misinterpreted as an escape sequence.
+    assert mod._unescape_ps_octal('log.write(x + "\\n")') == 'log.write(x + "\\n")'
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="_kill_by_command_text uses signal.SIGKILL, which does not exist "
+    "on Windows; the pgrep/ps fallback it belongs to is itself gated to "
+    "non-Windows platforms at the force_kill() call site (codex.py).",
+)
+def test_kill_by_command_text_matches_a_multiline_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test for the 2026-08-23 live finding: a real, heavy,
+    # multi-line `python3 -c "..."` write loop (hashing a counter with
+    # SHA-256 in a loop) survived force_kill() completely untouched --
+    # orphaned to launchd, ~2.9GB written before its own natural 90s
+    # timeout -- because ps's octal-escaping of the command's embedded
+    # newlines (see _unescape_ps_octal's own docstring) meant the
+    # substring match against codex's own reported command text (real
+    # newline bytes, parsed from JSON) could never succeed, independent
+    # of the 2026-08-18 length-guard fix. See docs/field-notes/
+    # 2026-08-23-macos-heavy-multiline-command-survives-force-kill.md.
+    import convobox.adapters.codex as mod
+
+    reported_command = (
+        'python3 -c "import hashlib, time\n'
+        "end = time.monotonic() + 90\n"
+        'counter = 0"'
+    )
+    # ps's own rendering of the SAME process's real argv: quotes consumed
+    # by the shell (per _strip_shell_quotes' own docstring), and the real
+    # embedded newlines octal-escaped (per _unescape_ps_octal's own).
+    ps_output = (
+        "  PID  PPID COMMAND\n"
+        "70000     1 codex app-server\n"
+        "70123 70000 python3 -c import hashlib, time\\012"
+        "end = time.monotonic() + 90\\012counter = 0\n"
+    )
+
+    class _FakeCompleted:
+        stdout = ps_output
+
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()  # noqa: ARG005
+    )
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)  # noqa: ARG005
+
+    result = mod._kill_by_command_text(reported_command)
+
+    assert 70123 in result
+
+
 # --- background_jobs() via the Windows Job Object (observation only) --
 # mocks convobox.adapters._windows_job_object directly, NOT real ctypes/
 # Win32 calls (that mechanism's own real-API and live-integration tests
