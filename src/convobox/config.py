@@ -483,6 +483,17 @@ class SafewordConfig(BaseModel):
     # live-reproduced 2026-08-14). Must be one of the strings already in
     # hard_stop_phrases -- see the validator below -- not a parallel,
     # independently-configured phrase.
+    #
+    # KNOWN LIMIT, disclosed not fixed (2026-08-19, Windows, codex):
+    # this ends the ConvoBox session and kills whatever the backend
+    # still has structurally attached, but a process the backend
+    # deliberately detached (e.g. via PowerShell's Start-Process) can
+    # survive indefinitely on Windows -- reproduced live 5/5. It is NOT
+    # a guarantee that every process the backend has ever spawned is
+    # dead, on any platform. See docs/KNOWN-ISSUES.md and
+    # docs/BACKGROUND-JOB-OBSERVABILITY-SCOPE.md for the fix direction
+    # (observation, not a broader kill guarantee -- deliberately not the
+    # latter, see that doc's own reasoning).
     kill_phrase: str | None = None
 
     @field_validator("kill_phrase")

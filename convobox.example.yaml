@@ -225,6 +225,11 @@ safeword:
   # backend's actual OS process and ends the whole ConvoBox session --
   # a real ejection, not a request. Use a phrase you won't say by
   # accident; the session ends, it does not resume.
+  # KNOWN LIMIT (Windows): reliably kills the session and the backend
+  # process, but a process the backend deliberately detached (e.g. via
+  # PowerShell's Start-Process) can survive -- reproduced live 5/5, not
+  # yet fixed. Not a guarantee every spawned process is dead. See
+  # docs/KNOWN-ISSUES.md.
   # kill_phrase: "eject eject eject"
 
 # ---------------------------------------------------------------------------
