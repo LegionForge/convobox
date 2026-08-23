@@ -1071,6 +1071,36 @@ def test_kill_by_command_text_matches_a_short_legitimate_command(
 # result. ---
 
 
+def _mock_windows_job_object(
+    monkeypatch: pytest.MonkeyPatch,
+    mod: object,
+    *,
+    create_job: object = lambda: 4242,
+    assign_to_job: object = lambda *_: True,
+    enumerate_job_pids: object = lambda _job: [],
+    close_job: object = lambda *_: None,
+) -> None:
+    """Mocks all FOUR _windows_job_object functions with safe defaults,
+    not just the one(s) a given test cares about.
+
+    Real bug this fixes, caught by CI (not this Windows dev machine,
+    where ctypes.windll genuinely exists and papered over the gap): a
+    test that monkeypatches sys.platform to "win32" but mocks only
+    create_job/assign_to_job still calls the REAL close_job() when
+    _shutdown()'s teardown runs aclose() -- and the real close_job() then
+    hits actual ctypes.windll, which doesn't exist on Linux CI, raising
+    AttributeError instead of gracefully degrading (the sys.platform
+    check inside _windows_job_object.py itself is fooled by the same
+    monkeypatch that's supposed to simulate Windows). Mocking every
+    function up front, with call-by-call overrides via monkeypatch AFTER
+    calling this, closes that gap structurally instead of per-test.
+    """
+    monkeypatch.setattr(mod._windows_job_object, "create_job", create_job)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mod._windows_job_object, "assign_to_job", assign_to_job)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mod._windows_job_object, "enumerate_job_pids", enumerate_job_pids)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mod._windows_job_object, "close_job", close_job)  # type: ignore[attr-defined]
+
+
 async def test_background_jobs_is_empty_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     adapter = _adapter()
@@ -1091,13 +1121,11 @@ async def test_spawn_on_windows_creates_and_assigns_the_job_object(
 
     monkeypatch.setattr(sys, "platform", "win32")
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(
-        mod._windows_job_object, "create_job", lambda: (calls.append(("create", None)), 4242)[1]
-    )
-    monkeypatch.setattr(
-        mod._windows_job_object,
-        "assign_to_job",
-        lambda job, pid: calls.append(("assign", (job, pid))) or True,  # type: ignore[func-returns-value]
+    _mock_windows_job_object(
+        monkeypatch,
+        mod,
+        create_job=lambda: (calls.append(("create", None)), 4242)[1],
+        assign_to_job=lambda job, pid: calls.append(("assign", (job, pid))) or True,  # type: ignore[func-returns-value]
     )
     adapter = _adapter()
     try:
@@ -1128,8 +1156,7 @@ async def test_spawn_reuses_the_same_job_object_across_respawns(
         create_calls += 1
         return 4242
 
-    monkeypatch.setattr(mod._windows_job_object, "create_job", fake_create)
-    monkeypatch.setattr(mod._windows_job_object, "assign_to_job", lambda *_: True)
+    _mock_windows_job_object(monkeypatch, mod, create_job=fake_create)
     adapter = _adapter()
     try:
         await adapter.send_text("hi")
@@ -1151,8 +1178,7 @@ async def test_background_jobs_excludes_codexs_own_pid_and_maps_the_rest_to_unkn
     import convobox.adapters.codex as mod
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(mod._windows_job_object, "create_job", lambda: 4242)
-    monkeypatch.setattr(mod._windows_job_object, "assign_to_job", lambda *_: True)
+    _mock_windows_job_object(monkeypatch, mod)
     adapter = _adapter()
     try:
         await adapter.send_text("hi")
@@ -1179,10 +1205,8 @@ async def test_aclose_closes_the_job_object_and_resets_it(
     import convobox.adapters.codex as mod
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(mod._windows_job_object, "create_job", lambda: 4242)
-    monkeypatch.setattr(mod._windows_job_object, "assign_to_job", lambda *_: True)
     closed: list[int] = []
-    monkeypatch.setattr(mod._windows_job_object, "close_job", closed.append)
+    _mock_windows_job_object(monkeypatch, mod, close_job=closed.append)
 
     adapter = _adapter()
     await adapter.send_text("hi")
