@@ -24,7 +24,7 @@ provenance:
     - Claude Code (Anthropic claude-sonnet-5) -- added Linux (wpctl) support to acoustic_calibration.py's --volume-candidates, diagnosed and worked around an upstream aec-audio-processing packaging bug (see Mechanism), ran the sweep, aggregated the data, wrote this note
   org: https://legionforge.org
   created: 2026-08-24T15:00:00-05:00
-  revised: 2026-08-25T06:40:00-05:00
+  revised: 2026-08-25T11:16:00-05:00
 license: CC BY 4.0 (intent; repo code MIT)
 ---
 
@@ -361,15 +361,66 @@ as the prior two notes.
   recommendation if this exact laptop is used for real ConvoBox sessions,
   though (per every caveat above) not a general Linux recommendation.
 
-## Not done (after the follow-up)
+## Second follow-up (next calendar session): independent N=10 re-verification, 50-0%, closes the "no second session" gap
+
+JP asked for a re-verification pass the next day, explicitly capping
+volume at 50% this time ("at 50% volume we get approximately 100% barge
+in [already]... 100 may be too much"). Same command shape, narrower
+range: `--volume-candidates 50,40,30,20,10,0 --delay-candidates auto
+--repeat-each 10` -- **60 more real live trials, a genuinely independent
+second session** (different day, fresh process, same rig), addressing
+the first follow-up's own "no independent second session" gap. Report:
+`uat-acoustic-calibration/20260825-103644/report.json`. Ambient RMS
+0.0188 -- close to both prior sessions' (0.0224, 0.0197), consistent
+baseline noise floor across all three passes now.
+
+| Vol % | First N=10 pass (raw/AEC) | This re-verify (raw/AEC) |
+|---|---|---|
+| 50 | 50 / 13 | 48 / 9 |
+| 40 | 40 / 0 | 34 / 1 |
+| 30 | 8 / 4 | 13 / 5 |
+| 20 | 0 / 0 | 0 / 0 |
+| 10 | 0 / 0 | 0 / 0 |
+| 0 | 0 / 0 | 0 / **1** |
+
+**The shape reproduces closely across two independent sessions**: a hard
+floor at and below 20%, AEC's best performance at 40% (near-total
+elimination both times), and still-substantial self-barge-in at 50% both
+times (AEC cuts it by roughly 75-80% but doesn't come close to
+eliminating it). 30% shows more session-to-session variance (8 vs. 13
+raw) than the other levels, but stays in the same "modest, non-zero"
+band both times -- consistent with, not contradicting, JP's own live
+human-voice read of that exact level as "about half and half."
+
+**This is now three independent lines of evidence agreeing on the same
+shape**: this synthetic N=10 pass, the first synthetic N=10 pass (previous
+session), and JP's real human voice in the same-day live-speech field
+note (`2026-08-25-linux-first-real-human-speech-demo-*`) -- "pretty much
+100%" at 50%, "about half and half" at 30%, essentially nothing below
+that. Three different measurement methods, two different sessions,
+one consistent story.
+
+**One curiosity, not chased further**: at 0% volume (no real playback
+signal at all), raw false-barges were 0/10 both sessions, but this
+session's AEC-processed count showed a single false-barge (1/10) where
+the first session showed none. With no real echo signal present at 0%,
+this is most plausibly AEC reacting to ambient room noise/its own
+adaptive-filter noise floor rather than anything related to echo
+cancellation performance -- a single N=1 occurrence, not enough to call a
+real pattern, noted honestly rather than smoothed over.
+
+## Not done (after both follow-ups)
 
 - Still no RT60/room measurement, no mic model/placement/DSP-state
   confirmation, no upstream `aec-audio-processing` bug report or
   `docs/KNOWN-ISSUES.md` entry.
-- No independent second *session* reproducing this same rig's numbers
-  (this is one session's N=10, not two sessions' N=10 each, the way the
-  Windows note's matched comparison was).
+- **The "no independent second session" gap is now closed** for the
+  50%-and-below range (both follow-ups agree) -- but the second session
+  never re-tested 60-100%, so that upper range still has only the single
+  first-pass N=10 measurement.
 - No investigation into *why* this rig's threshold is so much sharper
   than macOS's -- left as an open, unconfirmed hypothesis (driver/DSP
   differences, mic gain/AGC behavior, or genuine room/placement
   differences neither session measured).
+- The single 0%-volume AEC false-barge above is unexplained -- not
+  investigated further this session.
