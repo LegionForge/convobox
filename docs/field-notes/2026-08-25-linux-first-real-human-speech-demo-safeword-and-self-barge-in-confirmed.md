@@ -206,6 +206,44 @@ not an error state.
   decision: should a configurable voice exit phrase exist, analogous to
   `kill_phrase` but for a clean quit?
 
+## Follow-up (same day): "eject eject eject" configured and confirmed live
+
+After this session, `"eject eject eject"` was added to `convobox.yaml` as
+both a `hard_stop_phrases` entry and `safeword.kill_phrase` (escalates to
+`Orchestrator.force_kill()` -- a real OS-level kill of the backend
+subprocess, then ends the session, same mechanism as the Web UI's Quit
+button). Confirmed the code checks safewords on the raw transcript
+*before* the overlap-gate/echo-filter (`scripts/run_convobox.py`'s own
+comment: "Safeword is checked on the raw transcript BEFORE any quality
+gate or half-duplex drop") -- meaning both of this session's
+correctly-transcribed "eject" attempts, which were swallowed by the
+overlap gate as self-echo *because the phrase wasn't configured yet*,
+would not have been swallowed once it was.
+
+A fresh live session confirmed this directly:
+
+```
+transcript='eject, eject, eject.' lang=en (0.83) dec=0.54 busy=False  [HARD STOP]
+WARNING kill phrase matched 'eject eject eject' -- force-killing backend
+INFO exiting
+```
+
+Process-level check afterward confirmed a real, complete kill -- no
+orphaned `claude`/`run_convobox.py` processes, both the web port and the
+single-instance audio lock released. Combined across both sessions:
+3 of 4 real spoken attempts at this phrase transcribed correctly (the one
+miss was the Turkish-misdetection case above), and this 4th attempt is
+the first one made *after* the phrase was actually configured -- so it's
+the first real end-to-end confirmation that the whole path (STT -> raw-
+transcript safeword check -> kill_phrase escalation -> force_kill ->
+session exit) works together, not just that the phrase usually
+transcribes.
+
+This doesn't resolve the reliability caveat -- N=4 total, one miss, is
+still far short of the confidence needed to call this phrase safe to
+depend on -- but it does confirm the mechanism itself is wired correctly
+now that the phrase exists in config at all.
+
 ## Not done here
 
 - Did not test `"abort abort abort"` (the second configured safeword) --
