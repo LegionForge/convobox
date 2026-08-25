@@ -244,6 +244,32 @@ def _strip_shell_quotes(text: str) -> str:
     return text.replace("'", "").replace('"', "")
 
 
+def _normalize_whitespace(text: str) -> str:
+    """Collapse every run of whitespace (including a real embedded
+    newline/tab) to a single space, and strip the ends.
+
+    Added 2026-08-25, live-verified on Linux: BSD `ps` (macOS) octal-
+    escapes an embedded newline as the literal text `\\012` (see
+    `_unescape_ps_octal` below), but Linux's `procps` `ps` does something
+    different -- it renders the SAME embedded newline as a plain space,
+    with no escape sequence at all. Confirmed directly: spawning a real
+    multi-line `python3 -c "line1\\nline2"` process and reading its own
+    `ps -eo pid,ppid,command` entry back showed the two lines joined by
+    an ordinary space, not `\\012`. `_unescape_ps_octal` alone is a no-op
+    against that rendering (there's no octal escape to reverse), so the
+    substring match below -- comparing against codex's own reported
+    `command` text, which contains REAL newline bytes parsed from JSON --
+    failed to match at all: `_kill_by_command_text` returned an empty
+    list against a real, still-running multi-line process on this
+    platform. Collapsing whitespace on BOTH sides of the comparison
+    (after `_unescape_ps_octal` has already turned any macOS-style octal
+    escape back into a real newline, so this collapses that too) fixes
+    both renderings with one normalization instead of chasing each
+    platform's own `ps` quirk individually.
+    """
+    return " ".join(text.split())
+
+
 _PS_OCTAL_ESCAPE_RE = re.compile(r"\\([0-3][0-7]{2})")
 
 
@@ -340,7 +366,7 @@ def _kill_by_command_text(command: str) -> list[int]:
     Treat Linux as "should work, not yet proven" until validated live
     there.
     """
-    stripped_command = _strip_shell_quotes(command)
+    stripped_command = _normalize_whitespace(_strip_shell_quotes(command))
     try:
         # Fixed argv list (shell=True deliberately NOT used, so there's no
         # shell-injection surface); "ps" resolves via $PATH rather than an
@@ -351,9 +377,28 @@ def _kill_by_command_text(command: str) -> list[int]:
         # implies the attacker already has arbitrary local code
         # execution, at which point this specific call is not the weak
         # link.
+        #
+        # env=... with a huge COLUMNS is load-bearing, not decorative:
+        # live-verified 2026-08-25 while building this project's process-
+        # kill test matrix. `ps`'s COMMAND column truncates to terminal
+        # width whenever its own stdout isn't a wide/real tty -- true here
+        # regardless of platform, since capture_output=True always pipes
+        # ps's stdout. Confirmed directly: the SAME real spawned process,
+        # same code, same machine, matched and was killed correctly when
+        # this call's calling process had a wide terminal context, but
+        # failed to match at all (silently -- this whole function just
+        # returns an empty list, "nothing to kill") when run from a
+        # context where terminal-width detection came back small (e.g.
+        # under a test runner). ConvoBox itself has no control over what
+        # terminal context it's launched from in practice (a real
+        # terminal, a service manager, a headless script) -- COLUMNS is
+        # the one thing THIS call can pin regardless, so the safety-
+        # critical kill fallback doesn't silently depend on ambient
+        # terminal state it never asked for.
         out = subprocess.run(  # nosec B603 B607
             ["ps", "-eo", "pid,ppid,command"],
             capture_output=True, text=True, timeout=5, check=False,
+            env={**os.environ, "COLUMNS": "10000"},
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []
@@ -377,7 +422,9 @@ def _kill_by_command_text(command: str) -> list[int]:
         # the substring comparison below -- see _unescape_ps_octal()'s
         # own docstring for why (a multi-line commandExecution's reported
         # text, parsed from JSON, contains REAL newline bytes).
-        stripped_line_command = _strip_shell_quotes(_unescape_ps_octal(cmd_rest.strip()))
+        stripped_line_command = _normalize_whitespace(
+            _strip_shell_quotes(_unescape_ps_octal(cmd_rest.strip()))
+        )
         # A guard against one specific coincidental false-positive: a
         # BARE generic shell name with no arguments (e.g. ps reporting
         # just "zsh", nothing else). codex's own reported invocation
