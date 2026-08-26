@@ -45,13 +45,7 @@ from pathlib import Path
 import pytest
 
 from convobox.adapters.claude_code import ClaudeCodeAdapter
-from convobox.adapters.codex import (
-    CodexAdapter,
-    _kill_by_command_text,
-    _normalize_whitespace,
-    _strip_shell_quotes,
-    _unescape_ps_octal,
-)
+from convobox.adapters.codex import CodexAdapter, _kill_by_command_text
 
 _FAKE_CLI = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))]
 _FAKE_CODEX = [sys.executable, str(Path(__file__).with_name("fake_codex_appserver.py"))]
@@ -209,45 +203,27 @@ def test_kill_by_command_text_kills_a_real_multiline_process() -> None:
     """
     marker = f"convobox-test-{uuid.uuid4().hex}"
     script = f"import time\nprint({marker!r})\ntime.sleep(45)\n"
-    # Report the SAME interpreter invocation actually spawned below, not
-    # a hardcoded "python3" -- found live while writing this test: this
-    # venv's own interpreter is literally named `python` (no "3"), so a
-    # hardcoded "python3" in the reported text never substring-matched
-    # the real `ps` line at all. Real codex reports the command it
-    # actually ran, never a guessed/generic name -- matching that here is
-    # what makes this a real test of the matching logic, not an
-    # artificial mismatch of this test's own making.
-    reported_command = f'{sys.executable} -c "{script}"'
+    # Report ONLY the script text, deliberately WITHOUT any interpreter
+    # path prefix -- found live on real macOS CI while writing this test:
+    # `sys.executable` there is a venv shim (".../.venv/bin/python"), but
+    # the REAL running process macOS's own `ps` shows is a completely
+    # different path -- python.org's Framework Python re-execs into
+    # ".../Python.framework/.../Python.app/Contents/MacOS/Python", an
+    # OS-level identity `sys.executable` never reflects. That's a
+    # property of how THIS interpreter build reports its own path in
+    # Python, not of what a real codex commandExecution reports (codex
+    # reports whatever command it actually invoked, which by definition
+    # is exactly what its own `ps` line shows -- it has no equivalent
+    # sys.executable-vs-real-process split to fall into). Matching on the
+    # script content alone -- which both this real spawned process and
+    # any reasonable "reported command" text share verbatim -- tests the
+    # real matching logic without inheriting this interpreter's own
+    # unrelated path-identity quirk.
+    reported_command = script
     proc = subprocess.Popen([sys.executable, "-c", script])  # nosec B603
     try:
         found = _wait_until(lambda: len(_ps_pids_matching(marker)) >= 1, timeout_s=5.0)
         assert found, "the real process never appeared in `ps` -- test setup itself failed"
-
-        # Temporary live diagnostic (2026-08-25): print what this
-        # platform's REAL ps rendering + the matching helpers actually
-        # produce, so a CI failure here shows the real mismatch instead
-        # of just "nothing matched" -- print unconditionally (not only on
-        # failure) since pytest only shows captured stdout for a FAILED
-        # test anyway, and this is cheap.
-        env = {**os.environ, "COLUMNS": "10000"}
-        raw_ps = subprocess.run(
-            ["ps", "-eo", "pid,ppid,command"],
-            capture_output=True, text=True, env=env, check=False,
-        ).stdout
-        for line in raw_ps.splitlines():
-            if marker in line or str(proc.pid) in line:
-                print(f"DIAG raw ps line: {line!r}")
-                _pid_s, _, _rest = line.strip().partition(" ")
-                _ppid_s, _, cmd_rest = _rest.strip().partition(" ")
-                print(
-                    "DIAG stripped_line_command: "
-                    f"{_normalize_whitespace(_strip_shell_quotes(_unescape_ps_octal(cmd_rest.strip())))!r}"
-                )
-        print(f"DIAG reported_command: {reported_command!r}")
-        print(
-            "DIAG stripped_command: "
-            f"{_normalize_whitespace(_strip_shell_quotes(reported_command))!r}"
-        )
 
         killed = _kill_by_command_text(reported_command)
         assert killed, "_kill_by_command_text found nothing to kill against a real multi-line process"
