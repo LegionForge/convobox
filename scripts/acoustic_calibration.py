@@ -22,8 +22,10 @@ import argparse
 import asyncio
 import json
 import math
+import re
 import socket
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -82,16 +84,74 @@ def _get_pycaw_endpoint_volume() -> Any:
     return AudioUtilities.GetSpeakers().EndpointVolume
 
 
+def _wpctl(*args: str) -> str:
+    """Run a wpctl (WirePlumber/PipeWire) command and return its stdout.
+
+    Linux counterpart to the pycaw path above -- same role (drive the real
+    SYSTEM output volume, not tts.volume), different platform API. Raises a
+    clear error if wpctl itself is missing rather than letting a bare
+    FileNotFoundError surface.
+    """
+    try:
+        result = subprocess.run(
+            ["wpctl", *args], capture_output=True, text=True, check=True
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "--volume-candidates on Linux requires wpctl (WirePlumber), which "
+            "was not found on PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"wpctl {' '.join(args)} failed: {exc.stderr.strip()}"
+        ) from exc
+    return result.stdout
+
+
+def _get_wpctl_volume_percent() -> float:
+    output = _wpctl("get-volume", "@DEFAULT_AUDIO_SINK@")
+    match = re.search(r"Volume:\s*([\d.]+)", output)
+    if not match:
+        raise RuntimeError(f"could not parse `wpctl get-volume` output: {output!r}")
+    return round(float(match.group(1)) * 100.0, 2)
+
+
+def _set_wpctl_volume_percent(percent: float) -> None:
+    # wpctl accepts a bare 0.0-1.0 scalar for the default sink; clamped to
+    # 0-100 by the caller (_set_system_volume_percent) before we get here.
+    _wpctl("set-volume", "@DEFAULT_AUDIO_SINK@", f"{percent / 100.0:.4f}")
+
+
 def _get_system_volume_percent() -> float:
-    endpoint = _get_pycaw_endpoint_volume()
-    return round(endpoint.GetMasterVolumeLevelScalar() * 100.0, 2)
+    if sys.platform == "win32":
+        endpoint = _get_pycaw_endpoint_volume()
+        return round(endpoint.GetMasterVolumeLevelScalar() * 100.0, 2)
+    if sys.platform.startswith("linux"):
+        return _get_wpctl_volume_percent()
+    raise NotImplementedError(
+        "--volume-candidates controls the SYSTEM output volume via a "
+        "platform-specific API (pycaw's Core Audio wrapper on Windows, "
+        "wpctl/PipeWire on Linux). Not available on this platform -- sweep "
+        "tts.volume in convobox.yaml by hand between runs instead."
+    )
 
 
 def _set_system_volume_percent(percent: float) -> None:
     if not 0.0 <= percent <= 100.0:
         raise ValueError(f"system volume percent must be 0-100, got {percent}")
-    endpoint = _get_pycaw_endpoint_volume()
-    endpoint.SetMasterVolumeLevelScalar(percent / 100.0, None)
+    if sys.platform == "win32":
+        endpoint = _get_pycaw_endpoint_volume()
+        endpoint.SetMasterVolumeLevelScalar(percent / 100.0, None)
+        return
+    if sys.platform.startswith("linux"):
+        _set_wpctl_volume_percent(percent)
+        return
+    raise NotImplementedError(
+        "--volume-candidates controls the SYSTEM output volume via a "
+        "platform-specific API (pycaw's Core Audio wrapper on Windows, "
+        "wpctl/PipeWire on Linux). Not available on this platform -- sweep "
+        "tts.volume in convobox.yaml by hand between runs instead."
+    )
 
 
 _TEST_TEXT = (
@@ -788,9 +848,9 @@ def main() -> None:
             "comma-separated SYSTEM output volume percentages to sweep (0-100, "
             "for example 100,75,50,40,35,30,25,20) -- runs the full delay-"
             "candidate logic once per volume level, restoring the original "
-            "system volume afterward. Windows-only (pycaw, `uv sync --extra "
-            "calibration`); automates GitHub issue #119's manual macOS volume "
-            "sweep."
+            "system volume afterward. Windows (pycaw, `uv sync --extra "
+            "calibration`) or Linux (wpctl/PipeWire, no extra install needed); "
+            "automates GitHub issue #119's manual macOS volume sweep."
         ),
     )
     parser.add_argument("--output-dir", default="uat-acoustic-calibration")
