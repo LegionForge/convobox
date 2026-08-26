@@ -104,8 +104,25 @@ STT_COMPUTE_TYPES: tuple[str, ...] = (
 # with device: cpu) can be rejected with a clear config-level error instead
 # of a raw ValueError three layers deep inside ctranslate2's Whisper
 # constructor. "default" is deliberately excluded from both -- it's a
-# sentinel resolved internally (int8 on cpu, float16 on cuda), never a real
-# compute type passed to ctranslate2 directly, so it's valid on any device.
+# sentinel resolved internally, never a real compute type passed to
+# ctranslate2 directly, so it's valid on any device.
+#
+# CORRECTED 2026-08-25 (live performance audit, this project's own field
+# notes): "default" does NOT simply mean "int8 on cpu, float16 on cuda" --
+# this comment previously claimed that, and operators reading it believed
+# they were running int8 when they were not. What actually happens: it
+# tries to use the MODEL's own saved compute type first (many published
+# faster-whisper conversions, including the `base` model this project
+# defaults to, are saved as float16), falling back per-device only if
+# that's not efficiently supported. Confirmed live on a real Haswell CPU
+# (this project's own 2014-era Linux test rig): ctranslate2 logs "The
+# compute type inferred from the saved model is float16, but the target
+# device or backend do not support efficient float16 computation... have
+# been automatically converted to use the float32 compute type instead"
+# -- resolving to float32, NOT int8, contradicting the old claim outright.
+# Set an EXPLICIT compute_type (e.g. "int8") if you specifically want
+# that precision -- "default" is model-dependent, not a fixed per-device
+# mapping.
 STT_COMPUTE_TYPES_CPU: tuple[str, ...] = ("float32", "int16", "int8", "int8_float32")
 STT_COMPUTE_TYPES_CUDA: tuple[str, ...] = (
     "bfloat16",

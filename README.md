@@ -136,15 +136,15 @@ voice pipeline has already been through. See
 
 **Supported today:**
 
-<img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, new voice-gated approval), Codex (app-server JSON-RPC, tested live, real approval channel not yet voice-wired). Windows 11 tested end-to-end; Linux/macOS implemented, not yet voice-validated.">
+<img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, new voice-gated approval), Codex (app-server JSON-RPC, tested live, real approval channel not yet voice-wired). Windows 11, macOS, and Linux all voice-validated live (see docs/field-notes/).">
 
 | Component | Status | Detail |
 |---|---|---|
 | **Windows 11** | Validated end to end | The reference platform. |
 | **macOS** | Mostly validated | AEC, Kokoro TTS, the real mic loop, all three backends, and — with a real human speaker — the safeword hard-stop and barge-in are all confirmed live. Stays here pending browser-driven web-UI testing and sustained everyday use. |
-| **Linux** | Implemented, not voice-validated | Same adapters and pipeline as the others; no live voice pass yet. |
+| **Linux** | Mostly validated | AEC (N=10 volume sweep, twice), Kokoro TTS, the real mic loop, and TUI/text/Web UI (real browser-driven testing) are all confirmed live; with a real human speaker, the claude-code backend's safeword hard-stop, `kill_phrase`, and self-barge-in are confirmed live too. OpenCode confirmed live only at the adapter level so far (no real mic session yet); Codex not yet live-tested on this platform. A live acoustic safety-phrase sweep also found some phrases (e.g. "abort abort abort", and Kokoro's own rendering of "eject eject eject") less reliable via synthesized voices than assumed — see docs/field-notes/. Stays here pending those backend/phrase gaps and sustained everyday use. |
 | **Backends** | All three validated | opencode (HTTP+SSE), Claude Code (stream-json), Codex (app-server) — each driven through the full voice loop, including tool use. |
-| **STT** | faster-whisper | Validated on both tested platforms. |
+| **STT** | faster-whisper | Validated on all three tested platforms. |
 | **TTS** | Kokoro (default), Piper (opt-in) | Kokoro confirmed in live voice sessions with real speakers. |
 
 Two open gaps worth knowing before you lean on the safety path:
