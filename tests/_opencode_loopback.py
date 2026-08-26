@@ -121,6 +121,12 @@ class OpenCodeServer:
             else:
                 await self._respond(writer, 404, b'{"error":"not found"}')
         except (asyncio.IncompleteReadError, ConnectionResetError):
+            # The client (the adapter under test) closing its connection
+            # mid-request -- e.g. after a hard-stop/aclose() tears down the
+            # HTTP client while this handler is still reading -- is an
+            # expected, benign shutdown path for a test loopback server,
+            # not a real error worth surfacing. finally still closes the
+            # writer either way.
             pass
         finally:
             writer.close()
