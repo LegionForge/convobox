@@ -352,19 +352,24 @@ def _kill_by_command_text(command: str) -> list[int]:
     itself, so it stays a plain, easily-testable function rather than
     needing its own internal no-op-elsewhere branch.
 
-    Only macOS has actually been LIVE-VALIDATED. Linux is expected, not
-    confirmed, to behave the same way: the underlying mechanisms this
-    fallback depends on (shell-quoted invocation text that doesn't
-    survive into `ps`'s own argv reconstruction; multi-statement shell
-    scripts forking rather than exec'ing for non-tail commands) are
-    properties of POSIX shell parsing, not of macOS specifically, and
-    codex's process-spawning model (fork/exec, the real child becoming
-    its own session/process-group leader) is architecturally the same
-    on any POSIX system -- but this has not been run against a real
-    Linux `codex app-server` to confirm the exact wrapper text (e.g.
-    `/bin/bash -c` vs. macOS's `/bin/zsh -lc`) unwraps the same way.
-    Treat Linux as "should work, not yet proven" until validated live
-    there.
+    macOS has been LIVE-VALIDATED (20/20, 2026-08-15/18/23 field notes).
+    Linux is now ALSO confirmed, not just expected -- live-tested
+    2026-08-25 (tests/test_real_process_tree_kill.py, real spawned
+    process trees, no mocked `ps`) -- but that same pass found two real
+    Linux-specific gaps in THIS function, both fixed: (1) Linux's
+    `procps` `ps` renders an embedded newline as a plain space, not
+    macOS's `\012` octal escape, which `_unescape_ps_octal` alone didn't
+    reverse -- fixed by `_normalize_whitespace` collapsing whitespace on
+    both sides of the comparison, handling either rendering; (2) this
+    function's own `ps` call had no `COLUMNS` override, so its COMMAND
+    column truncated to terminal width whenever `ps`'s stdout wasn't a
+    wide/real tty (true for this call every time, since
+    `capture_output=True` always pipes it) -- the same real process,
+    same code, matched in one calling context and was silently missed in
+    another, purely from ambient terminal-width detection this function
+    never controlled. Both are now covered by `tests/
+    test_real_process_tree_kill.py` and `tests/test_codex_adapter.py`'s
+    own regression tests, not just this docstring's word.
     """
     stripped_command = _normalize_whitespace(_strip_shell_quotes(command))
     try:
