@@ -360,7 +360,52 @@ async def test_tool_failed_event_maps_to_error_event(server: OpenCodeServer) -> 
         await adapter._client.aclose()
 
     assert [e.type for e in events] == [BackendEventType.ERROR]
-    assert json.loads(events[0].tool_output or "null") == "command not found"
+    # content=, not tool_output= -- every other adapter's ERROR events use
+    # content, and scripts/run_convobox.py's ERROR handler only reads
+    # .content; a prior version of this code used tool_output= here, which
+    # would have silently swallowed the error (found by inspection while
+    # fixing the identical, live-reproduced step.failed gap below).
+    assert json.loads(events[0].content or "null") == "command not found"
+
+
+@pytest.mark.asyncio
+async def test_step_failed_event_maps_to_error_event_and_clears_busy(
+    server: OpenCodeServer,
+) -> None:
+    # Live-reproduced 2026-08-26 (real opencode serve 1.18.19, real
+    # OpenCode Zen gateway): a session whose model the provider rejected
+    # produced session.next.step.failed instead of session.next.step.ended
+    # for that step -- and, before this fix, _track_busy only recognized
+    # step.ended, so is_busy() never cleared. ConvoBox waited
+    # indefinitely ("backend still working... THINKING") for a step that
+    # had already terminally failed. See docs/field-notes/
+    # 2026-08-26-opencode-step-failed-event-never-cleared-busy-infinite-hang.md.
+    server.frames = [
+        _frame(
+            1,
+            "session.next.step.failed",
+            {"error": {"type": "unknown", "message": "Model x-preview-f-free is not supported"}},
+        ),
+    ]
+    adapter = OpenCodeAdapter(server.base_url)
+    adapter._busy = True
+    events = []
+
+    async def collect() -> None:
+        async for event in adapter.events():
+            events.append(event)
+
+    collector = asyncio.ensure_future(collect())
+    try:
+        await _release_all_gates(server, len(server.frames))
+        await asyncio.wait_for(collector, timeout=5)
+    finally:
+        collector.cancel()
+        await adapter._client.aclose()
+
+    assert [e.type for e in events] == [BackendEventType.ERROR]
+    assert "not supported" in (events[0].content or "")
+    assert adapter.is_busy() is False
 
 
 @pytest.mark.asyncio
