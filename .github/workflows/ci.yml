@@ -139,3 +139,57 @@ jobs:
 
       - name: Real process-tree kill suite
         run: uv run pytest tests/test_real_process_tree_kill.py -v
+
+  safety-phrase-matrix:
+    name: Safety-phrase battery (${{ matrix.os }})
+    # Continuous cross-platform regression guard for the safety-critical
+    # phrase set (safewords/hard-stop, kill_phrase, pause, resume) added
+    # 2026-08-26 after docs/field-notes/2026-08-15-safety-phrase-
+    # reliability-battery-halt-and-bare-athena-unreliable.md and PR #342
+    # showed this project has a real history of individual phrases (e.g.
+    # "halt", bare "Athena") turning out unreliable through the real
+    # TTS->STT->detector chain despite passing string-level unit tests --
+    # a regression here (a phrase becoming unreliable after a TTS/STT
+    # engine bump, a detector change, a dependency update) needs the SAME
+    # kind of continuous, every-OS check process-kill-matrix above gives
+    # process-tree kill reliability, not a one-off manual battery run.
+    #
+    # Runs scripts/safety_phrase_battery.py, NOT
+    # scripts/safety_phrase_battery_live.py: the live variant needs real
+    # speakers/a real mic/a real room (and is hardcoded to Linux's
+    # wpctl/PipeWire for its volume sweep) -- it stays a human-run, real-
+    # hardware check per platform, same tier as the UAT smoke docs. This
+    # job's script deliberately removes the audio-hardware confound
+    # (synthesizes TTS to an in-memory buffer, decodes it straight back
+    # through STT) so it needs only the `dev` extra, same as
+    # process-kill-matrix, and is safe and cheap on GitHub-hosted runners
+    # with no real audio hardware.
+    #
+    # Gated identically to process-kill-matrix (push-to-main + manual
+    # dispatch, not every PR) for the same reason: macOS/Windows runner-
+    # minutes cost more than Linux's, and this isn't needed on every WIP
+    # push -- only to catch a real regression once code lands.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Safety-phrase TTS->STT->detector battery
+        run: uv run python scripts/safety_phrase_battery.py --repeats 5
