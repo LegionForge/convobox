@@ -26,14 +26,27 @@ _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # single-step text reply and a multi-step tool-calling one -- see
 # OPENCODE_API_NOTES.md). The real taxonomy is a ~28-member discriminated
 # union (session/step/text/reasoning/tool/shell/compaction/revert); only
-# these five map onto our 5-value BackendEventType or drive is_busy()
+# these six map onto our 5-value BackendEventType or drive is_busy()
 # tracking, and DONE is deliberately never emitted -- see is_busy()'s
-# tracking, driven from _STEP_ENDED below, not a DONE event.
+# tracking, driven from _STEP_ENDED/_STEP_FAILED below, not a DONE event.
 _TEXT_ENDED = "session.next.text.ended"
 _TOOL_CALLED = "session.next.tool.called"
 _TOOL_SUCCESS = "session.next.tool.success"
 _TOOL_FAILED = "session.next.tool.failed"
 _STEP_ENDED = "session.next.step.ended"
+# Live-reproduced 2026-08-26 (Linux, real `opencode serve` 1.18.19, real
+# OpenCode Zen gateway): the session's own default model resolved to one
+# the gateway rejected outright ("Provider request failed with HTTP 401
+# ... Model x-preview-f-free is not supported"). The server's real
+# response to that is a session.next.step.failed event -- NOT
+# session.next.step.ended -- fired instead of, not in addition to, a
+# step.ended for that step. Before this fix, _track_busy only recognized
+# _STEP_ENDED, so a failed step never cleared is_busy(): ConvoBox waited
+# ("backend still working... THINKING") indefinitely, reproduced twice in
+# a row (275s and 150s+, only ending because a hard stop was spoken) for
+# what the provider had already terminally failed within 4ms. See
+# docs/field-notes/2026-08-26-opencode-step-failed-event-never-cleared-busy-infinite-hang.md.
+_STEP_FAILED = "session.next.step.failed"
 
 # step.ended's own `finish` field is the real, precise "is more coming"
 # signal (confirmed live: a multi-step tool-calling response's first step
@@ -47,6 +60,9 @@ _STEP_ENDED = "session.next.step.ended"
 # utterance gets queued instead of steered (harmless, delivery="queue"
 # waits behind current work) -- the opposite mistake (latching busy forever
 # on an unrecognized value) blocks the user outright. See OPENCODE_API_NOTES.md.
+# step.failed carries no `finish` field at all (confirmed live, see
+# _STEP_FAILED above) -- a failed step is unconditionally terminal, so
+# _track_busy clears busy on it without consulting this set.
 _CONTINUING_FINISH_REASONS = frozenset({"tool-calls"})
 
 
@@ -69,7 +85,8 @@ class OpenCodeAdapter(BackendAdapter):
     which the unversioned surface lacks too.
 
     is_busy() is tracked from step.ended's `finish` field (see
-    _CONTINUING_FINISH_REASONS), not OpenCode's own POST .../wait endpoint
+    _CONTINUING_FINISH_REASONS) and, unconditionally, from step.failed
+    (see _STEP_FAILED) -- not OpenCode's own POST .../wait endpoint
     ("wait for a session agent loop to become idle") despite that sounding
     like the obviously-correct mechanism. Confirmed live, repeatedly: a
     concurrent POST .../wait while this adapter's own SSE GET
@@ -311,7 +328,11 @@ class OpenCodeAdapter(BackendAdapter):
             await self._close_sse()
 
     def _track_busy(self, outer: dict[str, Any]) -> None:
-        if outer.get("type") != _STEP_ENDED:
+        event_type = outer.get("type")
+        if event_type == _STEP_FAILED:
+            self._busy = False
+            return
+        if event_type != _STEP_ENDED:
             return
         finish = (outer.get("data") or {}).get("finish")
         if finish not in _CONTINUING_FINISH_REASONS:
@@ -350,12 +371,30 @@ def _to_backend_event(outer: dict[str, Any]) -> BackendEvent | None:
         # SessionNextToolFailed schema (data.error) -- spec-grounded, not
         # independently re-verified against a live failure, same
         # confidence-tier distinction DEPENDENCY_LICENSE_AUDIT.md uses.
+        # content=, not tool_output= -- every other ERROR-event constructor
+        # in this codebase (claude_code.py, codex.py, orchestrator.py) uses
+        # content, and scripts/run_convobox.py's own ERROR handler only
+        # ever reads event.content; tool_output= here would have made this
+        # branch silently produce a spoken/logged no-op, the exact same
+        # failure shape as the step.failed bug this file's _STEP_FAILED
+        # comment documents (found by inspection while fixing that one).
         return BackendEvent(
             type=BackendEventType.ERROR,
-            tool_output=json.dumps(payload.get("error")),
+            content=json.dumps(payload.get("error")),
+        )
+    if event_type == _STEP_FAILED:
+        # Live-reproduced 2026-08-26 -- see _STEP_FAILED's own comment
+        # above. payload.error is the same {"type": ..., "message": ...}
+        # shape _TOOL_FAILED expects; surfaced as content (not tool_output)
+        # for the same reason given there.
+        return BackendEvent(
+            type=BackendEventType.ERROR,
+            content=json.dumps(payload.get("error")),
         )
     # Every other real event type (session.next.prompt.admitted/.prompted,
-    # step.started, step.ended itself (handled by _track_busy, not here),
+    # step.started, step.ended/step.failed themselves (handled by
+    # _track_busy; step.failed ALSO surfaced above, step.ended is not --
+    # a clean completion isn't an error worth a spoken/logged event),
     # text.started, tool.input.*, reasoning.*, shell.*, compaction.*,
     # revert.*, ...) is intentionally not surfaced as a BackendEvent --
     # our 5-value model has no slot for them. A deliberately narrow
