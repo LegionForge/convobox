@@ -2152,6 +2152,7 @@ async def run(args: argparse.Namespace) -> None:
             web_forwarder.forward_transcript(text)
         await orchestrator.handle_transcript(text)
         await _drain_until_idle(adapter, timeout_s=args.timeout)
+        await _deny_pending_approval_before_text_exit(orchestrator, approval_gate, web_forwarder)
         player.wait()
         await orchestrator.stop_event_loop()
         await adapter.aclose()
@@ -3106,6 +3107,42 @@ async def _drain_until_idle(adapter, timeout_s: float) -> None:  # type: ignore[
             await asyncio.sleep(0.5)
             return
     log.warning("backend still busy after %.0fs; giving up the wait", timeout_s)
+
+
+async def _deny_pending_approval_before_text_exit(  # type: ignore[no-untyped-def]
+    orchestrator, approval_gate, web_forwarder=None,
+) -> None:
+    """`--text` mode's own exit-path safety net: deny any still-pending
+    backend approval before disconnecting.
+
+    `--text` mode never runs `_working_watchdog` (constructed in the mic-
+    loop setup path only, well after `--text` mode's own early `return`),
+    so `approval_gate`'s own `observe_timeout()` is never ticked. Left
+    alone, a pending approval just sits open until `_drain_until_idle`'s
+    unrelated generic busy-timeout above gives up, and this exit path used
+    to fall through to `adapter.aclose()` without ever sending an explicit
+    decline -- see docs/KNOWN-ISSUES.md's "--text mode + permission_mode:
+    approve abandons a pending approval instead of denying it" (diagnosed
+    2026-08-11, fixed here). Deny outright instead, matching the mic
+    loop's own "silence is never consent" invariant (ApprovalPromptGate's
+    own docstring) -- there is no more waiting to do, `--text` mode is
+    exiting regardless of the outcome.
+    """
+    if approval_gate is None or not approval_gate.is_waiting:
+        return
+    if await orchestrator.resolve_pending_approval(False):
+        log.warning(
+            "declined pending backend approval before --text mode exit "
+            "(no reply channel left to wait on)"
+        )
+        if web_forwarder is not None:
+            web_forwarder.forward_approval_resolved(False)
+    else:
+        log.error(
+            "--text mode exit found a pending approval wait but no "
+            "backend request could be declined"
+        )
+    approval_gate.cancel_wait()
 
 
 async def _stop_web_server(server: object | None, task: asyncio.Task[None] | None) -> None:
