@@ -508,17 +508,28 @@ on macOS, which has no mic on the dev machine).
 
 ## What's not tested at all yet
 
-- The orchestrator wired to a live OpenCode server through a real mic
-  session (only tested against the in-repo fake server, plus a direct
-  adapter-level round trip against a real `opencode serve` instance on
-  Linux, 2026-08-25 -- see docs/field-notes/ -- neither is the full
-  orchestrator/mic-loop path).
-- Codex through a real live-voice mic session on Linux (claude-code got
-  a full real-human-voice pass there 2026-08-25; codex did not).
-- Sustained everyday use on Linux -- one extensive same-day session
-  covered AEC, TUI/text/Web UI, and a real human-voice safeword/
-  kill_phrase/barge-in pass (see docs/field-notes/), not accumulated
-  regular use the way Windows has.
+- A clean, successful end-to-end turn through the orchestrator wired to
+  a live OpenCode server over a real mic session on Linux. The
+  orchestrator-wired real-mic-loop path itself WAS exercised for the
+  first time 2026-08-26 (previously only the in-repo fake server and an
+  isolated adapter-level round trip had been tried) -- a real spoken
+  question, real transcript, real `opencode serve` round trip -- but it
+  surfaced a real infinite-hang bug (a provider-rejected model's
+  `session.next.step.failed` event never clearing `is_busy()`), fixed
+  the same session. A full successful turn through this exact path
+  still hasn't been observed live. See docs/field-notes/2026-08-26-
+  opencode-step-failed-event-never-cleared-busy-infinite-hang.md.
+- Sustained everyday use on Linux -- two extensive same-day/next-day
+  sessions covered AEC, TUI/text/Web UI, a real human-voice safeword/
+  kill_phrase/barge-in pass on claude-code, and (2026-08-26) a first
+  real mic-loop pass on both codex and opencode, including codex's
+  kill_phrase (see docs/field-notes/), but not accumulated regular use
+  the way Windows has.
+
+Codex's real live-voice mic session gap (present in earlier drafts of
+this doc) is now closed: a real spoken question, real transcript, real
+`commandExecution` tool call, correct spoken answer, and a clean
+`kill_phrase` force-kill were all confirmed live on Linux, 2026-08-26.
 
 ## Release gate: what CI cannot test
 
