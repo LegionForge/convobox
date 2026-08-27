@@ -22,6 +22,13 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Added 2026-08-25 alongside the process-kill-matrix job below, whose
+  # own `if:` restricts it to push/workflow_dispatch (not every PR) --
+  # needs a real trigger source to dispatch from at all. Every other job
+  # in this file is unaffected: none of them gate on event_name, so they
+  # keep running on pull_request/push exactly as before: this only adds
+  # a new way to ALSO run the full workflow on demand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -79,3 +86,56 @@ jobs:
   secrets:
     name: Secret Scanning
     uses: LegionForge/dev-rig/.github/workflows/secrets.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
+
+  process-kill-matrix:
+    name: Process-kill matrix (${{ matrix.os }})
+    # A local job, NOT a dev-rig `uses:` call -- dev-rig's own test.yml is
+    # hardcoded to `runs-on: ubuntu-latest` with no OS-matrix input to opt
+    # into (confirmed via `gh api repos/LegionForge/dev-rig/contents/
+    # .github/workflows/test.yml`, 2026-08-25), so a real cross-platform
+    # OS matrix needs its own job here rather than a dev-rig parameter
+    # that doesn't exist. A dev-rig feature request for a real OS-matrix
+    # input is the correct long-term home for this -- not filed yet; this
+    # job is the achievable-today path.
+    #
+    # Deliberately narrow: runs ONLY tests/test_backend_adapter_
+    # conformance.py and tests/test_real_process_tree_kill.py, not the
+    # full suite (already covered, Linux/single-Python, by the `test` job
+    # above via dev-rig) -- both need only the `dev` extra (no real audio
+    # hardware, no `aec` extra's from-source build), so this stays cheap
+    # even tripled across three OSes.
+    #
+    # Gated to main-branch pushes + manual dispatch, NOT every PR: macOS/
+    # Windows GitHub-hosted runners cost meaningfully more per runner-
+    # minute than Linux and macOS queues have their own history of
+    # flakiness -- the same "heavier than pre-PR" treatment TESTING.md's
+    # release gate already gives the mandatory human live-mic UAT pass,
+    # applied here to the one thing in this job that's actually
+    # automatable across all three platforms.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Backend adapter conformance suite
+        run: uv run pytest tests/test_backend_adapter_conformance.py -v
+
+      - name: Real process-tree kill suite
+        run: uv run pytest tests/test_real_process_tree_kill.py -v

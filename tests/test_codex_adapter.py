@@ -1052,9 +1052,9 @@ def test_kill_by_command_text_matches_a_short_legitimate_command(
         stdout = ps_output
 
     monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()  # noqa: ARG005
+        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
     )
-    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)  # noqa: ARG005
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)
 
     result = mod._kill_by_command_text("/bin/zsh -lc 'sleep 90'")
 
@@ -1126,13 +1126,116 @@ def test_kill_by_command_text_matches_a_multiline_command(
         stdout = ps_output
 
     monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()  # noqa: ARG005
+        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
     )
-    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)  # noqa: ARG005
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)
 
     result = mod._kill_by_command_text(reported_command)
 
     assert 70123 in result
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="_kill_by_command_text uses signal.SIGKILL, which does not exist "
+    "on Windows; the pgrep/ps fallback it belongs to is itself gated to "
+    "non-Windows platforms at the force_kill() call site (codex.py).",
+)
+def test_kill_by_command_text_matches_a_multiline_command_on_linux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test for a live finding on THIS session's Linux box
+    # (2026-08-25), while building the cross-platform process-kill test
+    # matrix: unlike macOS's BSD `ps` (octal-escapes an embedded newline
+    # as the literal text `\012`, see test above), Linux's `procps` `ps`
+    # renders the SAME embedded newline as a plain space -- confirmed by
+    # directly spawning a real multi-line `python3 -c "line1\nline2"`
+    # process and reading its own `ps -eo pid,ppid,command` entry back.
+    # `_unescape_ps_octal` alone is a no-op against that rendering (no
+    # octal escape to reverse), so the substring match failed here even
+    # though the 2026-08-23 macOS fix above was already in place --
+    # `_kill_by_command_text` returned an empty list against a real,
+    # still-running process on this platform, confirmed live before this
+    # fix (`_normalize_whitespace`, see its own docstring). This is the
+    # test docs/KNOWN-ISSUES.md's "Linux: expected, not confirmed" note
+    # was waiting on -- confirmed, and it needed a real fix, not just
+    # confirmation.
+    import convobox.adapters.codex as mod
+
+    reported_command = (
+        'python3 -c "import hashlib, time\n'
+        "end = time.monotonic() + 90\n"
+        'counter = 0"'
+    )
+    # Linux procps's own rendering of the SAME process: quotes consumed by
+    # the shell (same as macOS), but the embedded newlines are plain
+    # spaces -- no `\012` escape at all.
+    ps_output = (
+        "  PID  PPID COMMAND\n"
+        "70000     1 codex app-server\n"
+        "70123 70000 python3 -c import hashlib, time "
+        "end = time.monotonic() + 90 counter = 0\n"
+    )
+
+    class _FakeCompleted:
+        stdout = ps_output
+
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
+    )
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)
+
+    result = mod._kill_by_command_text(reported_command)
+
+    assert 70123 in result
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="_kill_by_command_text uses signal.SIGKILL, which does not exist "
+    "on Windows; the pgrep/ps fallback it belongs to is itself gated to "
+    "non-Windows platforms at the force_kill() call site (codex.py).",
+)
+def test_kill_by_command_text_requests_a_wide_ps_column_regardless_of_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test for a live finding while building this project's
+    # process-kill test matrix (2026-08-25): `ps`'s COMMAND column
+    # truncates to terminal width whenever its own stdout isn't a real,
+    # wide tty -- true for this call every time, since capture_output=True
+    # always pipes it. The SAME real spawned process, same machine,
+    # matched and was killed correctly in one calling context but was
+    # silently missed (this function just returns an empty list, "nothing
+    # to kill") in another, purely because of ambient terminal-width
+    # detection ConvoBox has no control over in practice (a real
+    # terminal vs. a service manager vs. a headless script). Asserts the
+    # actual fix: the internal ps subprocess.run() call must pass an
+    # explicit env with a huge COLUMNS, not rely on whatever the calling
+    # process's own environment happens to provide.
+    import convobox.adapters.codex as mod
+
+    captured_kwargs: dict[str, object] = {}
+
+    class _FakeCompleted:
+        stdout = "  PID  PPID COMMAND\n"
+
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompleted:
+        captured_kwargs.update(kwargs)
+        return _FakeCompleted()
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    mod._kill_by_command_text("sleep 90")
+
+    env = captured_kwargs.get("env")
+    assert isinstance(env, dict), "the ps call must pass an explicit env dict"
+    assert env.get("COLUMNS") not in (None, "", "80"), (
+        "the ps call must override COLUMNS with a wide value -- without "
+        "this, ps truncates COMMAND to terminal width in some calling "
+        "contexts, silently failing to match a real, still-running "
+        "process (confirmed live: same process, same code, matched in "
+        "one calling context and missed in another)"
+    )
 
 
 # --- background_jobs() via the Windows Job Object (observation only) --

@@ -28,6 +28,18 @@ Turn behavior is scripted by the prompt text:
                             responding to turn/interrupt (checked before the
                             plain "hang" match) -- simulates the app-server
                             dying while a request is genuinely in flight
+  contains "spawn a real killable process" -> forks a REAL OS process tree
+                            (a multi-statement `sh -c` wrapper whose non-tail
+                            command forks a separate long-lived child -- the
+                            exact fork-not-exec shape 2026-08-15's field note
+                            found), reports it via a real commandExecution
+                            item/started with the item left "in progress"
+                            (no item/completed, no turn/completed -- the
+                            turn stays busy, same as "hang"), so a real,
+                            live test can call the real CodexAdapter's
+                            force_kill() against it and confirm the real
+                            process tree is actually dead afterward. See
+                            tests/test_real_process_tree_kill.py.
   contains "emit garbage first" -> writes one malformed (non-JSON) stdout
                             line before the normal echo response
   contains "needs approval" -> server->client approval request first (current
@@ -60,6 +72,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess  # nosec B404 -- spawns a real, harmless test process tree
 import sys
 
 THREAD_ID = "thr_test"
@@ -133,6 +146,42 @@ def main() -> None:
             if "hang and vanish on interrupt" in text:
                 active_turn = turn_id
                 die_on_interrupt = True
+                continue
+            if "spawn a real killable process" in text:
+                # The marker is whatever text follows the trigger phrase --
+                # the caller picks it (e.g. a uuid) so the test can find
+                # this exact process in a real `ps` scan without needing
+                # this fake to report its PID back over the protocol (real
+                # codex doesn't do that either -- _kill_by_command_text's
+                # own design is PID-agnostic, text-based matching, see
+                # codex.py). A real multi-statement `sh -c` wrapper whose
+                # non-tail command forks a SEPARATE long-lived child -- the
+                # exact fork-not-exec shape 2026-08-15's field note found
+                # (killing only the matched wrapper left the real long-
+                # running command alive, reparented to init).
+                marker = text.split("spawn a real killable process", 1)[1].strip()
+                # "; echo done" is load-bearing -- see
+                # tests/test_real_process_tree_kill.py's own comment on
+                # this exact point: without a command AFTER sleep, this
+                # box's /bin/sh execs sleep in place (no fork, no
+                # separate child, the marker vanishes from `ps` too),
+                # which defeats the whole "separate forked child" bug
+                # shape this trigger exists to reproduce.
+                real_command = f"echo {marker}; sleep 60; echo done"
+                subprocess.Popen(["sh", "-c", real_command])
+                active_turn = turn_id
+                notify("item/started", {
+                    "threadId": THREAD_ID,
+                    "item": {
+                        "type": "commandExecution", "id": "cmd_real",
+                        "command": f"sh -c {real_command}",
+                    },
+                })
+                # No item/completed, no turn/completed -- the turn stays
+                # busy/in-progress, same as "hang", so a real force_kill()
+                # call finds self._busy=True and self._last_command_text
+                # set, matching the real gating conditions codex.py's
+                # force_kill() checks before invoking the ps fallback.
                 continue
             if "hang" in text:
                 active_turn = turn_id
