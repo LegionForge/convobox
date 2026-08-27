@@ -1676,6 +1676,45 @@ built artifacts live and how they're kept in sync with the pinned
 
 ---
 
+### AEC builds from source on Linux too — but its `lib64` RPM convention breaks the sdist's own library search (upstream)
+
+**Status:** verified 2026-08-24 on openSUSE Tumbleweed (RPM-based). Same
+underlying gap as the macOS entry above (PyPI ships no Linux wheel
+either, `pip install aec-audio-processing` falls back to a source
+build), plus one Linux-specific bug on top: the sdist's `setup.py`
+(`get_webrtc_library_path()`) globs only `install/lib/**` for the built
+`libwebrtc-audio-processing*` shared object. On a Debian/Ubuntu-style
+multiarch layout that's where meson's own `install` step puts it, so the
+macOS/Windows-tested path works unchanged. On an RPM-based distro (this
+machine), meson's install step follows the platform's own convention
+and puts it under `install/lib64/` instead — the glob finds nothing, and
+the build fails at the link step even though the shared object was
+built successfully one directory over.
+
+**Workaround used (not a durable fix):**
+
+```
+ln -s lib64 install/lib
+```
+
+run once inside the `uv` build cache's extracted sdist directory, after
+the meson build step completes but before `setup.py` finishes linking.
+Confirmed unblocks the same `EchoCanceller`/`AudioProcessor` path this
+machine went on to run a 119-trial-scale volume sweep against (see
+`docs/field-notes/2026-08-24-linux-volume-sweep-reproduces-high-volume-aec-regression.md`
+and the other 2026-08-24/25 Linux field notes) — zero code changes to
+ConvoBox itself, same as the macOS entry.
+
+**Not done as part of this pass, deliberately:** no upstream bug/PR
+filed against `aec-audio-processing` yet (the fix is small — glob
+`install/lib64/**` too, or use `pkg-config`/meson's own introspection
+instead of a hardcoded path — but is this repo's read of someone else's
+build script, not confirmed against their intent); no Linux wheel
+published or vendored for this repo's CI, same reasoning as the macOS
+entry's deferral.
+
+---
+
 ## Backend integration (including upstream bugs)
 
 Problems in or at the boundary with a coding-agent CLI. Upstream entries

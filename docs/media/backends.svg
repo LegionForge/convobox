@@ -52,5 +52,5 @@
   <text x="820" y="172" text-anchor="middle" class="note">channel — auto-declined</text>
   <text x="820" y="188" text-anchor="middle" class="note">today; voice-wiring not yet built.</text>
 
-  <text x="500" y="310" text-anchor="middle" class="caption" font-size="12.5">Platform: Windows 11 tested end-to-end today · Linux and macOS are implemented, not yet voice-validated.</text>
+  <text x="500" y="310" text-anchor="middle" class="caption" font-size="12.5">Platform: Windows 11, macOS, and Linux all voice-validated live (see docs/field-notes/).</text>
 </svg>

@@ -508,11 +508,17 @@ on macOS, which has no mic on the dev machine).
 
 ## What's not tested at all yet
 
-- The orchestrator wired to a live OpenCode server (only tested against
-  the in-repo fake server) — a real `opencode serve` instance was not
-  reachable in this environment (its npm postinstall failed here) to
-  test against.
-- Everything on Linux.
+- The orchestrator wired to a live OpenCode server through a real mic
+  session (only tested against the in-repo fake server, plus a direct
+  adapter-level round trip against a real `opencode serve` instance on
+  Linux, 2026-08-25 -- see docs/field-notes/ -- neither is the full
+  orchestrator/mic-loop path).
+- Codex through a real live-voice mic session on Linux (claude-code got
+  a full real-human-voice pass there 2026-08-25; codex did not).
+- Sustained everyday use on Linux -- one extensive same-day session
+  covered AEC, TUI/text/Web UI, and a real human-voice safeword/
+  kill_phrase/barge-in pass (see docs/field-notes/), not accumulated
+  regular use the way Windows has.
 
 ## Release gate: what CI cannot test
 

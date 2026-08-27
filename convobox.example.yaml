@@ -109,8 +109,14 @@ stt:
   model: base             # tiny.en (fastest, English-only) | base | small | ...
   device: auto            # "auto" (recommended -- picks a real GPU if one is
                           # visible, e.g. NVIDIA CUDA, else cpu) | "cpu" | "cuda"
-  compute_type: default   # "default" (recommended -- int8 on cpu, float16 on
-                          # cuda) | int8 | int8_float32 | int16 (cpu) |
+  compute_type: default   # "default" (recommended -- uses the MODEL's own
+                          # saved precision, falling back per-device only if
+                          # unsupported; NOT a fixed "int8 on cpu" mapping --
+                          # live-confirmed on a real CPU: the `base` model's
+                          # saved float16 fell back to float32, not int8, when
+                          # the CPU lacked efficient float16 support. Set an
+                          # explicit value below if you want a specific
+                          # precision) | int8 | int8_float32 | int16 (cpu) |
                           # float16 | bfloat16 | int8_float16 | int8_bfloat16
                           # (cuda) | float32 (full precision, the ceiling --
                           # the model itself was trained in float32, so
