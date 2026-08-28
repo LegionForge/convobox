@@ -1704,6 +1704,19 @@ it characterizes the raw problem's scale, it does not re-test the known
 mitigation. Full data: `docs/field-notes/2026-08-27-full-delay-x-volume-
 grid-aec-processing-makes-self-barge-in-worse-at-high-volume.md`.
 
+**Follow-up (2026-08-28): the known `barge_in_min_speech_ms=1200`
+mitigation validated at N=10 across the full volume range.** 300 trials
+(6 delay candidates, adding `400ms` to the standard set, x 5 volumes x
+N=10) with the mitigation applied: complete elimination of AEC-caused
+false barge-ins at 20-35% volume (0.00-0.25 mean, down from 1.28-1.80
+unmitigated), 2.4x-6x fewer at 50-100% (still 2.6x-4x worse than
+raw-AEC-off at the highest volumes). `aec_delay_ms=309` -- this repo's
+long-standing historical recommendation, not the newly-tested 400ms --
+turns out the most consistently strong paired delay choice across the
+grid. Full data:
+`docs/field-notes/2026-08-28-mitigation-grid-barge-in-threshold-1200ms-
+plus-400ms-delay-validated-at-scale.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
