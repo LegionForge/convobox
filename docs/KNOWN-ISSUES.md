@@ -1690,6 +1690,20 @@ example of a small sample overselling an effect size. Full 50-trial
 raw data appended to the same field note:
 `docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
 
+**Follow-up (2026-08-27): the finding re-confirmed at N=10 across the
+full standard delay-candidate set, not just `auto`.** 250 real trials
+(5 delay candidates x 5 volume levels x N=10, up from N=1/N=7 in the
+findings above) show every candidate -- not only auto-estimated delay
+-- produces roughly 10x more AEC-processed false barge-ins than raw at
+100%/75% volume (means ~9.8-9.9 vs. 1.0), tapering to AEC being a net
+improvement at 35%/20%, consistent with the 30-40% crossover the
+119-trial sweep found. This grid used the standard delay set (not
+including the 400ms candidate the mitigation below found best) and left
+`barge_in_min_speech_ms` at its unmitigated 250ms default throughout --
+it characterizes the raw problem's scale, it does not re-test the known
+mitigation. Full data: `docs/field-notes/2026-08-27-full-delay-x-volume-
+grid-aec-processing-makes-self-barge-in-worse-at-high-volume.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
