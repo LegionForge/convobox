@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from convobox.adapters.base import BackendEvent, BackendEventType
 from convobox.approval import ApprovalDetector
 from convobox.tui import ConversationTuiState
@@ -7,6 +9,7 @@ from scripts.run_convobox import (
     ApprovalPromptGate,
     LastSpokenResponse,
     WorkingIndicator,
+    _deny_pending_approval_before_text_exit,
     _on_backend_event,
     _render_approval_explanation,
 )
@@ -322,3 +325,84 @@ def test_render_approval_explanation_never_empty_with_no_detail_at_all() -> None
     assert _render_approval_explanation(None, "Bash", None) == (
         "No further detail is available for Bash."
     )
+
+
+# --- _deny_pending_approval_before_text_exit: --text mode's exit-path fix
+# for docs/KNOWN-ISSUES.md's "--text mode + permission_mode: approve
+# abandons a pending approval instead of denying it" -- --text mode never
+# runs _working_watchdog, so approval_gate.observe_timeout() is never
+# ticked; without this, a pending approval sat open until an unrelated
+# generic busy-timeout gave up and disconnected the backend without ever
+# sending an explicit decline. ---
+
+
+class _FakeOrchestrator:
+    def __init__(self, has_pending: bool) -> None:
+        self._has_pending = has_pending
+        self.resolve_calls: list[bool] = []
+
+    async def resolve_pending_approval(self, approved: bool) -> bool:
+        self.resolve_calls.append(approved)
+        return self._has_pending
+
+
+class _FakeWebForwarder:
+    def __init__(self) -> None:
+        self.resolved_calls: list[bool] = []
+
+    def forward_approval_resolved(self, approved: bool) -> None:
+        self.resolved_calls.append(approved)
+
+
+@pytest.mark.asyncio
+async def test_deny_pending_approval_is_a_no_op_when_gate_is_none() -> None:
+    orchestrator = _FakeOrchestrator(has_pending=True)
+    await _deny_pending_approval_before_text_exit(orchestrator, None, None)
+    assert orchestrator.resolve_calls == []
+
+
+@pytest.mark.asyncio
+async def test_deny_pending_approval_is_a_no_op_when_gate_is_not_waiting() -> None:
+    gate = _gate()
+    orchestrator = _FakeOrchestrator(has_pending=True)
+    await _deny_pending_approval_before_text_exit(orchestrator, gate, None)
+    assert orchestrator.resolve_calls == []
+
+
+@pytest.mark.asyncio
+async def test_deny_pending_approval_denies_and_clears_the_wait_when_waiting() -> None:
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    orchestrator = _FakeOrchestrator(has_pending=True)
+    forwarder = _FakeWebForwarder()
+
+    await _deny_pending_approval_before_text_exit(orchestrator, gate, forwarder)
+
+    # The explicit decline this whole fix exists to guarantee.
+    assert orchestrator.resolve_calls == [False]
+    assert forwarder.resolved_calls == [False]
+    assert gate.is_waiting is False
+
+
+@pytest.mark.asyncio
+async def test_deny_pending_approval_clears_the_wait_even_if_adapter_had_nothing_pending() -> None:
+    # A stale gate (race between the gate and the adapter's own state) must
+    # still leave is_waiting False afterward -- same fail-closed handling
+    # the mic loop's observe_timeout() path already relies on.
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    orchestrator = _FakeOrchestrator(has_pending=False)
+
+    await _deny_pending_approval_before_text_exit(orchestrator, gate, None)
+
+    assert orchestrator.resolve_calls == [False]
+    assert gate.is_waiting is False
+
+
+@pytest.mark.asyncio
+async def test_deny_pending_approval_tolerates_no_web_forwarder() -> None:
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    orchestrator = _FakeOrchestrator(has_pending=True)
+    await _deny_pending_approval_before_text_exit(orchestrator, gate, None)
+    assert gate.is_waiting is False

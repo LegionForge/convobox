@@ -21,7 +21,7 @@ before trusting a voice session with write access; see also
 | **Safety-critical** | | | | |
 | [A hard-stop (safeword or pause phrase) does not guarantee an in-flight tool call actually stops](#a-hard-stop-safeword-or-pause-phrase-does-not-guarantee-an-in-flight-tool-call-actually-stops) | Orchestrator | All | Validated-live | High |
 | [`kill_phrase` ends the ConvoBox session cleanly on Windows, but does not reach an orphaned/detached child process it spawned](#kill_phrase-ends-the-convobox-session-cleanly-on-windows-but-does-not-reach-an-orphaneddetached-child-process-it-spawned) | Force-kill | Windows | Validated-live | High |
-| [`--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it](#--text-mode--permission_mode-approve-abandons-a-pending-approval-instead-of-denying-it) | Approvals | All | Diagnosed | Medium |
+| [`--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it](#--text-mode--permission_mode-approve-abandons-a-pending-approval-instead-of-denying-it----fixed) | Approvals | All | Fixed | — |
 | [STT error-ladder rejection gates on language probability, not decode confidence](#stt-error-ladder-rejection-gates-on-language-probability-not-decode-confidence----a-low-confidence-hallucination-can-slip-through) | STT gating | All | Validated-live | Medium |
 | ["halt halt halt" (a default hard-stop phrase) failed round-trip transcription 4/5 times; bare "Athena" (default resume word) failed 3/5](#halt-halt-halt-a-default-hard-stop-phrase-failed-round-trip-transcription-45-times-bare-athena-default-resume-word-failed-35) | Safeword STT | All | Validated-live | Medium |
 | [A misheard safeword can land on the pause phrase instead of the safeword](#a-misheard-safeword-can-land-on-the-pause-phrase-instead-of-the-safeword----same-hard-stop-effect-different-resulting-state) | Safeword | All | Diagnosed | Low |
@@ -409,12 +409,13 @@ this specific orphaning-not-process-group mechanism.
 
 ---
 
-### `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it
+### `--text` mode + `permission_mode: approve` abandons a pending approval instead of denying it -- fixed
 
 **Status:** diagnosed live 2026-08-11, macOS (Mac mini M4), both claude-code
-and codex backends. Not fixed this pass -- fail-safe in practice (nothing
-ever gets written without a real answer) but the mechanism is misleading
-and worth a real fix.
+and codex backends. Fixed 2026-08-27 -- always was fail-safe in practice
+(nothing ever got written without a real answer), the fix makes the
+mechanism honest: an explicit decline is now sent instead of a silent
+disconnect.
 
 **Symptom.** Ask either backend (in `--text` mode, `permission_mode: approve`)
 to write a file: the approval prompt fires correctly
@@ -443,13 +444,34 @@ channel is ever built on further (e.g. surfaced to a caller who cares
 *why* a request didn't go through, or a future mode where abandon and
 deny should behave differently).
 
-**Fix candidates, neither built yet:** either construct a lightweight
-version of the watchdog (or just call `approval_gate.observe_timeout()`
-on a bare timer) in `--text` mode too, or have `--text` mode's own exit
-path call `resolve_pending_approval(False)` explicitly before
-`adapter.aclose()`.
+**Fix (2026-08-27):** took the second candidate -- `--text` mode's own
+exit path now calls a new helper, `_deny_pending_approval_before_text_exit`
+(`scripts/run_convobox.py`), right after `_drain_until_idle` gives up and
+before `adapter.aclose()`. If `approval_gate.is_waiting`, it calls
+`orchestrator.resolve_pending_approval(False)` explicitly (same "silence
+is never consent" invariant the mic loop's own watchdog-driven timeout
+already enforces) and clears the gate. Chose this over constructing a
+lightweight watchdog in `--text` mode: it's a smaller, more targeted
+change, and `--text` mode is inherently a single-shot request with no
+further waiting to do once `_drain_until_idle` has already given up --
+there is no "keep ticking a timer" case left to build for.
 
-**Also attempted, inconclusive:** the live mic-loop voice-approval flow
+**Verified:** unit tests in `tests/test_approval_prompt_gate.py`
+(`test_deny_pending_approval_*`, fake orchestrator/gate/web-forwarder,
+covers "no gate," "not waiting," "denies and clears," "stale gate with
+nothing pending to decline," "no web forwarder configured"), plus a live
+before/after repro against a real `claude-code` subprocess
+(`permission_mode: approve`, `--text "create a file called probe.txt..."`,
+`--timeout 8` to shorten the wait): before the fix, the run ended with
+only `backend still busy after 8s; giving up the wait` and no file
+created; after the fix, the same run additionally logs `declined pending
+backend approval before --text mode exit`, with the file still never
+created either way (this was never a write-safety gap). Full test suite
+(1561 passed, 1 skipped) green after the change. No live mic-loop
+regression check was needed -- the mic loop's own watchdog-driven path is
+untouched by this change.
+
+**Also attempted, inconclusive (2026-08-11, still open):** the live mic-loop voice-approval flow
 itself (the thing `--text` mode structurally can't exercise) -- 4 live
 synthetic-injection attempts, blocked by real, loud ambient background
 noise in the test room that session (not a code issue). Full detail,
