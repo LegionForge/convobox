@@ -1454,6 +1454,71 @@ time). That assessment has since resolved through extensive live UAT
 that justified waiting no longer applies. The live JP go-ahead question
 is the only remaining gate now.
 
+**What the NS/AGC actually are, confirmed by reading the binding
+(2026-08-29).** `aec_audio_processing.AudioProcessor` is a SWIG-
+generated wrapper (`audio_processing.py`, header says "Do not make
+changes ... modify the SWIG interface file instead") around a compiled
+`libwebrtc-audio-processing-2.{dylib,so,dll}` (`loader.py`) -- this is
+the freedesktop.org `webrtc-audio-processing` fork of Google's own
+WebRTC APM (the same engine PulseAudio's/PipeWire's `webrtc-echo-
+cancel` module uses), not a from-scratch reimplementation. The Python
+layer exposes only construction flags and stream I/O
+(`process_stream`/`process_reverse_stream`/`has_voice`/etc.) -- no
+docstrings or comments reference the algorithm beneath `ns_level`/
+`agc_mode` specifically, because there's nothing to reference: those
+ints map straight through to APM's own enums. Concretely, this means:
+NS here is APM's classic **spectral-subtraction-style stationary noise
+suppressor** (`ns_level` 0-3 aggressiveness) -- not a modern neural
+denoiser (nothing like RNNoise/DTLN is in this binary), and AGC is
+APM's **legacy AGC1 (`agc_mode` 0-3)**, an adaptive *input*-gain
+controller that reacts to the mic signal after capture. Neither touches
+what ConvoBox sends to the speaker before it plays -- both are reactive
+input-side processing, not proactive output-side limiting. This is
+useful context for the "why this might matter" section above (real,
+but modest and reactive) and directly motivates the new idea below.
+
+**New candidate, informed by this investigation + the 2026-08-29 AEC/
+THD field-note campaign + how professional AEC products (Zoom/Teams)
+are known to layer their pipeline: a proactive soft limiter on TTS
+output, not just reactive NS/AGC on the mic.** This session's THD
+measurements (`docs/field-notes/2026-08-29-thd-measurement-and-n20-
+fixed-comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`) and
+the delay x volume grids (`docs/field-notes/2026-08-27-...md`,
+`2026-08-28-...md`) all point the same direction: AEC3's false-barge
+rate gets *worse* than AEC-off once the speaker itself is driven into
+its own nonlinear distortion regime (confirmed on both the Mac mini's
+internal driver and, at maxed own-gain, small external speakers too) --
+because AEC3's adaptive filter assumes a roughly linear acoustic path
+from far-end signal to echo, and a hard-clipping/distorting driver
+breaks that assumption long before NS/AGC on the *input* side get a
+chance to help. Professional products don't solely rely on cancelling
+distortion after the fact -- they cap how hard the output signal can
+ever drive the speaker in the first place (a soft knee limiter/
+compressor on the far-end/TTS signal, tuned below the specific
+driver's own distortion onset), so the linear AEC model holds true more
+of the time to begin with. Concretely for ConvoBox: a limiter stage
+applied to the TTS PCM buffer in `AudioPlayer` (or wherever
+`on_block_played`'s far-end reference is sourced from) BEFORE it both
+plays and feeds the AEC reference -- e.g. a simple soft-knee limiter
+with a threshold below this session's measured per-device distortion
+onset (internal speaker's own 4kHz THD climbs sharply at 100% system
+volume per the N=3 sweep above; a real implementation would need a
+proper per-device calibration step, not a hardcoded threshold, since
+the onset level is clearly device-specific -- external speakers showed
+no such rise in their normal ~24-50%-gain operating range but did
+distort badly once their own gain dial was maxed).
+
+**Not built.** A genuinely new idea from this session's research
+discussion, distinct from (and complementary to -- not a replacement
+for) the existing NS/AGC candidate above: NS/AGC are reactive, mic-
+side, and already wired into the binding awaiting a go-ahead; this
+limiter idea is proactive, output-side, and would need new code (no
+existing knob in `aec-audio-processing` does this) plus a per-device
+calibration step this session's THD script prototypes but doesn't
+productize. Documented here as a candidate awaiting JP's go-ahead, same
+convention as the rest of this entry -- not scoped or estimated further
+this session.
+
 ---
 
 ## Platform and compatibility
