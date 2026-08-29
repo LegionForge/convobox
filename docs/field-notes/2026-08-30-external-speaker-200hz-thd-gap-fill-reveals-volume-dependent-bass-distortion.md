@@ -54,6 +54,30 @@ may well be similarly bad, just unmeasurable at this SNR (same caveat
 the original 2026-08-29 note gave for external speaker low-volume
 measurements generally).
 
+## A newly-noticed hardware detail: the Tone dial is set full toward treble
+
+Checked after this measurement (2026-08-30, later the same day): the
+speakers have a physical "Tone" dial (per the Z200-class QSG referenced
+in the 2026-08-28 note's retroactive hardware-ID addendum), currently
+set to its full-"+" position -- JP's own read is that this means full
+toward High/treble, not bass. No identifying part number or model
+sticker was found on the physical unit itself (checked, cursory look
+only) beyond the general footprint/connector match already noted.
+
+This is a real, relevant, newly-known factor for the 200Hz finding
+above, but its exact effect is NOT confirmed here -- a tone control set
+toward treble plausibly means bass is being actively attenuated (or
+just less boosted) somewhere in the amp's analog signal path before it
+ever reaches the driver, which could mean the 200Hz distortion measured
+above is happening on an already-attenuated bass signal, not a full-
+strength one -- i.e. the true bass distortion at this driver's normal/
+flatter tone setting is unknown and could be different (better or
+worse) from what was measured today. Like the Tone dial's own position,
+this was NOT changed for this session's measurements (same reasoning as
+the volume gain dial: don't invalidate comparability with prior data by
+changing a physical setting mid-series without a deliberate before/
+after test).
+
 ## Plausible mechanism (not confirmed, but independently corroborated)
 
 This is consistent with a small, ported/passive-radiator consumer
@@ -110,3 +134,10 @@ external speakers should expect materially worse linearity than the
 2. A closer, port-adjacent mic placement (not this session's normal
    listening-position placement) would help confirm/refute the port-
    noise hypothesis specifically, if it's ever worth the effort.
+3. A deliberate before/after: rerun this exact 200Hz sweep with the Tone
+   dial turned full toward bass instead of its current full-treble
+   position, to isolate how much of today's result is the driver's own
+   nonlinearity vs. the tone circuit's own attenuation/interaction at
+   that setting. Not done today -- would need to be its own explicit,
+   labeled comparison (both settings recorded), not a silent dial
+   change.
