@@ -150,6 +150,12 @@ measurement tool's own first output.
    get a real continuous frequency-response comparison and finally
    investigate whether the 1kHz THD anomaly corresponds to a visible
    resonance peak in a proper sweep, not just 3 discrete points.
-3. Fold this tool (once RT60 is trustworthy) into JP's own suggested
-   `scripts/hardware_profile.py` consolidation, alongside `thd_sweep.py`
-   and the existing `acoustic_calibration.py` AEC/VAD grid.
+3. **Done (2026-08-29, later the same day):** consolidated this tool and
+   `thd_sweep.py` into a committed `scripts/hardware_profile.py` (`thd`
+   and `sweep` subcommands), with unit tests on the pure-math paths
+   (`tests/test_hardware_profile.py`) -- but RT60 was carried over
+   AS-IS, still flagged unverified, not resolved by the consolidation
+   itself. The existing `acoustic_calibration.py` AEC/VAD grid was left
+   separate, not folded in -- it depends on ConvoBox's own runtime
+   (EchoCanceller, VAD, TTS) in a way `hardware_profile.py` deliberately
+   does not, to keep it usable as a standalone hardware diagnostic.

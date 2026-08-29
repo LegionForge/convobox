@@ -186,11 +186,12 @@ practical AEC benefit to compensate.
 1. A proper root-caused explanation (or at least a ruled-out list) for
    the 1kHz flat-THD anomaly -- possibly worth a swept sine (continuous
    frequency response) rather than 3 discrete points.
-2. JP's own suggestion: consolidate THD + RT60 (2026-08-11, also never
-   committed) + the existing AEC/VAD grid into one committed
-   `scripts/hardware_profile.py` -- a standing "hardware health check"
-   tool for this and other realtime-voice projects, rather than another
-   scratch script rediscovered from a field note later.
+2. **Done (2026-08-29, later the same day):** JP's own suggestion to
+   consolidate THD + the ESS/Farina sweep into one committed
+   `scripts/hardware_profile.py` -- see the ESS field note's own
+   follow-up #3 for what shipped and what's still open (RT60 remains
+   unverified; the AEC/VAD grid itself was not folded in, only THD +
+   sweep).
 3. JP's longer-horizon idea, explicitly out of scope for this session:
    a ConvoBox mobile frontend (Android/mobile Linux/iOS) with a
    local-vs-server-side STT/TTS architecture decision -- flagged as a
