@@ -8,7 +8,7 @@ hardware:
   computer: Mac mini M4 (2024), same machine as every prior note in this series.
   microphone: AIRHUG 28 USB conference mic, unchanged from prior sessions.
   output_device_A (internal, prior grids): "Mac mini Speakers" (Core Audio) -- single built-in driver.
-  output_device_B (this note): real external powered speakers, physically connected to the Mac mini's front 3.5mm analog port this session -- macOS names this output "External Headphones" generically regardless of what's actually plugged in. Speaker model/power not recorded (JP's own hardware, not specified this session).
+  output_device_B (this note): small amplified Logitech computer speakers ("nothing special" per JP), own physical volume dial at roughly 24-50% of max throughout, physically connected to the Mac mini's front 3.5mm analog port this session -- macOS names this output "External Headphones" generically regardless of what's actually plugged in. Mic placement asymmetric relative to the pair: ~0.75m from the right speaker, ~1.5m from the left.
   volume_calibration: speaker's own physical gain was unknown at session start. Confirmed via three manual single-trial checks (JP listening) before the unattended sweep: 20% system volume = too quiet to hear; 50% = still quiet; 100% = "comfortable, good level." Full 100/75/50/35/20 range then run unattended, same range as every internal-speaker grid.
 room: unchanged from prior notes.
 evidence:
@@ -89,18 +89,59 @@ different, smaller-magnitude phenomenon (raw echo increasing with
 volume, a normal AEC challenge) rather than the dramatic
 AEC-fragments-the-signal pattern seen on the internal speaker.
 
+## Direct human corroboration of the distortion hypothesis (2026-08-28/29, post-hoc)
+
+After reviewing these results, JP reported directly: the Mac mini's
+internal speaker is "very loud and tends to distort" starting around
+75% of max volume, continuing at 100% -- perceived as "loud, a bit
+tinny and annoying," explicitly **not** digital clipping. This closes
+the exact gap the 2026-08-11 combined-mitigation note left open ("No
+digital clipping found in the raw mic captures... but that doesn't
+rule out acoustic distortion at the speaker itself, a different
+phenomenon") with a direct first-person report: acoustic/driver
+distortion, not digital clipping, matching this whole series'
+hypothesis precisely.
+
+**Caveat, stated by JP himself and worth preserving verbatim in
+spirit:** this is a subjective judgment from an experienced musician
+(decades with piano, guitar, cello, strings, choir, bass, recorder) but
+with disclosed tinnitus around 8-8.5kHz and substantial hearing loss
+above ~9kHz. That's a real basis for timbral pattern-recognition, but
+not a substitute for an objective measurement -- if anything it
+strengthens the case for a real THD/spectral-analysis follow-up (see
+"What this does NOT show" below) as the way to move this from a
+corroborated, human-reported symptom to a directly measured one,
+independent of any one listener's hearing profile.
+
+## External speaker hardware detail (reported after the fact)
+
+The external speakers used this session: small amplified Logitech
+computer speakers, "nothing special," own physical volume dial set to
+roughly 24-50% of its own max (not maxed) throughout testing. Mic
+placement relative to the pair was asymmetric: approximately 0.75m
+from the right speaker, 1.5m from the left -- double the distance to
+one channel vs. the other. This asymmetry is a plausible contributor to
+the 100%-volume external result being noisier than 75%/50% (raw
+false-barges rising to 2.54 from a flat ~0 at the lower two volumes) --
+not investigated further this session, but worth controlling for (equal
+distance to both channels) in any follow-up.
+
 ## What this does NOT show
 
 - **Not proof the internal speaker is definitively "broken."** No THD
-  measurement was taken on either speaker this session -- this is a
-  strong behavioral signal, still not a direct acoustic distortion
+  measurement was taken on either speaker this session -- JP's own
+  direct listening report (above) is a real, corroborating data point,
+  but not a substitute for an objective acoustic distortion
   measurement.
 - **Not a claim external speakers are a complete fix at every volume.**
-  100% volume still shows a real, if much smaller, effect.
-- **The external speaker's own specs are unrecorded** (model, power,
-  placement relative to the mic) -- a different external speaker could
-  behave differently; this result is about "a real external speaker,"
-  not a specific validated model.
+  100% volume still shows a real, if much smaller, effect -- and the
+  external speakers' own asymmetric placement is a live confound at
+  that volume specifically.
+- **Not a validated claim about external speakers in general** -- this
+  result is about one specific pair (small amplified Logitech
+  computer speakers, run well below their own max gain), asymmetrically
+  placed. A different external speaker, or better placement, could
+  behave differently in either direction.
 
 ## Recommendation
 

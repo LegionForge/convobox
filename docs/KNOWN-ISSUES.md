@@ -36,6 +36,7 @@ before trusting a voice session with write access; see also
 | **Platform and compatibility** | | | | |
 | [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
+| [A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection](#a-macs-front-35mm-jack-mutes-the-internal-speaker-at-the-hardware-level-regardless-of-software-output-device-selection) | Audio output | macOS | Verified | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
 | **Web UI** | | | | |
@@ -1459,6 +1460,48 @@ is the only remaining gate now.
 
 Issues that only appear on one OS or one audio API.
 
+### A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection
+
+**Status:** verified live, 2026-08-29, Mac mini M4. Not a ConvoBox bug
+-- a real hardware/OS behavior anyone testing multiple output devices
+on similar hardware should know about, since it silently invalidates a
+class of comparison the software has no way to detect.
+
+**Symptom.** While running a controlled internal-vs-external-speaker
+comparison (`docs/field-notes/2026-08-29-thd-measurement-and-n20-fixed-
+comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`), the
+internal-speaker measurement came back suspiciously clean --
+`raw_playback_rms` (the actual mic-captured playback level) was 0.0047,
+a 20x drop from the same nominal setting's expected ~0.09, despite
+`audio.output_device` being explicitly set to `"Mac mini Speakers"` (a
+different device than the external speakers connected at the time) and
+`sd.query_devices()` confirming that device was correctly selected in
+software.
+
+**Root cause.** Something physically plugged into the Mac mini's front
+3.5mm analog jack attenuates/mutes the internal speaker at the hardware
+level (a jack-sense circuit), and this does NOT appear to respect an
+application-level output-device override -- selecting a different
+device in Core Audio doesn't override the physical jack-sense behavior
+for the internal driver specifically. Confirmed by physically unplugging
+the external speakers and rerunning: `raw_playback_rms` returned to
+0.0971, matching the pre-confound baseline almost exactly.
+
+**Practical implication.** Any acoustic measurement of the internal
+speaker taken while ANYTHING is plugged into the front port is suspect
+-- checking `sd.query_devices()`/`audio.output_device` alone is not
+enough to confirm which speaker is actually producing sound. Always
+verify actual captured signal level (or just listen) matches
+expectations before trusting a "device A vs. device B" comparison on
+this class of hardware.
+
+**Not built:** no code change is proposed here -- this is a testing-
+methodology note, not a mitigation, since it's outside ConvoBox's own
+control (a Core Audio / hardware jack-sense behavior, not something the
+`sounddevice`/`aec-audio-processing` layer can detect or override).
+
+---
+
 ### WASAPI output plays speech an octave too high ("static chipmunk")
 
 **Status:** deferred (2026-07-12). Mitigation: use an **MME** output device.
@@ -1731,6 +1774,26 @@ built-in speaker to almost any real external speaker looks like a more
 complete fix than the threshold mitigation alone. Full data:
 `docs/field-notes/2026-08-28-external-vs-internal-speaker-confirms-mac-
 mini-built-in-speaker-is-the-driver.md`.
+
+**Follow-up (2026-08-29): a tight N=20 fixed-setting comparison confirms
+the grid finding exactly, and the first objective distortion
+measurement (THD) backs it up.** Internal vs external at 100%
+volume/`aec_delay_ms=309`/N=20: internal AEC-processed false-barges
+9.90 vs. external's 3.15 -- matches the broader grid closely. A new THD
+sweep (200/1000/4000Hz tones, SNR-gated after an initial ungated
+version gave nonsensical noise-floor-dominated results) found a clean
+signal at 4kHz: internal speaker's distortion peaks at 100% volume
+(4.66% THD, vs. external's 1.02%) then drops -- the first genuinely
+measured (not corroborated-by-citation-or-listening-report) evidence
+for the distortion hypothesis. 200Hz/1000Hz results were noisier and
+not fully explained (1kHz sat oddly flat at 14-20% across most volumes,
+not a clean volume-dependent trend). Also found and documented a real
+testing-methodology gotcha along the way (see this doc's own Platform
+and compatibility section): something plugged into the Mac mini's
+front jack mutes the internal speaker at the hardware level regardless
+of software output-device selection. Full data:
+`docs/field-notes/2026-08-29-thd-measurement-and-n20-fixed-comparison-
+plus-front-jack-mutes-internal-speaker-gotcha.md`.
 
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
