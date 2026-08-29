@@ -118,6 +118,56 @@ def test_harmonic_offset_samples_orders_correctly():
     assert 0 < offset_2 < offset_3
 
 
+def test_schroeder_rt60_noise_floor_correction_prevents_gross_overestimate():
+    # Regression test for the real 2026-08-29 bug: a short true decay
+    # (RT60 ~0.3s) buried in a long noisy tail was, before noise-floor
+    # correction, read back as RT60 ~3-5s -- because uncorrected backward
+    # integration of a noise-dominated tail decreases almost linearly
+    # (not exponentially) and only plunges sharply right at the very end
+    # of the finite window, mimicking a long, slow decay.
+    rng = np.random.default_rng(4)
+    n = SAMPLE_RATE * 2  # 2s window, same order as the real capture's tail
+    t = np.arange(n) / SAMPLE_RATE
+    true_rt60 = 0.3
+    decay_tau = true_rt60 / (3 * np.log(10))  # exp(-t/tau) crosses -60dB at t=RT60
+    real_decay = rng.normal(size=n) * np.exp(-t / decay_tau)
+    # scale=0.005 -> noise power ~46dB below peak power, enough dynamic
+    # range for a fair T30 (-35dB) measurement; a noisier floor would
+    # put -35dB AT the noise floor itself, which no correction can fix.
+    noise_floor = rng.normal(scale=0.005, size=n)
+    ir_segment = (real_decay + noise_floor).astype(np.float64)
+
+    corrected = hp.schroeder_rt60(ir_segment, SAMPLE_RATE)
+    assert corrected["rt60_from_t20"] is not None
+    # Should land in the right order of magnitude (well under 1s), not
+    # the ~3-5s the uncorrected version produced against real data.
+    assert corrected["rt60_from_t20"] < 1.0
+    assert corrected["rt60_from_t30"] < 1.0
+    assert corrected["t20_reliable"] is True
+    assert corrected["t30_reliable"] is True
+
+
+def test_schroeder_rt60_flags_low_snr_as_unreliable():
+    # Regression test for the real 2026-08-30 finding: a near-field,
+    # safe-volume capture with only ~18dB of peak-to-noise-floor SNR
+    # produced a plausible-LOOKING but wrong RT60 even after noise
+    # correction. This must be flagged, not silently trusted.
+    rng = np.random.default_rng(5)
+    n = SAMPLE_RATE * 2
+    t = np.arange(n) / SAMPLE_RATE
+    # Loud, fast-decaying signal on top of a noise floor only ~18dB down
+    # from the peak -- deliberately insufficient dynamic range.
+    peak_amplitude = 8.0
+    real_decay = rng.normal(size=n) * peak_amplitude * np.exp(-t / 0.02)
+    noise_floor = rng.normal(scale=1.0, size=n)
+    ir_segment = (real_decay + noise_floor).astype(np.float64)
+
+    result = hp.schroeder_rt60(ir_segment, SAMPLE_RATE)
+    assert result["snr_db"] < 30.0
+    assert result["t20_reliable"] is False
+    assert result["t30_reliable"] is False
+
+
 def test_schroeder_rt60_shorter_decay_gives_shorter_rt60():
     rng = np.random.default_rng(3)
     n = SAMPLE_RATE * 2

@@ -20,11 +20,10 @@ Two subcommands:
 
   sweep  Exponential Sine Sweep (Farina method): one measurement gives a
          continuous frequency response, per-harmonic distortion, and an
-         RT60 estimate. NOTE: this tool's RT60 output does not yet match
-         an independently trusted room measurement (2026-08-11 field
-         note) -- treat frequency response and harmonic numbers as the
-         reliable part of `sweep` output, RT60 as unverified. See the
-         2026-08-29 ESS field note for the two real bugs (a missing 2*pi
+         RT60 estimate (Schroeder backward integration with noise-floor
+         compensation -- see schroeder_rt60()'s docstring for the
+         real bug this had and how it was found/fixed). See the
+         2026-08-29 ESS field note for two earlier bugs (a missing 2*pi
          in the sweep phase, and an over-long frequency-response window)
          found and fixed while building this.
 
@@ -233,21 +232,74 @@ def harmonic_offset_samples(n_harmonic: int, r: float, duration: float, sample_r
     return int(round(delta_t * sample_rate))
 
 
-def schroeder_rt60(ir_segment: np.ndarray, sample_rate: int) -> dict:
+def schroeder_rt60(
+    ir_segment: np.ndarray,
+    sample_rate: int,
+    noise_fraction: float = 0.1,
+    min_snr_db_t20: float = 30.0,
+    min_snr_db_t30: float = 40.0,
+) -> dict:
     """Schroeder backward-integration RT60 estimate from a linear impulse
-    response's decay tail.
+    response's decay tail, with noise-floor compensation (Chu 1978).
 
-    NOTE (2026-08-29): this estimator's output did not match an
-    independently trusted room measurement when run against a real ESS
-    capture (T20/T30-derived RT60 of 3-5s vs. an established ~0.2-0.46s
-    room measurement). Root cause not resolved -- candidates include a
-    different mic/speaker distance/setup, or this specific Schroeder-
-    integration window being unsuited to a close-mic'd, short-duration
-    capture. Treat this function's output as unverified; do not report
-    it as a trustworthy room RT60 without further validation.
+    RESOLVED 2026-08-29 (previously flagged unverified in this same
+    session): the earlier, uncorrected version of this function
+    overestimated RT60 by roughly 10x against an independently trusted
+    room measurement (T20/T30-derived RT60 of 3.4-5.1s vs. an established
+    ~0.2-0.46s). Root cause: plain (uncorrected) Schroeder backward
+    integration of a tail that is mostly background noise (mic self-noise
+    + room ambience, once the real acoustic decay has already died out)
+    is a well-known trap -- backward-integrated energy of stationary
+    noise over a FINITE window decreases roughly LINEARLY with time, not
+    exponentially, so its dB curve stays almost flat for most of the
+    window and only plunges sharply right at the very end (as the
+    remaining-samples-to-sum shrinks toward zero). That produces exactly
+    the signature this session's real capture showed: T20 (-5 to -25dB)
+    took 1.70s, but the NEXT 10dB down to -35dB (T30) took only another
+    0.023s -- a near-vertical late plunge, not a real decay. Any T20/T30
+    window that lands even partly in that noise-dominated region reads
+    back a grossly inflated decay time.
+
+    Fix: estimate the background noise power from the LAST
+    `noise_fraction` of the segment (assumed noise-dominated once real
+    decay has finished), then subtract N*(T-t) -- the noise's own linear
+    contribution to the backward integral -- from the RAW (uncorrected)
+    cumulative sum, clipping the resulting CUMULATIVE curve (not each
+    individual sample) to zero. This is the standard Chu (1978)
+    correction. Clipping must happen after the cumulative sum, not
+    before: energy is squared-Gaussian per sample, so per-sample
+    clip-then-sum (an earlier, wrong version of this fix) discards
+    legitimate negative fluctuations that should cancel positive ones in
+    the sum, and systematically under-corrects -- verified by a unit
+    test that still failed (RT60 ~4.8s on a synthetic 0.3s-decay-plus-
+    noise signal) until the clip was moved to after the cumsum.
+
+    STILL NOT ENOUGH on its own, verified live 2026-08-30: a real
+    external-speaker ESS capture after this fix still read RT60 ~2-4s
+    against a trusted ~0.2-0.46s room measurement. Root cause, isolated
+    by inspecting the raw decay curve directly: this specific setup
+    (safe/comfortable playback level, near-field small speakers, ordinary
+    room noise) has only ~18dB of dynamic range between the fundamental
+    peak and the true noise floor -- far short of the ~30-45dB ISO 3382
+    generally wants for a trustworthy T20/T30 extraction. With that
+    little headroom, the Chu correction's own noise estimate (from a
+    short trailing window) is itself imprecise, and Schroeder's own
+    total-energy normalization gets dominated by accumulated background
+    noise summed across a multi-second tail rather than by the real
+    (likely sub-100ms) direct decay -- a known limitation of the plain
+    Chu method without full ISO 3382-2 Lundeby-style adaptive noise-floor
+    detection. Rather than silently returning a confident-looking wrong
+    number, this function now computes the achieved peak-to-noise-floor
+    SNR and flags `t20_reliable`/`t30_reliable` accordingly -- same
+    "flag reliability, don't just report" discipline as this file's
+    `measure_thd`.
     """
     energy = ir_segment.astype(np.float64) ** 2
-    schroeder = np.cumsum(energy[::-1])[::-1]
+    n = len(energy)
+    noise_win = max(1, int(n * noise_fraction))
+    noise_power = float(np.mean(energy[-noise_win:]))
+    schroeder_raw = np.cumsum((energy - noise_power)[::-1])[::-1]
+    schroeder = np.maximum(schroeder_raw, 0.0)
     schroeder = schroeder / (schroeder[0] + 1e-20)
     with np.errstate(divide="ignore"):
         db = 10 * np.log10(schroeder + 1e-20)
@@ -265,11 +317,17 @@ def schroeder_rt60(ir_segment: np.ndarray, sample_rate: int) -> dict:
 
     t20 = find_decay(-5, -25)
     t30 = find_decay(-5, -35)
+    peak_power = float(np.max(energy[: min(n, 100)]))
+    snr_db = float(10 * np.log10(peak_power / noise_power)) if noise_power > 1e-20 else float("inf")
     return {
         "t20_s": t20,
         "t30_s": t30,
         "rt60_from_t20": t20 * 3 if t20 else None,
         "rt60_from_t30": t30 * 2 if t30 else None,
+        "noise_power": noise_power,
+        "snr_db": snr_db,
+        "t20_reliable": snr_db >= min_snr_db_t20,
+        "t30_reliable": snr_db >= min_snr_db_t30,
     }
 
 
@@ -428,6 +486,11 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             args.sample_rate, args.amplitude, args.n_harmonics, output_device, input_device,
         )
         print(f"volume={volume}: {json.dumps({'freq_response_db': trial['freq_response_db'], 'rt60': trial['rt60']}, indent=2)}")
+        if not trial["rt60"]["t20_reliable"]:
+            print(
+                f"  ** RT60 UNRELIABLE: only {trial['rt60']['snr_db']:.1f}dB peak-to-noise-floor SNR "
+                "(need ~30dB+ for T20, ~40dB+ for T30) -- try a louder sweep/output level or a quieter room **"
+            )
         results.append({"volume": volume, **trial})
 
     _write_json(args.output_json, {
