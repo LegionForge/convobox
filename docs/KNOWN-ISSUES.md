@@ -1717,6 +1717,21 @@ grid. Full data:
 `docs/field-notes/2026-08-28-mitigation-grid-barge-in-threshold-1200ms-
 plus-400ms-delay-validated-at-scale.md`.
 
+**Follow-up (2026-08-28): real external speakers essentially eliminate
+the problem at 75% and below -- the first direct evidence for the
+distortion hypothesis, not just corroboration.** JP attached real
+external powered speakers to the Mac mini's front port. Same grid as
+the 2026-08-27 baseline (5 delays x 5 volumes x N=10, unmitigated
+threshold): at 75%/50% volume, external speakers produced essentially
+zero false barge-ins of any kind (0.00-0.02 mean AEC-processed, vs.
+internal's 9.82/4.60 at the same volumes). 100% volume still shows a
+real but far smaller effect (~1.5x AEC-vs-raw ratio, vs. internal's
+~10x). Recommendation: for open-speaker use, swapping away from the
+built-in speaker to almost any real external speaker looks like a more
+complete fix than the threshold mitigation alone. Full data:
+`docs/field-notes/2026-08-28-external-vs-internal-speaker-confirms-mac-
+mini-built-in-speaker-is-the-driver.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
