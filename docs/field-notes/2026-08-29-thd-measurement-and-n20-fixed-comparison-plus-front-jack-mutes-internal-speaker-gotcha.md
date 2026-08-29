@@ -143,6 +143,44 @@ alone would have been fully conclusive.
 - 4kHz's clean result is one frequency, one session, N=3 per condition
   -- a real signal, not yet a large-sample-validated one.
 
+## Addendum (same day, after the above): external speakers ALSO distort badly when their own gain is maxed
+
+All prior external-speaker data in this and the 2026-08-28 note was
+collected with the speakers' own physical gain dial at ~24-50% of max.
+Later the same day, JP turned that dial to 100% and asked for a quick,
+carefully incremental safety-checked sweep (single trials, JP
+confirming comfort/safety by ear before each step up: 5% -> 15% -> 30%
+-> 50% -> 75% system volume, stopped there deliberately before 100%):
+
+| system volume (dial maxed) | raw false-barges | AEC false-barges |
+|---|---|---|
+| 50% | 1 | 5 |
+| 75% | 1 | **18** |
+
+At 75% system volume with the speaker's own gain maxed, JP described
+the sound directly: "loud and almost painful, just below that of a
+rock concert" at ~2m -- and the AEC-processed false-barge count spiked
+to 18 in a single trial, the highest single-trial count recorded
+anywhere in this entire field-note series (higher even than the
+internal speaker's own worst 100%-volume trials, which topped out
+around 14). **This is a real, if small-N, confirmation that the
+external speakers are not immune to this problem in general -- they
+just don't hit it in their normal (~24-50% gain) operating range.**
+Consistent with the working hypothesis throughout this series: it's
+driving ANY speaker hard enough into its own distortion regime that
+breaks AEC3's linear model, not something uniquely wrong with the Mac
+mini's internal driver specifically. JP stopped the sweep at 75%
+deliberately (further volume judged unnecessary for the data and
+approaching genuinely uncomfortable/risky territory) -- this is N=1 per
+level, directional, not a replacement for the fuller N=3/N=10 grids
+run at the speakers' normal gain elsewhere in this series.
+
+**Practical note for JP:** worth turning the external speakers' own
+gain dial back down to roughly its prior 24-50% setting for regular
+use -- this addendum confirms running them at max gain reaches
+uncomfortable listening levels well before 100% system volume, with no
+practical AEC benefit to compensate.
+
 ## Recommended follow-ups (not started)
 
 1. A proper root-caused explanation (or at least a ruled-out list) for
