@@ -126,6 +126,19 @@ false-barges rising to 2.54 from a flat ~0 at the lower two volumes) --
 not investigated further this session, but worth controlling for (equal
 distance to both channels) in any follow-up.
 
+**Exact model, identified 2026-08-30 (later, retroactively):** JP could
+not find an exact product page (no longer listed/discontinued), but
+identified the pair as similar in footprint to the [Logitech Z207
+Bluetooth Computer Speakers](https://support.logi.com/hc/en-us/articles/360024325493--Getting-Started-Z207-Bluetooth-Computer-Speakers)
+-- except wired via a TRRS 3.5mm connection, not Bluetooth -- and
+closest in spec to the wired [Logitech Z200](https://www.logitech.com/assets/65757/z200-web-qsg.pdf)
+line (5.0V, 1.3A USB power). Likely a Z200-class model or a close
+sibling, not confirmed exactly. This retroactive ID doesn't change any
+finding already reported (all measurements above stand as recorded
+against "this specific physical pair"), but is worth keeping for anyone
+trying to reproduce or compare against a similar small amplified
+computer speaker in the future.
+
 ## What this does NOT show
 
 - **Not proof the internal speaker is definitively "broken."** No THD
