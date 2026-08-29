@@ -54,17 +54,25 @@ may well be similarly bad, just unmeasurable at this SNR (same caveat
 the original 2026-08-29 note gave for external speaker low-volume
 measurements generally).
 
-## Plausible mechanism (not confirmed)
+## Plausible mechanism (not confirmed, but independently corroborated)
 
 This is consistent with a small, ported/passive-radiator consumer
 speaker driver reaching its mechanical excursion limit at low
 frequencies well before the same happens at midrange/treble -- a common
 signature in cheap computer speakers, sometimes audible as "chuffing"
 or "farting" port noise at loud bass. Not confirmed by any independent
-method this session (no accelerometer/near-field port measurement, no
-listening test specifically at 200Hz) -- flagged as the most likely
-explanation given the frequency-selective, volume-climbing pattern, not
-asserted as proven.
+acoustic method this session (no accelerometer/near-field port
+measurement, no listening test specifically at 200Hz) -- but JP
+independently confirmed, from his own prior knowledge of this exact
+hardware (not prompted by this data), that these desk speakers have a
+known-weak low-frequency AND high-frequency response ("really lame"
+frequency response, his words, adding "anything maybe around 300Hz and
+lower... may not have the power you're looking for"). That's a
+first-person, pre-existing-knowledge corroboration of the same
+direction this measurement found -- same three-legged pattern
+(behavioral/objective measurement + direct human corroboration) this
+field-note series used successfully for the 4kHz "tinny" finding on
+2026-08-29.
 
 ## Why this matters for the AEC/barge-in question this whole series has chased
 

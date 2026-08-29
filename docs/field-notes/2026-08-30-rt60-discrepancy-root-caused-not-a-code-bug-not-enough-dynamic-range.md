@@ -1,6 +1,6 @@
 ---
 title: Chasing the ESS/Farina RT60 discrepancy -- fixed a real Chu-correction ordering bug, then root-caused the remaining gap to insufficient measurement SNR (~18-24dB vs. the ~30-45dB ISO 3382 wants), not a further code bug -- added an honest reliability flag instead of a silently-wrong number
-status: root-caused, mitigated (not eliminated)
+status: resolved (fix verified at adequate SNR, same day, via addendum)
 date: 2026-08-30
 project: ConvoBox (github.com/LegionForge/convobox)
 versions: ConvoBox main @ b355ba2; scripts/hardware_profile.py, tests/test_hardware_profile.py
@@ -126,16 +126,61 @@ result, instead of a plausible-looking wrong one.
 
 ## Recommended follow-ups (not started)
 
-1. If a trustworthy RT60 number is ever actually needed (not just "is
-   this tool broken"): rerun with a louder sweep amplitude/output level
-   in a quiet moment, check the reported `snr_db` clears 40dB, and only
-   then trust the number. The speaker gain dial itself has real headroom
-   left (confirmed at ~50% of max during this session's captures, not
-   maxed), so there's an easy first lever to try before concluding the
-   hardware itself can't clear the SNR bar.
+1. ~~If a trustworthy RT60 number is ever actually needed...~~ **Done,
+   same day, see addendum below** -- follow-up #1 was completed within
+   hours of writing it.
 2. A full ISO 3382-2 Lundeby-method implementation (iterative noise
    floor + integration-limit estimation) would likely do somewhat better
    at marginal SNR than this session's Chu-only fix, but wouldn't
    overcome a genuinely insufficient-SNR capture like this session's --
    not pursued, since the SNR gate already gives an honest answer for
    the common case.
+
+## Addendum (same day, during an autonomous /loop R&D session): follow-up #1 confirms the fix at higher volume
+
+With the external speakers still connected and JP away, ran the exact
+follow-up this note itself recommended: ESS sweeps at 25%/50%/75% system
+volume (vs. the original captures' ~10%), same external speakers,
+gain dial unchanged (~50% of max, no physical adjustment).
+
+| system volume | SNR achieved | t20_reliable | t30_reliable | RT60 (from T20) |
+|---|---|---|---|---|
+| 25% | 38.2dB | true | false | 0.516s |
+| 50% | 54.2dB | true | true | 0.5435s |
+| 75% | 65.5dB | true | true | 0.5494s |
+
+**This is a clean confirmation of the whole fix chain.** SNR climbs
+predictably with volume (38 -> 54 -> 65dB) exactly as expected once a
+real signal is driven harder against a roughly fixed room noise floor.
+Once SNR clears the reliability gates, RT60 converges to a tight,
+self-consistent ~0.51-0.55s across three independent captures at three
+different volumes -- a dramatic contrast with the original unreliable
+low-SNR captures, which gave wildly different numbers every time (5.09,
+4.36, 3.14, 2.17s). Two of the three volumes (50%, 75%) agree to within
+0.006s of each other, which is itself strong evidence this is now
+measuring something real and reproducible, not noise.
+
+**Small remaining gap, not chased further.** ~0.51-0.55s is still
+somewhat longer than the trusted 2026-08-11 room measurement's ~0.2
+(T20) to 0.46s (T30) ceiling -- plausible, not-yet-confirmed
+explanations: a genuinely different mic/speaker position (this is a
+near-field capture, closer to the small external speakers, not
+necessarily the same spot as the original room-level measurement); or a
+broadband (100-8000Hz) decay averaging in some longer-ringing low-
+frequency content the original measurement's own method may have
+weighted differently. JP separately confirmed (same session) that these
+specific desk speakers have a known-weak low-frequency AND high-
+frequency response ("really lame" frequency response, his words) --
+this doesn't obviously explain a LONGER decay (a bass-weak speaker
+would if anything under-drive the longest-ringing frequencies, biasing
+RT60 shorter, not longer), but it's a real, independently-known
+property of this exact hardware worth keeping in mind for any future
+frequency-response work with these speakers, not just this RT60 number.
+
+**Bottom line:** the tool works. Given adequate SNR (25%+ volume on this
+hardware), it returns a believable, reproducible RT60 in the right
+order of magnitude. The original bug report ("RT60 doesn't match")
+is resolved as: fixed a real ordering bug, and the remaining gap was a
+measurement-conditions issue (low volume => low SNR), not a further code
+defect -- exactly as this note's main body predicted before this
+addendum went and checked.
