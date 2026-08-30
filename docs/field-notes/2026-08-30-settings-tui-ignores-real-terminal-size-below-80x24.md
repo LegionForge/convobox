@@ -7,6 +7,7 @@ versions: ConvoBox main @ 121d771 (post-v0.4.0); scripts/settings_tui.py; openSU
 evidence:
   - Live operator report on Linux ("the settings tui isn't rendering right either, and it isn't autosizing for the terminal size")
   - Direct call to `render(state, width=60, height=20)` from a `uv run python -c ...` one-liner, output inspected directly
+  - Real `pty.fork()`-spawned run of `scripts/settings_tui.py` in a 50x15 pseudo-terminal (`TIOCSWINSZ` set before exec), captured output confirms 81-byte lines regardless of the pty's real width; arrow-key nav and quit both confirmed working
   - `tests/test_settings_tui.py` full run (156/156 passed) confirming no existing coverage of resize/small-terminal behavior
 provenance:
   authors:
@@ -57,6 +58,27 @@ terminal narrower than 80 columns or shorter than 24 rows -- a common
 split-pane or tiled-window-manager size, not an edge case -- every line
 this emits is wider than the actual terminal, so the terminal itself
 wraps each logical row into two or more visual rows.
+
+**Reproduced end-to-end in a real pseudo-terminal, not just a direct
+function call.** Spawned the actual `scripts/settings_tui.py` process
+under a real `pty.fork()`-created pseudo-terminal explicitly sized to
+50x15 (`TIOCSWINSZ`, set before `exec`) -- a realistic split-pane size,
+not a synthetic extreme. Every captured frame's lines are exactly 81
+bytes (80 rendered columns + `\r`), regardless of the pty's real 50-column
+width:
+
+```
+' ConvoBox Settings TUI | clean | /tmp/...' len= 81
+'backend: codex  tts: kokoro/af_sarah  stt: faster-whisper/base  audio: defaul...' len= 81
+'+------------------------------------------------------------------------------+' len= 81
+```
+
+**Confirmed cosmetic, not functionally broken:** arrow-key navigation
+(`Down Down Right`, sent as real escape sequences into the pty) and `q`
+to quit both worked -- the process printed its final status line and
+exited cleanly (`waitpid` returned normally), so the app's internal
+state and control flow are unaffected by the size bug; only the visual
+layout is wrong on a real narrow terminal.
 
 ## Root cause 2: no live-resize repaint
 
