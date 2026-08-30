@@ -55,10 +55,16 @@ except OSError:
 
     class _NoPortAudio:
         def __getattr__(self, name: str) -> object:
-            raise RuntimeError(
-                "sounddevice/PortAudio unavailable in this environment "
-                "(no native PortAudio library found) -- hardware_profile.py "
-                "needs real audio hardware for this operation"
+            # AttributeError, not RuntimeError: monkeypatch.setattr() does
+            # its own getattr(target, name, default) first to save the old
+            # value for teardown, and only tolerates AttributeError there --
+            # anything else propagates and breaks the patch before it's
+            # even applied (caught live via PR #348 CI, where this raised
+            # RuntimeError and broke both hp.sd-monkeypatching tests).
+            raise AttributeError(
+                f"sounddevice/PortAudio unavailable in this environment "
+                f"(no native PortAudio library found) -- hardware_profile.py "
+                f"needs real audio hardware for {name!r}"
             )
 
     sd = _NoPortAudio()  # type: ignore[assignment]
