@@ -66,12 +66,13 @@ Tier 1/2.
 | Backend | Linux | macOS | Windows |
 |---|---|---|---|
 | claude-code | ✅ Real human-voice session, 2026-08-25 (safeword, kill_phrase, self-barge-in — see the same-day field notes) | ✅ 2026-08-11 live demo field note | ✅ Referenced across multiple field notes (kill-phrase, VAD freeze) |
-| codex | ❌ Not yet run | ✅ Multiple field notes (force-kill fix rounds, kill-phrase live tests) | ✅ Multiple field notes (kill-phrase, VAD freeze, job-object) |
+| codex | 🟡 First live-mic session run 2026-08-30 (`docs/UAT-codex-smoke.md`): loop basics, busy tracking, hard stop, kill-phrase, and error-recovery all confirmed; soft interject (`turn/steer`) and approval-mid-flight not yet exercised | ✅ Multiple field notes (force-kill fix rounds, kill-phrase live tests) | ✅ Multiple field notes (kill-phrase, VAD freeze, job-object) |
 | opencode | 🟡 Adapter-level only (2026-08-25 field note) — no live-mic session yet | Not confirmed in a dedicated field note | Not confirmed in a dedicated field note |
 
-Run via `docs/UAT-claude-code-smoke.md`, `docs/UAT-codex-smoke.md`,
-`docs/UAT-opencode-smoke.md` (the last two written 2026-08-25, not yet
-run live — see each doc's own Findings log). `docs/UAT-checklist.md`'s
+Run via `docs/UAT-claude-code-smoke.md`, `docs/UAT-codex-smoke.md`
+(written 2026-08-25, first run live 2026-08-30 — see its own Findings
+log), `docs/UAT-opencode-smoke.md` (written 2026-08-25, not yet run
+live — see its own Findings log). `docs/UAT-checklist.md`'s
 `[G4]` ("verify against each backend") and `[L2]` (OpenCode's silent
 default-model behavior) are the existing cross-backend items this table
 routes to, not duplicates of them.

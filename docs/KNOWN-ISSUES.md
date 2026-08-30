@@ -28,7 +28,7 @@ before trusting a voice session with write access; see also
 | [A safeword match in a transcript skips checking that same transcript for a pause phrase](#a-safeword-match-in-a-transcript-skips-checking-that-same-transcript-for-a-pause-phrase----fixed) | Safeword | All | Fixed | — |
 | **Stability, freezes, and crashes** | | | | |
 | [faster-whisper's native allocator can fail during a long session](#faster-whispers-native-allocator-can-fail-during-a-long-session) | STT | All (Windows-observed) | Mitigated | Medium |
-| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows | Mostly resolved | Medium |
+| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows, Linux | Mostly resolved; mic-layer-only variant still open | Medium |
 | [Backend can go silently busy for minutes with zero output](#backend-can-go-silently-busy-for-minutes-with-zero-output----root-cause-unconfirmed) | Backend | All | Diagnosed | Medium |
 | **Speech pipeline (STT / TTS / AEC)** | | | | |
 | [Kokoro can't synthesize past ~510 phonemes](#kokoro-cant-synthesize-past-510-phonemes----hard-model-limit-not-a-configmode-issue) | TTS (Kokoro) | All | Diagnosed | Low |
@@ -38,12 +38,14 @@ before trusting a voice session with write access; see also
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
+| [Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream](#codex-permission_mode-approve-crashes-on-current-codex-cli----approval_policyuntrusted-was-removed-upstream) | codex (upstream) | All | Diagnosed, unfixed | High |
 | **Web UI** | | | | |
 | [Web UI: artifact pane gaps (0.3.0)](#web-ui-artifact-pane-gaps-030) | Web UI | All | Deferred | Low |
 | [Web UI: a short CancelledError traceback can appear on quit/Ctrl+C](#web-ui-a-short-cancellederror-traceback-can-appear-on-quitctrlc) | Web UI | All | Mostly mitigated | Low |
 | ["Open in editor" occasionally opens a different file than the one clicked](#open-in-editor-occasionally-opens-a-different-file-than-the-one-clicked----fixed) | Web UI | All | Fixed | — |
 | **Cosmetic and diagnostic** | | | | |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
+| [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Diagnosed | Medium |
 
 ---
 
@@ -1290,6 +1292,31 @@ going into any release -- rare (one occurrence to date, self-resolving),
 not confirmed eliminated, and not yet reproduced deliberately rather
 than caught incidentally.
 
+**Second live occurrence, first on Linux (2026-08-30).** Caught during
+Codex's second live-mic UAT pass (`docs/UAT-codex-smoke.md`,
+`backend=codex`, `permission_mode=plan`) while re-testing hard-stop
+responsiveness -- reported live by the operator as "still not
+interrupting well" before the log was checked. `convobox-tui.log`
+confirms genuine total silence in the mic/STT pipeline for **213.4s**
+(00:53:40.683 -> 00:57:13.997, zero `Processing audio` lines), while the
+codex adapter's own `_read_loop` kept logging its routine 5s idle-poll
+warnings on schedule the entire time (`busy=False` throughout) --
+identical shape to 2026-08-15's variant: the backend-adapter task stayed
+demonstrably alive and idle, only the mic-capture/VAD side went dark.
+Self-resolved with no restart, same as the original catch. This is now
+**two occurrences, both `backend=codex`, one macOS (2026-08-15) and one
+Linux (2026-08-30)** -- raises confidence this is platform-independent
+and codex-adjacent rather than a macOS-specific fluke, though still not
+proven backend-independent (both catches used codex). **Operational
+impact confirmed live:** every hard-stop/kill-phrase attempt spoken
+during the freeze window was not silently declined by the overlap gate
+(that would still log a `dropped (...)` line) -- it was never heard at
+all, no log line of any kind. Once the freeze lifted on its own, the very
+next "stop stop stop" and "eject eject eject" attempts matched
+instantly (see the UAT doc's own Findings log for that session) --
+reinforcing that the safeword-matching logic itself is not the problem;
+the mic-capture layer being unresponsive upstream of it is.
+
 ---
 
 ### Backend can go silently busy for minutes with zero output -- root cause unconfirmed
@@ -1401,6 +1428,17 @@ rather than chunking Kokoro itself -- same benefit, none of the
 audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
 later becomes a reason to keep everything on the permissively-licensed
 engine.
+
+**Second live confirmation, different backend (2026-08-30):** reproduced
+again during Codex's first live-mic UAT smoke test on Linux
+(`docs/UAT-codex-smoke.md`), triggered by a long web-search-summary
+response. Same signature (`RuntimeError: Kokoro synthesis stalled...`),
+same graceful recovery (the 30s timeout caught it, ConvoBox logged it and
+kept the session going normally on the next turn) -- no new root cause,
+just evidence this isn't backend-specific. The operator never heard any
+part of that response; no partial-audio or "answer too long" fallback
+exists yet, which is the concrete cost of the still-missing pre-chunking
+layer described above.
 
 ---
 
@@ -2030,6 +2068,61 @@ retry may also be needed the first time a server starts. Full write-up:
 
 ---
 
+### Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream
+
+**Status:** diagnosed live 2026-08-30, unfixed. `backend.permission_mode:
+approve` for the codex backend is currently unusable against codex-cli
+0.149.1 (the version installed at diagnosis time).
+
+**Symptom.** `_PERMISSION_CODEX_OVERRIDES` in
+`src/convobox/adapters/codex.py` hardcodes `("untrusted",
+"workspace-write")` for `approve` mode, injected as `-c
+approval_policy=untrusted -c sandbox_mode=workspace-write` at spawn --
+verified live against codex-cli as of 2026-07-20 (see the dict's own
+comment). Against 0.149.1, the very first turn fails immediately with
+`ConnectionError: codex app-server exited` (`codex.py`'s `_ensure_thread`
+-> `_request` timing out because the pending future was resolved with
+that error from `_read_loop`'s cleanup). Running the exact spawn command
+by hand shows why: `codex -c approval_policy=untrusted -c
+sandbox_mode=workspace-write app-server` -> `Error: approval_policy =
+"untrusted" is no longer supported; remove this setting`. `plan`
+(`never`/`read-only`) and `permissive` (`never`/`workspace-write`) are
+unaffected -- only `approve`'s value has been deprecated upstream.
+
+**Not a simple rename -- the underlying model changed, not just the
+enum's spelling.** The CLI's own error for a truly-unknown value lists
+the currently-valid `approval_policy` variants: `untrusted`,
+`on-failure`, `on-request`, `granular`, `never` (`untrusted` is still a
+*recognized* enum member, just explicitly rejected with a dedicated
+error rather than accepted or reported as unknown -- a deliberate
+deprecation, not a typo upstream). Swapping in `on-request` alone stops
+the crash but is a **false fix, live-confirmed same session**: with
+`sandbox_mode=workspace-write` still set, an in-workspace file-write
+prompt completed and the file was created with **no approval prompt at
+all** -- current codex-cli treats in-workspace writes as already
+permitted by `workspace-write` regardless of `approval_policy`, so the
+old "any write escalates to approval" behavior `approve` mode depends on
+no longer exists at that sandbox setting. That combination was reverted
+immediately rather than left in place, since it silently removes the
+safety gate `approve` mode exists for instead of preserving it.
+
+**Not yet built:** a real replacement mapping needs to be worked out and
+live-verified against the actual approval RPCs (`item/fileChange/
+requestApproval`, `item/commandExecution/requestApproval`) before
+trusting it -- e.g. `sandbox_mode=read-only` paired with `on-request`/
+`on-failure` (forcing every write to escalate, since the sandbox itself
+disallows it, rather than relying on `approval_policy` to intercept
+writes the sandbox already allows). Until then, `approve` mode fails
+loudly and immediately (a crash, not a silent bypass) for the codex
+backend specifically -- `plan` and `permissive` remain fine.
+
+**How this was found:** while re-checking settings before a second live
+Codex UAT pass (`docs/UAT-codex-smoke.md`), specifically to exercise the
+still-untested "approval mid-flight" checklist item, which needs
+`approve` mode to trigger a real approval RPC at all.
+
+---
+
 ## Web UI
 
 The optional browser companion (`--web`). Newest and least-hardened
@@ -2283,3 +2376,47 @@ fallthrough noted for [T6]'s TTS-failure-in-`--tui` gap.
 "something actually errored") or leave it as-is since it's cosmetic and
 never misleads about whether the hard-stop itself worked. Web UI behavior
 not yet separately confirmed -- this session's evidence is TUI-only.
+
+---
+
+### Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone
+
+**Status:** diagnosed live 2026-08-30, unfixed.
+
+**Symptom.** Reported live on Linux: "the settings tui isn't rendering
+right either, and it isn't autosizing for the terminal size." Two
+independent, compounding causes found by reading `scripts/settings_tui.py`
+and confirmed by calling `render()` directly:
+
+1. **Hardcoded minimum floor, live-confirmed by direct call:**
+   `render(state, width, height)` opens with `width = max(width, 80)` and
+   `height = max(height, 24)` -- calling it with a real, smaller terminal
+   size (`width=60, height=20`) still produced 22 lines, each padded to
+   exactly **80 columns**, completely ignoring the requested smaller
+   size. On any real terminal narrower than 80 columns or shorter than 24
+   rows (a common split-pane/tiled-window-manager size, not an edge
+   case), every line this emits is wider than the actual terminal, so the
+   terminal itself wraps each logical row into two or more visual rows --
+   which then breaks `draw()`'s redraw scheme (`"\x1b[H"` cursor-home
+   followed by one `"\x1b[K"`-cleared write per logical line): each
+   repaint's cursor-home no longer lines up with the previous frame's
+   actual row boundaries once wrapping is happening, producing the
+   garbled/overlapping look reported as "not rendering right," not just
+   clipped content.
+2. **No live-resize repaint.** `run_tui()`'s main loop
+   (`while running: draw(state); key = read_key(); ...`) only calls
+   `draw()` once, then blocks inside `read_key()`'s raw-mode
+   `sys.stdin.read(1)` until the next keypress -- there is no `SIGWINCH`
+   handler and no timeout-based redraw. Resizing the terminal window
+   while the TUI is idle (no key pressed) leaves the stale layout on
+   screen until the very next keystroke, which is when `os.get_terminal_size()`
+   is finally re-read inside `draw()`. This compounds (1): a session that
+   starts in an 80+ column terminal and is then resized smaller keeps
+   rendering as if nothing changed until the next key, then suddenly
+   suffers the wrapping/misalignment above.
+
+**Not yet built:** clamping `render()`'s layout to the real terminal size
+(with a minimum-size message instead of a forced-80x24 layout when the
+terminal is genuinely too small to render usefully) and either a
+`SIGWINCH` handler or a short poll timeout in the main loop so a resize
+repaints without waiting on a keypress.
