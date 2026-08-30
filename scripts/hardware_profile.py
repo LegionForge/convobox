@@ -53,19 +53,25 @@ try:
     import sounddevice as sd
 except OSError:
 
+    def _no_portaudio(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError(
+            "sounddevice/PortAudio unavailable in this environment (no "
+            "native PortAudio library found) -- hardware_profile.py needs "
+            "real audio hardware for this operation"
+        )
+
     class _NoPortAudio:
-        def __getattr__(self, name: str) -> object:
-            # AttributeError, not RuntimeError: monkeypatch.setattr() does
-            # its own getattr(target, name, default) first to save the old
-            # value for teardown, and only tolerates AttributeError there --
-            # anything else propagates and breaks the patch before it's
-            # even applied (caught live via PR #348 CI, where this raised
-            # RuntimeError and broke both hp.sd-monkeypatching tests).
-            raise AttributeError(
-                f"sounddevice/PortAudio unavailable in this environment "
-                f"(no native PortAudio library found) -- hardware_profile.py "
-                f"needs real audio hardware for {name!r}"
-            )
+        # Real methods (not __getattr__) for the exact sd.* surface this
+        # module calls, so getattr(sd, name, default) -- what pytest's
+        # monkeypatch.setattr() uses internally to save the old value for
+        # teardown -- finds them via normal attribute lookup and can
+        # override them, same as it would on the real sounddevice module.
+        # A __getattr__-based catch-all looked equivalent but isn't: it
+        # makes every attribute look "missing" to monkeypatch, which then
+        # refuses to set a new one (caught live via PR #348 CI).
+        query_devices = _no_portaudio
+        playrec = _no_portaudio
+        wait = _no_portaudio
 
     sd = _NoPortAudio()  # type: ignore[assignment]
 
