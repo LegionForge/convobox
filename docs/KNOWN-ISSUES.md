@@ -1478,9 +1478,9 @@ useful context for the "why this might matter" section above (real,
 but modest and reactive) and directly motivates the new idea below.
 
 **New candidate, informed by this investigation + the 2026-08-29 AEC/
-THD field-note campaign + how professional AEC products (Zoom/Teams)
-are known to layer their pipeline: a proactive soft limiter on TTS
-output, not just reactive NS/AGC on the mic.** This session's THD
+THD field-note campaign + a 2026-08-30 literature check on professional
+AEC engineering practice: a proactive soft limiter on the render/TTS
+signal, not just reactive NS/AGC on the mic.** This session's THD
 measurements (`docs/field-notes/2026-08-29-thd-measurement-and-n20-
 fixed-comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`) and
 the delay x volume grids (`docs/field-notes/2026-08-27-...md`,
@@ -1491,22 +1491,46 @@ internal driver and, at maxed own-gain, small external speakers too) --
 because AEC3's adaptive filter assumes a roughly linear acoustic path
 from far-end signal to echo, and a hard-clipping/distorting driver
 breaks that assumption long before NS/AGC on the *input* side get a
-chance to help. Professional products don't solely rely on cancelling
-distortion after the fact -- they cap how hard the output signal can
-ever drive the speaker in the first place (a soft knee limiter/
-compressor on the far-end/TTS signal, tuned below the specific
-driver's own distortion onset), so the linear AEC model holds true more
-of the time to begin with. Concretely for ConvoBox: a limiter stage
-applied to the TTS PCM buffer in `AudioPlayer` (or wherever
-`on_block_played`'s far-end reference is sourced from) BEFORE it both
-plays and feeds the AEC reference -- e.g. a simple soft-knee limiter
-with a threshold below this session's measured per-device distortion
-onset (internal speaker's own 4kHz THD climbs sharply at 100% system
-volume per the N=3 sweep above; a real implementation would need a
-proper per-device calibration step, not a hardcoded threshold, since
-the onset level is clearly device-specific -- external speakers showed
-no such rise in their normal ~24-50%-gain operating range but did
-distort badly once their own gain dial was maxed).
+chance to help.
+
+**Correction (2026-08-30):** an earlier draft of this entry claimed
+this is "known" Zoom/Teams practice -- a web research pass found no
+public source describing either vendor's AEC internals, so that framing
+was an unconfirmed inference and is retracted here. A real, citable
+precedent was found instead: QSC's own **Q-SYS Acoustic Echo
+Cancellation white paper** (a commercial pro-AEC vendor's published
+engineering guidance, not marketing) explicitly recommends placing a
+compressor/limiter on the *mixed reference signal* to avoid clipping,
+with the threshold near 0dB -- and critically, placing it **before**
+that signal forks to both the loudspeaker and the AEC's own reference
+input, "so that the AEC reference input sees the same compressed or
+limited signal that is sent to the loudspeakers... this prevents the
+AEC from chasing gain changes." Separately, standard echo-cancellation
+literature treats a nonlinear echo path as fundamentally uncancellable
+by a linear adaptive filter (consistent with this project's own
+finding above) -- reinforcing that this needs a fix ahead of the
+speaker, not another mic-side reactive stage. WebRTC's own AGC1 (what
+ConvoBox's binding uses) and the newer AGC2 were both checked and
+confirmed to be capture-side only in every generation -- upgrading the
+WebRTC binding would not add this on its own; it has to be new,
+ConvoBox-side render-path code regardless.
+
+Concretely for ConvoBox, per the Q-SYS placement detail: a limiter
+stage applied to the mixed render signal in `AudioPlayer` (or wherever
+`on_block_played`'s far-end reference is sourced from) BEFORE it forks
+to (a) play out the real speaker and (b) feed the AEC reference input --
+e.g. a simple soft-knee limiter with a threshold below the specific
+driver's own distortion onset (internal speaker's own 4kHz THD climbs
+sharply at 100% system volume per the N=3 sweep above; a real
+implementation would need a proper per-device calibration step, not a
+hardcoded threshold, since the onset level is clearly device-specific --
+external speakers showed no such rise in their normal ~24-50%-gain
+operating range but did distort badly once their own gain dial was
+maxed). Feeding the AEC reference input the *same post-limit* signal,
+not the pre-limit TTS PCM, is the detail Q-SYS calls out as the reason
+this avoids the AEC "chasing" a gain change it never saw -- a real
+implementation should get this ordering right, not just add a limiter
+anywhere convenient in the render path.
 
 **Not built.** A genuinely new idea from this session's research
 discussion, distinct from (and complementary to -- not a replacement
@@ -1517,7 +1541,10 @@ existing knob in `aec-audio-processing` does this) plus a per-device
 calibration step this session's THD script prototypes but doesn't
 productize. Documented here as a candidate awaiting JP's go-ahead, same
 convention as the rest of this entry -- not scoped or estimated further
-this session.
+this session. A follow-up prior-art/IP-strategy research pass is in
+progress as of 2026-08-30 (see the field-notes/session log for
+findings once complete) before any decision on whether this is worth
+patenting, open-sourcing, or dual-licensing.
 
 ---
 
