@@ -1441,6 +1441,28 @@ part of that response; no partial-audio or "answer too long" fallback
 exists yet, which is the concrete cost of the still-missing pre-chunking
 layer described above.
 
+**Third live confirmation, new trigger -- short Arabic text (2026-08-30,
+same day, later session):** fired three more times in a single session,
+every time on a short (one-to-two-sentence) Arabic response -- nowhere
+near the length that triggers this on English text. Arabic phonemization
+appears to be far denser per character than English's, hitting the same
+hard 510-token limit at a fraction of the visible text length; not
+diagnosed further (would need inspecting the actual phonemizer's token
+output for Arabic), but a real, actionable data point for anyone relying
+on Kokoro for non-English responses. Also newly observed this time: a
+`"Phonemes are too long, truncating to 510 phonemes"` warning from
+kokoro-onnx itself immediately precedes the crash -- the library's own
+truncation attempt appears to have an off-by-one (truncating to exactly
+510, then indexing `voice[len(tokens)]` with `len(tokens) == 510` against
+a 510-length array), consistent with rather than contradicting the root
+cause above. Failure mode was milder than the English case: playback
+started ~25ms after the error (some chunks had already synthesized
+before the failing batch), so the operator heard a truncated response
+rather than total silence for the full 30s stall timeout -- not a fix,
+just a less bad outcome depending on where in the stream the failure
+lands. Full write-up: `docs/field-notes/2026-08-30-conversational-mode-
+plus-aec-first-live-codex-linux-session.md`.
+
 ---
 
 ### WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
@@ -1734,6 +1756,26 @@ upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
 built artifacts live and how they're kept in sync with the pinned
 `aec-audio-processing` version.
+
+**Follow-up (2026-08-30, Linux, different hardware): a 100-trial sweep
+(10 volume levels x N=10, 100%-10% in 10% steps) pins the clean-floor
+transition tighter than a live operator's own real-time estimate.** On
+a 4th-gen Intel i7 laptop (openSUSE Tumbleweed) running `conversational`
++ AEC with Codex, **20% system volume was the only level with zero false
+barge-ins across all 10 trials** -- 30% and 40% were a large improvement
+over 50%+ (2 residual false-barges per 10 trials each, vs. 6-49 above)
+but not clean, one step higher than the operator's own live guess of
+"30% or 35%" based on ear alone during the same day's live session.
+**A real anomaly, not yet corroborated**: 90% showed AEC-processed false
+barge-ins (49) *exceeding* raw/no-AEC (33) in 9 of 10 trials -- the same
+qualitative "AEC makes it worse than doing nothing" shape this entry's
+macOS finding attributes to being *above* the transition zone, but here
+appearing as an isolated spike at one level rather than a consistent
+pattern across the whole upper range (100% itself shows AEC clearly
+helping: 35 raw -> 14 processed). Single N=10 run at that level, not yet
+re-run. Full table, methodology, and the same synthetic-vs-live-ear
+caveat this entry already carries: `docs/field-notes/2026-08-30-linux-
+100-trial-volume-sweep-self-barge-in-clean-floor-at-20-percent.md`.
 
 ---
 
@@ -2424,51 +2466,87 @@ repaints without waiting on a keypress.
 
 ---
 
-### Settings TUI arrow keys silently do nothing on terminals sending SS3 sequences -- fix applied, live confirmation pending
+### Settings TUI arrow keys silently do nothing -- two fixes applied, second one live-plausible but not yet confirmed; session paused mid-verification
 
-**Status:** diagnosed and fixed in source 2026-08-30 (`scripts/
-settings_tui.py`'s `read_key()`); `tests/test_settings_tui.py` still
-156/156 green; **not yet confirmed live against the operator's own
-terminal** -- see below for why.
+**Status:** two fixes applied in source 2026-08-30 (`scripts/
+settings_tui.py`'s `read_key()`), in sequence, as live operator feedback
+corrected the diagnosis each time; `tests/test_settings_tui.py` still
+156/156 green throughout. **Neither fix has a confirmed-working live
+report yet** -- the operator paused the session for the night right
+after applying fix 2, having reported "another test reveals a QC error"
+without detail on whether navigation itself now works. Picking this up
+is the first thing to do next session -- see "Next steps" below.
 
-**Symptom, reported live on Linux the same session as the terminal-size
-entry above:** "the arrow keys weren't rendering right" while `q` to
-quit worked fine.
+**Symptom, reported live on Linux:** arrow keys did nothing ("don't seem
+to be navigating... tested twice. still not working"), `q` to quit
+worked fine throughout.
 
-**Root cause.** `read_key()` recognized only the CSI form of arrow-key
-escape sequences (`"\x1b[A"`/`B`/`C`/`D`): after reading a leading
-`\x1b`, it checked `if seq != "[": return "ESC"`, discarding the second
-byte and returning early for anything else. Many terminals (and the
-same terminal in a different cursor-key mode, DECCKM) send the SS3 form
-instead (`"\x1bOA"` etc.) for arrow keys -- a real, common,
-terminal/mode-dependent split, not an exotic edge case. Under the old
-code, an SS3 sequence's `"O"` byte was swallowed as a bare `ESC` (a
-no-op -- `"ESC"` as a 3-character return value never matches the
-lowercase `"esc"`/`"q"` quit check either, since `_handle_browse`'s own
-`key.lower() if len(key) == 1 else key` only lowercases single
-characters), and the still-unread direction letter (`A`/`B`/`C`/`D`)
-then surfaced as an ordinary keystroke on the *next* `read_key()` call
-instead of navigating -- consistent with arrows appearing to do nothing
-and occasionally injecting a stray letter wherever the next keystroke
-would land (e.g. into an open text-edit buffer).
+**First hypothesis, tested and reasonably ruled out: SS3 vs. CSI escape
+sequences.** `read_key()` originally recognized only the CSI form of
+arrow keys (`"\x1b[A"` etc.); many terminals send the SS3 form instead
+(`"\x1bOA"`) depending on cursor-key mode (DECCKM). This is a real gap
+(fixed: both prefixes are now accepted, purely additive, no regression
+risk) but **direct evidence says it wasn't this operator's actual
+cause**: a minimal diagnostic script
+(`key_probe.py`, blocking `read(1)` calls only, no escape-sequence
+timing logic at all) was run live in the operator's real terminal and
+showed perfectly standard, immediate CSI bytes for both arrows:
+`'\x1b' '[' 'A'` (Up) and `'\x1b' '[' 'B'` (Down) -- exactly the form
+`read_key()` already handled, both before and after the SS3 fix. The
+SS3 fix stays (a real, separate robustness improvement for other
+terminals/modes) but is not the explanation for this report.
 
-**Fix:** accept both `"["` and `"O"` as the sequence's second byte --
-both forms use identical direction-letter codes, so one lookup table
-already covers both once the gate accepts either prefix. Purely
-additive: it recognizes a previously-unhandled input shape without
-changing behavior for terminals that were already sending CSI
-correctly, so there is no regression risk analogous to the
-`approval_policy` swap earlier this same day.
+**Second hypothesis, live-plausible, not yet confirmed: a too-tight
+50ms `select()` timeout on slow hardware.** The operator's own machine
+is a 4th-gen Intel i7 laptop, independently reported as noticeably
+slower for this project's other work this same day (kokoro synthesis
+timing, general responsiveness). `read_key()`'s escape-sequence path
+gates on `select.select([sys.stdin], [], [], 0.05)` between reading the
+leading `\x1b` and the rest of the sequence -- if more than 50ms elapses
+(plausible under this app's own per-frame `draw()` cost between
+keystrokes on slower hardware, not necessarily the terminal itself),
+a genuine arrow-key sequence is misread as a bare `ESC` (a silent
+no-op), with its remaining bytes then misread as literal keystrokes on
+the *next* `read_key()` call. Notably, `key_probe.py` -- which has no
+timeout/`select()` logic at all, just three unconditional blocking reads
+-- worked cleanly on the very same terminal where the real app failed;
+that contrast is the actual evidence behind this hypothesis, not
+guesswork. **Fix:** widened the timeout from 0.05s to 0.3s -- still
+imperceptible for the one legitimate standalone-`ESC` case (dismissing a
+modal) this timeout exists to keep responsive, while giving real
+multi-byte sequences six times the room on slow hardware.
 
-**Why live confirmation is still pending, not skipped.** Verification
-was attempted via a real `pty.fork()`-spawned `settings_tui.py` process
-fed literal `"\x1bOB"` bytes (the same technique that confirmed the
-terminal-size bug above) -- but the operator had, in parallel, a real
-live `run_convobox.py --tui --web` UAT session running and sustaining
-140-159% CPU (real-time STT/TTS work), and the verification process
-never completed within 60s under that contention (confirmed via
-`/proc/<pid>/status`: genuinely scheduled but CPU-starved, not
-deadlocked) before being killed rather than left competing with the
-operator's actual test. The fix is applied and unit-tested; the
-live-pty confirmation this project's own verification bar calls for is
-the next step, once a quiet window exists.
+**Why this fix is also not yet confirmed.** The operator applied this
+fix and started a fresh test, then reported "another test reveals a QC
+error" (2026-08-30, end of session) with no further detail before
+pausing for the night -- unclear whether that message means navigation
+now works and a *different*, new issue (a validation warning?) surfaced,
+or whether it's unrelated to the timeout fix entirely. Do not assume
+either fix is confirmed working from this entry alone.
+
+**Live-pty automated verification was attempted twice more and both
+attempts failed for environment reasons, not code reasons** -- worth
+recording so the same dead end isn't repeated: a `pty.fork()`-spawned
+`settings_tui.py` fed literal escape bytes was tried once while the
+operator had a live `run_convobox.py --tui --web` session running (140-
+159% CPU from real-time STT/TTS work) and never completed within 60s
+under that contention; a second attempt after that session ended also
+hung, and investigation found the FIRST attempt's own forked child had
+survived as an orphan (`timeout` only kills its direct child, not a
+`pty.fork()`-created grandchild) and was still holding real resources,
+confounding the second attempt. Both were killed by exact PID once
+identified; neither the operator's real sessions nor their config were
+touched by any of this. Automated pty verification of this specific app
+remains unreliable in this sandbox -- live operator testing is the
+actual verification path going forward.
+
+**Next steps (pick up here):**
+1. Get the operator's actual "QC error" detail -- what specifically was
+   shown, and whether arrow navigation itself worked in that same test.
+2. If navigation still fails at 300ms, the timeout hypothesis is likely
+   wrong too, and the next candidate is worth checking directly: is
+   `state.move_field()`/`move_section()` actually being called and
+   mutating `selected_field`/`selected_section` (add a temporary debug
+   line to `_handle_browse()` if needed), to confirm whether the bug is
+   in key *reading* at all versus somewhere in the render/redraw path
+   not reflecting a state change that IS happening correctly.

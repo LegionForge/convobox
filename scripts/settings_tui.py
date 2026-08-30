@@ -1920,11 +1920,39 @@ def _confirm_modal(
             return True
 
 
+_MIN_LEFT_WIDTH = 36
+_MIN_RIGHT_WIDTH = 24
+_MIN_USABLE_WIDTH = _MIN_LEFT_WIDTH + 3 + _MIN_RIGHT_WIDTH  # " | " separator
+_MIN_USABLE_HEIGHT = 12  # header/tabs/legend chrome (10 lines) + >=2 visible fields
+
+
 def render(state: TuiState, width: int, height: int) -> list[str]:
-    width = max(width, 80)
-    height = max(height, 24)
-    left_width = max(36, min(54, width // 2 + 4))
-    right_width = max(24, width - left_width - 3)
+    # Previously forced a minimum 80x24 regardless of the REAL terminal
+    # size (`width = max(width, 80)`) -- live-reported 2026-08-30: on any
+    # real terminal narrower/shorter than that (a common split-pane size,
+    # not an edge case), every line this emits was wider than the actual
+    # terminal, so the terminal itself wrapped each logical row into two+
+    # visual rows. That broke draw()'s "\x1b[H" + one "\x1b[K"-cleared
+    # write per logical line repaint scheme -- cursor-home no longer
+    # landed on the previous frame's real row boundaries once wrapping
+    # was happening, which is why navigation looked broken ("arrows
+    # don't seem to go where I want"): the selected-field pointer WAS
+    # moving internally, but the garbled repaint made the new position
+    # unreadable, not merely absent. Now uses the real size and falls
+    # back to an explicit message below this layout's own hard minimum
+    # (_MIN_LEFT_WIDTH + _MIN_RIGHT_WIDTH themselves have hardcoded
+    # floors, so simply removing the outer max() alone still overflows
+    # anything narrower than _MIN_USABLE_WIDTH) rather than attempting a
+    # two-column layout that can't fit and silently overflowing again.
+    if width < _MIN_USABLE_WIDTH or height < _MIN_USABLE_HEIGHT:
+        msg = (
+            f"Terminal too small ({width}x{height}) -- resize to at "
+            f"least {_MIN_USABLE_WIDTH}x{_MIN_USABLE_HEIGHT} to use the "
+            "Settings TUI."
+        )
+        return [msg[:width]] if width > 0 else [""]
+    left_width = max(_MIN_LEFT_WIDTH, min(54, width // 2 + 4))
+    right_width = max(_MIN_RIGHT_WIDTH, width - left_width - 3)
     lines: list[str] = []
     # Explicit and highlighted when dirty (live UAT feedback, 2026-07-22):
     # a plain "dirty" label is easy to miss entirely; the moment there ARE
@@ -2031,7 +2059,24 @@ def read_key() -> str:
             if ch == "\x7f":
                 return "BACKSPACE"
             return ch
-        if not select.select([sys.stdin], [], [], 0.05)[0]:
+        # Live-reported 2026-08-30 on a slower (4th-gen i7) Linux laptop:
+        # arrow keys did nothing even though the terminal was confirmed
+        # (via a minimal blocking-read probe script, no timeout involved)
+        # to send perfectly standard CSI sequences ("\x1b[A" etc.) with no
+        # delay. The probe's success while this code failed pointed at the
+        # difference between them: this is the only place in the read path
+        # with a TIMEOUT gating whether more bytes get treated as part of
+        # the escape sequence at all. 50ms was tight enough that on this
+        # machine -- under this app's own per-frame draw() cost between
+        # keystrokes, not the terminal -- the '[' byte could still be
+        # in-flight when the timeout fired, misreading a real arrow key as
+        # a bare ESC (a silent no-op) and leaking its remaining bytes to
+        # be misread as literal keystrokes on the *next* call. Widened
+        # generously: 300ms is still imperceptible for the one real
+        # standalone-ESC case (quitting a modal) this timeout exists to
+        # keep fast, while giving real multi-byte sequences far more
+        # room on slow hardware.
+        if not select.select([sys.stdin], [], [], 0.3)[0]:
             return "ESC"
         seq = sys.stdin.read(1)
         # Arrow/Home/End keys arrive as either CSI ("\x1b[A") or SS3
