@@ -41,7 +41,27 @@ import time
 from pathlib import Path
 
 import numpy as np
-import sounddevice as sd
+
+try:
+    # sounddevice loads the native PortAudio library the instant it's
+    # imported and raises OSError if that library is absent -- CI Linux
+    # runners don't have it, so importing this module (e.g. for its pure-
+    # math functions under test) must not require real audio hardware.
+    # Same failure mode documented in src/convobox/audio/_sounddevice.py;
+    # not reused here since this script deliberately imports nothing from
+    # convobox.* (see module docstring).
+    import sounddevice as sd
+except OSError:
+
+    class _NoPortAudio:
+        def __getattr__(self, name: str) -> object:
+            raise RuntimeError(
+                "sounddevice/PortAudio unavailable in this environment "
+                "(no native PortAudio library found) -- hardware_profile.py "
+                "needs real audio hardware for this operation"
+            )
+
+    sd = _NoPortAudio()  # type: ignore[assignment]
 
 
 def resolve_device(name_substring: str, want_output: bool) -> int:
