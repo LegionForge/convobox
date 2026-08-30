@@ -46,6 +46,7 @@ before trusting a voice session with write access; see also
 | **Cosmetic and diagnostic** | | | | |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
 | [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Diagnosed | Medium |
+| [Settings TUI arrow keys silently do nothing on terminals sending SS3 sequences](#settings-tui-arrow-keys-silently-do-nothing-on-terminals-sending-ss3-sequences----fix-applied-live-confirmation-pending) | Settings TUI | All | Fix applied, live-confirmation pending | Medium |
 
 ---
 
@@ -2420,3 +2421,54 @@ and confirmed by calling `render()` directly:
 terminal is genuinely too small to render usefully) and either a
 `SIGWINCH` handler or a short poll timeout in the main loop so a resize
 repaints without waiting on a keypress.
+
+---
+
+### Settings TUI arrow keys silently do nothing on terminals sending SS3 sequences -- fix applied, live confirmation pending
+
+**Status:** diagnosed and fixed in source 2026-08-30 (`scripts/
+settings_tui.py`'s `read_key()`); `tests/test_settings_tui.py` still
+156/156 green; **not yet confirmed live against the operator's own
+terminal** -- see below for why.
+
+**Symptom, reported live on Linux the same session as the terminal-size
+entry above:** "the arrow keys weren't rendering right" while `q` to
+quit worked fine.
+
+**Root cause.** `read_key()` recognized only the CSI form of arrow-key
+escape sequences (`"\x1b[A"`/`B`/`C`/`D`): after reading a leading
+`\x1b`, it checked `if seq != "[": return "ESC"`, discarding the second
+byte and returning early for anything else. Many terminals (and the
+same terminal in a different cursor-key mode, DECCKM) send the SS3 form
+instead (`"\x1bOA"` etc.) for arrow keys -- a real, common,
+terminal/mode-dependent split, not an exotic edge case. Under the old
+code, an SS3 sequence's `"O"` byte was swallowed as a bare `ESC` (a
+no-op -- `"ESC"` as a 3-character return value never matches the
+lowercase `"esc"`/`"q"` quit check either, since `_handle_browse`'s own
+`key.lower() if len(key) == 1 else key` only lowercases single
+characters), and the still-unread direction letter (`A`/`B`/`C`/`D`)
+then surfaced as an ordinary keystroke on the *next* `read_key()` call
+instead of navigating -- consistent with arrows appearing to do nothing
+and occasionally injecting a stray letter wherever the next keystroke
+would land (e.g. into an open text-edit buffer).
+
+**Fix:** accept both `"["` and `"O"` as the sequence's second byte --
+both forms use identical direction-letter codes, so one lookup table
+already covers both once the gate accepts either prefix. Purely
+additive: it recognizes a previously-unhandled input shape without
+changing behavior for terminals that were already sending CSI
+correctly, so there is no regression risk analogous to the
+`approval_policy` swap earlier this same day.
+
+**Why live confirmation is still pending, not skipped.** Verification
+was attempted via a real `pty.fork()`-spawned `settings_tui.py` process
+fed literal `"\x1bOB"` bytes (the same technique that confirmed the
+terminal-size bug above) -- but the operator had, in parallel, a real
+live `run_convobox.py --tui --web` UAT session running and sustaining
+140-159% CPU (real-time STT/TTS work), and the verification process
+never completed within 60s under that contention (confirmed via
+`/proc/<pid>/status`: genuinely scheduled but CPU-starved, not
+deadlocked) before being killed rather than left competing with the
+operator's actual test. The fix is applied and unit-tested; the
+live-pty confirmation this project's own verification bar calls for is
+the next step, once a quiet window exists.

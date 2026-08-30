@@ -2034,7 +2034,16 @@ def read_key() -> str:
         if not select.select([sys.stdin], [], [], 0.05)[0]:
             return "ESC"
         seq = sys.stdin.read(1)
-        if seq != "[":
+        # Arrow/Home/End keys arrive as either CSI ("\x1b[A") or SS3
+        # ("\x1bOA") sequences depending on the terminal's cursor-key mode
+        # (DECCKM) -- a real, live-reported gap, 2026-08-30: this only ever
+        # recognized CSI, so a terminal/multiplexer sending SS3 (common
+        # depending on TERM/DECCKM state) had its second byte ("O")
+        # swallowed here as a bare ESC, and the still-unread direction
+        # letter (A/B/C/D) then surfaced as a literal keystroke on the
+        # NEXT read_key() call instead of navigating. Both forms use the
+        # same direction-letter code, so one lookup table covers both.
+        if seq not in ("[", "O"):
             return "ESC"
         code = sys.stdin.read(1)
         return {"A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT", "H": "HOME", "F": "END"}.get(code, "")
