@@ -28,7 +28,7 @@ before trusting a voice session with write access; see also
 | [A safeword match in a transcript skips checking that same transcript for a pause phrase](#a-safeword-match-in-a-transcript-skips-checking-that-same-transcript-for-a-pause-phrase----fixed) | Safeword | All | Fixed | — |
 | **Stability, freezes, and crashes** | | | | |
 | [faster-whisper's native allocator can fail during a long session](#faster-whispers-native-allocator-can-fail-during-a-long-session) | STT | All (Windows-observed) | Mitigated | Medium |
-| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows | Mostly resolved | Medium |
+| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows, Linux | Mostly resolved; mic-layer-only variant still open | Medium |
 | [Backend can go silently busy for minutes with zero output](#backend-can-go-silently-busy-for-minutes-with-zero-output----root-cause-unconfirmed) | Backend | All | Diagnosed | Medium |
 | **Speech pipeline (STT / TTS / AEC)** | | | | |
 | [Kokoro can't synthesize past ~510 phonemes](#kokoro-cant-synthesize-past-510-phonemes----hard-model-limit-not-a-configmode-issue) | TTS (Kokoro) | All | Diagnosed | Low |
@@ -39,12 +39,15 @@ before trusting a voice session with write access; see also
 | [A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection](#a-macs-front-35mm-jack-mutes-the-internal-speaker-at-the-hardware-level-regardless-of-software-output-device-selection) | Audio output | macOS | Verified | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
+| [Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream](#codex-permission_mode-approve-crashes-on-current-codex-cli----approval_policyuntrusted-was-removed-upstream) | codex (upstream) | All | Diagnosed, unfixed | High |
 | **Web UI** | | | | |
 | [Web UI: artifact pane gaps (0.3.0)](#web-ui-artifact-pane-gaps-030) | Web UI | All | Deferred | Low |
 | [Web UI: a short CancelledError traceback can appear on quit/Ctrl+C](#web-ui-a-short-cancellederror-traceback-can-appear-on-quitctrlc) | Web UI | All | Mostly mitigated | Low |
 | ["Open in editor" occasionally opens a different file than the one clicked](#open-in-editor-occasionally-opens-a-different-file-than-the-one-clicked----fixed) | Web UI | All | Fixed | — |
 | **Cosmetic and diagnostic** | | | | |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
+| [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Diagnosed | Medium |
+| [Settings TUI arrow keys silently did nothing](#settings-tui-arrow-keys-silently-did-nothing----root-caused-and-fixed-confirmed-live-via-key-by-key-debug-instrumentation) | Settings TUI | All | Fixed, live-confirmed | — |
 
 ---
 
@@ -1291,6 +1294,31 @@ going into any release -- rare (one occurrence to date, self-resolving),
 not confirmed eliminated, and not yet reproduced deliberately rather
 than caught incidentally.
 
+**Second live occurrence, first on Linux (2026-08-30).** Caught during
+Codex's second live-mic UAT pass (`docs/UAT-codex-smoke.md`,
+`backend=codex`, `permission_mode=plan`) while re-testing hard-stop
+responsiveness -- reported live by the operator as "still not
+interrupting well" before the log was checked. `convobox-tui.log`
+confirms genuine total silence in the mic/STT pipeline for **213.4s**
+(00:53:40.683 -> 00:57:13.997, zero `Processing audio` lines), while the
+codex adapter's own `_read_loop` kept logging its routine 5s idle-poll
+warnings on schedule the entire time (`busy=False` throughout) --
+identical shape to 2026-08-15's variant: the backend-adapter task stayed
+demonstrably alive and idle, only the mic-capture/VAD side went dark.
+Self-resolved with no restart, same as the original catch. This is now
+**two occurrences, both `backend=codex`, one macOS (2026-08-15) and one
+Linux (2026-08-30)** -- raises confidence this is platform-independent
+and codex-adjacent rather than a macOS-specific fluke, though still not
+proven backend-independent (both catches used codex). **Operational
+impact confirmed live:** every hard-stop/kill-phrase attempt spoken
+during the freeze window was not silently declined by the overlap gate
+(that would still log a `dropped (...)` line) -- it was never heard at
+all, no log line of any kind. Once the freeze lifted on its own, the very
+next "stop stop stop" and "eject eject eject" attempts matched
+instantly (see the UAT doc's own Findings log for that session) --
+reinforcing that the safeword-matching logic itself is not the problem;
+the mic-capture layer being unresponsive upstream of it is.
+
 ---
 
 ### Backend can go silently busy for minutes with zero output -- root cause unconfirmed
@@ -1402,6 +1430,39 @@ rather than chunking Kokoro itself -- same benefit, none of the
 audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
 later becomes a reason to keep everything on the permissively-licensed
 engine.
+
+**Second live confirmation, different backend (2026-08-30):** reproduced
+again during Codex's first live-mic UAT smoke test on Linux
+(`docs/UAT-codex-smoke.md`), triggered by a long web-search-summary
+response. Same signature (`RuntimeError: Kokoro synthesis stalled...`),
+same graceful recovery (the 30s timeout caught it, ConvoBox logged it and
+kept the session going normally on the next turn) -- no new root cause,
+just evidence this isn't backend-specific. The operator never heard any
+part of that response; no partial-audio or "answer too long" fallback
+exists yet, which is the concrete cost of the still-missing pre-chunking
+layer described above.
+
+**Third live confirmation, new trigger -- short Arabic text (2026-08-30,
+same day, later session):** fired three more times in a single session,
+every time on a short (one-to-two-sentence) Arabic response -- nowhere
+near the length that triggers this on English text. Arabic phonemization
+appears to be far denser per character than English's, hitting the same
+hard 510-token limit at a fraction of the visible text length; not
+diagnosed further (would need inspecting the actual phonemizer's token
+output for Arabic), but a real, actionable data point for anyone relying
+on Kokoro for non-English responses. Also newly observed this time: a
+`"Phonemes are too long, truncating to 510 phonemes"` warning from
+kokoro-onnx itself immediately precedes the crash -- the library's own
+truncation attempt appears to have an off-by-one (truncating to exactly
+510, then indexing `voice[len(tokens)]` with `len(tokens) == 510` against
+a 510-length array), consistent with rather than contradicting the root
+cause above. Failure mode was milder than the English case: playback
+started ~25ms after the error (some chunks had already synthesized
+before the failing batch), so the operator heard a truncated response
+rather than total silence for the full 30s stall timeout -- not a fix,
+just a less bad outcome depending on where in the stream the failure
+lands. Full write-up: `docs/field-notes/2026-08-30-conversational-mode-
+plus-aec-first-live-codex-linux-session.md`.
 
 ---
 
@@ -1893,6 +1954,26 @@ for a documentation-only note; would need its own decision about where
 built artifacts live and how they're kept in sync with the pinned
 `aec-audio-processing` version.
 
+**Follow-up (2026-08-30, Linux, different hardware): a 100-trial sweep
+(10 volume levels x N=10, 100%-10% in 10% steps) pins the clean-floor
+transition tighter than a live operator's own real-time estimate.** On
+a 4th-gen Intel i7 laptop (openSUSE Tumbleweed) running `conversational`
++ AEC with Codex, **20% system volume was the only level with zero false
+barge-ins across all 10 trials** -- 30% and 40% were a large improvement
+over 50%+ (2 residual false-barges per 10 trials each, vs. 6-49 above)
+but not clean, one step higher than the operator's own live guess of
+"30% or 35%" based on ear alone during the same day's live session.
+**A real anomaly, not yet corroborated**: 90% showed AEC-processed false
+barge-ins (49) *exceeding* raw/no-AEC (33) in 9 of 10 trials -- the same
+qualitative "AEC makes it worse than doing nothing" shape this entry's
+macOS finding attributes to being *above* the transition zone, but here
+appearing as an isolated spike at one level rather than a consistent
+pattern across the whole upper range (100% itself shows AEC clearly
+helping: 35 raw -> 14 processed). Single N=10 run at that level, not yet
+re-run. Full table, methodology, and the same synthetic-vs-live-ear
+caveat this entry already carries: `docs/field-notes/2026-08-30-linux-
+100-trial-volume-sweep-self-barge-in-clean-floor-at-20-percent.md`.
+
 ---
 
 ### AEC builds from source on Linux too — but its `lib64` RPM convention breaks the sdist's own library search (upstream)
@@ -2227,6 +2308,61 @@ retry may also be needed the first time a server starts. Full write-up:
 
 ---
 
+### Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream
+
+**Status:** diagnosed live 2026-08-30, unfixed. `backend.permission_mode:
+approve` for the codex backend is currently unusable against codex-cli
+0.149.1 (the version installed at diagnosis time).
+
+**Symptom.** `_PERMISSION_CODEX_OVERRIDES` in
+`src/convobox/adapters/codex.py` hardcodes `("untrusted",
+"workspace-write")` for `approve` mode, injected as `-c
+approval_policy=untrusted -c sandbox_mode=workspace-write` at spawn --
+verified live against codex-cli as of 2026-07-20 (see the dict's own
+comment). Against 0.149.1, the very first turn fails immediately with
+`ConnectionError: codex app-server exited` (`codex.py`'s `_ensure_thread`
+-> `_request` timing out because the pending future was resolved with
+that error from `_read_loop`'s cleanup). Running the exact spawn command
+by hand shows why: `codex -c approval_policy=untrusted -c
+sandbox_mode=workspace-write app-server` -> `Error: approval_policy =
+"untrusted" is no longer supported; remove this setting`. `plan`
+(`never`/`read-only`) and `permissive` (`never`/`workspace-write`) are
+unaffected -- only `approve`'s value has been deprecated upstream.
+
+**Not a simple rename -- the underlying model changed, not just the
+enum's spelling.** The CLI's own error for a truly-unknown value lists
+the currently-valid `approval_policy` variants: `untrusted`,
+`on-failure`, `on-request`, `granular`, `never` (`untrusted` is still a
+*recognized* enum member, just explicitly rejected with a dedicated
+error rather than accepted or reported as unknown -- a deliberate
+deprecation, not a typo upstream). Swapping in `on-request` alone stops
+the crash but is a **false fix, live-confirmed same session**: with
+`sandbox_mode=workspace-write` still set, an in-workspace file-write
+prompt completed and the file was created with **no approval prompt at
+all** -- current codex-cli treats in-workspace writes as already
+permitted by `workspace-write` regardless of `approval_policy`, so the
+old "any write escalates to approval" behavior `approve` mode depends on
+no longer exists at that sandbox setting. That combination was reverted
+immediately rather than left in place, since it silently removes the
+safety gate `approve` mode exists for instead of preserving it.
+
+**Not yet built:** a real replacement mapping needs to be worked out and
+live-verified against the actual approval RPCs (`item/fileChange/
+requestApproval`, `item/commandExecution/requestApproval`) before
+trusting it -- e.g. `sandbox_mode=read-only` paired with `on-request`/
+`on-failure` (forcing every write to escalate, since the sandbox itself
+disallows it, rather than relying on `approval_policy` to intercept
+writes the sandbox already allows). Until then, `approve` mode fails
+loudly and immediately (a crash, not a silent bypass) for the codex
+backend specifically -- `plan` and `permissive` remain fine.
+
+**How this was found:** while re-checking settings before a second live
+Codex UAT pass (`docs/UAT-codex-smoke.md`), specifically to exercise the
+still-untested "approval mid-flight" checklist item, which needs
+`approve` mode to trigger a real approval RPC at all.
+
+---
+
 ## Web UI
 
 The optional browser companion (`--web`). Newest and least-hardened
@@ -2480,3 +2616,151 @@ fallthrough noted for [T6]'s TTS-failure-in-`--tui` gap.
 "something actually errored") or leave it as-is since it's cosmetic and
 never misleads about whether the hard-stop itself worked. Web UI behavior
 not yet separately confirmed -- this session's evidence is TUI-only.
+
+---
+
+### Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone
+
+**Status:** diagnosed live 2026-08-30, unfixed.
+
+**Symptom.** Reported live on Linux: "the settings tui isn't rendering
+right either, and it isn't autosizing for the terminal size." Two
+independent, compounding causes found by reading `scripts/settings_tui.py`
+and confirmed by calling `render()` directly:
+
+1. **Hardcoded minimum floor, live-confirmed by direct call:**
+   `render(state, width, height)` opens with `width = max(width, 80)` and
+   `height = max(height, 24)` -- calling it with a real, smaller terminal
+   size (`width=60, height=20`) still produced 22 lines, each padded to
+   exactly **80 columns**, completely ignoring the requested smaller
+   size. On any real terminal narrower than 80 columns or shorter than 24
+   rows (a common split-pane/tiled-window-manager size, not an edge
+   case), every line this emits is wider than the actual terminal, so the
+   terminal itself wraps each logical row into two or more visual rows --
+   which then breaks `draw()`'s redraw scheme (`"\x1b[H"` cursor-home
+   followed by one `"\x1b[K"`-cleared write per logical line): each
+   repaint's cursor-home no longer lines up with the previous frame's
+   actual row boundaries once wrapping is happening, producing the
+   garbled/overlapping look reported as "not rendering right," not just
+   clipped content.
+2. **No live-resize repaint.** `run_tui()`'s main loop
+   (`while running: draw(state); key = read_key(); ...`) only calls
+   `draw()` once, then blocks inside `read_key()`'s raw-mode
+   `sys.stdin.read(1)` until the next keypress -- there is no `SIGWINCH`
+   handler and no timeout-based redraw. Resizing the terminal window
+   while the TUI is idle (no key pressed) leaves the stale layout on
+   screen until the very next keystroke, which is when `os.get_terminal_size()`
+   is finally re-read inside `draw()`. This compounds (1): a session that
+   starts in an 80+ column terminal and is then resized smaller keeps
+   rendering as if nothing changed until the next key, then suddenly
+   suffers the wrapping/misalignment above.
+
+**Not yet built:** clamping `render()`'s layout to the real terminal size
+(with a minimum-size message instead of a forced-80x24 layout when the
+terminal is genuinely too small to render usefully) and either a
+`SIGWINCH` handler or a short poll timeout in the main loop so a resize
+repaints without waiting on a keypress.
+
+---
+
+### Settings TUI arrow keys silently did nothing -- root-caused and fixed, confirmed live via key-by-key debug instrumentation
+
+**Status:** fixed and live-confirmed 2026-08-30. `tests/test_settings_tui.py`
+156/156 green throughout every step below. Three attempts total, two
+ruled out by direct live evidence before the real fix landed -- kept as
+a record of the actual debugging path, not tidied into a straight line.
+
+**Symptom, reported live on Linux:** arrow keys did nothing ("don't seem
+to be navigating... tested twice. still not working"), `q` to quit
+worked fine throughout.
+
+**First hypothesis, tested and reasonably ruled out: SS3 vs. CSI escape
+sequences.** `read_key()` originally recognized only the CSI form of
+arrow keys (`"\x1b[A"` etc.); many terminals send the SS3 form instead
+(`"\x1bOA"`) depending on cursor-key mode (DECCKM). This is a real gap
+(fixed: both prefixes are now accepted, purely additive, no regression
+risk) but **direct evidence says it wasn't this operator's actual
+cause**: a minimal diagnostic script
+(`key_probe.py`, blocking `read(1)` calls only, no escape-sequence
+timing logic at all) was run live in the operator's real terminal and
+showed perfectly standard, immediate CSI bytes for both arrows:
+`'\x1b' '[' 'A'` (Up) and `'\x1b' '[' 'B'` (Down) -- exactly the form
+`read_key()` already handled, both before and after the SS3 fix. The
+SS3 fix stays (a real, separate robustness improvement for other
+terminals/modes) but is not the explanation for this report.
+
+**Second hypothesis, live-plausible, not yet confirmed: a too-tight
+50ms `select()` timeout on slow hardware.** The operator's own machine
+is a 4th-gen Intel i7 laptop, independently reported as noticeably
+slower for this project's other work this same day (kokoro synthesis
+timing, general responsiveness). `read_key()`'s escape-sequence path
+gates on `select.select([sys.stdin], [], [], 0.05)` between reading the
+leading `\x1b` and the rest of the sequence -- if more than 50ms elapses
+(plausible under this app's own per-frame `draw()` cost between
+keystrokes on slower hardware, not necessarily the terminal itself),
+a genuine arrow-key sequence is misread as a bare `ESC` (a silent
+no-op), with its remaining bytes then misread as literal keystrokes on
+the *next* `read_key()` call. Notably, `key_probe.py` -- which has no
+timeout/`select()` logic at all, just three unconditional blocking reads
+-- worked cleanly on the very same terminal where the real app failed;
+that contrast is the actual evidence behind this hypothesis, not
+guesswork. First attempt: widened the timeout from 0.05s to 0.3s.
+**Live-tested and still not enough** -- the operator's next live session
+still needed multiple presses per field ("works better? sorta? but I
+have to hit the arrow keys multiple times").
+
+**Live-pty automated verification was attempted twice and both attempts
+failed for environment reasons, not code reasons** -- worth recording so
+the same dead end isn't repeated: a `pty.fork()`-spawned `settings_tui.py`
+fed literal escape bytes was tried once while the operator had a live
+`run_convobox.py --tui --web` session running (140-159% CPU from
+real-time STT/TTS work) and never completed within 60s under that
+contention; a second attempt after that session ended also hung, and
+investigation found the FIRST attempt's own forked child had survived as
+an orphan (`timeout` only kills its direct child, not a `pty.fork()`-
+created grandchild) and was still holding real resources, confounding
+the second attempt. Both were killed by exact PID once identified;
+neither the operator's real sessions nor their config were touched by
+any of this. **Automated pty verification of this specific app is
+unreliable in this sandbox -- the fix that actually worked came from
+different tooling entirely, below.**
+
+**Root-caused and fixed via live key-by-key debug instrumentation, not
+another guess.** Rather than propose a third hypothesis blind,
+`run_tui()` gained an opt-in, zero-effect-unless-set debug trace
+(`CONVOBOX_TUI_DEBUG_KEYS=<path>`) logging every raw `read_key()` result,
+its wall-clock duration, and whether `selected_section`/`selected_field`
+actually changed. The operator ran it live and the log gave a direct,
+unambiguous answer: a single Right-arrow press was consistently split
+into **three separate `read_key()` calls** -- `'ESC'` (this `select()`
+timing out), then `'['` and `'C'` each read in ~0.0ms on the *next* two
+calls (already sitting in the kernel's input buffer by then, arriving a
+beat after the timeout fired) -- each landing as an independent no-op
+instead of one `"RIGHT"` token. Exactly the "need to press multiple
+times" symptom, now measured directly rather than inferred. The 0.3s
+timeout from the first attempt was confirmed via this same log to still
+be too tight (repeated splits with ~400-500ms between the pieces).
+
+**Real fix: widened the timeout to 1.0s.** Still a non-issue for the one
+legitimate standalone-`ESC` case (cancelling a modal) this timeout
+exists to keep responsive -- no human perceives a <1s delay there as
+broken -- while giving this hardware's apparent inter-byte latency a
+much larger margin. **Confirmed live with a second debug-log run,
+cleared and re-captured from scratch**: every arrow press in the new log
+resolves into exactly one `'RIGHT'`/`'LEFT'`/`'UP'`/`'DOWN'` token and
+moves the selection correctly every time; the only non-moving cases are
+genuine boundaries (top of a field list, last tab) -- zero ESC/`[`/letter
+splits anywhere in the confirming log. This is the first of the three
+navigation hypotheses in this entry with real before/after log evidence
+behind it, not inference from a probe script or code reading alone.
+
+**The debug instrumentation was left in place**, opt-in and inert unless
+`CONVOBOX_TUI_DEBUG_KEYS` is set -- useful if a different terminal or a
+future regression needs the same kind of direct evidence again rather
+than re-deriving this same debugging path from scratch.
+
+**Not resolved by this entry:** the operator's earlier "another test
+reveals a QC error" comment was never followed up with detail (raised
+between the 0.3s and 1.0s attempts) -- if it names a real, separate
+issue, it hasn't been captured anywhere and should be asked about
+directly next time it comes up.

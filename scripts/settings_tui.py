@@ -1920,11 +1920,39 @@ def _confirm_modal(
             return True
 
 
+_MIN_LEFT_WIDTH = 36
+_MIN_RIGHT_WIDTH = 24
+_MIN_USABLE_WIDTH = _MIN_LEFT_WIDTH + 3 + _MIN_RIGHT_WIDTH  # " | " separator
+_MIN_USABLE_HEIGHT = 12  # header/tabs/legend chrome (10 lines) + >=2 visible fields
+
+
 def render(state: TuiState, width: int, height: int) -> list[str]:
-    width = max(width, 80)
-    height = max(height, 24)
-    left_width = max(36, min(54, width // 2 + 4))
-    right_width = max(24, width - left_width - 3)
+    # Previously forced a minimum 80x24 regardless of the REAL terminal
+    # size (`width = max(width, 80)`) -- live-reported 2026-08-30: on any
+    # real terminal narrower/shorter than that (a common split-pane size,
+    # not an edge case), every line this emits was wider than the actual
+    # terminal, so the terminal itself wrapped each logical row into two+
+    # visual rows. That broke draw()'s "\x1b[H" + one "\x1b[K"-cleared
+    # write per logical line repaint scheme -- cursor-home no longer
+    # landed on the previous frame's real row boundaries once wrapping
+    # was happening, which is why navigation looked broken ("arrows
+    # don't seem to go where I want"): the selected-field pointer WAS
+    # moving internally, but the garbled repaint made the new position
+    # unreadable, not merely absent. Now uses the real size and falls
+    # back to an explicit message below this layout's own hard minimum
+    # (_MIN_LEFT_WIDTH + _MIN_RIGHT_WIDTH themselves have hardcoded
+    # floors, so simply removing the outer max() alone still overflows
+    # anything narrower than _MIN_USABLE_WIDTH) rather than attempting a
+    # two-column layout that can't fit and silently overflowing again.
+    if width < _MIN_USABLE_WIDTH or height < _MIN_USABLE_HEIGHT:
+        msg = (
+            f"Terminal too small ({width}x{height}) -- resize to at "
+            f"least {_MIN_USABLE_WIDTH}x{_MIN_USABLE_HEIGHT} to use the "
+            "Settings TUI."
+        )
+        return [msg[:width]] if width > 0 else [""]
+    left_width = max(_MIN_LEFT_WIDTH, min(54, width // 2 + 4))
+    right_width = max(_MIN_RIGHT_WIDTH, width - left_width - 3)
     lines: list[str] = []
     # Explicit and highlighted when dirty (live UAT feedback, 2026-07-22):
     # a plain "dirty" label is easy to miss entirely; the moment there ARE
@@ -2031,10 +2059,37 @@ def read_key() -> str:
             if ch == "\x7f":
                 return "BACKSPACE"
             return ch
-        if not select.select([sys.stdin], [], [], 0.05)[0]:
+        # Live-reported 2026-08-30 on a slower (4th-gen i7) Linux laptop:
+        # arrow keys needed multiple presses before anything moved.
+        # CONVOBOX_TUI_DEBUG_KEYS instrumentation (run_tui()) caught it
+        # directly, not by inference: a single Right-arrow press was
+        # consistently split into three separate read_key() calls --
+        # 'ESC' (this select() timing out), then '[' and 'C' each read
+        # instantly on the NEXT two calls (already sitting in the kernel
+        # buffer by then, just arriving a beat after this timeout fired) --
+        # each landing as an independent no-op instead of one "RIGHT". An
+        # earlier attempt widened this from 50ms to 300ms on the same
+        # theory; live logs from that attempt showed 300ms still wasn't
+        # consistently enough (repeated ESC/[ /letter splits recorded with
+        # ~400-500ms between them). Widened further to 1.0s: still a
+        # non-issue for the one real standalone-ESC case (cancelling a
+        # modal) this timeout exists to keep responsive -- a human cannot
+        # perceive a <1s delay there as broken -- while giving real
+        # multi-byte sequences a much larger margin on this hardware's
+        # apparent inter-byte latency.
+        if not select.select([sys.stdin], [], [], 1.0)[0]:
             return "ESC"
         seq = sys.stdin.read(1)
-        if seq != "[":
+        # Arrow/Home/End keys arrive as either CSI ("\x1b[A") or SS3
+        # ("\x1bOA") sequences depending on the terminal's cursor-key mode
+        # (DECCKM) -- a real, live-reported gap, 2026-08-30: this only ever
+        # recognized CSI, so a terminal/multiplexer sending SS3 (common
+        # depending on TERM/DECCKM state) had its second byte ("O")
+        # swallowed here as a bare ESC, and the still-unread direction
+        # letter (A/B/C/D) then surfaced as a literal keystroke on the
+        # NEXT read_key() call instead of navigating. Both forms use the
+        # same direction-letter code, so one lookup table covers both.
+        if seq not in ("[", "O"):
             return "ESC"
         code = sys.stdin.read(1)
         return {"A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT", "H": "HOME", "F": "END"}.get(code, "")
@@ -2724,17 +2779,47 @@ def run_tui(config_path: Path | None = None) -> None:
     _enable_ansi()
     sys.stdout.write("\x1b[?25l\x1b[2J")
     sys.stdout.flush()
+    # Opt-in, zero effect unless set (live-debugging aid, 2026-08-30): two
+    # reported arrow-key fixes (SS3 recognition, a wider select() timeout)
+    # each seemed plausible but neither had a confirmed-working live report
+    # -- "sorta" better, still needing multiple presses per field. Rather
+    # than guess a third root cause, this logs the exact raw key read and
+    # the resulting navigation state on every keypress, so the next live
+    # session gives ground truth instead of another hypothesis.
+    debug_path = os.environ.get("CONVOBOX_TUI_DEBUG_KEYS")
+    debug_file = open(debug_path, "a", encoding="utf-8") if debug_path else None  # noqa: SIM115
     try:
         running = True
         while running:
             draw(state)
+            before = (state.selected_section, state.selected_field)
+            t0 = time.monotonic()
             key = read_key()
+            read_ms = (time.monotonic() - t0) * 1000
+            if debug_file is not None:
+                debug_file.write(
+                    f"{time.strftime('%H:%M:%S')} read_key()={key!r} "
+                    f"(took {read_ms:.1f}ms) before=section{before[0]}/field{before[1]}\n"
+                )
+                debug_file.flush()
             if not key:
+                if debug_file is not None:
+                    debug_file.write("  -> empty key, looping without handling\n")
+                    debug_file.flush()
                 continue
             running = _handle_browse(state, key)
+            if debug_file is not None:
+                after = (state.selected_section, state.selected_field)
+                debug_file.write(
+                    f"  -> handled, after=section{after[0]}/field{after[1]} "
+                    f"(moved={after != before})\n"
+                )
+                debug_file.flush()
     finally:
         sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")
         sys.stdout.flush()
+        if debug_file is not None:
+            debug_file.close()
     print(state.status)
 
 
