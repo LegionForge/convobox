@@ -46,7 +46,7 @@ before trusting a voice session with write access; see also
 | ["Open in editor" occasionally opens a different file than the one clicked](#open-in-editor-occasionally-opens-a-different-file-than-the-one-clicked----fixed) | Web UI | All | Fixed | — |
 | **Cosmetic and diagnostic** | | | | |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
-| [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Diagnosed | Medium |
+| [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Fixed, live-confirmed | — |
 | [Settings TUI arrow keys silently did nothing](#settings-tui-arrow-keys-silently-did-nothing----root-caused-and-fixed-confirmed-live-via-key-by-key-debug-instrumentation) | Settings TUI | All | Fixed, live-confirmed | — |
 
 ---
@@ -2621,45 +2621,96 @@ not yet separately confirmed -- this session's evidence is TUI-only.
 
 ### Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone
 
-**Status:** diagnosed live 2026-08-30, unfixed.
+**Status:** fixed and live-confirmed 2026-08-30/31 (diagnosed 2026-08-30,
+fixed across two sessions). `tests/test_settings_tui.py` 162/162 green.
+Two independent, compounding causes -- both fixed, though the fixes
+landed at different times, see below.
 
 **Symptom.** Reported live on Linux: "the settings tui isn't rendering
 right either, and it isn't autosizing for the terminal size." Two
 independent, compounding causes found by reading `scripts/settings_tui.py`
 and confirmed by calling `render()` directly:
 
-1. **Hardcoded minimum floor, live-confirmed by direct call:**
-   `render(state, width, height)` opens with `width = max(width, 80)` and
-   `height = max(height, 24)` -- calling it with a real, smaller terminal
-   size (`width=60, height=20`) still produced 22 lines, each padded to
-   exactly **80 columns**, completely ignoring the requested smaller
-   size. On any real terminal narrower than 80 columns or shorter than 24
-   rows (a common split-pane/tiled-window-manager size, not an edge
-   case), every line this emits is wider than the actual terminal, so the
-   terminal itself wraps each logical row into two or more visual rows --
-   which then breaks `draw()`'s redraw scheme (`"\x1b[H"` cursor-home
-   followed by one `"\x1b[K"`-cleared write per logical line): each
-   repaint's cursor-home no longer lines up with the previous frame's
-   actual row boundaries once wrapping is happening, producing the
-   garbled/overlapping look reported as "not rendering right," not just
-   clipped content.
-2. **No live-resize repaint.** `run_tui()`'s main loop
-   (`while running: draw(state); key = read_key(); ...`) only calls
-   `draw()` once, then blocks inside `read_key()`'s raw-mode
-   `sys.stdin.read(1)` until the next keypress -- there is no `SIGWINCH`
-   handler and no timeout-based redraw. Resizing the terminal window
-   while the TUI is idle (no key pressed) leaves the stale layout on
-   screen until the very next keystroke, which is when `os.get_terminal_size()`
-   is finally re-read inside `draw()`. This compounds (1): a session that
-   starts in an 80+ column terminal and is then resized smaller keeps
-   rendering as if nothing changed until the next key, then suddenly
-   suffers the wrapping/misalignment above.
+1. **Hardcoded minimum floor, live-confirmed by direct call --
+   fixed same day (2026-08-30).** `render(state, width, height)` opened
+   with `width = max(width, 80)` and `height = max(height, 24)` --
+   calling it with a real, smaller terminal size (`width=60, height=20`)
+   produced 22 lines, each padded to exactly **80 columns**, completely
+   ignoring the requested smaller size. On any real terminal narrower
+   than 80 columns or shorter than 24 rows (a common split-pane/tiled-
+   window-manager size, not an edge case), every line this emitted was
+   wider than the actual terminal, so the terminal itself wrapped each
+   logical row into two or more visual rows -- breaking `draw()`'s
+   redraw scheme (`"\x1b[H"` cursor-home followed by one
+   `"\x1b[K"`-cleared write per logical line): each repaint's cursor-home
+   no longer lined up with the previous frame's actual row boundaries
+   once wrapping was happening, producing the garbled/overlapping look
+   reported as "not rendering right," not just clipped content. Fixed by
+   using the real size directly, falling back to an explicit
+   "Terminal too small (WxH) -- resize to at least ..." message below a
+   hard usable-layout minimum (`_MIN_USABLE_WIDTH`/`_MIN_USABLE_HEIGHT`)
+   instead of attempting a two-column layout that can't fit. `render_modal()`
+   had the identical `max(width, 80)`/`max(height, 24)` floor (same bug,
+   same wrap-and-garble mechanism for `_draw_modal`'s repaint) -- fixed
+   the following session (2026-08-31) once noticed while re-verifying
+   this entry; the modal layout degrades safely at any real width via
+   `fit()`'s own truncation and `box_width`'s already-width-bounded calc,
+   so no separate too-small fallback was needed there, just removing the
+   artificial inflation.
+2. **No live-resize repaint -- fixed 2026-08-31.** `run_tui()`'s main
+   loop (`while running: draw(state); key = read_key(); ...`) only called
+   `draw()` once, then blocked inside `read_key()`'s raw-mode
+   `sys.stdin.read(1)` until the next keypress -- no `SIGWINCH` handler,
+   no timeout-based redraw. Resizing the terminal window while the TUI
+   was idle (no key pressed) left the stale layout on screen until the
+   very next keystroke. Fixed with a `SIGWINCH` handler installed for the
+   duration of `run_tui()` that calls `draw(state)` directly -- Python
+   (PEP 475) automatically retries the interrupted `read(1)` once the
+   handler returns, so the read loop itself needed no changes. Not
+   available on Windows (no `SIGWINCH` there); `draw()` still happens
+   correctly on the next keypress in that case, same as before this fix.
+   **A real correctness bug surfaced while building this, not just in
+   testing it:** a resize signal firing while `read_key()` had already
+   called `tty.setraw(fd)` (which disables the tty driver's own
+   OPOST/ONLCR output translation until `read_key()`'s `finally`
+   restores it) meant a `draw()` call from inside that exact window wrote
+   bare `"\n"` between lines instead of `"\r\n"` -- on a real terminal
+   this moves the cursor down a row WITHOUT returning it to column 0,
+   misaligning every row after the first. Confirmed directly via a real
+   `pty.fork()` run: a resize-triggered frame landed as one 2000+ byte
+   "line" with zero `\r` bytes in it. Fixed by having `draw()`/
+   `_draw_modal()` join lines with an explicit `"\x1b[K\r\n"` instead of
+   relying on the terminal's OPOST/ONLCR state, which by construction
+   can no longer be assumed once a signal handler can trigger a redraw
+   asynchronously. **A second, related risk was caught and fixed before
+   it ever shipped, not left as a follow-up:** the naive version of this
+   handler would also fire while a modal (`_edit_value_interactive`,
+   `_confirm_modal`, `_scrollable_test_picker_modal`) has its own
+   `read_key()`/`_draw_modal()` loop on screen, repainting the MAIN
+   browse screen underneath and blowing away the modal that's actually
+   showing. Fixed with a module-level `_modal_depth` counter (a counter,
+   not a bool, so a Confirm Quit dialog nested inside an open field
+   editor doesn't have the inner one's exit clear it prematurely) set by
+   a `@_tracks_modal_depth` decorator on all three modal-loop functions;
+   the `SIGWINCH` handler skips its repaint whenever `_modal_depth > 0`.
+   An idle resize while a modal is open is now a genuine no-op (matching
+   pre-fix behavior for that specific case) rather than a new,
+   worse-than-before visual bug -- confirmed live via a real `pty.fork()`
+   run: zero bytes of output during an idle resize with a modal open, and
+   the correct new width once the modal is dismissed.
 
-**Not yet built:** clamping `render()`'s layout to the real terminal size
-(with a minimum-size message instead of a forced-80x24 layout when the
-terminal is genuinely too small to render usefully) and either a
-`SIGWINCH` handler or a short poll timeout in the main loop so a resize
-repaints without waiting on a keypress.
+**Live-verified end-to-end, not just via `render()`/`render_modal()`
+called directly.** Two real `pty.fork()`-spawned runs of the actual
+`scripts/settings_tui.py` process (same methodology as the earlier
+2026-08-30 size-bug confirmation): (1) resized the pty via `TIOCSWINSZ`
+while idle in the main browse loop with no keystroke sent at all --
+the kernel delivers `SIGWINCH` to the pty's foreground process group on
+a real resize, exactly like a real terminal emulator does -- and the very
+next captured frame already reflected the new width (a clean single line
+at the new column count, not a garbled multi-thousand-byte line); (2)
+opened a field's edit modal, resized idle with the modal open (zero bytes
+of output, confirming the guard), then pressed Esc and confirmed the main
+screen redrew correctly at the new size.
 
 ---
 
@@ -2759,8 +2810,71 @@ behind it, not inference from a probe script or code reading alone.
 future regression needs the same kind of direct evidence again rather
 than re-deriving this same debugging path from scratch.
 
-**Not resolved by this entry:** the operator's earlier "another test
-reveals a QC error" comment was never followed up with detail (raised
-between the 0.3s and 1.0s attempts) -- if it names a real, separate
-issue, it hasn't been captured anywhere and should be asked about
-directly next time it comes up.
+**Not resolved by this entry (at the time):** the operator's earlier
+"another test reveals a QC error" comment was never followed up with
+detail (raised between the 0.3s and 1.0s attempts). It's very likely
+the same underlying defect as the follow-up below, found and fixed one
+day later.
+
+**Follow-up, 2026-08-31: a second key pressed shortly after a first one
+could be silently swallowed.** Live-reported by the operator: pressing
+Right then Right worked (both moved right), but Right then **Left**
+also just kept showing Right's result -- the second, *different*
+keypress had no visible effect at all, distinct from the multi-press
+symptom above (that needed *repeats of the same key*; this ate a
+*different* key outright).
+
+Root-caused with a live pty harness (`os.fork()`/`pty.openpty()`
+feeding the real `read_key()` both sequences back-to-back, no operator
+round-trip needed this time) and found **two independent, real bugs**,
+both in `read_key()`:
+
+1. `tty.setraw(fd)` runs at the top of *every* `read_key()` call, not
+   just once at startup, and Python's `tty.setraw()` defaults to
+   `when=TCSAFLUSH` -- which **discards any bytes already sitting in
+   the kernel's input queue** at the moment it's applied. A second
+   keypress landing in that queue while the loop was still busy with
+   the first (`draw()` + dispatch overhead between `read_key()` calls
+   is a real window) got thrown away by the very next call's own
+   `setraw()`, before a single byte of it was ever read. Confirmed
+   directly: feeding `\x1b[C\x1b[D` (Right immediately followed by
+   Left) to the harness showed the Left bytes vanish at exactly this
+   line, and the next `read_key()` call then hung waiting on input
+   that was never coming (because it had already been discarded).
+2. Separately, `sys.stdin.read(1)` -- a *buffered* `TextIOWrapper`
+   read -- can silently pull more than the one requested byte into
+   Python's own userspace buffer in a single syscall if more was
+   already pending. The `select()` call right after it only sees the
+   raw kernel fd, which by then has nothing left (already drained into
+   that buffer), so it can time out on data that was sitting there the
+   whole time, just invisible to it.
+
+**Fix:** pass `termios.TCSANOW` to `tty.setraw()` (switches to raw mode
+without touching queued input) and read every byte via `os.read(fd, 1)`
+instead of `sys.stdin.read()`, so `select()`'s view of the fd always
+matches what's actually been consumed. Text-field typing still needs
+full UTF-8 decoding (unlike the ASCII-only CSI/SS3 escape bytes), so a
+small helper reads a leading byte's continuation bytes off the raw fd
+based on its UTF-8 length prefix. **Confirmed against the real,
+patched `read_key()`** via the same pty harness: Right-then-Left now
+resolves to `['RIGHT', 'LEFT']` correctly, Right-then-Right still gives
+`['RIGHT', 'RIGHT']` (no regression on the case that already looked
+fine), and a typed non-ASCII character (`é`) still decodes correctly.
+`tests/test_settings_tui.py` 162/162 throughout.
+
+**Also found and fixed in the same pass:** `_handle_browse`'s
+`lowered = key.lower() if len(key) == 1 else key` never lowercased the
+3-character `"ESC"` token `read_key()` actually returns, so
+`if lowered in ("q", "esc")` could **never match a real Escape press**
+-- Esc was a complete, silent no-op in the browse screen (no
+quit-confirm, nothing), for reasons unrelated to the swallowed-key bug
+above but discovered while tracing why a swallowed key produced no
+visible feedback at all. Fixed by unconditionally lowercasing (safe:
+every multi-char token's lowered form, e.g. `"up"`, `"enter"`, is still
+distinct from the single-char bindings checked against it).
+
+**Live confirmation from the operator on real hardware/terminal is
+still the project's own bar for this kind of input bug** (per this
+entry's own history above) -- the pty-harness evidence is real and
+reproducible, but hasn't yet been cross-checked against the operator's
+actual terminal the way the 1.0s-timeout fix was.

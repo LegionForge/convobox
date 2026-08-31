@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
+import re
+import signal
 import sys
 import threading
 import time
@@ -264,6 +267,55 @@ def test_confirm_modal_cancels_on_escape(monkeypatch: pytest.MonkeyPatch) -> Non
     keys = iter(["ESC"])
     monkeypatch.setattr(settings_tui, "read_key", lambda: next(keys))
     assert settings_tui._confirm_modal("Confirm", "Proceed?", ["detail"]) is False
+
+
+def test_modal_depth_tracks_a_modal_loop_being_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    # run_tui()'s SIGWINCH handler checks _modal_depth before repainting
+    # the main screen (docs/KNOWN-ISSUES.md's resize entry) so an idle
+    # resize while a modal is open doesn't blow it away -- this confirms
+    # the counter set by @_tracks_modal_depth is actually 0 outside a
+    # modal, >0 WHILE one is on screen, and back to 0 once it returns.
+    assert settings_tui._modal_depth == 0
+    seen_depth_during_call = None
+
+    def fake_read_key() -> str:
+        nonlocal seen_depth_during_call
+        seen_depth_during_call = settings_tui._modal_depth
+        return "ESC"
+
+    monkeypatch.setattr(settings_tui, "read_key", fake_read_key)
+    settings_tui._confirm_modal("Confirm", "Proceed?", ["detail"])
+
+    assert seen_depth_during_call == 1
+    assert settings_tui._modal_depth == 0
+
+
+def test_modal_depth_nests_correctly_across_a_confirm_inside_an_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The counter (not a plain bool) exists specifically for this case: a
+    # Confirm Quit dialog can be raised from inside an already-open field
+    # editor, and the inner dialog returning must not clear the flag while
+    # the outer editor is still on screen.
+    spec = FieldSpec("audio", "input_device", "Input device", "optional_str")
+    depths_seen: list[int] = []
+
+    def fake_read_key() -> str:
+        depths_seen.append(settings_tui._modal_depth)
+        if len(depths_seen) == 1:
+            # First read inside the outer edit modal: nest a confirm modal
+            # (using the real function, not a stub) before finishing.
+            inner_keys = iter(["ESC"])
+            monkeypatch.setattr(settings_tui, "read_key", lambda: next(inner_keys))
+            settings_tui._confirm_modal("Nested", "Really?", [])
+            assert settings_tui._modal_depth == 1  # back to just the outer editor
+            monkeypatch.setattr(settings_tui, "read_key", fake_read_key)
+        return "ESC"
+
+    monkeypatch.setattr(settings_tui, "read_key", fake_read_key)
+    settings_tui._edit_value_interactive(spec, "", AppConfig())
+
+    assert settings_tui._modal_depth == 0
 
 
 def test_validate_config_passes_when_voice_files_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1375,6 +1427,62 @@ def test_render_includes_sections_and_dirty_flag(tmp_path: Path, monkeypatch: py
     assert "ConvoBox Settings TUI" in joined
     assert "dirty" in joined
     assert "TTS" in joined
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(line: str) -> int:
+    """Length of `line` as it actually occupies terminal columns -- ANSI
+    SGR codes are zero-width there but not to plain len(), same
+    distinction _highlight_keys's own docstring calls out for fit()."""
+    return len(_ANSI_RE.sub("", line))
+
+
+def test_render_shows_too_small_message_below_minimum_usable_size(tmp_path: Path) -> None:
+    # docs/KNOWN-ISSUES.md, "Settings TUI ignores real terminal size below
+    # 80x24": render() previously forced width/height up to 80x24
+    # regardless of the real terminal, so every line it emitted overflowed
+    # a genuinely smaller terminal and got wrapped by the terminal itself,
+    # garbling the redraw. Below the layout's own hard minimum
+    # (_MIN_USABLE_WIDTH/_MIN_USABLE_HEIGHT), it must fall back to a
+    # single explicit message instead of attempting a layout that can't
+    # fit -- this is the first coverage of that fallback path at all.
+    config = AppConfig()
+    state = TuiState(path=tmp_path / "convobox.yaml", original=config, working=config.model_copy(deep=True))
+
+    lines = render(state, 60, 20)
+
+    assert len(lines) == 1
+    assert "too small" in lines[0].lower()
+    assert "60x20" in lines[0]
+    assert _visible_len(lines[0]) <= 60
+
+
+def test_render_uses_full_layout_at_minimum_usable_size(tmp_path: Path) -> None:
+    config = AppConfig()
+    state = TuiState(path=tmp_path / "convobox.yaml", original=config, working=config.model_copy(deep=True))
+
+    lines = render(state, settings_tui._MIN_USABLE_WIDTH, settings_tui._MIN_USABLE_HEIGHT)
+
+    assert "ConvoBox Settings TUI" in "\n".join(lines)
+    for line in lines:
+        assert _visible_len(line) <= settings_tui._MIN_USABLE_WIDTH
+
+
+def test_render_modal_does_not_inflate_a_real_narrow_terminal() -> None:
+    # Same bug class as render() above, for the modal's own repaint path
+    # (_draw_modal): render_modal() used to force width/height up to
+    # 80x24 too, so a modal on a genuinely narrower/shorter real terminal
+    # overflowed and wrapped exactly like the main screen did. Unlike
+    # render(), the modal degrades via fit()'s own truncation rather than
+    # a dedicated fallback message -- this just confirms no line exceeds
+    # the REAL terminal size that was actually passed in.
+    lines = render_modal("Confirm Save", "Save changes?", ["A detail line."], "", 40, 15)
+
+    assert len(lines) <= 15
+    for line in lines:
+        assert _visible_len(line) <= 40
 
 
 def test_render_modal_uses_same_chrome() -> None:
@@ -2567,3 +2675,40 @@ def test_validate_rejects_permission_mode_conflicting_with_raw_command_flag() ->
     )
     report = validate_config(config)
     assert any("permission_mode" in e for e in report.errors)
+
+
+def test_run_tui_installs_and_restores_sigwinch_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # docs/KNOWN-ISSUES.md, "...never repaints on resize alone": the main
+    # loop only redrew once per keypress, blocking inside read_key() the
+    # rest of the time, so a resize while idle left the stale layout on
+    # screen until the next key. run_tui() now installs a SIGWINCH handler
+    # that repaints immediately; this confirms it's actually wired up
+    # (fires a real draw on a real signal, not just present in the source)
+    # and cleanly restored afterward rather than leaking into the rest of
+    # the test process.
+    if not hasattr(signal, "SIGWINCH"):
+        pytest.skip("SIGWINCH is not available on this platform")
+
+    path = tmp_path / "convobox.yaml"
+    draw_calls: list[object] = []
+    monkeypatch.setattr(settings_tui, "draw", lambda state: draw_calls.append(state))
+    original_handler = signal.getsignal(signal.SIGWINCH)
+
+    keys = iter(["q"])
+
+    def fake_read_key() -> str:
+        # Fired from inside the (already unblocked) read_key call rather
+        # than from a real blocking read -- CPython delivers a pending
+        # signal at the next bytecode boundary regardless, so the handler
+        # still runs and repaints before this function returns "q".
+        os.kill(os.getpid(), signal.SIGWINCH)
+        return next(keys)
+
+    monkeypatch.setattr(settings_tui, "read_key", fake_read_key)
+
+    settings_tui.run_tui(path)
+
+    assert len(draw_calls) >= 2  # the loop's own draw() + at least one resize-triggered draw
+    assert signal.getsignal(signal.SIGWINCH) == original_handler
