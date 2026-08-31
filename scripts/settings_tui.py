@@ -17,12 +17,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import io
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import sys
 import tempfile
 import textwrap
@@ -1633,8 +1635,21 @@ def render_modal(
     choice_value: str | None = None,
     hint_override: str | None = None,
 ) -> list[str]:
-    width = max(width, 80)
-    height = max(height, 24)
+    # Previously forced an artificial 80x24 floor regardless of the real
+    # terminal size -- the same wrap-and-garble mechanism as render()'s
+    # analogous bug (docs/KNOWN-ISSUES.md, "Settings TUI ignores real
+    # terminal size..."): every line here was padded/truncated to a WIDTH
+    # the real terminal might not have, so the terminal itself wrapped it,
+    # breaking _draw_modal's cursor-home-based repaint the same way render()
+    # broke draw()'s. Unlike render()'s two-column layout, a modal degrades
+    # safely at any real width via fit()'s own truncation and box_width's
+    # already-width-bounded calc below (box_width <= int(width * 0.8), so it
+    # can never exceed the real width) -- no separate "too small" fallback
+    # message is needed here, just don't inflate width/height past what the
+    # terminal actually reports. The remaining floor is only a sanity
+    # minimum against degenerate (near-zero) sizes.
+    width = max(width, 20)
+    height = max(height, 8)
     border = "=" if severity == "destructive" else "-"
     accent = f"{_RED}{_BOLD}" if severity == "destructive" else f"{_CYAN}{_BOLD}"
     tone = " DANGER " if severity == "destructive" else " INFO "
@@ -1778,7 +1793,10 @@ def _draw_modal(
     # fragments from a wider previous frame visible past the new content.
     sys.stdout.write(
         "\x1b[H"
-        + "\x1b[K\n".join(
+        # Explicit "\r\n" -- see draw()'s own comment on the same join for
+        # why this can't rely on the terminal driver's OPOST/ONLCR
+        # translation of a bare "\n".
+        + "\x1b[K\r\n".join(
             render_modal(
                 title,
                 prompt,
@@ -1797,6 +1815,30 @@ def _draw_modal(
     sys.stdout.flush()
 
 
+# Tracks whether a modal's own read_key()/_draw_modal() loop is currently
+# on screen (see _tracks_modal_depth below) -- run_tui()'s SIGWINCH handler
+# checks this before repainting so a resize while a modal is open doesn't
+# blow it away with the main browse screen underneath instead of the modal
+# that's actually showing. A module-level counter rather than a plain bool
+# so nested modals (e.g. a Confirm Quit dialog raised from inside an open
+# field editor) don't have the outer one's exit clear it prematurely.
+_modal_depth = 0
+
+
+def _tracks_modal_depth(fn: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        global _modal_depth
+        _modal_depth += 1
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _modal_depth -= 1
+
+    return wrapper
+
+
+@_tracks_modal_depth
 def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) -> tuple[bool, Any]:
     is_pickable = spec.kind in ("choice", "device", "bool", "kokoro_voice")
     # Device fields are str | None; _format_value(None) is the display
@@ -1904,6 +1946,7 @@ def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) ->
         )
 
 
+@_tracks_modal_depth
 def _confirm_modal(
     title: str,
     prompt: str,
@@ -2101,8 +2144,20 @@ def draw(state: TuiState) -> None:
     size = os.get_terminal_size()
     # Clear-to-end-of-line on every row -- see _draw_modal's comment for why
     # relying on exact-width padding alone isn't reliable enough.
+    #
+    # Explicit "\r\n", not a bare "\n": this can now run from the SIGWINCH
+    # handler installed in run_tui(), which can fire at any point --
+    # including while read_key() is mid-blocking-read with the terminal
+    # already put into raw mode via tty.setraw() (which disables the tty
+    # driver's own OPOST/ONLCR output translation until read_key()'s
+    # finally restores it). A bare "\n" written during that exact window
+    # would move the cursor down a row WITHOUT returning it to column 0,
+    # misaligning every row after the first -- confirmed via a real
+    # pty.fork() run: a resize-triggered frame landed as one 2000+ byte
+    # "line" with zero \r bytes in it. Writing "\r\n" ourselves makes this
+    # correct regardless of the terminal's current OPOST/ONLCR state.
     sys.stdout.write(
-        "\x1b[H" + "\x1b[K\n".join(render(state, size.columns, size.lines)) + "\x1b[K"
+        "\x1b[H" + "\x1b[K\r\n".join(render(state, size.columns, size.lines)) + "\x1b[K"
     )
     sys.stdout.flush()
 
@@ -2286,6 +2341,7 @@ async def _test_piper_speaker(speaker: str, config: AppConfig) -> str:
     return f"{label}: played ({audio.shape[0]} samples @ {engine.sample_rate}Hz)"
 
 
+@_tracks_modal_depth
 def _scrollable_test_picker_modal(
     modal_title: str,
     editing_prompt: str,
@@ -2788,6 +2844,29 @@ def run_tui(config_path: Path | None = None) -> None:
     # session gives ground truth instead of another hypothesis.
     debug_path = os.environ.get("CONVOBOX_TUI_DEBUG_KEYS")
     debug_file = open(debug_path, "a", encoding="utf-8") if debug_path else None  # noqa: SIM115
+    # Live-reported 2026-08-30 (docs/KNOWN-ISSUES.md, "...never repaints on
+    # resize alone"): the main loop below only calls draw() once per
+    # keypress, then blocks inside read_key()'s raw-mode sys.stdin.read(1)
+    # -- resizing the terminal while idle left the stale layout on screen
+    # until the next key. SIGWINCH is delivered on every resize; Python
+    # (PEP 475) automatically retries the interrupted read(1) once the
+    # handler returns, so this just needs to repaint, not touch the read
+    # loop itself. Not available on Windows (no SIGWINCH there) -- draw()
+    # is still correct on the next keypress in that case, same as before.
+    _resize_handler_installed = hasattr(signal, "SIGWINCH")
+    if _resize_handler_installed:
+        def _on_resize(signum: int, frame: Any) -> None:
+            # Skip while a modal's own loop owns the screen (_modal_depth,
+            # set by _tracks_modal_depth) -- repainting the main browse
+            # screen here would blow away whatever modal is actually
+            # showing instead of it. That modal's own next keystroke-driven
+            # redraw already picks up the new size; only the idle main-loop
+            # case (no modal, blocked in read_key()) needs this handler.
+            if _modal_depth == 0:
+                with contextlib.suppress(Exception):
+                    draw(state)
+
+        _previous_winch_handler = signal.signal(signal.SIGWINCH, _on_resize)
     try:
         running = True
         while running:
@@ -2816,6 +2895,8 @@ def run_tui(config_path: Path | None = None) -> None:
                 )
                 debug_file.flush()
     finally:
+        if _resize_handler_installed:
+            signal.signal(signal.SIGWINCH, _previous_winch_handler)
         sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")
         sys.stdout.flush()
         if debug_file is not None:
