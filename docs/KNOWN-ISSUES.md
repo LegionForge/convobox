@@ -28,7 +28,7 @@ before trusting a voice session with write access; see also
 | [A safeword match in a transcript skips checking that same transcript for a pause phrase](#a-safeword-match-in-a-transcript-skips-checking-that-same-transcript-for-a-pause-phrase----fixed) | Safeword | All | Fixed | — |
 | **Stability, freezes, and crashes** | | | | |
 | [faster-whisper's native allocator can fail during a long session](#faster-whispers-native-allocator-can-fail-during-a-long-session) | STT | All (Windows-observed) | Mitigated | Medium |
-| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows | Mostly resolved | Medium |
+| [VAD segmenter's per-window model call is synchronous with no offload/timeout](#vad-segmenters-per-window-model-call-is-synchronous-with-no-offloadtimeout----can-plausibly-freeze-the-whole-app) | VAD / mic loop | macOS, Windows, Linux | Mostly resolved; mic-layer-only variant still open | Medium |
 | [Backend can go silently busy for minutes with zero output](#backend-can-go-silently-busy-for-minutes-with-zero-output----root-cause-unconfirmed) | Backend | All | Diagnosed | Medium |
 | **Speech pipeline (STT / TTS / AEC)** | | | | |
 | [Kokoro can't synthesize past ~510 phonemes](#kokoro-cant-synthesize-past-510-phonemes----hard-model-limit-not-a-configmode-issue) | TTS (Kokoro) | All | Diagnosed | Low |
@@ -36,14 +36,18 @@ before trusting a voice session with write access; see also
 | **Platform and compatibility** | | | | |
 | [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
+| [A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection](#a-macs-front-35mm-jack-mutes-the-internal-speaker-at-the-hardware-level-regardless-of-software-output-device-selection) | Audio output | macOS | Verified | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
+| [Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream](#codex-permission_mode-approve-crashes-on-current-codex-cli----approval_policyuntrusted-was-removed-upstream) | codex (upstream) | All | Diagnosed, unfixed | High |
 | **Web UI** | | | | |
 | [Web UI: artifact pane gaps (0.3.0)](#web-ui-artifact-pane-gaps-030) | Web UI | All | Deferred | Low |
 | [Web UI: a short CancelledError traceback can appear on quit/Ctrl+C](#web-ui-a-short-cancellederror-traceback-can-appear-on-quitctrlc) | Web UI | All | Mostly mitigated | Low |
 | ["Open in editor" occasionally opens a different file than the one clicked](#open-in-editor-occasionally-opens-a-different-file-than-the-one-clicked----fixed) | Web UI | All | Fixed | — |
 | **Cosmetic and diagnostic** | | | | |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
+| [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Diagnosed | Medium |
+| [Settings TUI arrow keys silently did nothing](#settings-tui-arrow-keys-silently-did-nothing----root-caused-and-fixed-confirmed-live-via-key-by-key-debug-instrumentation) | Settings TUI | All | Fixed, live-confirmed | — |
 
 ---
 
@@ -1290,6 +1294,31 @@ going into any release -- rare (one occurrence to date, self-resolving),
 not confirmed eliminated, and not yet reproduced deliberately rather
 than caught incidentally.
 
+**Second live occurrence, first on Linux (2026-08-30).** Caught during
+Codex's second live-mic UAT pass (`docs/UAT-codex-smoke.md`,
+`backend=codex`, `permission_mode=plan`) while re-testing hard-stop
+responsiveness -- reported live by the operator as "still not
+interrupting well" before the log was checked. `convobox-tui.log`
+confirms genuine total silence in the mic/STT pipeline for **213.4s**
+(00:53:40.683 -> 00:57:13.997, zero `Processing audio` lines), while the
+codex adapter's own `_read_loop` kept logging its routine 5s idle-poll
+warnings on schedule the entire time (`busy=False` throughout) --
+identical shape to 2026-08-15's variant: the backend-adapter task stayed
+demonstrably alive and idle, only the mic-capture/VAD side went dark.
+Self-resolved with no restart, same as the original catch. This is now
+**two occurrences, both `backend=codex`, one macOS (2026-08-15) and one
+Linux (2026-08-30)** -- raises confidence this is platform-independent
+and codex-adjacent rather than a macOS-specific fluke, though still not
+proven backend-independent (both catches used codex). **Operational
+impact confirmed live:** every hard-stop/kill-phrase attempt spoken
+during the freeze window was not silently declined by the overlap gate
+(that would still log a `dropped (...)` line) -- it was never heard at
+all, no log line of any kind. Once the freeze lifted on its own, the very
+next "stop stop stop" and "eject eject eject" attempts matched
+instantly (see the UAT doc's own Findings log for that session) --
+reinforcing that the safeword-matching logic itself is not the problem;
+the mic-capture layer being unresponsive upstream of it is.
+
 ---
 
 ### Backend can go silently busy for minutes with zero output -- root cause unconfirmed
@@ -1402,6 +1431,39 @@ audio-seam risk. Worth full chunking only if Piper's GPL-3.0 licensing
 later becomes a reason to keep everything on the permissively-licensed
 engine.
 
+**Second live confirmation, different backend (2026-08-30):** reproduced
+again during Codex's first live-mic UAT smoke test on Linux
+(`docs/UAT-codex-smoke.md`), triggered by a long web-search-summary
+response. Same signature (`RuntimeError: Kokoro synthesis stalled...`),
+same graceful recovery (the 30s timeout caught it, ConvoBox logged it and
+kept the session going normally on the next turn) -- no new root cause,
+just evidence this isn't backend-specific. The operator never heard any
+part of that response; no partial-audio or "answer too long" fallback
+exists yet, which is the concrete cost of the still-missing pre-chunking
+layer described above.
+
+**Third live confirmation, new trigger -- short Arabic text (2026-08-30,
+same day, later session):** fired three more times in a single session,
+every time on a short (one-to-two-sentence) Arabic response -- nowhere
+near the length that triggers this on English text. Arabic phonemization
+appears to be far denser per character than English's, hitting the same
+hard 510-token limit at a fraction of the visible text length; not
+diagnosed further (would need inspecting the actual phonemizer's token
+output for Arabic), but a real, actionable data point for anyone relying
+on Kokoro for non-English responses. Also newly observed this time: a
+`"Phonemes are too long, truncating to 510 phonemes"` warning from
+kokoro-onnx itself immediately precedes the crash -- the library's own
+truncation attempt appears to have an off-by-one (truncating to exactly
+510, then indexing `voice[len(tokens)]` with `len(tokens) == 510` against
+a 510-length array), consistent with rather than contradicting the root
+cause above. Failure mode was milder than the English case: playback
+started ~25ms after the error (some chunks had already synthesized
+before the failing batch), so the operator heard a truncated response
+rather than total silence for the full 30s stall timeout -- not a fix,
+just a less bad outcome depending on where in the stream the failure
+lands. Full write-up: `docs/field-notes/2026-08-30-conversational-mode-
+plus-aec-first-live-codex-linux-session.md`.
+
 ---
 
 ### WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
@@ -1453,11 +1515,145 @@ time). That assessment has since resolved through extensive live UAT
 that justified waiting no longer applies. The live JP go-ahead question
 is the only remaining gate now.
 
+**What the NS/AGC actually are, confirmed by reading the binding
+(2026-08-29).** `aec_audio_processing.AudioProcessor` is a SWIG-
+generated wrapper (`audio_processing.py`, header says "Do not make
+changes ... modify the SWIG interface file instead") around a compiled
+`libwebrtc-audio-processing-2.{dylib,so,dll}` (`loader.py`) -- this is
+the freedesktop.org `webrtc-audio-processing` fork of Google's own
+WebRTC APM (the same engine PulseAudio's/PipeWire's `webrtc-echo-
+cancel` module uses), not a from-scratch reimplementation. The Python
+layer exposes only construction flags and stream I/O
+(`process_stream`/`process_reverse_stream`/`has_voice`/etc.) -- no
+docstrings or comments reference the algorithm beneath `ns_level`/
+`agc_mode` specifically, because there's nothing to reference: those
+ints map straight through to APM's own enums. Concretely, this means:
+NS here is APM's classic **spectral-subtraction-style stationary noise
+suppressor** (`ns_level` 0-3 aggressiveness) -- not a modern neural
+denoiser (nothing like RNNoise/DTLN is in this binary), and AGC is
+APM's **legacy AGC1 (`agc_mode` 0-3)**, an adaptive *input*-gain
+controller that reacts to the mic signal after capture. Neither touches
+what ConvoBox sends to the speaker before it plays -- both are reactive
+input-side processing, not proactive output-side limiting. This is
+useful context for the "why this might matter" section above (real,
+but modest and reactive) and directly motivates the new idea below.
+
+**New candidate, informed by this investigation + the 2026-08-29 AEC/
+THD field-note campaign + a 2026-08-30 literature check on professional
+AEC engineering practice: a proactive soft limiter on the render/TTS
+signal, not just reactive NS/AGC on the mic.** This session's THD
+measurements (`docs/field-notes/2026-08-29-thd-measurement-and-n20-
+fixed-comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`) and
+the delay x volume grids (`docs/field-notes/2026-08-27-...md`,
+`2026-08-28-...md`) all point the same direction: AEC3's false-barge
+rate gets *worse* than AEC-off once the speaker itself is driven into
+its own nonlinear distortion regime (confirmed on both the Mac mini's
+internal driver and, at maxed own-gain, small external speakers too) --
+because AEC3's adaptive filter assumes a roughly linear acoustic path
+from far-end signal to echo, and a hard-clipping/distorting driver
+breaks that assumption long before NS/AGC on the *input* side get a
+chance to help.
+
+**Correction (2026-08-30):** an earlier draft of this entry claimed
+this is "known" Zoom/Teams practice -- a web research pass found no
+public source describing either vendor's AEC internals, so that framing
+was an unconfirmed inference and is retracted here. A real, citable
+precedent was found instead: QSC's own **Q-SYS Acoustic Echo
+Cancellation white paper** (a commercial pro-AEC vendor's published
+engineering guidance, not marketing) explicitly recommends placing a
+compressor/limiter on the *mixed reference signal* to avoid clipping,
+with the threshold near 0dB -- and critically, placing it **before**
+that signal forks to both the loudspeaker and the AEC's own reference
+input, "so that the AEC reference input sees the same compressed or
+limited signal that is sent to the loudspeakers... this prevents the
+AEC from chasing gain changes." Separately, standard echo-cancellation
+literature treats a nonlinear echo path as fundamentally uncancellable
+by a linear adaptive filter (consistent with this project's own
+finding above) -- reinforcing that this needs a fix ahead of the
+speaker, not another mic-side reactive stage. WebRTC's own AGC1 (what
+ConvoBox's binding uses) and the newer AGC2 were both checked and
+confirmed to be capture-side only in every generation -- upgrading the
+WebRTC binding would not add this on its own; it has to be new,
+ConvoBox-side render-path code regardless.
+
+Concretely for ConvoBox, per the Q-SYS placement detail: a limiter
+stage applied to the mixed render signal in `AudioPlayer` (or wherever
+`on_block_played`'s far-end reference is sourced from) BEFORE it forks
+to (a) play out the real speaker and (b) feed the AEC reference input --
+e.g. a simple soft-knee limiter with a threshold below the specific
+driver's own distortion onset (internal speaker's own 4kHz THD climbs
+sharply at 100% system volume per the N=3 sweep above; a real
+implementation would need a proper per-device calibration step, not a
+hardcoded threshold, since the onset level is clearly device-specific --
+external speakers showed no such rise in their normal ~24-50%-gain
+operating range but did distort badly once their own gain dial was
+maxed). Feeding the AEC reference input the *same post-limit* signal,
+not the pre-limit TTS PCM, is the detail Q-SYS calls out as the reason
+this avoids the AEC "chasing" a gain change it never saw -- a real
+implementation should get this ordering right, not just add a limiter
+anywhere convenient in the render path.
+
+**Not built.** A genuinely new idea from this session's research
+discussion, distinct from (and complementary to -- not a replacement
+for) the existing NS/AGC candidate above: NS/AGC are reactive, mic-
+side, and already wired into the binding awaiting a go-ahead; this
+limiter idea is proactive, output-side, and would need new code (no
+existing knob in `aec-audio-processing` does this) plus a per-device
+calibration step this session's THD script prototypes but doesn't
+productize. Documented here as a candidate awaiting JP's go-ahead, same
+convention as the rest of this entry -- not scoped or estimated further
+this session. A follow-up prior-art/IP-strategy research pass is in
+progress as of 2026-08-30 (see the field-notes/session log for
+findings once complete) before any decision on whether this is worth
+patenting, open-sourcing, or dual-licensing.
+
 ---
 
 ## Platform and compatibility
 
 Issues that only appear on one OS or one audio API.
+
+### A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection
+
+**Status:** verified live, 2026-08-29, Mac mini M4. Not a ConvoBox bug
+-- a real hardware/OS behavior anyone testing multiple output devices
+on similar hardware should know about, since it silently invalidates a
+class of comparison the software has no way to detect.
+
+**Symptom.** While running a controlled internal-vs-external-speaker
+comparison (`docs/field-notes/2026-08-29-thd-measurement-and-n20-fixed-
+comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`), the
+internal-speaker measurement came back suspiciously clean --
+`raw_playback_rms` (the actual mic-captured playback level) was 0.0047,
+a 20x drop from the same nominal setting's expected ~0.09, despite
+`audio.output_device` being explicitly set to `"Mac mini Speakers"` (a
+different device than the external speakers connected at the time) and
+`sd.query_devices()` confirming that device was correctly selected in
+software.
+
+**Root cause.** Something physically plugged into the Mac mini's front
+3.5mm analog jack attenuates/mutes the internal speaker at the hardware
+level (a jack-sense circuit), and this does NOT appear to respect an
+application-level output-device override -- selecting a different
+device in Core Audio doesn't override the physical jack-sense behavior
+for the internal driver specifically. Confirmed by physically unplugging
+the external speakers and rerunning: `raw_playback_rms` returned to
+0.0971, matching the pre-confound baseline almost exactly.
+
+**Practical implication.** Any acoustic measurement of the internal
+speaker taken while ANYTHING is plugged into the front port is suspect
+-- checking `sd.query_devices()`/`audio.output_device` alone is not
+enough to confirm which speaker is actually producing sound. Always
+verify actual captured signal level (or just listen) matches
+expectations before trusting a "device A vs. device B" comparison on
+this class of hardware.
+
+**Not built:** no code change is proposed here -- this is a testing-
+methodology note, not a mitigation, since it's outside ConvoBox's own
+control (a Core Audio / hardware jack-sense behavior, not something the
+`sounddevice`/`aec-audio-processing` layer can detect or override).
+
+---
 
 ### WASAPI output plays speech an octave too high ("static chipmunk")
 
@@ -1690,11 +1886,93 @@ example of a small sample overselling an effect size. Full 50-trial
 raw data appended to the same field note:
 `docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
 
+**Follow-up (2026-08-27): the finding re-confirmed at N=10 across the
+full standard delay-candidate set, not just `auto`.** 250 real trials
+(5 delay candidates x 5 volume levels x N=10, up from N=1/N=7 in the
+findings above) show every candidate -- not only auto-estimated delay
+-- produces roughly 10x more AEC-processed false barge-ins than raw at
+100%/75% volume (means ~9.8-9.9 vs. 1.0), tapering to AEC being a net
+improvement at 35%/20%, consistent with the 30-40% crossover the
+119-trial sweep found. This grid used the standard delay set (not
+including the 400ms candidate the mitigation below found best) and left
+`barge_in_min_speech_ms` at its unmitigated 250ms default throughout --
+it characterizes the raw problem's scale, it does not re-test the known
+mitigation. Full data: `docs/field-notes/2026-08-27-full-delay-x-volume-
+grid-aec-processing-makes-self-barge-in-worse-at-high-volume.md`.
+
+**Follow-up (2026-08-28): the known `barge_in_min_speech_ms=1200`
+mitigation validated at N=10 across the full volume range.** 300 trials
+(6 delay candidates, adding `400ms` to the standard set, x 5 volumes x
+N=10) with the mitigation applied: complete elimination of AEC-caused
+false barge-ins at 20-35% volume (0.00-0.25 mean, down from 1.28-1.80
+unmitigated), 2.4x-6x fewer at 50-100% (still 2.6x-4x worse than
+raw-AEC-off at the highest volumes). `aec_delay_ms=309` -- this repo's
+long-standing historical recommendation, not the newly-tested 400ms --
+turns out the most consistently strong paired delay choice across the
+grid. Full data:
+`docs/field-notes/2026-08-28-mitigation-grid-barge-in-threshold-1200ms-
+plus-400ms-delay-validated-at-scale.md`.
+
+**Follow-up (2026-08-28): real external speakers essentially eliminate
+the problem at 75% and below -- the first direct evidence for the
+distortion hypothesis, not just corroboration.** JP attached real
+external powered speakers to the Mac mini's front port. Same grid as
+the 2026-08-27 baseline (5 delays x 5 volumes x N=10, unmitigated
+threshold): at 75%/50% volume, external speakers produced essentially
+zero false barge-ins of any kind (0.00-0.02 mean AEC-processed, vs.
+internal's 9.82/4.60 at the same volumes). 100% volume still shows a
+real but far smaller effect (~1.5x AEC-vs-raw ratio, vs. internal's
+~10x). Recommendation: for open-speaker use, swapping away from the
+built-in speaker to almost any real external speaker looks like a more
+complete fix than the threshold mitigation alone. Full data:
+`docs/field-notes/2026-08-28-external-vs-internal-speaker-confirms-mac-
+mini-built-in-speaker-is-the-driver.md`.
+
+**Follow-up (2026-08-29): a tight N=20 fixed-setting comparison confirms
+the grid finding exactly, and the first objective distortion
+measurement (THD) backs it up.** Internal vs external at 100%
+volume/`aec_delay_ms=309`/N=20: internal AEC-processed false-barges
+9.90 vs. external's 3.15 -- matches the broader grid closely. A new THD
+sweep (200/1000/4000Hz tones, SNR-gated after an initial ungated
+version gave nonsensical noise-floor-dominated results) found a clean
+signal at 4kHz: internal speaker's distortion peaks at 100% volume
+(4.66% THD, vs. external's 1.02%) then drops -- the first genuinely
+measured (not corroborated-by-citation-or-listening-report) evidence
+for the distortion hypothesis. 200Hz/1000Hz results were noisier and
+not fully explained (1kHz sat oddly flat at 14-20% across most volumes,
+not a clean volume-dependent trend). Also found and documented a real
+testing-methodology gotcha along the way (see this doc's own Platform
+and compatibility section): something plugged into the Mac mini's
+front jack mutes the internal speaker at the hardware level regardless
+of software output-device selection. Full data:
+`docs/field-notes/2026-08-29-thd-measurement-and-n20-fixed-comparison-
+plus-front-jack-mutes-internal-speaker-gotcha.md`.
+
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope
 for a documentation-only note; would need its own decision about where
 built artifacts live and how they're kept in sync with the pinned
 `aec-audio-processing` version.
+
+**Follow-up (2026-08-30, Linux, different hardware): a 100-trial sweep
+(10 volume levels x N=10, 100%-10% in 10% steps) pins the clean-floor
+transition tighter than a live operator's own real-time estimate.** On
+a 4th-gen Intel i7 laptop (openSUSE Tumbleweed) running `conversational`
++ AEC with Codex, **20% system volume was the only level with zero false
+barge-ins across all 10 trials** -- 30% and 40% were a large improvement
+over 50%+ (2 residual false-barges per 10 trials each, vs. 6-49 above)
+but not clean, one step higher than the operator's own live guess of
+"30% or 35%" based on ear alone during the same day's live session.
+**A real anomaly, not yet corroborated**: 90% showed AEC-processed false
+barge-ins (49) *exceeding* raw/no-AEC (33) in 9 of 10 trials -- the same
+qualitative "AEC makes it worse than doing nothing" shape this entry's
+macOS finding attributes to being *above* the transition zone, but here
+appearing as an isolated spike at one level rather than a consistent
+pattern across the whole upper range (100% itself shows AEC clearly
+helping: 35 raw -> 14 processed). Single N=10 run at that level, not yet
+re-run. Full table, methodology, and the same synthetic-vs-live-ear
+caveat this entry already carries: `docs/field-notes/2026-08-30-linux-
+100-trial-volume-sweep-self-barge-in-clean-floor-at-20-percent.md`.
 
 ---
 
@@ -2030,6 +2308,61 @@ retry may also be needed the first time a server starts. Full write-up:
 
 ---
 
+### Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream
+
+**Status:** diagnosed live 2026-08-30, unfixed. `backend.permission_mode:
+approve` for the codex backend is currently unusable against codex-cli
+0.149.1 (the version installed at diagnosis time).
+
+**Symptom.** `_PERMISSION_CODEX_OVERRIDES` in
+`src/convobox/adapters/codex.py` hardcodes `("untrusted",
+"workspace-write")` for `approve` mode, injected as `-c
+approval_policy=untrusted -c sandbox_mode=workspace-write` at spawn --
+verified live against codex-cli as of 2026-07-20 (see the dict's own
+comment). Against 0.149.1, the very first turn fails immediately with
+`ConnectionError: codex app-server exited` (`codex.py`'s `_ensure_thread`
+-> `_request` timing out because the pending future was resolved with
+that error from `_read_loop`'s cleanup). Running the exact spawn command
+by hand shows why: `codex -c approval_policy=untrusted -c
+sandbox_mode=workspace-write app-server` -> `Error: approval_policy =
+"untrusted" is no longer supported; remove this setting`. `plan`
+(`never`/`read-only`) and `permissive` (`never`/`workspace-write`) are
+unaffected -- only `approve`'s value has been deprecated upstream.
+
+**Not a simple rename -- the underlying model changed, not just the
+enum's spelling.** The CLI's own error for a truly-unknown value lists
+the currently-valid `approval_policy` variants: `untrusted`,
+`on-failure`, `on-request`, `granular`, `never` (`untrusted` is still a
+*recognized* enum member, just explicitly rejected with a dedicated
+error rather than accepted or reported as unknown -- a deliberate
+deprecation, not a typo upstream). Swapping in `on-request` alone stops
+the crash but is a **false fix, live-confirmed same session**: with
+`sandbox_mode=workspace-write` still set, an in-workspace file-write
+prompt completed and the file was created with **no approval prompt at
+all** -- current codex-cli treats in-workspace writes as already
+permitted by `workspace-write` regardless of `approval_policy`, so the
+old "any write escalates to approval" behavior `approve` mode depends on
+no longer exists at that sandbox setting. That combination was reverted
+immediately rather than left in place, since it silently removes the
+safety gate `approve` mode exists for instead of preserving it.
+
+**Not yet built:** a real replacement mapping needs to be worked out and
+live-verified against the actual approval RPCs (`item/fileChange/
+requestApproval`, `item/commandExecution/requestApproval`) before
+trusting it -- e.g. `sandbox_mode=read-only` paired with `on-request`/
+`on-failure` (forcing every write to escalate, since the sandbox itself
+disallows it, rather than relying on `approval_policy` to intercept
+writes the sandbox already allows). Until then, `approve` mode fails
+loudly and immediately (a crash, not a silent bypass) for the codex
+backend specifically -- `plan` and `permissive` remain fine.
+
+**How this was found:** while re-checking settings before a second live
+Codex UAT pass (`docs/UAT-codex-smoke.md`), specifically to exercise the
+still-untested "approval mid-flight" checklist item, which needs
+`approve` mode to trigger a real approval RPC at all.
+
+---
+
 ## Web UI
 
 The optional browser companion (`--web`). Newest and least-hardened
@@ -2283,3 +2616,151 @@ fallthrough noted for [T6]'s TTS-failure-in-`--tui` gap.
 "something actually errored") or leave it as-is since it's cosmetic and
 never misleads about whether the hard-stop itself worked. Web UI behavior
 not yet separately confirmed -- this session's evidence is TUI-only.
+
+---
+
+### Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone
+
+**Status:** diagnosed live 2026-08-30, unfixed.
+
+**Symptom.** Reported live on Linux: "the settings tui isn't rendering
+right either, and it isn't autosizing for the terminal size." Two
+independent, compounding causes found by reading `scripts/settings_tui.py`
+and confirmed by calling `render()` directly:
+
+1. **Hardcoded minimum floor, live-confirmed by direct call:**
+   `render(state, width, height)` opens with `width = max(width, 80)` and
+   `height = max(height, 24)` -- calling it with a real, smaller terminal
+   size (`width=60, height=20`) still produced 22 lines, each padded to
+   exactly **80 columns**, completely ignoring the requested smaller
+   size. On any real terminal narrower than 80 columns or shorter than 24
+   rows (a common split-pane/tiled-window-manager size, not an edge
+   case), every line this emits is wider than the actual terminal, so the
+   terminal itself wraps each logical row into two or more visual rows --
+   which then breaks `draw()`'s redraw scheme (`"\x1b[H"` cursor-home
+   followed by one `"\x1b[K"`-cleared write per logical line): each
+   repaint's cursor-home no longer lines up with the previous frame's
+   actual row boundaries once wrapping is happening, producing the
+   garbled/overlapping look reported as "not rendering right," not just
+   clipped content.
+2. **No live-resize repaint.** `run_tui()`'s main loop
+   (`while running: draw(state); key = read_key(); ...`) only calls
+   `draw()` once, then blocks inside `read_key()`'s raw-mode
+   `sys.stdin.read(1)` until the next keypress -- there is no `SIGWINCH`
+   handler and no timeout-based redraw. Resizing the terminal window
+   while the TUI is idle (no key pressed) leaves the stale layout on
+   screen until the very next keystroke, which is when `os.get_terminal_size()`
+   is finally re-read inside `draw()`. This compounds (1): a session that
+   starts in an 80+ column terminal and is then resized smaller keeps
+   rendering as if nothing changed until the next key, then suddenly
+   suffers the wrapping/misalignment above.
+
+**Not yet built:** clamping `render()`'s layout to the real terminal size
+(with a minimum-size message instead of a forced-80x24 layout when the
+terminal is genuinely too small to render usefully) and either a
+`SIGWINCH` handler or a short poll timeout in the main loop so a resize
+repaints without waiting on a keypress.
+
+---
+
+### Settings TUI arrow keys silently did nothing -- root-caused and fixed, confirmed live via key-by-key debug instrumentation
+
+**Status:** fixed and live-confirmed 2026-08-30. `tests/test_settings_tui.py`
+156/156 green throughout every step below. Three attempts total, two
+ruled out by direct live evidence before the real fix landed -- kept as
+a record of the actual debugging path, not tidied into a straight line.
+
+**Symptom, reported live on Linux:** arrow keys did nothing ("don't seem
+to be navigating... tested twice. still not working"), `q` to quit
+worked fine throughout.
+
+**First hypothesis, tested and reasonably ruled out: SS3 vs. CSI escape
+sequences.** `read_key()` originally recognized only the CSI form of
+arrow keys (`"\x1b[A"` etc.); many terminals send the SS3 form instead
+(`"\x1bOA"`) depending on cursor-key mode (DECCKM). This is a real gap
+(fixed: both prefixes are now accepted, purely additive, no regression
+risk) but **direct evidence says it wasn't this operator's actual
+cause**: a minimal diagnostic script
+(`key_probe.py`, blocking `read(1)` calls only, no escape-sequence
+timing logic at all) was run live in the operator's real terminal and
+showed perfectly standard, immediate CSI bytes for both arrows:
+`'\x1b' '[' 'A'` (Up) and `'\x1b' '[' 'B'` (Down) -- exactly the form
+`read_key()` already handled, both before and after the SS3 fix. The
+SS3 fix stays (a real, separate robustness improvement for other
+terminals/modes) but is not the explanation for this report.
+
+**Second hypothesis, live-plausible, not yet confirmed: a too-tight
+50ms `select()` timeout on slow hardware.** The operator's own machine
+is a 4th-gen Intel i7 laptop, independently reported as noticeably
+slower for this project's other work this same day (kokoro synthesis
+timing, general responsiveness). `read_key()`'s escape-sequence path
+gates on `select.select([sys.stdin], [], [], 0.05)` between reading the
+leading `\x1b` and the rest of the sequence -- if more than 50ms elapses
+(plausible under this app's own per-frame `draw()` cost between
+keystrokes on slower hardware, not necessarily the terminal itself),
+a genuine arrow-key sequence is misread as a bare `ESC` (a silent
+no-op), with its remaining bytes then misread as literal keystrokes on
+the *next* `read_key()` call. Notably, `key_probe.py` -- which has no
+timeout/`select()` logic at all, just three unconditional blocking reads
+-- worked cleanly on the very same terminal where the real app failed;
+that contrast is the actual evidence behind this hypothesis, not
+guesswork. First attempt: widened the timeout from 0.05s to 0.3s.
+**Live-tested and still not enough** -- the operator's next live session
+still needed multiple presses per field ("works better? sorta? but I
+have to hit the arrow keys multiple times").
+
+**Live-pty automated verification was attempted twice and both attempts
+failed for environment reasons, not code reasons** -- worth recording so
+the same dead end isn't repeated: a `pty.fork()`-spawned `settings_tui.py`
+fed literal escape bytes was tried once while the operator had a live
+`run_convobox.py --tui --web` session running (140-159% CPU from
+real-time STT/TTS work) and never completed within 60s under that
+contention; a second attempt after that session ended also hung, and
+investigation found the FIRST attempt's own forked child had survived as
+an orphan (`timeout` only kills its direct child, not a `pty.fork()`-
+created grandchild) and was still holding real resources, confounding
+the second attempt. Both were killed by exact PID once identified;
+neither the operator's real sessions nor their config were touched by
+any of this. **Automated pty verification of this specific app is
+unreliable in this sandbox -- the fix that actually worked came from
+different tooling entirely, below.**
+
+**Root-caused and fixed via live key-by-key debug instrumentation, not
+another guess.** Rather than propose a third hypothesis blind,
+`run_tui()` gained an opt-in, zero-effect-unless-set debug trace
+(`CONVOBOX_TUI_DEBUG_KEYS=<path>`) logging every raw `read_key()` result,
+its wall-clock duration, and whether `selected_section`/`selected_field`
+actually changed. The operator ran it live and the log gave a direct,
+unambiguous answer: a single Right-arrow press was consistently split
+into **three separate `read_key()` calls** -- `'ESC'` (this `select()`
+timing out), then `'['` and `'C'` each read in ~0.0ms on the *next* two
+calls (already sitting in the kernel's input buffer by then, arriving a
+beat after the timeout fired) -- each landing as an independent no-op
+instead of one `"RIGHT"` token. Exactly the "need to press multiple
+times" symptom, now measured directly rather than inferred. The 0.3s
+timeout from the first attempt was confirmed via this same log to still
+be too tight (repeated splits with ~400-500ms between the pieces).
+
+**Real fix: widened the timeout to 1.0s.** Still a non-issue for the one
+legitimate standalone-`ESC` case (cancelling a modal) this timeout
+exists to keep responsive -- no human perceives a <1s delay there as
+broken -- while giving this hardware's apparent inter-byte latency a
+much larger margin. **Confirmed live with a second debug-log run,
+cleared and re-captured from scratch**: every arrow press in the new log
+resolves into exactly one `'RIGHT'`/`'LEFT'`/`'UP'`/`'DOWN'` token and
+moves the selection correctly every time; the only non-moving cases are
+genuine boundaries (top of a field list, last tab) -- zero ESC/`[`/letter
+splits anywhere in the confirming log. This is the first of the three
+navigation hypotheses in this entry with real before/after log evidence
+behind it, not inference from a probe script or code reading alone.
+
+**The debug instrumentation was left in place**, opt-in and inert unless
+`CONVOBOX_TUI_DEBUG_KEYS` is set -- useful if a different terminal or a
+future regression needs the same kind of direct evidence again rather
+than re-deriving this same debugging path from scratch.
+
+**Not resolved by this entry:** the operator's earlier "another test
+reveals a QC error" comment was never followed up with detail (raised
+between the 0.3s and 1.0s attempts) -- if it names a real, separate
+issue, it hasn't been captured anywhere and should be asked about
+directly next time it comes up.
