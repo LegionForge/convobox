@@ -2810,8 +2810,71 @@ behind it, not inference from a probe script or code reading alone.
 future regression needs the same kind of direct evidence again rather
 than re-deriving this same debugging path from scratch.
 
-**Not resolved by this entry:** the operator's earlier "another test
-reveals a QC error" comment was never followed up with detail (raised
-between the 0.3s and 1.0s attempts) -- if it names a real, separate
-issue, it hasn't been captured anywhere and should be asked about
-directly next time it comes up.
+**Not resolved by this entry (at the time):** the operator's earlier
+"another test reveals a QC error" comment was never followed up with
+detail (raised between the 0.3s and 1.0s attempts). It's very likely
+the same underlying defect as the follow-up below, found and fixed one
+day later.
+
+**Follow-up, 2026-08-31: a second key pressed shortly after a first one
+could be silently swallowed.** Live-reported by the operator: pressing
+Right then Right worked (both moved right), but Right then **Left**
+also just kept showing Right's result -- the second, *different*
+keypress had no visible effect at all, distinct from the multi-press
+symptom above (that needed *repeats of the same key*; this ate a
+*different* key outright).
+
+Root-caused with a live pty harness (`os.fork()`/`pty.openpty()`
+feeding the real `read_key()` both sequences back-to-back, no operator
+round-trip needed this time) and found **two independent, real bugs**,
+both in `read_key()`:
+
+1. `tty.setraw(fd)` runs at the top of *every* `read_key()` call, not
+   just once at startup, and Python's `tty.setraw()` defaults to
+   `when=TCSAFLUSH` -- which **discards any bytes already sitting in
+   the kernel's input queue** at the moment it's applied. A second
+   keypress landing in that queue while the loop was still busy with
+   the first (`draw()` + dispatch overhead between `read_key()` calls
+   is a real window) got thrown away by the very next call's own
+   `setraw()`, before a single byte of it was ever read. Confirmed
+   directly: feeding `\x1b[C\x1b[D` (Right immediately followed by
+   Left) to the harness showed the Left bytes vanish at exactly this
+   line, and the next `read_key()` call then hung waiting on input
+   that was never coming (because it had already been discarded).
+2. Separately, `sys.stdin.read(1)` -- a *buffered* `TextIOWrapper`
+   read -- can silently pull more than the one requested byte into
+   Python's own userspace buffer in a single syscall if more was
+   already pending. The `select()` call right after it only sees the
+   raw kernel fd, which by then has nothing left (already drained into
+   that buffer), so it can time out on data that was sitting there the
+   whole time, just invisible to it.
+
+**Fix:** pass `termios.TCSANOW` to `tty.setraw()` (switches to raw mode
+without touching queued input) and read every byte via `os.read(fd, 1)`
+instead of `sys.stdin.read()`, so `select()`'s view of the fd always
+matches what's actually been consumed. Text-field typing still needs
+full UTF-8 decoding (unlike the ASCII-only CSI/SS3 escape bytes), so a
+small helper reads a leading byte's continuation bytes off the raw fd
+based on its UTF-8 length prefix. **Confirmed against the real,
+patched `read_key()`** via the same pty harness: Right-then-Left now
+resolves to `['RIGHT', 'LEFT']` correctly, Right-then-Right still gives
+`['RIGHT', 'RIGHT']` (no regression on the case that already looked
+fine), and a typed non-ASCII character (`é`) still decodes correctly.
+`tests/test_settings_tui.py` 162/162 throughout.
+
+**Also found and fixed in the same pass:** `_handle_browse`'s
+`lowered = key.lower() if len(key) == 1 else key` never lowercased the
+3-character `"ESC"` token `read_key()` actually returns, so
+`if lowered in ("q", "esc")` could **never match a real Escape press**
+-- Esc was a complete, silent no-op in the browse screen (no
+quit-confirm, nothing), for reasons unrelated to the swallowed-key bug
+above but discovered while tracing why a swallowed key produced no
+visible feedback at all. Fixed by unconditionally lowercasing (safe:
+every multi-char token's lowered form, e.g. `"up"`, `"enter"`, is still
+distinct from the single-char bindings checked against it).
+
+**Live confirmation from the operator on real hardware/terminal is
+still the project's own bar for this kind of input bug** (per this
+entry's own history above) -- the pty-harness evidence is real and
+reproducible, but hasn't yet been cross-checked against the operator's
+actual terminal the way the 1.0s-timeout fix was.

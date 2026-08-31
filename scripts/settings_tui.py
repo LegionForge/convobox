@@ -2094,8 +2094,35 @@ def read_key() -> str:
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
+        # TCSANOW, not tty.setraw()'s own default (TCSAFLUSH): this runs at
+        # the top of EVERY read_key() call, not just once at startup, and
+        # TCSAFLUSH discards any bytes already sitting in the kernel's
+        # input queue at the exact moment it's applied. Live-reported
+        # 2026-08-31: pressing two different arrow keys shortly after each
+        # other (e.g. Right then Left) had the second one silently vanish
+        # -- the TUI stayed on Right's result as if Left had never been
+        # pressed. Reproduced directly with a pty harness (not inferred):
+        # feeding Right immediately followed by Left showed the Left bytes
+        # discarded right here, and the next read_key() call then hung
+        # waiting on genuinely new input that was never coming. TCSANOW
+        # switches into raw mode without touching whatever's already
+        # queued.
+        tty.setraw(fd, termios.TCSANOW)
+        # Read via the raw fd (os.read), never sys.stdin.read(): the same
+        # 2026-08-31 pty repro also caught a second, independent bug in the
+        # old sys.stdin.read()-based version -- Python's TextIOWrapper does
+        # its own userspace buffering, so a single sys.stdin.read(1) call
+        # can silently pull several already-arrived bytes into that buffer
+        # in one syscall. The select() below only sees the raw kernel fd,
+        # which by then has nothing left pending, so it times out on data
+        # that was sitting right there the whole time, just invisible to
+        # it. Reading everything through os.read() keeps what's been
+        # consumed exactly in sync with what select() can see. Text fields
+        # can contain non-ASCII input, so the leading byte is decoded as a
+        # full UTF-8 character (1-4 bytes), not assumed to be a single
+        # byte; the CSI/SS3 sequence bytes that follow an ESC are always
+        # plain ASCII by protocol.
+        ch = _read_utf8_char(fd)
         if ch != "\x1b":
             if ch in ("\r", "\n"):
                 return "ENTER"
@@ -2120,9 +2147,9 @@ def read_key() -> str:
         # perceive a <1s delay there as broken -- while giving real
         # multi-byte sequences a much larger margin on this hardware's
         # apparent inter-byte latency.
-        if not select.select([sys.stdin], [], [], 1.0)[0]:
+        if not select.select([fd], [], [], 1.0)[0]:
             return "ESC"
-        seq = sys.stdin.read(1)
+        seq = os.read(fd, 1).decode("ascii", errors="replace")
         # Arrow/Home/End keys arrive as either CSI ("\x1b[A") or SS3
         # ("\x1bOA") sequences depending on the terminal's cursor-key mode
         # (DECCKM) -- a real, live-reported gap, 2026-08-30: this only ever
@@ -2134,10 +2161,40 @@ def read_key() -> str:
         # same direction-letter code, so one lookup table covers both.
         if seq not in ("[", "O"):
             return "ESC"
-        code = sys.stdin.read(1)
+        code = os.read(fd, 1).decode("ascii", errors="replace")
         return {"A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT", "H": "HOME", "F": "END"}.get(code, "")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _read_utf8_char(fd: int) -> str:
+    """Read exactly one UTF-8 character from a raw fd via os.read() only.
+
+    Used instead of sys.stdin.read(1) -- see the 2026-08-31 comment in
+    read_key() for why mixing that buffered read with a raw-fd select()
+    call caused a live, reproduced bug. A leading byte's high bits say how
+    many continuation bytes (0-3) a multi-byte character needs; ASCII
+    (single-byte) input, the overwhelming majority of keystrokes here,
+    takes the fast path with no extra reads.
+    """
+    first = os.read(fd, 1)
+    if not first:
+        return ""
+    lead = first[0]
+    if lead < 0x80:
+        extra = 0
+    elif lead >> 5 == 0b110:
+        extra = 1
+    elif lead >> 4 == 0b1110:
+        extra = 2
+    elif lead >> 3 == 0b11110:
+        extra = 3
+    else:
+        extra = 0
+    raw = first
+    for _ in range(extra):
+        raw += os.read(fd, 1)
+    return raw.decode("utf-8", errors="replace")
 
 
 def draw(state: TuiState) -> None:
@@ -2739,7 +2796,14 @@ def _run_with_spinner(state: TuiState, run: Callable[[], None]) -> None:
 
 
 def _handle_browse(state: TuiState, key: str) -> bool:
-    lowered = key.lower() if len(key) == 1 else key
+    # key.lower() unconditionally, not just for single-char keys: read_key()
+    # returns "ESC" (uppercase, 3 chars) for a real Escape press, and the
+    # old `if len(key) == 1 else key` guard left that uncased, so
+    # `lowered in ("q", "esc")` could never match it -- Esc was a silent
+    # no-op in the browse view with no quit-confirm at all. Safe to drop
+    # the guard: every multi-char token's lowered form (e.g. "up", "enter")
+    # is still distinct from the single-char bindings checked below.
+    lowered = key.lower()
     if lowered in ("q", "esc"):
         if state.dirty and not _confirm_modal(
             "Confirm Quit",
