@@ -36,6 +36,7 @@ before trusting a voice session with write access; see also
 | **Platform and compatibility** | | | | |
 | [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
+| [A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection](#a-macs-front-35mm-jack-mutes-the-internal-speaker-at-the-hardware-level-regardless-of-software-output-device-selection) | Audio output | macOS | Verified | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
 | [Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream](#codex-permission_mode-approve-crashes-on-current-codex-cli----approval_policyuntrusted-was-removed-upstream) | codex (upstream) | All | Diagnosed, unfixed | High |
@@ -1514,11 +1515,145 @@ time). That assessment has since resolved through extensive live UAT
 that justified waiting no longer applies. The live JP go-ahead question
 is the only remaining gate now.
 
+**What the NS/AGC actually are, confirmed by reading the binding
+(2026-08-29).** `aec_audio_processing.AudioProcessor` is a SWIG-
+generated wrapper (`audio_processing.py`, header says "Do not make
+changes ... modify the SWIG interface file instead") around a compiled
+`libwebrtc-audio-processing-2.{dylib,so,dll}` (`loader.py`) -- this is
+the freedesktop.org `webrtc-audio-processing` fork of Google's own
+WebRTC APM (the same engine PulseAudio's/PipeWire's `webrtc-echo-
+cancel` module uses), not a from-scratch reimplementation. The Python
+layer exposes only construction flags and stream I/O
+(`process_stream`/`process_reverse_stream`/`has_voice`/etc.) -- no
+docstrings or comments reference the algorithm beneath `ns_level`/
+`agc_mode` specifically, because there's nothing to reference: those
+ints map straight through to APM's own enums. Concretely, this means:
+NS here is APM's classic **spectral-subtraction-style stationary noise
+suppressor** (`ns_level` 0-3 aggressiveness) -- not a modern neural
+denoiser (nothing like RNNoise/DTLN is in this binary), and AGC is
+APM's **legacy AGC1 (`agc_mode` 0-3)**, an adaptive *input*-gain
+controller that reacts to the mic signal after capture. Neither touches
+what ConvoBox sends to the speaker before it plays -- both are reactive
+input-side processing, not proactive output-side limiting. This is
+useful context for the "why this might matter" section above (real,
+but modest and reactive) and directly motivates the new idea below.
+
+**New candidate, informed by this investigation + the 2026-08-29 AEC/
+THD field-note campaign + a 2026-08-30 literature check on professional
+AEC engineering practice: a proactive soft limiter on the render/TTS
+signal, not just reactive NS/AGC on the mic.** This session's THD
+measurements (`docs/field-notes/2026-08-29-thd-measurement-and-n20-
+fixed-comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`) and
+the delay x volume grids (`docs/field-notes/2026-08-27-...md`,
+`2026-08-28-...md`) all point the same direction: AEC3's false-barge
+rate gets *worse* than AEC-off once the speaker itself is driven into
+its own nonlinear distortion regime (confirmed on both the Mac mini's
+internal driver and, at maxed own-gain, small external speakers too) --
+because AEC3's adaptive filter assumes a roughly linear acoustic path
+from far-end signal to echo, and a hard-clipping/distorting driver
+breaks that assumption long before NS/AGC on the *input* side get a
+chance to help.
+
+**Correction (2026-08-30):** an earlier draft of this entry claimed
+this is "known" Zoom/Teams practice -- a web research pass found no
+public source describing either vendor's AEC internals, so that framing
+was an unconfirmed inference and is retracted here. A real, citable
+precedent was found instead: QSC's own **Q-SYS Acoustic Echo
+Cancellation white paper** (a commercial pro-AEC vendor's published
+engineering guidance, not marketing) explicitly recommends placing a
+compressor/limiter on the *mixed reference signal* to avoid clipping,
+with the threshold near 0dB -- and critically, placing it **before**
+that signal forks to both the loudspeaker and the AEC's own reference
+input, "so that the AEC reference input sees the same compressed or
+limited signal that is sent to the loudspeakers... this prevents the
+AEC from chasing gain changes." Separately, standard echo-cancellation
+literature treats a nonlinear echo path as fundamentally uncancellable
+by a linear adaptive filter (consistent with this project's own
+finding above) -- reinforcing that this needs a fix ahead of the
+speaker, not another mic-side reactive stage. WebRTC's own AGC1 (what
+ConvoBox's binding uses) and the newer AGC2 were both checked and
+confirmed to be capture-side only in every generation -- upgrading the
+WebRTC binding would not add this on its own; it has to be new,
+ConvoBox-side render-path code regardless.
+
+Concretely for ConvoBox, per the Q-SYS placement detail: a limiter
+stage applied to the mixed render signal in `AudioPlayer` (or wherever
+`on_block_played`'s far-end reference is sourced from) BEFORE it forks
+to (a) play out the real speaker and (b) feed the AEC reference input --
+e.g. a simple soft-knee limiter with a threshold below the specific
+driver's own distortion onset (internal speaker's own 4kHz THD climbs
+sharply at 100% system volume per the N=3 sweep above; a real
+implementation would need a proper per-device calibration step, not a
+hardcoded threshold, since the onset level is clearly device-specific --
+external speakers showed no such rise in their normal ~24-50%-gain
+operating range but did distort badly once their own gain dial was
+maxed). Feeding the AEC reference input the *same post-limit* signal,
+not the pre-limit TTS PCM, is the detail Q-SYS calls out as the reason
+this avoids the AEC "chasing" a gain change it never saw -- a real
+implementation should get this ordering right, not just add a limiter
+anywhere convenient in the render path.
+
+**Not built.** A genuinely new idea from this session's research
+discussion, distinct from (and complementary to -- not a replacement
+for) the existing NS/AGC candidate above: NS/AGC are reactive, mic-
+side, and already wired into the binding awaiting a go-ahead; this
+limiter idea is proactive, output-side, and would need new code (no
+existing knob in `aec-audio-processing` does this) plus a per-device
+calibration step this session's THD script prototypes but doesn't
+productize. Documented here as a candidate awaiting JP's go-ahead, same
+convention as the rest of this entry -- not scoped or estimated further
+this session. A follow-up prior-art/IP-strategy research pass is in
+progress as of 2026-08-30 (see the field-notes/session log for
+findings once complete) before any decision on whether this is worth
+patenting, open-sourcing, or dual-licensing.
+
 ---
 
 ## Platform and compatibility
 
 Issues that only appear on one OS or one audio API.
+
+### A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection
+
+**Status:** verified live, 2026-08-29, Mac mini M4. Not a ConvoBox bug
+-- a real hardware/OS behavior anyone testing multiple output devices
+on similar hardware should know about, since it silently invalidates a
+class of comparison the software has no way to detect.
+
+**Symptom.** While running a controlled internal-vs-external-speaker
+comparison (`docs/field-notes/2026-08-29-thd-measurement-and-n20-fixed-
+comparison-plus-front-jack-mutes-internal-speaker-gotcha.md`), the
+internal-speaker measurement came back suspiciously clean --
+`raw_playback_rms` (the actual mic-captured playback level) was 0.0047,
+a 20x drop from the same nominal setting's expected ~0.09, despite
+`audio.output_device` being explicitly set to `"Mac mini Speakers"` (a
+different device than the external speakers connected at the time) and
+`sd.query_devices()` confirming that device was correctly selected in
+software.
+
+**Root cause.** Something physically plugged into the Mac mini's front
+3.5mm analog jack attenuates/mutes the internal speaker at the hardware
+level (a jack-sense circuit), and this does NOT appear to respect an
+application-level output-device override -- selecting a different
+device in Core Audio doesn't override the physical jack-sense behavior
+for the internal driver specifically. Confirmed by physically unplugging
+the external speakers and rerunning: `raw_playback_rms` returned to
+0.0971, matching the pre-confound baseline almost exactly.
+
+**Practical implication.** Any acoustic measurement of the internal
+speaker taken while ANYTHING is plugged into the front port is suspect
+-- checking `sd.query_devices()`/`audio.output_device` alone is not
+enough to confirm which speaker is actually producing sound. Always
+verify actual captured signal level (or just listen) matches
+expectations before trusting a "device A vs. device B" comparison on
+this class of hardware.
+
+**Not built:** no code change is proposed here -- this is a testing-
+methodology note, not a mitigation, since it's outside ConvoBox's own
+control (a Core Audio / hardware jack-sense behavior, not something the
+`sounddevice`/`aec-audio-processing` layer can detect or override).
+
+---
 
 ### WASAPI output plays speech an octave too high ("static chipmunk")
 
@@ -1750,6 +1885,68 @@ appeared (Pearson r=-0.243 for T20, r=-0.155 for T30) -- a real
 example of a small sample overselling an effect size. Full 50-trial
 raw data appended to the same field note:
 `docs/field-notes/2026-08-11-full-volume-sweep-raw-data-and-room-rt60.md`.
+
+**Follow-up (2026-08-27): the finding re-confirmed at N=10 across the
+full standard delay-candidate set, not just `auto`.** 250 real trials
+(5 delay candidates x 5 volume levels x N=10, up from N=1/N=7 in the
+findings above) show every candidate -- not only auto-estimated delay
+-- produces roughly 10x more AEC-processed false barge-ins than raw at
+100%/75% volume (means ~9.8-9.9 vs. 1.0), tapering to AEC being a net
+improvement at 35%/20%, consistent with the 30-40% crossover the
+119-trial sweep found. This grid used the standard delay set (not
+including the 400ms candidate the mitigation below found best) and left
+`barge_in_min_speech_ms` at its unmitigated 250ms default throughout --
+it characterizes the raw problem's scale, it does not re-test the known
+mitigation. Full data: `docs/field-notes/2026-08-27-full-delay-x-volume-
+grid-aec-processing-makes-self-barge-in-worse-at-high-volume.md`.
+
+**Follow-up (2026-08-28): the known `barge_in_min_speech_ms=1200`
+mitigation validated at N=10 across the full volume range.** 300 trials
+(6 delay candidates, adding `400ms` to the standard set, x 5 volumes x
+N=10) with the mitigation applied: complete elimination of AEC-caused
+false barge-ins at 20-35% volume (0.00-0.25 mean, down from 1.28-1.80
+unmitigated), 2.4x-6x fewer at 50-100% (still 2.6x-4x worse than
+raw-AEC-off at the highest volumes). `aec_delay_ms=309` -- this repo's
+long-standing historical recommendation, not the newly-tested 400ms --
+turns out the most consistently strong paired delay choice across the
+grid. Full data:
+`docs/field-notes/2026-08-28-mitigation-grid-barge-in-threshold-1200ms-
+plus-400ms-delay-validated-at-scale.md`.
+
+**Follow-up (2026-08-28): real external speakers essentially eliminate
+the problem at 75% and below -- the first direct evidence for the
+distortion hypothesis, not just corroboration.** JP attached real
+external powered speakers to the Mac mini's front port. Same grid as
+the 2026-08-27 baseline (5 delays x 5 volumes x N=10, unmitigated
+threshold): at 75%/50% volume, external speakers produced essentially
+zero false barge-ins of any kind (0.00-0.02 mean AEC-processed, vs.
+internal's 9.82/4.60 at the same volumes). 100% volume still shows a
+real but far smaller effect (~1.5x AEC-vs-raw ratio, vs. internal's
+~10x). Recommendation: for open-speaker use, swapping away from the
+built-in speaker to almost any real external speaker looks like a more
+complete fix than the threshold mitigation alone. Full data:
+`docs/field-notes/2026-08-28-external-vs-internal-speaker-confirms-mac-
+mini-built-in-speaker-is-the-driver.md`.
+
+**Follow-up (2026-08-29): a tight N=20 fixed-setting comparison confirms
+the grid finding exactly, and the first objective distortion
+measurement (THD) backs it up.** Internal vs external at 100%
+volume/`aec_delay_ms=309`/N=20: internal AEC-processed false-barges
+9.90 vs. external's 3.15 -- matches the broader grid closely. A new THD
+sweep (200/1000/4000Hz tones, SNR-gated after an initial ungated
+version gave nonsensical noise-floor-dominated results) found a clean
+signal at 4kHz: internal speaker's distortion peaks at 100% volume
+(4.66% THD, vs. external's 1.02%) then drops -- the first genuinely
+measured (not corroborated-by-citation-or-listening-report) evidence
+for the distortion hypothesis. 200Hz/1000Hz results were noisier and
+not fully explained (1kHz sat oddly flat at 14-20% across most volumes,
+not a clean volume-dependent trend). Also found and documented a real
+testing-methodology gotcha along the way (see this doc's own Platform
+and compatibility section): something plugged into the Mac mini's
+front jack mutes the internal speaker at the hardware level regardless
+of software output-device selection. Full data:
+`docs/field-notes/2026-08-29-thd-measurement-and-n20-fixed-comparison-
+plus-front-jack-mutes-internal-speaker-gotcha.md`.
 
 **Not done as part of this pass, deliberately:** publishing a macOS wheel
 upstream, or vendoring/prebuilding one for this repo's CI — out of scope

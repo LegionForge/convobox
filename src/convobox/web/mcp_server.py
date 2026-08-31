@@ -88,7 +88,7 @@ def add_mcp_routes(
     working_dir: Path | None,
     token: str | None,
     web_forwarder: WebEventForwarder | None,
-) -> None:
+) -> MCPServer | None:
     """Mounts the show_document MCP server at MCP_MOUNT_PATH, streamable-
     HTTP transport (the modern MCP transport; --mcp-config's own "type":
     "http" per `claude mcp add --help`, not the older SSE shape).
@@ -101,9 +101,18 @@ def add_mcp_routes(
     harmless; an LLM tool that's ALWAYS advertised as available and
     ALWAYS fails wastes a real agent turn discovering that, which is
     worse than the tool not existing at all.
+
+    Returns the MCPServer instance (or None on the no-op path above) so
+    tests can call server.call_tool(...) directly -- exercises the tool
+    functions' own logic (path resolution, media-type checks, forwarder
+    calls) without driving a full MCP protocol handshake, which this
+    module's test file deliberately leaves to live verification instead
+    (see tests/test_web_mcp_server.py's own docstring). The one production
+    caller (web/app.py) already discards this as a bare statement, so
+    returning it is a no-op there.
     """
     if working_dir is None or token is None:
-        return
+        return None
 
     server = MCPServer(name="convobox")
 
@@ -196,3 +205,5 @@ def add_mcp_routes(
             yield
 
     app.router.lifespan_context = combined_lifespan
+
+    return server
