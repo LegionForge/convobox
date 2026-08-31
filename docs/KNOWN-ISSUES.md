@@ -46,7 +46,7 @@ before trusting a voice session with write access; see also
 | **Cosmetic and diagnostic** | | | | |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
 | [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Diagnosed | Medium |
-| [Settings TUI arrow keys silently do nothing on terminals sending SS3 sequences](#settings-tui-arrow-keys-silently-do-nothing-on-terminals-sending-ss3-sequences----fix-applied-live-confirmation-pending) | Settings TUI | All | Fix applied, live-confirmation pending | Medium |
+| [Settings TUI arrow keys silently did nothing](#settings-tui-arrow-keys-silently-did-nothing----root-caused-and-fixed-confirmed-live-via-key-by-key-debug-instrumentation) | Settings TUI | All | Fixed, live-confirmed | — |
 
 ---
 
@@ -2466,16 +2466,12 @@ repaints without waiting on a keypress.
 
 ---
 
-### Settings TUI arrow keys silently do nothing -- two fixes applied, second one live-plausible but not yet confirmed; session paused mid-verification
+### Settings TUI arrow keys silently did nothing -- root-caused and fixed, confirmed live via key-by-key debug instrumentation
 
-**Status:** two fixes applied in source 2026-08-30 (`scripts/
-settings_tui.py`'s `read_key()`), in sequence, as live operator feedback
-corrected the diagnosis each time; `tests/test_settings_tui.py` still
-156/156 green throughout. **Neither fix has a confirmed-working live
-report yet** -- the operator paused the session for the night right
-after applying fix 2, having reported "another test reveals a QC error"
-without detail on whether navigation itself now works. Picking this up
-is the first thing to do next session -- see "Next steps" below.
+**Status:** fixed and live-confirmed 2026-08-30. `tests/test_settings_tui.py`
+156/156 green throughout every step below. Three attempts total, two
+ruled out by direct live evidence before the real fix landed -- kept as
+a record of the actual debugging path, not tidied into a straight line.
 
 **Symptom, reported live on Linux:** arrow keys did nothing ("don't seem
 to be navigating... tested twice. still not working"), `q` to quit
@@ -2511,42 +2507,63 @@ the *next* `read_key()` call. Notably, `key_probe.py` -- which has no
 timeout/`select()` logic at all, just three unconditional blocking reads
 -- worked cleanly on the very same terminal where the real app failed;
 that contrast is the actual evidence behind this hypothesis, not
-guesswork. **Fix:** widened the timeout from 0.05s to 0.3s -- still
-imperceptible for the one legitimate standalone-`ESC` case (dismissing a
-modal) this timeout exists to keep responsive, while giving real
-multi-byte sequences six times the room on slow hardware.
+guesswork. First attempt: widened the timeout from 0.05s to 0.3s.
+**Live-tested and still not enough** -- the operator's next live session
+still needed multiple presses per field ("works better? sorta? but I
+have to hit the arrow keys multiple times").
 
-**Why this fix is also not yet confirmed.** The operator applied this
-fix and started a fresh test, then reported "another test reveals a QC
-error" (2026-08-30, end of session) with no further detail before
-pausing for the night -- unclear whether that message means navigation
-now works and a *different*, new issue (a validation warning?) surfaced,
-or whether it's unrelated to the timeout fix entirely. Do not assume
-either fix is confirmed working from this entry alone.
+**Live-pty automated verification was attempted twice and both attempts
+failed for environment reasons, not code reasons** -- worth recording so
+the same dead end isn't repeated: a `pty.fork()`-spawned `settings_tui.py`
+fed literal escape bytes was tried once while the operator had a live
+`run_convobox.py --tui --web` session running (140-159% CPU from
+real-time STT/TTS work) and never completed within 60s under that
+contention; a second attempt after that session ended also hung, and
+investigation found the FIRST attempt's own forked child had survived as
+an orphan (`timeout` only kills its direct child, not a `pty.fork()`-
+created grandchild) and was still holding real resources, confounding
+the second attempt. Both were killed by exact PID once identified;
+neither the operator's real sessions nor their config were touched by
+any of this. **Automated pty verification of this specific app is
+unreliable in this sandbox -- the fix that actually worked came from
+different tooling entirely, below.**
 
-**Live-pty automated verification was attempted twice more and both
-attempts failed for environment reasons, not code reasons** -- worth
-recording so the same dead end isn't repeated: a `pty.fork()`-spawned
-`settings_tui.py` fed literal escape bytes was tried once while the
-operator had a live `run_convobox.py --tui --web` session running (140-
-159% CPU from real-time STT/TTS work) and never completed within 60s
-under that contention; a second attempt after that session ended also
-hung, and investigation found the FIRST attempt's own forked child had
-survived as an orphan (`timeout` only kills its direct child, not a
-`pty.fork()`-created grandchild) and was still holding real resources,
-confounding the second attempt. Both were killed by exact PID once
-identified; neither the operator's real sessions nor their config were
-touched by any of this. Automated pty verification of this specific app
-remains unreliable in this sandbox -- live operator testing is the
-actual verification path going forward.
+**Root-caused and fixed via live key-by-key debug instrumentation, not
+another guess.** Rather than propose a third hypothesis blind,
+`run_tui()` gained an opt-in, zero-effect-unless-set debug trace
+(`CONVOBOX_TUI_DEBUG_KEYS=<path>`) logging every raw `read_key()` result,
+its wall-clock duration, and whether `selected_section`/`selected_field`
+actually changed. The operator ran it live and the log gave a direct,
+unambiguous answer: a single Right-arrow press was consistently split
+into **three separate `read_key()` calls** -- `'ESC'` (this `select()`
+timing out), then `'['` and `'C'` each read in ~0.0ms on the *next* two
+calls (already sitting in the kernel's input buffer by then, arriving a
+beat after the timeout fired) -- each landing as an independent no-op
+instead of one `"RIGHT"` token. Exactly the "need to press multiple
+times" symptom, now measured directly rather than inferred. The 0.3s
+timeout from the first attempt was confirmed via this same log to still
+be too tight (repeated splits with ~400-500ms between the pieces).
 
-**Next steps (pick up here):**
-1. Get the operator's actual "QC error" detail -- what specifically was
-   shown, and whether arrow navigation itself worked in that same test.
-2. If navigation still fails at 300ms, the timeout hypothesis is likely
-   wrong too, and the next candidate is worth checking directly: is
-   `state.move_field()`/`move_section()` actually being called and
-   mutating `selected_field`/`selected_section` (add a temporary debug
-   line to `_handle_browse()` if needed), to confirm whether the bug is
-   in key *reading* at all versus somewhere in the render/redraw path
-   not reflecting a state change that IS happening correctly.
+**Real fix: widened the timeout to 1.0s.** Still a non-issue for the one
+legitimate standalone-`ESC` case (cancelling a modal) this timeout
+exists to keep responsive -- no human perceives a <1s delay there as
+broken -- while giving this hardware's apparent inter-byte latency a
+much larger margin. **Confirmed live with a second debug-log run,
+cleared and re-captured from scratch**: every arrow press in the new log
+resolves into exactly one `'RIGHT'`/`'LEFT'`/`'UP'`/`'DOWN'` token and
+moves the selection correctly every time; the only non-moving cases are
+genuine boundaries (top of a field list, last tab) -- zero ESC/`[`/letter
+splits anywhere in the confirming log. This is the first of the three
+navigation hypotheses in this entry with real before/after log evidence
+behind it, not inference from a probe script or code reading alone.
+
+**The debug instrumentation was left in place**, opt-in and inert unless
+`CONVOBOX_TUI_DEBUG_KEYS` is set -- useful if a different terminal or a
+future regression needs the same kind of direct evidence again rather
+than re-deriving this same debugging path from scratch.
+
+**Not resolved by this entry:** the operator's earlier "another test
+reveals a QC error" comment was never followed up with detail (raised
+between the 0.3s and 1.0s attempts) -- if it names a real, separate
+issue, it hasn't been captured anywhere and should be asked about
+directly next time it comes up.

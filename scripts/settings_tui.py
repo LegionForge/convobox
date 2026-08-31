@@ -2060,23 +2060,24 @@ def read_key() -> str:
                 return "BACKSPACE"
             return ch
         # Live-reported 2026-08-30 on a slower (4th-gen i7) Linux laptop:
-        # arrow keys did nothing even though the terminal was confirmed
-        # (via a minimal blocking-read probe script, no timeout involved)
-        # to send perfectly standard CSI sequences ("\x1b[A" etc.) with no
-        # delay. The probe's success while this code failed pointed at the
-        # difference between them: this is the only place in the read path
-        # with a TIMEOUT gating whether more bytes get treated as part of
-        # the escape sequence at all. 50ms was tight enough that on this
-        # machine -- under this app's own per-frame draw() cost between
-        # keystrokes, not the terminal -- the '[' byte could still be
-        # in-flight when the timeout fired, misreading a real arrow key as
-        # a bare ESC (a silent no-op) and leaking its remaining bytes to
-        # be misread as literal keystrokes on the *next* call. Widened
-        # generously: 300ms is still imperceptible for the one real
-        # standalone-ESC case (quitting a modal) this timeout exists to
-        # keep fast, while giving real multi-byte sequences far more
-        # room on slow hardware.
-        if not select.select([sys.stdin], [], [], 0.3)[0]:
+        # arrow keys needed multiple presses before anything moved.
+        # CONVOBOX_TUI_DEBUG_KEYS instrumentation (run_tui()) caught it
+        # directly, not by inference: a single Right-arrow press was
+        # consistently split into three separate read_key() calls --
+        # 'ESC' (this select() timing out), then '[' and 'C' each read
+        # instantly on the NEXT two calls (already sitting in the kernel
+        # buffer by then, just arriving a beat after this timeout fired) --
+        # each landing as an independent no-op instead of one "RIGHT". An
+        # earlier attempt widened this from 50ms to 300ms on the same
+        # theory; live logs from that attempt showed 300ms still wasn't
+        # consistently enough (repeated ESC/[ /letter splits recorded with
+        # ~400-500ms between them). Widened further to 1.0s: still a
+        # non-issue for the one real standalone-ESC case (cancelling a
+        # modal) this timeout exists to keep responsive -- a human cannot
+        # perceive a <1s delay there as broken -- while giving real
+        # multi-byte sequences a much larger margin on this hardware's
+        # apparent inter-byte latency.
+        if not select.select([sys.stdin], [], [], 1.0)[0]:
             return "ESC"
         seq = sys.stdin.read(1)
         # Arrow/Home/End keys arrive as either CSI ("\x1b[A") or SS3
@@ -2778,17 +2779,47 @@ def run_tui(config_path: Path | None = None) -> None:
     _enable_ansi()
     sys.stdout.write("\x1b[?25l\x1b[2J")
     sys.stdout.flush()
+    # Opt-in, zero effect unless set (live-debugging aid, 2026-08-30): two
+    # reported arrow-key fixes (SS3 recognition, a wider select() timeout)
+    # each seemed plausible but neither had a confirmed-working live report
+    # -- "sorta" better, still needing multiple presses per field. Rather
+    # than guess a third root cause, this logs the exact raw key read and
+    # the resulting navigation state on every keypress, so the next live
+    # session gives ground truth instead of another hypothesis.
+    debug_path = os.environ.get("CONVOBOX_TUI_DEBUG_KEYS")
+    debug_file = open(debug_path, "a", encoding="utf-8") if debug_path else None  # noqa: SIM115
     try:
         running = True
         while running:
             draw(state)
+            before = (state.selected_section, state.selected_field)
+            t0 = time.monotonic()
             key = read_key()
+            read_ms = (time.monotonic() - t0) * 1000
+            if debug_file is not None:
+                debug_file.write(
+                    f"{time.strftime('%H:%M:%S')} read_key()={key!r} "
+                    f"(took {read_ms:.1f}ms) before=section{before[0]}/field{before[1]}\n"
+                )
+                debug_file.flush()
             if not key:
+                if debug_file is not None:
+                    debug_file.write("  -> empty key, looping without handling\n")
+                    debug_file.flush()
                 continue
             running = _handle_browse(state, key)
+            if debug_file is not None:
+                after = (state.selected_section, state.selected_field)
+                debug_file.write(
+                    f"  -> handled, after=section{after[0]}/field{after[1]} "
+                    f"(moved={after != before})\n"
+                )
+                debug_file.flush()
     finally:
         sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")
         sys.stdout.flush()
+        if debug_file is not None:
+            debug_file.close()
     print(state.status)
 
 
