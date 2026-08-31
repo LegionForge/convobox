@@ -261,7 +261,7 @@ def deconvolve(recording: np.ndarray, inverse_filter: np.ndarray) -> np.ndarray:
 
 def harmonic_offset_samples(n_harmonic: int, r: float, duration: float, sample_rate: int) -> int:
     delta_t = duration * np.log(n_harmonic) / r
-    return int(round(delta_t * sample_rate))
+    return round(delta_t * sample_rate)
 
 
 def schroeder_rt60(

@@ -30,7 +30,6 @@ import pytest
 
 from convobox.adapters import _windows_job_object as jo
 
-
 # --- non-Windows short-circuit: every function must degrade to a safe,
 # non-raising no-op without touching ctypes.windll at all (which doesn't
 # exist off Windows) ---
@@ -240,7 +239,7 @@ def test_detached_descendant_stays_visible_after_tracked_process_exits() -> None
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", check_command],
-                capture_output=True, text=True,
+                capture_output=True, text=True, check=False,
             )
             return bool(result.stdout.strip())
 
@@ -253,5 +252,5 @@ def test_detached_descendant_stays_visible_after_tracked_process_exits() -> None
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
-                capture_output=True,
+                capture_output=True, check=False,
             )

@@ -53,6 +53,7 @@ from convobox.interrupt_presets import resolve_preset
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.vad.segmenter import UtteranceSegmenter
 
+
 def _get_pycaw_endpoint_volume() -> Any:
     """Import pycaw and return the default output endpoint's
     IAudioEndpointVolume interface, lazily -- keeps this module importable
