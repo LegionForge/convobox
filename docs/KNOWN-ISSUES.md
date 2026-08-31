@@ -32,7 +32,7 @@ before trusting a voice session with write access; see also
 | [Backend can go silently busy for minutes with zero output](#backend-can-go-silently-busy-for-minutes-with-zero-output----root-cause-unconfirmed) | Backend | All | Diagnosed | Medium |
 | **Speech pipeline (STT / TTS / AEC)** | | | | |
 | [Kokoro can't synthesize past ~510 phonemes](#kokoro-cant-synthesize-past-510-phonemes----hard-model-limit-not-a-configmode-issue) | TTS (Kokoro) | All | Diagnosed | Low |
-| [WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)](#webrtc-apms-noise-suppression--auto-gain-control-are-unused-candidate-awaiting-go-ahead) | AEC | All | Candidate | — |
+| [WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)](#webrtc-apms-noise-suppression--auto-gain-control-are-unused-candidate-awaiting-go-ahead) | AEC | All | Live-tested 2026-08-31, awaiting JP's default-change decision | — |
 | **Platform and compatibility** | | | | |
 | [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
@@ -1468,12 +1468,26 @@ plus-aec-first-live-codex-linux-session.md`.
 
 ### WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)
 
-**Status:** candidate, not built. Offered to JP directly (2026-07-15
-evening, in response to his live report that mic+speaker AEC is still
-leaking despite the delay-hint fix); awaiting his go-ahead before
-touching this. The original "why not now" reasoning below is stale (it
-predated the extensive AEC investigation this session has since done)
-and is kept for history, not as the current blocker.
+**Status:** NS/AGC live-tested on real hardware 2026-08-31 (GitHub issue
+#323, the concrete scoped follow-up to this entry) -- **result: AGC
+measurably WORSENS open-speaker self-barge-in, NS alone gives a small
+real improvement.** Full methodology and numbers:
+`docs/field-notes/2026-08-31-issue-323-ns-agc-open-speaker-trial-agc-hurts-ns-mildly-helps.md`.
+32 real trials (4 configs x N=8), same `scripts/acoustic_calibration.py`
+harness this repo already trusts for delay/volume decisions. `agc_only`:
++29% false barge-ins, suppression cut from 9.91dB to 6.00dB, residual RMS
++59% vs baseline -- confirms AGC boosts POST-AEC residual echo/noise
+rather than taming the mic before AEC runs, the opposite of this entry's
+original hypothesis below. `ns_only`: -15% false barge-ins, +0.46dB
+suppression, lower residual RMS -- small but consistent across all three
+metrics. **Not yet applied to `aec.py`** -- a config-default change this
+close to barge-in/safety behavior needs JP's own review of this data
+before shipping, per this project's own "never a silent
+`automatic_config_edit`" convention. Decision needed: flip
+`enable_ns=True, ns_level=2` as the new default (leave AGC off,
+confirmed harmful), or leave both off and treat this as a documented
+negative-for-AGC / marginal-for-NS result not worth the added surface.
+Original 2026-07-15 offer/rationale kept below for history.
 
 **What's there but unused, with more real detail than previously
 recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
