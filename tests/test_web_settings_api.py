@@ -204,6 +204,71 @@ def test_test_endpoint_blocks_on_invalid_draft_without_probing(client: TestClien
     assert "test blocked" in response.json()["detail"]
 
 
+# --- /api/settings/test's own backend.command/web.bind_address escalation
+# guard (2026-09-01, same incident class as GitHub issue #235's finding
+# A4 above -- reported via an independently-verified cross-session
+# security review): unlike /api/settings/save, this route used to call
+# probe_backend()/etc. with the RAW draft config and no escalation check
+# at all, so a changed backend.command reached asyncio.create_subprocess_exec
+# with zero save required -- an arbitrary-command-execution gap, not just
+# a config-persistence one. Fixed by applying the same
+# _detect_web_settings_escalation() guard here too, before any probe
+# runs. probe_backend is monkeypatched to a spy that fails the test if
+# ever called, so these tests fail loudly if the guard is ever removed
+# and the probe becomes reachable again, not just if the status code
+# regresses.
+
+
+def test_test_endpoint_rejects_a_changed_backend_command_without_probing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    async def probe_backend_must_not_be_called(config: object) -> str:
+        raise AssertionError("probe_backend() must not run when the escalation guard fires")
+
+    monkeypatch.setattr(settings_tui, "probe_backend", probe_backend_must_not_be_called)
+    values = client.get("/api/settings").json()["values"]
+    values["backend"]["command"] = ["rm", "-rf", "/"]
+    response = client.post(
+        "/api/settings/test", json={"section": "backend", "field": None, "values": values}
+    )
+    assert response.status_code == 403
+    assert "backend.command" in response.json()["detail"]
+
+
+def test_test_endpoint_rejects_a_changed_bind_address_without_probing(
+    client: TestClient,
+) -> None:
+    # web section has no probe_* dispatch of its own (falls through to the
+    # generic "configuration validated" message) -- the guard must still
+    # fire before that fallback, not just before a real probe call.
+    values = client.get("/api/settings").json()["values"]
+    values["web"]["bind_address"] = "0.0.0.0"
+    response = client.post(
+        "/api/settings/test", json={"section": "web", "field": None, "values": values}
+    )
+    assert response.status_code == 403
+    assert "bind_address" in response.json()["detail"]
+
+
+def test_test_endpoint_allows_an_unchanged_backend_command_to_probe(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import settings_tui
+
+    async def fake_probe_backend(config: object) -> str:
+        return "backend probe ok"
+
+    monkeypatch.setattr(settings_tui, "probe_backend", fake_probe_backend)
+    values = client.get("/api/settings").json()["values"]
+    response = client.post(
+        "/api/settings/test", json={"section": "backend", "field": None, "values": values}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "backend probe ok"}
+
+
 # --- /api/settings/test's actual probe dispatch (tts/stt/backend/audio ->
 # the matching scripts.settings_tui.probe_* function, else a generic
 # "validated" message) and its exception-to-500 handling -- previously
