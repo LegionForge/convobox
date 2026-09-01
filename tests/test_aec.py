@@ -90,6 +90,33 @@ def test_process_preserves_chunk_length_for_arbitrary_sizes() -> None:
         assert len(canceller.process(chunk)) == size
 
 
+def test_ns_and_agc_default_off() -> None:
+    # No config knob existed for these before GitHub issue #323's
+    # 2026-08-31 live trial -- both were hardcoded off. Confirm the new
+    # defaults still leave the real underlying AudioProcessor's NS/AGC
+    # off unless explicitly enabled, checked against the real binding's
+    # own state accessor methods (ns_enabled()/agc_enabled()), not a mock.
+    canceller = EchoCanceller(delay_ms=50)
+    assert canceller._apm.ns_enabled() is False
+    assert canceller._apm.agc_enabled() is False
+
+
+def test_ns_and_agc_enable_flags_reach_the_real_audio_processor() -> None:
+    # The tested-good config from the 2026-08-31 trial (ns on at
+    # ns_level=2, agc left off) -- confirm the kwargs actually flow
+    # through to the real AudioProcessor construction, not just accepted
+    # and dropped.
+    canceller = EchoCanceller(delay_ms=50, ns_enabled=True, ns_level=2)
+    assert canceller._apm.ns_enabled() is True
+    assert canceller._apm.agc_enabled() is False
+
+
+def test_agc_enable_flag_reaches_the_real_audio_processor() -> None:
+    canceller = EchoCanceller(delay_ms=50, agc_enabled=True, agc_mode=1)
+    assert canceller._apm.agc_enabled() is True
+    assert canceller._apm.ns_enabled() is False
+
+
 def test_feed_reverse_accepts_tts_sample_rate() -> None:
     # The reference arrives at Piper's 22.05kHz; must not raise and must
     # buffer correctly across odd block sizes.

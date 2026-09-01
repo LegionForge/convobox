@@ -423,9 +423,19 @@ def _run_trial(
     tail_seconds: float,
     output_dir: Path,
     system_volume_percent: float | None = None,
+    ns_enabled: bool = False,
+    ns_level: int = 2,
+    agc_enabled: bool = False,
+    agc_mode: int = 1,
 ) -> TrialResult:
     auto = requested_delay_ms is None
-    canceller = EchoCanceller(delay_ms=requested_delay_ms or 100)
+    canceller = EchoCanceller(
+        delay_ms=requested_delay_ms or 100,
+        ns_enabled=ns_enabled,
+        ns_level=ns_level,
+        agc_enabled=agc_enabled,
+        agc_mode=agc_mode,
+    )
     player = AudioPlayer(device=output_device)
     delay_ready = threading.Event()
     reference_started = threading.Event()
@@ -701,6 +711,10 @@ def run(args: argparse.Namespace) -> Path:
                     tail_seconds=args.tail_seconds,
                     output_dir=output_dir,
                     system_volume_percent=volume_percent,
+                    ns_enabled=config.audio.aec_ns,
+                    ns_level=config.audio.aec_ns_level,
+                    agc_enabled=config.audio.aec_agc,
+                    agc_mode=config.audio.aec_agc_mode,
                 )
 
             def run_delay_sweep_at(volume_percent: float | None) -> list[TrialResult]:
@@ -800,6 +814,12 @@ def run(args: argparse.Namespace) -> Path:
             "input": config.audio.input_device,
             "output": config.audio.output_device,
             "sample_rate": config.audio.sample_rate,
+        },
+        "aec_ns_agc": {
+            "ns_enabled": config.audio.aec_ns,
+            "ns_level": config.audio.aec_ns_level,
+            "agc_enabled": config.audio.aec_agc,
+            "agc_mode": config.audio.aec_agc_mode,
         },
         "ambient": {
             "seconds": round(len(ambient_audio) / config.audio.sample_rate, 3),

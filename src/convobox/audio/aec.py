@@ -142,7 +142,15 @@ class AecDumpWriter:
 class EchoCanceller:
     """Stateful AEC: feed what the speakers play, filter what the mic hears."""
 
-    def __init__(self, delay_ms: int = 100, dump: AecDumpWriter | None = None) -> None:
+    def __init__(
+        self,
+        delay_ms: int = 100,
+        dump: AecDumpWriter | None = None,
+        ns_enabled: bool = False,
+        ns_level: int = 2,
+        agc_enabled: bool = False,
+        agc_mode: int = 1,
+    ) -> None:
         try:
             from aec_audio_processing import AudioProcessor
         except ImportError as exc:  # pragma: no cover - environment-specific
@@ -151,8 +159,18 @@ class EchoCanceller:
                 'not installed. Install it with: uv pip install -e ".[aec]" '
                 "(Windows wheels; other platforms may need a source build)"
             ) from exc
+        # ns_enabled/agc_enabled default off, matching AudioConfig's own
+        # aec_ns/aec_agc defaults -- see that field's docstring for the
+        # 2026-08-31 live trial (GitHub issue #323) that measured NS as a
+        # real small improvement and AGC as actively harmful (it boosts
+        # residual POST-AEC echo, not the raw pre-AEC mic signal).
         self._apm: Any = AudioProcessor(
-            enable_aec=True, enable_ns=False, enable_agc=False, enable_vad=False
+            enable_aec=True,
+            enable_ns=ns_enabled,
+            ns_level=ns_level,
+            enable_agc=agc_enabled,
+            agc_mode=agc_mode,
+            enable_vad=False,
         )
         self._apm.set_stream_format(_AEC_RATE, 1)
         self._apm.set_reverse_stream_format(_AEC_RATE, 1)

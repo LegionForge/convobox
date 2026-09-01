@@ -354,6 +354,71 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   `UNDER-CANCELLING` stretch and settles back to `0.30s` once AEC
   recovers, and that the wider window doesn't make the assistant feel
   sluggish to respond to real speech right after it stops talking.
+- **[E10] NS/AGC (`audio.aec_ns`/`aec_agc`, GitHub issue #323) --
+  cross-platform confirmation needed before any default change.**
+  **Status:** live-tested on ONE machine only so far (Mac mini M4,
+  macOS, external Logitech speakers via the analog jack + AIRHUG 28
+  mic) -- 32 real trials, 4 configs x N=8, via
+  `scripts/acoustic_calibration.py`. Result: `aec_ns` (NS, at
+  `aec_ns_level: 2`) alone gave a real, consistent improvement (-15%
+  false barge-ins, +0.46dB suppression, lower residual mic RMS across
+  all N=8). `aec_agc` (AGC) measured WORSE than off (+29% false
+  barge-ins, suppression cut nearly in half) -- it amplifies residual
+  POST-AEC echo, not the raw pre-AEC mic signal, the opposite of the
+  original "tame a hot mic" hypothesis. Full methodology and numbers:
+  `docs/field-notes/2026-08-31-issue-323-ns-agc-open-speaker-trial-agc-hurts-ns-mildly-helps.md`.
+  Both are now real, off-by-default config fields (`convobox.yaml`'s
+  `audio` section, or the Settings TUI/Web UI's "(advanced)" fields) --
+  no more throwaway test scripting needed to re-run this trial.
+
+  **What "done" looks like for this item:** the same trial, same
+  methodology, on a genuinely different machine/room/speaker-mic
+  geometry than the one already tested, to find out whether the
+  Mac-mini result generalizes or was specific to that setup's acoustic
+  path. One real confirming (or contradicting) run on a second platform
+  is worth more here than a bigger N on the same machine again.
+
+  **Prerequisites before running.**
+  1. Real, OPEN speakers and a real mic in the same room -- NOT
+     headphones/headset. This trial specifically exercises the
+     open-speaker acoustic-echo path `echo_cancellation` exists for; a
+     headset UAT pass would tell you nothing about this question (no
+     acoustic leakage to cancel in the first place). If the target
+     machine's normal setup is a headset, this needs a temporary swap
+     to open speakers for the duration of the trial.
+  2. `uv sync --extra dev --extra aec` -- Windows gets prebuilt
+     `aec-audio-processing` wheels (the easy path); other platforms may
+     need a source build (`meson`/`ninja`/`swig` first -- see
+     `src/convobox/audio/aec.py`'s own install-error message).
+  3. `python scripts/audio_devices.py --setup` to confirm the real
+     speaker/mic device names, and pin `audio.output_device`/
+     `audio.input_device` in `convobox.yaml` if the system defaults
+     aren't the open-speaker pair.
+  4. A quiet-ish room for the run (ambient noise affects false-barge-in
+     counts) -- doesn't need to be silent, just not mid-construction.
+
+  **Steps.**
+  1. `audio.echo_cancellation: true`, leave `aec_ns`/`aec_agc` unset
+     (both default `false`) -- baseline run:
+     `python scripts/acoustic_calibration.py --delay-candidates auto --repeat-each 8`.
+  2. Set `aec_ns: true` (leave `aec_ns_level` at its default `2`) and
+     re-run the same command -- NS-only run.
+  3. Revert `aec_ns: false`, set `aec_agc: true` (`aec_agc_mode` default
+     `1`) and re-run -- AGC-only run, to confirm (or refute) that it's
+     harmful here too, not just on the Mac mini.
+  4. Compare each run's `report.json` -> `aggregates_by_delay_ms` (one
+     entry per delay bucket, normally just one under `auto` resolution)
+     -- specifically `processed_false_barge_ins`, `mean_suppression_db`,
+     `mean_processed_rms`, same three metrics the original trial used.
+     Each run's own `aec_ns_agc` block (new field, this session) records
+     exactly which config produced it, for a clean record without
+     needing to remember which yaml edit went with which run.
+  5. Write up the result as a new dated field note (same format as
+     `docs/field-notes/2026-08-31-issue-323-ns-agc-open-speaker-trial-agc-hurts-ns-mildly-helps.md`
+     -- copy its structure) and update this entry + `docs/KNOWN-ISSUES.md`'s
+     NS/AGC entry with the cross-platform result. If NS holds up here
+     too, that's the point where flipping the shipped default becomes a
+     real decision to make, not before.
 
 ## 2. VAD segmentation
 
@@ -566,12 +631,17 @@ document. Re-derived from the doc's own current section list rather than
 patched piecemeal, to catch anything else that had drifted (nothing else
 did).
 
-0. **Newest, not yet UAT'd (2026-07-29, PR #175/#178) -- run this first.**
-   `[T6]` (TTS synthesis/playback failures now surfaced, not swallowed)
-   is still live-unverified -- provoke a real synthesis failure and
-   confirm it logs clearly instead of silently truncating. `[G11]` (false
-   interruption marker on every waited-out turn) is now closed --
-   live-confirmed 2026-07-30, no false positives/negatives.
+0. **Newest, not yet UAT'd -- run this first.**
+   `[E10]` (NS/AGC, GitHub issue #323) is the current top priority:
+   live-tested on ONE machine (Mac mini M4/macOS) only, needs a second
+   platform (Helios/Windows first, per JP's own priority call
+   2026-09-01) to confirm the result generalizes before any shipped
+   default changes. `[T6]` (TTS synthesis/playback failures now
+   surfaced, not swallowed) is still live-unverified -- provoke a real
+   synthesis failure and confirm it logs clearly instead of silently
+   truncating. `[G11]` (false interruption marker on every waited-out
+   turn) is now closed -- live-confirmed 2026-07-30, no false
+   positives/negatives.
 1. Happy path: idle → speak → response spoken (N1-N4, T2).
 2. Hard stop safety: S1-S5.
 3. Echo / half-duplex: E1-E5 (speakers ON).

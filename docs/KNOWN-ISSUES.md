@@ -32,7 +32,7 @@ before trusting a voice session with write access; see also
 | [Backend can go silently busy for minutes with zero output](#backend-can-go-silently-busy-for-minutes-with-zero-output----root-cause-unconfirmed) | Backend | All | Diagnosed | Medium |
 | **Speech pipeline (STT / TTS / AEC)** | | | | |
 | [Kokoro can't synthesize past ~510 phonemes](#kokoro-cant-synthesize-past-510-phonemes----hard-model-limit-not-a-configmode-issue) | TTS (Kokoro) | All | Diagnosed | Low |
-| [WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)](#webrtc-apms-noise-suppression--auto-gain-control-are-unused-candidate-awaiting-go-ahead) | AEC | All | Live-tested 2026-08-31, awaiting JP's default-change decision | — |
+| [WebRTC APM's noise suppression / auto gain control are unused (candidate, awaiting go-ahead)](#webrtc-apms-noise-suppression--auto-gain-control-are-unused-candidate-awaiting-go-ahead) | AEC | All | Live-tested + exposed as opt-in config 2026-09-01, awaiting cross-platform UAT before default-change decision | — |
 | **Platform and compatibility** | | | | |
 | [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
@@ -1480,14 +1480,27 @@ harness this repo already trusts for delay/volume decisions. `agc_only`:
 rather than taming the mic before AEC runs, the opposite of this entry's
 original hypothesis below. `ns_only`: -15% false barge-ins, +0.46dB
 suppression, lower residual RMS -- small but consistent across all three
-metrics. **Not yet applied to `aec.py`** -- a config-default change this
-close to barge-in/safety behavior needs JP's own review of this data
-before shipping, per this project's own "never a silent
-`automatic_config_edit`" convention. Decision needed: flip
-`enable_ns=True, ns_level=2` as the new default (leave AGC off,
-confirmed harmful), or leave both off and treat this as a documented
-negative-for-AGC / marginal-for-NS result not worth the added surface.
-Original 2026-07-15 offer/rationale kept below for history.
+metrics.
+
+**Update (2026-09-01): exposed as an opt-in advanced config knob, default
+UNCHANGED.** `audio.aec_ns`/`aec_ns_level`/`aec_agc`/`aec_agc_mode` now
+exist in `AppConfig` (both `false` by default -- exposing the knob does
+not itself change any existing setup's behavior) and are wired through
+`EchoCanceller`, `run_convobox.py`, `acoustic_calibration.py`, and the
+Settings TUI/Web UI (both generated from the same `FieldSpec` list, so
+no separate UI code to keep in sync -- each field's help text repeats
+the tested numbers above and links back to the field note). The SHIPPED
+DEFAULT still does not reflect the tested-good NS value -- deliberate,
+not an oversight: this project's own `acoustic_calibration.py` always
+writes `"automatic_config_edit": false`, and a default change this close
+to barge-in/safety behavior should get cross-platform confirmation
+first, not ship off one Mac-mini trial. **Priority next step:** Windows
+(Helios) UAT with `aec_ns: true, aec_ns_level: 2` via the same
+`acoustic_calibration.py` harness (no more monkeypatch needed -- it's a
+real config field now, also written into each run's `report.json` under
+`aec_ns_agc` for traceability), then Linux, before deciding whether to
+flip the shipped default. Original 2026-07-15 offer/rationale kept below
+for history.
 
 **What's there but unused, with more real detail than previously
 recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
