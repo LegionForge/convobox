@@ -140,3 +140,48 @@ barge-in/safety behavior deserves a second look before it ships.
   defaults, not independently tuned -- a future session could sweep
   `ns_level` 0-3 to see whether a stronger/weaker NS setting does even
   better, now that the direction (NS helps, AGC hurts) is established.
+
+## Follow-up, 2026-09-01: `ns_level` sweep (0-3), then a 2-vs-3 repeat confirmation
+
+Now that `aec_ns`/`aec_ns_level` are real config fields (PR #354), this
+caveat's own suggested next step took ten minutes instead of a new
+monkeypatch driver. Same machine, same open-speaker setup, same
+methodology (`--delay-candidates auto --repeat-each 8`).
+
+**Pass 1 (all four levels, one run each):**
+
+| `ns_level` | false barge-ins /8 | suppression dB | residual RMS |
+|---|---|---|---|
+| 0 (low) | 62 | 9.18 | 0.0544 |
+| 1 (moderate) | 59 | 7.85 | 0.0629 |
+| 2 (high -- the value tested/documented above) | 59 | 9.50 | 0.0531 |
+| **3 (very high)** | **45** | 9.01 | 0.0562 |
+
+All four beat the no-NS baseline (73) on false barge-ins, confirming the
+original finding wasn't specific to `ns_level=2`. `ns_level=3` stood out
+as noticeably better than the 0/1/2 cluster (which are within each
+other's own trial-to-trial noise -- individual repeats within a single
+level swung suppression 5.8-37.5dB).
+
+**Pass 2, same day, later: a dedicated 2-vs-3 repeat to confirm the gap
+wasn't a one-off.** Absolute counts moved a lot session to session (real
+ambient-noise variance, nothing wrong) -- `ns_level=2` alone went from
+59 to 88 false barge-ins between the two passes. But the RELATIVE
+ordering held both times:
+
+| pass | `ns_level=2` | `ns_level=3` | relative gap |
+|---|---|---|---|
+| 1 | 59 | 45 | -24% |
+| 2 | 88 | 59 | -33% |
+
+`ns_level=3` beat `ns_level=2` in both independent passes, by a similar
+relative margin each time, despite the absolute numbers moving a lot.
+Suppression/RMS stayed statistically indistinguishable between the two
+levels both times (<0.6dB, <0.001 RMS apart) -- only the false-barge-in
+count discriminates between them.
+
+**Not yet applied anywhere.** `aec_ns_level`'s shipped default stays `2`
+-- this is a same-machine result (confirmed twice, but one room/setup),
+and `docs/UAT-checklist.md`'s `[E10]` cross-platform confirmation is
+still the gating step before any default changes, now updated to test
+both `ns_level=2` and `ns_level=3` on the second platform.

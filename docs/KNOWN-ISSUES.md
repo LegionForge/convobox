@@ -1494,13 +1494,26 @@ DEFAULT still does not reflect the tested-good NS value -- deliberate,
 not an oversight: this project's own `acoustic_calibration.py` always
 writes `"automatic_config_edit": false`, and a default change this close
 to barge-in/safety behavior should get cross-platform confirmation
-first, not ship off one Mac-mini trial. **Priority next step:** Windows
-(Helios) UAT with `aec_ns: true, aec_ns_level: 2` via the same
+first, not ship off one Mac-mini trial.
+
+**Update (2026-09-01): `ns_level` sweep (0-3) run on the same Mac mini,
+then a 2-vs-3 repeat to confirm.** All four levels beat no-NS; `ns_level=3`
+(very high) beat the documented `ns_level=2` (high) value in BOTH
+independent passes (-24% and -33% false barge-ins respectively), a
+consistent relative gap despite absolute counts moving a lot session to
+session. Full numbers:
+`docs/field-notes/2026-08-31-issue-323-ns-agc-open-speaker-trial-agc-hurts-ns-mildly-helps.md`'s
+2026-09-01 follow-up section. Still same-machine data -- doesn't change
+the "needs cross-platform confirmation before any default change" call,
+just adds a second candidate value to confirm there.
+
+**Priority next step:** Windows (Helios) UAT with `aec_ns: true`,
+testing BOTH `aec_ns_level: 2` and `aec_ns_level: 3` via the same
 `acoustic_calibration.py` harness (no more monkeypatch needed -- it's a
 real config field now, also written into each run's `report.json` under
 `aec_ns_agc` for traceability), then Linux, before deciding whether to
-flip the shipped default. Original 2026-07-15 offer/rationale kept below
-for history.
+flip the shipped default or which value to flip it to. Original
+2026-07-15 offer/rationale kept below for history.
 
 **What's there but unused, with more real detail than previously
 recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
