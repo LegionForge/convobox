@@ -44,6 +44,45 @@ class AudioConfig(BaseModel):
     # measured a genuinely better fixed value for this exact hardware and
     # want it to override auto-tuning.
     aec_delay_ms: int | None = None
+    # Noise suppression / auto gain control -- WebRTC APM's classic NS
+    # (spectral-subtraction) and legacy AGC1, the same binding as
+    # echo_cancellation but two separate stages EchoCanceller previously
+    # hardcoded off entirely (no config knob existed before this). Both
+    # default off here too -- exposing the knob must not silently change
+    # any existing setup's behavior, even though NS tested well below.
+    #
+    # Live-tested on real open-speaker hardware, 2026-08-31 (GitHub issue
+    # #323, one Mac mini + external speakers, N=8 real trials per
+    # config): aec_ns alone gave a small, consistent real improvement
+    # (-15% false barge-ins, +0.46dB suppression, lower residual mic
+    # RMS). aec_agc measurably WORSENED it (+29% false barge-ins,
+    # suppression cut nearly in half) -- it boosts whatever's left in
+    # the mic signal AFTER AEC already ran, including residual echo, not
+    # the raw pre-AEC signal the "tame a hot mic" hypothesis expected.
+    # Full methodology and numbers: docs/field-notes/2026-08-31-issue-
+    # 323-ns-agc-open-speaker-trial-agc-hurts-ns-mildly-helps.md.
+    # Cross-platform (Windows/Linux) UAT is still pending -- see
+    # docs/KNOWN-ISSUES.md before changing either default.
+    aec_ns: bool = False
+    aec_ns_level: int = 2  # 0=low, 1=moderate, 2=high (tested value), 3=very high
+    aec_agc: bool = False
+    aec_agc_mode: int = 1  # 0=adaptive analog, 1=adaptive digital, 2=fixed digital
+
+    @field_validator("aec_ns_level")
+    @classmethod
+    def _validate_aec_ns_level(cls, v: int) -> int:
+        if not 0 <= v <= 3:
+            raise ValueError(f"audio.aec_ns_level must be 0-3 (low/moderate/high/very high), not {v!r}")
+        return v
+
+    @field_validator("aec_agc_mode")
+    @classmethod
+    def _validate_aec_agc_mode(cls, v: int) -> int:
+        if not 0 <= v <= 2:
+            raise ValueError(
+                f"audio.aec_agc_mode must be 0-2 (adaptive analog/adaptive digital/fixed digital), not {v!r}"
+            )
+        return v
 
 
 class VADConfig(BaseModel):
