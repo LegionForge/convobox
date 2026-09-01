@@ -59,9 +59,14 @@ def _detect_web_settings_escalation(current: AppConfig, draft: AppConfig) -> str
     must never be allowed to change, else None.
 
     Found via autonomous codebase review, 2026-08-08 (GitHub issue #235,
-    finding A4). /api/settings/save shares this whole web UI's no-auth,
-    loopback-only trust boundary -- fine for most settings, but two
-    fields here are categorically higher-stakes than the rest:
+    finding A4). Called by BOTH /api/settings/save and /api/settings/test
+    (the latter added 2026-09-01, same incident class as the original
+    finding -- test_settings called probe_backend() with an attacker-
+    controlled backend.command and no guard at all, an arbitrary-command-
+    execution gap that didn't even need a save to trigger). Both routes
+    share this whole web UI's no-auth, loopback-only trust boundary --
+    fine for most settings, but two fields here are categorically
+    higher-stakes than the rest:
     backend.command is a list passed straight to
     asyncio.create_subprocess_exec (arbitrary-command-execution-on-next-
     start), and web.bind_address controls whether this same unauthenticated
@@ -190,6 +195,10 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
         from scripts import settings_tui
 
         config = _draft_config(req.values)
+        current = load_config(config_path)
+        escalation = _detect_web_settings_escalation(current, config)
+        if escalation is not None:
+            raise HTTPException(403, escalation)
         report = settings_tui.validate_config(config)
         if report.errors:
             raise HTTPException(409, f"test blocked: {report.errors[0]}")
