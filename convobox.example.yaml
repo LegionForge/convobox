@@ -167,6 +167,21 @@ audio:
                           # 2026-07-15 -- a stale 100ms hint kept AEC3
                           # from converging against a real ~222ms delay).
 
+  # aec_ns / aec_ns_level / aec_agc / aec_agc_mode: ADVANCED, both off by
+  # default (no effect unless echo_cancellation is also true). WebRTC
+  # APM's noise suppression and legacy AGC1, layered on top of AEC.
+  # Live-tested on one open-speaker setup, 2026-08-31 (GitHub issue
+  # #323, docs/field-notes/2026-08-31-issue-323-ns-agc-open-speaker-
+  # trial-agc-hurts-ns-mildly-helps.md): NS alone measured a real, small
+  # improvement; AGC measured WORSE than off (it amplifies whatever's
+  # left in the mic signal AFTER AEC already ran, not the raw pre-AEC
+  # signal). Cross-platform confirmation still pending -- see
+  # docs/KNOWN-ISSUES.md before relying on this away from that setup.
+  # aec_ns: true            # the tested-good value; false is the default
+  # aec_ns_level: 2         # 0=low, 1=moderate, 2=high (tested), 3=very high
+  # aec_agc: false           # tested WORSE than off -- not a recommendation
+  # aec_agc_mode: 1          # 0=adaptive analog, 1=adaptive digital, 2=fixed digital
+
 # ---------------------------------------------------------------------------
 # interaction -- barge-in (talking over a response).
 # ---------------------------------------------------------------------------

@@ -2265,6 +2265,10 @@ async def run(args: argparse.Namespace) -> None:
         canceller = EchoCanceller(
             delay_ms=initial_delay_ms,
             dump=aec_dump,
+            ns_enabled=config.audio.aec_ns,
+            ns_level=config.audio.aec_ns_level,
+            agc_enabled=config.audio.aec_agc,
+            agc_mode=config.audio.aec_agc_mode,
         )
         delay_estimated = False
 

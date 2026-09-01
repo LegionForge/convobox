@@ -76,6 +76,34 @@ def test_aec_delay_ms_defaults_to_none() -> None:
     assert AudioConfig().aec_delay_ms is None
 
 
+# --- NS/AGC (GitHub issue #323, live-tested 2026-08-31) ---
+
+
+def test_aec_ns_and_agc_default_off() -> None:
+    # Exposing the knob must not silently change any existing setup's
+    # behavior, even though NS tested well -- see AudioConfig's own
+    # field comment for the trial this defaults-off choice is based on.
+    config = AudioConfig()
+    assert config.aec_ns is False
+    assert config.aec_agc is False
+    assert config.aec_ns_level == 2
+    assert config.aec_agc_mode == 1
+
+
+def test_aec_ns_level_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError, match="aec_ns_level must be 0-3"):
+        AudioConfig(aec_ns_level=4)
+    with pytest.raises(ValueError, match="aec_ns_level must be 0-3"):
+        AudioConfig(aec_ns_level=-1)
+
+
+def test_aec_agc_mode_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError, match="aec_agc_mode must be 0-2"):
+        AudioConfig(aec_agc_mode=3)
+    with pytest.raises(ValueError, match="aec_agc_mode must be 0-2"):
+        AudioConfig(aec_agc_mode=-1)
+
+
 def test_approval_phrase_is_opt_in_and_validated() -> None:
     assert InteractionConfig().approval_phrase is None
     assert InteractionConfig(approval_phrase="cobalt night and gale").approval_phrase == "cobalt night and gale"
