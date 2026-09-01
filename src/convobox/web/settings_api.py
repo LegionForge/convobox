@@ -54,19 +54,57 @@ def _draft_config(values: dict[str, Any]) -> AppConfig:
         raise HTTPException(422, f"invalid settings payload: {exc}") from None
 
 
+def _authorized_draft_config(values: dict[str, Any], config_path: Path) -> AppConfig:
+    """Build a draft AppConfig AND enforce the escalation guard in one
+    step -- the single entry point every route that can reach a
+    dangerous downstream sink (save_with_backup's disk write, or a
+    probe_*'s real subprocess spawn / device I/O) must use instead of
+    calling `_draft_config` directly.
+
+    Why this exists (2026-09-01): `_detect_web_settings_escalation` was
+    added 2026-08-08 for GitHub issue #235's finding A4, but only wired
+    into /api/settings/save. /api/settings/test sat right next to it in
+    this same file, already reachable with an attacker-controlled
+    backend.command, and calling probe_backend() -> real
+    asyncio.create_subprocess_exec() with zero save required -- an
+    arbitrary-command-execution gap that went unnoticed for almost a
+    month (reported via an independently cross-verified security
+    review, fixed same day: see git blame on this function). The bug
+    wasn't a missing check so much as a missing check that was opt-in
+    per route -- easy to add once, easy to forget to add again next to
+    it. Centralizing it here removes that failure mode structurally: a
+    THIRD dangerous route added later can't reopen this class just by
+    someone forgetting to call the guard, because there is no way to
+    get a validated config out of this function without it.
+
+    /api/settings/validate and /api/settings/schema deliberately do NOT
+    use this -- they never reach a dangerous sink (pure validation /
+    field enumeration), so requiring it there would add friction with
+    no safety benefit.
+    """
+    config = _draft_config(values)
+    current = load_config(config_path)
+    escalation = _detect_web_settings_escalation(current, config)
+    if escalation is not None:
+        raise HTTPException(403, escalation)
+    return config
+
+
 def _detect_web_settings_escalation(current: AppConfig, draft: AppConfig) -> str | None:
     """Return an error message if `draft` changes a field this route
     must never be allowed to change, else None.
 
     Found via autonomous codebase review, 2026-08-08 (GitHub issue #235,
-    finding A4). Called by BOTH /api/settings/save and /api/settings/test
-    (the latter added 2026-09-01, same incident class as the original
-    finding -- test_settings called probe_backend() with an attacker-
-    controlled backend.command and no guard at all, an arbitrary-command-
-    execution gap that didn't even need a save to trigger). Both routes
-    share this whole web UI's no-auth, loopback-only trust boundary --
-    fine for most settings, but two fields here are categorically
-    higher-stakes than the rest:
+    finding A4). Only ever called through `_authorized_draft_config`
+    above, not directly -- see that function's own docstring for why
+    (2026-09-01: this same check existed but wasn't wired into
+    /api/settings/test for almost a month, an arbitrary-command-
+    execution gap that didn't even need a save to trigger; centralizing
+    the call site is what actually closes that class of mistake, not
+    just this one instance of it). Every route reachable through that
+    helper shares this whole web UI's no-auth, loopback-only trust
+    boundary -- fine for most settings, but two fields here are
+    categorically higher-stakes than the rest:
     backend.command is a list passed straight to
     asyncio.create_subprocess_exec (arbitrary-command-execution-on-next-
     start), and web.bind_address controls whether this same unauthenticated
@@ -175,11 +213,7 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
     async def save_settings(draft: SettingsDraft) -> dict[str, Any]:
         from scripts import settings_tui
 
-        config = _draft_config(draft.values)
-        current = load_config(config_path)
-        escalation = _detect_web_settings_escalation(current, config)
-        if escalation is not None:
-            raise HTTPException(403, escalation)
+        config = _authorized_draft_config(draft.values, config_path)
         report = settings_tui.validate_config(config)
         if report.errors:
             raise HTTPException(422, {"errors": report.errors, "warnings": report.warnings})
@@ -194,11 +228,7 @@ def add_settings_routes(app: FastAPI, config_path: Path) -> None:
     async def test_settings(req: SettingsTestRequest) -> dict[str, str]:
         from scripts import settings_tui
 
-        config = _draft_config(req.values)
-        current = load_config(config_path)
-        escalation = _detect_web_settings_escalation(current, config)
-        if escalation is not None:
-            raise HTTPException(403, escalation)
+        config = _authorized_draft_config(req.values, config_path)
         report = settings_tui.validate_config(config)
         if report.errors:
             raise HTTPException(409, f"test blocked: {report.errors[0]}")
