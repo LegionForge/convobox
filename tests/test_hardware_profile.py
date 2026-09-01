@@ -16,8 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import hardware_profile as hp  # noqa: E402
-
+import hardware_profile as hp
 
 SAMPLE_RATE = 48000
 
@@ -84,7 +83,7 @@ def test_generate_ess_covers_the_full_requested_band():
     # Regression test for the missing-2*pi bug: the sweep's actual
     # instantaneous frequency must reach f2 near the end, not f2/(2*pi).
     f1, f2, duration = 100.0, 8000.0, 2.0
-    sweep, r = hp.generate_ess(f1, f2, duration, SAMPLE_RATE, amplitude=0.5)
+    sweep, _r = hp.generate_ess(f1, f2, duration, SAMPLE_RATE, amplitude=0.5)
     # Instantaneous frequency near the end of the sweep should be close to f2.
     tail = sweep[-int(0.05 * SAMPLE_RATE) :]
     freqs, mag = hp.spectrum_mag(tail, SAMPLE_RATE)
