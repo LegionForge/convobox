@@ -63,8 +63,35 @@ _MAX_BROWSE_RESULTS = 500
 # interactive artifact still works. SVG can embed <script> too, so it
 # gets the same treatment as HTML, not just image formats that can't
 # execute anything.
+#
+# Residual finding, 2026-09-02 (cross-session review, "SOL"): `sandbox`
+# alone blocks same-origin standing but does NOT restrict outbound
+# network requests -- fetch()/XHR/<img>/sendBeacon to an attacker's own
+# server are all still permitted from a sandboxed-but-scriptful page.
+# "Open in new tab" appends this session's real /api/* bearer token to
+# the URL (index.html's authUrl(), the only way to authenticate a plain
+# top-level navigation -- no request headers to set). An
+# attacker-influenced HTML/SVG artifact could read that token straight
+# out of location.search and exfiltrate it externally, which would then
+# be usable against the real API (worse if web.bind_address reaches
+# beyond loopback). `default-src 'none'` closes every outbound channel
+# (fetch/XHR/EventSource/img/beacon/frame/object) the artifact's own
+# script could use to phone home; `script-src`/`style-src 'unsafe-inline'`
+# keep legitimate self-contained artifacts (inline <script>/<style>,
+# the common case for generated HTML) rendering and interactive;
+# `img-src data:` keeps embedded base64 images working without
+# reopening an external-image exfil channel. `Referrer-Policy: no-referrer`
+# additionally stops the token-bearing URL itself leaking via the
+# Referer header if the artifact links out to somewhere external.
 _SCRIPT_CAPABLE_EXTENSIONS = frozenset({".html", ".htm", ".svg"})
-_SCRIPT_CAPABLE_CSP = {"Content-Security-Policy": "sandbox allow-scripts"}
+_SCRIPT_CAPABLE_CSP = {
+    "Content-Security-Policy": (
+        "sandbox allow-scripts; default-src 'none'; "
+        "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src data:"
+    ),
+    "Referrer-Policy": "no-referrer",
+}
 
 
 def _resolve_working_dir(working_dir: Path | None) -> Path:
