@@ -387,6 +387,25 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   path. One real confirming (or contradicting) run on a second platform
   is worth more here than a bigger N on the same machine again.
 
+  **Update (2026-09-02): run on Helios/Windows, result is inconclusive
+  -- not a clean confirm or contradiction.** A first single-run pass per
+  config swung wildly (a same-config `aec_agc` repeat went 0%->100%
+  self-barge rejection), which turned out NOT to be mainly an
+  ambient-noise artifact: a 20-run overnight battery (5 interleaved
+  cycles x 4 configs, ambient RMS logged per run) found only a weak
+  ambient/outcome correlation overall (r=-0.2) -- **run-to-run variance
+  at N=8 is the real problem, and it's comparable in size to any
+  difference between configs.** Pooled (N=40/config): `ns_level=3` looks
+  best (87.5% mean rejection) -- tentatively supports the Mac mini's
+  level-3-beats-level-2 result -- but `ns_level=2` looks WORSE than
+  baseline here (60.0% vs 66.9%), contradicting the Mac mini's
+  ns-alone-helps result. Full numbers:
+  `docs/field-notes/2026-09-02-e10-helios-windows-cross-platform-battery-run-to-run-variance-dominates.md`.
+  This item stays open -- the revised next step is likely a higher-N or
+  repeat-based protocol change to `acoustic_calibration.py` itself
+  before a third platform (Linux) is worth running, not a straight
+  go/no-go on the current N=8 methodology.
+
   **Prerequisites before running.**
   1. Real, OPEN speakers and a real mic in the same room -- NOT
      headphones/headset. This trial specifically exercises the
