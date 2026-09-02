@@ -1507,13 +1507,30 @@ session. Full numbers:
 the "needs cross-platform confirmation before any default change" call,
 just adds a second candidate value to confirm there.
 
-**Priority next step:** Windows (Helios) UAT with `aec_ns: true`,
-testing BOTH `aec_ns_level: 2` and `aec_ns_level: 3` via the same
-`acoustic_calibration.py` harness (no more monkeypatch needed -- it's a
-real config field now, also written into each run's `report.json` under
-`aec_ns_agc` for traceability), then Linux, before deciding whether to
-flip the shipped default or which value to flip it to. Original
-2026-07-15 offer/rationale kept below for history.
+**Update (2026-09-02): Windows (Helios) cross-platform run does NOT
+clearly confirm the Mac mini result -- and surfaces a bigger problem
+with the N=8-per-run methodology itself.** A first single-run pass per
+config looked wildly inconsistent (including a same-config repeat
+swinging 0% to 100% self-barge rejection), which first looked like an
+ambient-noise confound. A 20-run overnight battery (5 interleaved cycles
+x 4 configs, ambient RMS logged per run) showed ambient noise is only a
+weak factor overall (Pearson r=-0.2 across all runs, near-zero within
+three of the four configs) -- the real driver is **run-to-run variance
+at N=8 that's comparable in size to any difference between configs**.
+Pooled per-config (N=40 each): `ns_level=3` looks best (87.5% mean
+rejection, tightest spread) -- tentatively supporting the Mac mini's
+level-3-beats-level-2 finding -- but `ns_level=2` looks WORSE than doing
+nothing on Helios (60.0% mean vs baseline's 66.9%), contradicting the
+Mac mini's original ns-alone-helps result. `aec_agc` also showed a real,
+Helios-specific pattern the Mac mini data didn't surface: its outcome
+correlates with ambient noise (r=-0.66) -- degrades disproportionately
+in louder rooms -- while the other three configs don't. Full numbers,
+methodology, and caveats:
+`docs/field-notes/2026-09-02-e10-helios-windows-cross-platform-battery-run-to-run-variance-dominates.md`.
+Given the spread within each config, none of this is confident enough to
+act on yet -- **still not applied anywhere**, shipped default unchanged,
+`[E10]` stays open pending JP's review and likely a redesigned
+higher-N/repeat protocol rather than a straight go/no-go on Linux next.
 
 **What's there but unused, with more real detail than previously
 recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
