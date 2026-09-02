@@ -2036,6 +2036,13 @@ async def run(args: argparse.Namespace) -> None:
         listening_bridge = WebListeningBridge()
         safeword_bridge = WebSafewordBridge()
         text_bridge = WebTextInputBridge()
+        # Real per-session auth for the browser UI itself (2026-09-01,
+        # GitHub security review) -- same "random token over a loopback
+        # channel" shape as mcp_token above and the approval-hook TCP
+        # server, not a new pattern. Embedded in the URL this session
+        # prints below; see web/app.py's require_web_ui_token for the
+        # full reasoning (why this, not a cookie).
+        web_ui_token = secrets.token_hex(16)
         web_app = create_app(
             db=web_app_history,
             broadcaster=web_broadcaster,
@@ -2051,6 +2058,8 @@ async def run(args: argparse.Namespace) -> None:
             ),
             mcp_token=mcp_token,
             web_forwarder=web_forwarder,
+            web_ui_token=web_ui_token,
+            port=config.web.port,
         )
         web_uvicorn_config = uvicorn.Config(
             web_app,
@@ -2070,9 +2079,16 @@ async def run(args: argparse.Namespace) -> None:
         web_server_watchdog = asyncio.ensure_future(
             _cancel_main_on_web_server_exit(web_server_task, main_task)
         )
+        # host in the printed URL is deliberately the loopback name a
+        # browser can actually open, not config.web.bind_address verbatim
+        # -- 0.0.0.0 is a valid bind address but not a valid URL host to
+        # navigate to from this same machine.
+        web_url_host = (
+            "127.0.0.1" if config.web.bind_address == "0.0.0.0" else config.web.bind_address  # nosec B104
+        )
         log.info(
-            "web UI listening on http://%s:%d (history_tracking=%s)",
-            config.web.bind_address, config.web.port, config.web.history_tracking_enabled,
+            "web UI listening on http://%s:%d/?token=%s (history_tracking=%s)",
+            web_url_host, config.web.port, web_ui_token, config.web.history_tracking_enabled,
         )
 
     # Live UAT, 2026-08-10: real NameError, reproduced on the first backend

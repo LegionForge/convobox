@@ -115,6 +115,8 @@ def create_app(
     working_dir: Path | None = None,
     mcp_token: str | None = None,
     web_forwarder: WebEventForwarder | None = None,
+    web_ui_token: str | None = None,
+    port: int | None = None,
 ) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
     display = display if display is not None else DisplayConfig()
@@ -122,13 +124,72 @@ def create_app(
     app.state.db = db
     app.state.broadcaster = broadcaster
 
+    # Scoped to the ACTUAL bound port when known, not any localhost port --
+    # see require_web_ui_token's own docstring below for why the token
+    # check is the real control now; this is defense in depth on top of
+    # it, closing "any other local process/page that happens to guess or
+    # already know the CSRF header's constant value gets treated as
+    # trusted" (found via an independently cross-verified security
+    # review, 2026-09-01). `port=None` (most existing tests, which don't
+    # care about this) keeps the original any-port regex so nothing here
+    # forces every test to start passing a port.
+    origin_regex = (
+        rf"^https?://(127\.0\.0\.1|localhost):{port}$" if port is not None else _LOCALHOST_ORIGIN_REGEX
+    )
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=_LOCALHOST_ORIGIN_REGEX,
+        allow_origin_regex=origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_web_ui_token(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Real authentication for the browser-facing web UI, not just the
+        CSRF header above (which forces a preflight but checks for a
+        constant, public string -- anyone who's read this file knows it,
+        so it stops a same-origin-blind cross-origin PAGE but not a local
+        process that already knows what to send).
+
+        A random per-session bearer token, generated once in
+        run_convobox.py and embedded in the URL it prints
+        (`http://host:port/?token=...`) -- the SAME "random per-session
+        token over a loopback channel" pattern already used for the MCP
+        mount (web/mcp_server.py's _require_bearer_token) and the
+        approval-hook TCP server (adapters/claude_code.py), not a new
+        pattern invented here. Deliberately NOT a cookie: a cookie gets
+        attached by the browser automatically regardless of which page
+        triggered the request (subject to SameSite rules, and a DNS-
+        rebinding attacker page specifically exploits this) -- a bearer
+        token/query param requires the CALLING JS to already know the
+        value, which only this app's own frontend (having read it once
+        from `location.search` at initial load) does.
+
+        Checked on /api/* only -- the static HTML/JS/CSS shell itself
+        isn't sensitive (no secrets embedded in it beyond what an
+        attacker would need the token for anyway), matching how a
+        Jupyter-style login flow serves its shell unauthenticated but
+        gates the actual API. /mcp is exempt: it already carries its own
+        independent bearer-token auth (mcp_server.py), and its client is
+        a CLI subprocess, not a browser page reading this URL.
+
+        Accepts the token via `Authorization: Bearer <token>` (what
+        index.html's fetch() calls send) OR a `?token=` query param
+        (for the handful of GET-by-URL cases a browser can't attach a
+        custom header to: the EventSource live-event stream, and the
+        artifact pane's direct `<img src>`/`<iframe src>`/download-link
+        URLs). `web_ui_token=None` (most existing tests, and any
+        create_app() caller that doesn't pass one) leaves this check off
+        entirely -- run_convobox.py's own real startup path always
+        generates one when the web UI is enabled.
+        """
+        if web_ui_token is None or not request.url.path.startswith("/api"):
+            return await call_next(request)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header == f"Bearer {web_ui_token}" or request.query_params.get("token") == web_ui_token:
+            return await call_next(request)
+        return Response(status_code=401, content="missing or invalid auth token")
 
     @app.middleware("http")
     async def require_csrf_header(request: Request, call_next):  # type: ignore[no-untyped-def]

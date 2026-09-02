@@ -253,20 +253,45 @@ rejected. (GitHub issue #235, finding A4.)
 
 ## Security model
 
-The whole surface assumes **one trusted user on one machine**. There is no
-authentication and no plan for one at this layer; remote access is a
-different design problem (see [ROADMAP.md](ROADMAP.md)'s deployment phases),
-not a missing feature here.
+The whole surface assumes **one trusted user on one machine** -- remote
+access is a different design problem (see [ROADMAP.md](ROADMAP.md)'s
+deployment phases), not a missing feature here. Until 2026-09-01 that
+translated to "no authentication and no plan for one at this layer";
+an independently cross-verified security review found that assumption
+didn't hold up (a same-origin artifact, or any other local process that
+knew the CSRF header's constant value, had the same standing as this
+page's own trusted JS), so real per-session authentication was added.
 
 - **Bind address.** Defaults to loopback. `WebConfig`'s validator rejects a
   specific non-loopback address outright, while still permitting `0.0.0.0`
   as a deliberate explicit choice.
-- **CORS.** Loopback origins only, matched by regex
-  (`^https?://(127\.0\.0\.1|localhost)(:\d+)?$`). A plain
-  `allow_origins=["http://127.0.0.1:*"]` does **not** work —
-  `CORSMiddleware.allow_origins` is an exact string match with no
-  mid-string wildcard — so matching an arbitrary dev-server port needs
-  `allow_origin_regex`.
+- **Auth token (2026-09-01).** A random per-session bearer token
+  (`secrets.token_hex(16)`, `run_convobox.py`), the same "random token
+  over a loopback channel" shape already used for the MCP mount and the
+  approval-hook TCP server, not a new pattern. Embedded in the URL this
+  session prints (`http://host:port/?token=...`); `index.html` reads it
+  back out of its own address bar once at load (`AUTH_TOKEN`) and
+  attaches it to every `/api/*` call via `apiFetch()`'s `Authorization:
+  Bearer` header, or as a `?token=` query param for the handful of
+  GET-by-URL cases a browser can't attach a custom header to
+  (`EventSource`, the artifact pane's `<img src>`/`<iframe src>`/
+  download-link URLs). Deliberately NOT a cookie: a cookie is attached
+  by the browser automatically regardless of which page triggered the
+  request (subject to `SameSite`, and exactly what a DNS-rebinding
+  attacker page exploits) -- a bearer token/query param requires the
+  calling JS to already know the value, which only this page's own
+  trusted JS (having read it from the real address bar) does. Checked
+  on `/api/*` only, via `require_web_ui_token`
+  (`src/convobox/web/app.py`) -- the static HTML/JS/CSS shell itself
+  isn't sensitive, matching a Jupyter-style login flow that serves its
+  shell unauthenticated but gates the actual API. `/mcp` is exempt
+  (already has its own independent bearer-token auth below).
+- **CORS.** Loopback origins on the ACTUAL bound port only, when known
+  (`create_app`'s `port` param) -- narrowed 2026-09-01 from "any
+  loopback origin, any port" (`^https?://(127\.0\.0\.1|localhost)(:\d+)?$`),
+  which trusted every other local process/page that happened to bind a
+  port, not just this app's own frontend. The auth token above is the
+  real control now; this is defense in depth on top of it.
 - **CSRF.** Every mutating method (`POST`/`PUT`/`PATCH`/`DELETE`) requires an
   `x-convobox-client` header. CORS alone was not enough: `/api/quit`,
   `/api/stop`, and `/api/sessions/{id}/clear` take no request body, which
@@ -278,8 +303,22 @@ not a missing feature here.
   protected only incidentally (a JSON content-type forces a preflight), an
   accident of body shape rather than a designed control, and a future
   body-less route would have silently reopened the gap. (GitHub issue #235,
-  finding A3.)
+  finding A3.) Superseded in practice by the auth token above (a request
+  without the right token never reaches this check's routes at all), kept
+  as an independent layer rather than removed.
 - **Settings escalation guard.** As above.
+- **Artifact CSP sandbox (2026-09-01).** HTML/SVG artifacts get a
+  `Content-Security-Policy: sandbox allow-scripts` response header
+  (`src/convobox/web/artifacts.py`). The in-pane render path
+  (`<iframe sandbox="allow-scripts">`, deliberately no
+  `allow-same-origin`) was already safe, but the artifact browser's
+  "Open in new tab" link opens the same URL as a plain top-level
+  navigation with no sandbox at all -- full same-origin standing, so an
+  attacker-influenced artifact's own script could `fetch()` any `/api/*`
+  route with this page's own trusted-JS standing. The CSP header
+  achieves the same isolation (unique opaque origin, script still runs)
+  for a top-level navigation that the iframe attribute can only achieve
+  for an embedded frame.
 - **MCP server.** Mounted at `/mcp` behind a random per-session bearer
   token, generated in `run_convobox.py` and handed to the CLI via
   `--mcp-config`'s `headers` field.

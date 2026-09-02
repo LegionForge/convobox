@@ -44,6 +44,28 @@ from convobox.adapters.base import ARTIFACT_MEDIA_TYPES
 # working_dir can't turn one request into unbounded filesystem work.
 _MAX_BROWSE_RESULTS = 500
 
+# Script-capable artifact types get a CSP sandbox header on their GET
+# response (2026-09-01, confirmed via an independently cross-verified
+# security review). The in-pane render path (index.html's renderArtifact)
+# already sandboxes HTML correctly -- `<iframe sandbox="allow-scripts">`,
+# deliberately no `allow-same-origin`, per docs/ARTIFACT-PANE-SCOPE.md's
+# own "well-mitigated" note -- but the "Open in new tab" link (added
+# later, for the working-directory browser) opens this same URL as a
+# plain top-level navigation, with NO sandbox at all: full same-origin
+# standing, so an attacker-influenced HTML/SVG artifact's own script
+# could fetch() any /api/* route with the same standing this page's own
+# trusted JS has. `Content-Security-Policy: sandbox` on the RESPONSE
+# achieves the same effect for a top-level navigation that the iframe
+# attribute achieves for an embedded frame -- the browser treats the
+# loaded document as if it came from a unique, opaque origin (same-origin
+# checks against the real API origin fail), while still allowing script
+# to run (`allow-scripts`, no `allow-same-origin`) so a legitimate
+# interactive artifact still works. SVG can embed <script> too, so it
+# gets the same treatment as HTML, not just image formats that can't
+# execute anything.
+_SCRIPT_CAPABLE_EXTENSIONS = frozenset({".html", ".htm", ".svg"})
+_SCRIPT_CAPABLE_CSP = {"Content-Security-Policy": "sandbox allow-scripts"}
+
 
 def _resolve_working_dir(working_dir: Path | None) -> Path:
     """Shared by every route below -- raises the same 503 either the
@@ -267,4 +289,5 @@ def add_artifact_routes(app: FastAPI, working_dir: Path | None) -> None:
             raise HTTPException(
                 415, f"{candidate.suffix!r} is not a servable artifact type"
             )
-        return FileResponse(candidate, media_type=media_type)
+        headers = _SCRIPT_CAPABLE_CSP if candidate.suffix.lower() in _SCRIPT_CAPABLE_EXTENSIONS else None
+        return FileResponse(candidate, media_type=media_type, headers=headers)
