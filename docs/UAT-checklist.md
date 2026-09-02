@@ -371,6 +371,15 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   `audio` section, or the Settings TUI/Web UI's "(advanced)" fields) --
   no more throwaway test scripting needed to re-run this trial.
 
+  **Update (2026-09-01), still same machine:** an `ns_level` 0-3 sweep,
+  then a dedicated 2-vs-3 repeat to confirm, found `ns_level: 3` (very
+  high) beats the documented `ns_level: 2` (high) value -- 24% and 33%
+  fewer false barge-ins in two independent passes respectively (a
+  consistent relative gap despite absolute counts moving a lot session
+  to session). Full numbers in the same field note's 2026-09-01
+  follow-up section. This adds a second value to confirm below -- it
+  does NOT reduce how much cross-platform confirmation still matters.
+
   **What "done" looks like for this item:** the same trial, same
   methodology, on a genuinely different machine/room/speaker-mic
   geometry than the one already tested, to find out whether the
@@ -401,19 +410,25 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   1. `audio.echo_cancellation: true`, leave `aec_ns`/`aec_agc` unset
      (both default `false`) -- baseline run:
      `python scripts/acoustic_calibration.py --delay-candidates auto --repeat-each 8`.
-  2. Set `aec_ns: true` (leave `aec_ns_level` at its default `2`) and
-     re-run the same command -- NS-only run.
-  3. Revert `aec_ns: false`, set `aec_agc: true` (`aec_agc_mode` default
+  2. Set `aec_ns: true`, leave `aec_ns_level` at its default `2`, and
+     re-run the same command -- NS-only run (`ns_level=2`, the value
+     documented above).
+  3. Set `aec_ns_level: 3` (still `aec_ns: true`) and re-run again --
+     the 2026-09-01 Mac-mini follow-up found this beats `ns_level: 2`
+     in two independent same-machine passes; worth checking whether
+     that holds on a second platform too, not just re-confirming NS
+     itself helps.
+  4. Revert `aec_ns: false`, set `aec_agc: true` (`aec_agc_mode` default
      `1`) and re-run -- AGC-only run, to confirm (or refute) that it's
      harmful here too, not just on the Mac mini.
-  4. Compare each run's `report.json` -> `aggregates_by_delay_ms` (one
+  5. Compare each run's `report.json` -> `aggregates_by_delay_ms` (one
      entry per delay bucket, normally just one under `auto` resolution)
      -- specifically `processed_false_barge_ins`, `mean_suppression_db`,
      `mean_processed_rms`, same three metrics the original trial used.
      Each run's own `aec_ns_agc` block (new field, this session) records
      exactly which config produced it, for a clean record without
      needing to remember which yaml edit went with which run.
-  5. Write up the result as a new dated field note (same format as
+  6. Write up the result as a new dated field note (same format as
      `docs/field-notes/2026-08-31-issue-323-ns-agc-open-speaker-trial-agc-hurts-ns-mildly-helps.md`
      -- copy its structure) and update this entry + `docs/KNOWN-ISSUES.md`'s
      NS/AGC entry with the cross-platform result. If NS holds up here
