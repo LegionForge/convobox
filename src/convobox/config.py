@@ -64,7 +64,11 @@ class AudioConfig(BaseModel):
     # Cross-platform (Windows/Linux) UAT is still pending -- see
     # docs/KNOWN-ISSUES.md before changing either default.
     aec_ns: bool = False
-    aec_ns_level: int = 2  # 0=low, 1=moderate, 2=high (tested value), 3=very high
+    # 0=low, 1=moderate, 2=high (this default), 3=very high. A 2026-09-01
+    # same-machine follow-up sweep found 3 beats 2 in two independent
+    # passes (24%/33% fewer false barge-ins) -- see the field note's
+    # later section. Default stays 2 pending cross-platform confirmation.
+    aec_ns_level: int = 2
     aec_agc: bool = False
     aec_agc_mode: int = 1  # 0=adaptive analog, 1=adaptive digital, 2=fixed digital
 
