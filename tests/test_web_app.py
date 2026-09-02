@@ -117,9 +117,8 @@ def test_api_request_with_correct_bearer_token_is_accepted() -> None:
 
 
 def test_api_request_with_correct_query_param_token_is_accepted() -> None:
-    # The EventSource/img-src/iframe-src/download-link path -- a browser
-    # can't attach a custom header to these, so the query param is the
-    # only option for them.
+    # The EventSource path -- a browser can't attach a custom header to
+    # it, so the query param is the only option there.
     app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
     with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get(f"/api/config?token={_WEB_UI_TOKEN}")
@@ -132,6 +131,129 @@ def test_non_api_paths_are_not_gated_by_the_token() -> None:
     app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
     with TestClient(app) as client:  # deliberately no token anywhere
         response = client.get("/health")
+    assert response.status_code == 200
+
+
+# --- artifact_token: a SECOND, independently-random token narrowly
+# scoped to just the artifact-read GET routes (2026-09-02, cross-session
+# security review, "SOL"). index.html's artifactUrl() embeds THIS token
+# (not web_ui_token) in every plain-URL artifact load -- <img src>,
+# "open in new tab", a download link -- because an attacker-influenced
+# HTML/SVG artifact's own script could read a token back out of its own
+# URL. The CSP sandbox (artifacts.py) already blocks that script from
+# exfiltrating anything outbound; this is belt-and-suspenders -- even a
+# token that DOES leak some other way must not authorize anything but
+# re-fetching artifact content. ---
+
+_ARTIFACT_TOKEN = "test-artifact-token-do-not-use-in-real-life"
+
+
+def test_artifact_token_authorizes_an_artifact_get(tmp_path: Path) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        working_dir=working_dir,
+        web_ui_token=_WEB_UI_TOKEN,
+        artifact_token=_ARTIFACT_TOKEN,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get(f"/api/artifacts/chart.png?atoken={_ARTIFACT_TOKEN}")
+    assert response.status_code == 200
+
+
+def test_artifact_token_authorizes_the_editor_uri_route(tmp_path: Path) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        working_dir=working_dir,
+        web_ui_token=_WEB_UI_TOKEN,
+        artifact_token=_ARTIFACT_TOKEN,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get(f"/api/artifacts/chart.png/editor-uri?atoken={_ARTIFACT_TOKEN}")
+    assert response.status_code == 200
+
+
+def test_wrong_artifact_token_is_rejected(tmp_path: Path) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        working_dir=working_dir,
+        web_ui_token=_WEB_UI_TOKEN,
+        artifact_token=_ARTIFACT_TOKEN,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get("/api/artifacts/chart.png?atoken=not-the-real-token")
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/config",
+        "/api/quit",
+        "/api/artifacts",  # the bare listing -- a bigger disclosure than one named file
+    ],
+)
+def test_artifact_token_does_not_authorize_routes_outside_artifact_reads(
+    tmp_path: Path, path: str
+) -> None:
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        working_dir=working_dir,
+        web_ui_token=_WEB_UI_TOKEN,
+        artifact_token=_ARTIFACT_TOKEN,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get(f"{path}?atoken={_ARTIFACT_TOKEN}")
+    assert response.status_code == 401
+
+
+def test_artifact_token_does_not_authorize_a_post_to_set_active_artifact(
+    tmp_path: Path,
+) -> None:
+    # POST /api/artifacts/active is a state report (mutation), not a
+    # read -- _is_artifact_read_path() excludes it by method, not just
+    # by path, so this must still require web_ui_token.
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        working_dir=working_dir,
+        web_ui_token=_WEB_UI_TOKEN,
+        artifact_token=_ARTIFACT_TOKEN,
+    )
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post(
+            f"/api/artifacts/active?atoken={_ARTIFACT_TOKEN}", json={"path": None}
+        )
+    assert response.status_code == 401
+
+
+def test_web_ui_token_still_authorizes_artifact_reads(tmp_path: Path) -> None:
+    # The trusted same-origin frontend JS may still use the general
+    # token for artifact routes too (e.g. apiFetch's editor-uri call) --
+    # only the NARROWER token is scope-restricted, not the broader one.
+    working_dir = tmp_path / "workspace"
+    working_dir.mkdir()
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(
+        db=HistoryDB(Path(":memory:")),
+        working_dir=working_dir,
+        web_ui_token=_WEB_UI_TOKEN,
+        artifact_token=_ARTIFACT_TOKEN,
+    )
+    headers = {**_CSRF_HEADERS, "Authorization": f"Bearer {_WEB_UI_TOKEN}"}
+    with TestClient(app, headers=headers) as client:
+        response = client.get("/api/artifacts/chart.png")
     assert response.status_code == 200
 
 
