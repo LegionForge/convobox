@@ -109,6 +109,10 @@ def test_upload_never_overwrites_an_existing_file(working_dir: Path) -> None:
 
 
 def test_upload_rejects_a_file_over_the_size_limit(working_dir: Path) -> None:
+    # A real oversized body -- httpx computes an accurate Content-Length for
+    # it, so this is now caught by reject_oversized_uploads (the early
+    # middleware below) before Starlette ever parses/spools the multipart
+    # body, not by upload_file()'s own too-late per-chunk check.
     app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
     oversized = b"x" * (_MAX_UPLOAD_BYTES + 1)
     with TestClient(app, headers=_CSRF_HEADERS) as client:
@@ -116,6 +120,47 @@ def test_upload_rejects_a_file_over_the_size_limit(working_dir: Path) -> None:
     assert response.status_code == 413
     # The partial write must not be left behind on disk.
     assert list(working_dir.iterdir()) == []
+
+
+# --- reject_oversized_uploads (2026-09-02, cross-session security review,
+# "SOL"): upload_file()'s own per-chunk check runs too late to be the real
+# bound -- by the time it sees any bytes, Starlette has already spooled the
+# WHOLE multipart body to a temp file while resolving the `UploadFile`
+# parameter. This middleware rejects on Content-Length alone, before
+# Starlette touches the body at all. ---
+
+
+def test_upload_rejects_solely_on_a_claimed_content_length_before_parsing(
+    working_dir: Path,
+) -> None:
+    # The actual body sent here is tiny and not even valid multipart data --
+    # if this 413s anyway, the rejection can only have come from the
+    # Content-Length header check, proven independent of what (if anything)
+    # Starlette's multipart parser would have made of the body itself.
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post(
+            "/api/upload",
+            content=b"not-actually-this-big",
+            headers={
+                "content-length": str(_MAX_UPLOAD_BYTES + 1),
+                "content-type": "multipart/form-data; boundary=x",
+            },
+        )
+    assert response.status_code == 413
+    assert list(working_dir.iterdir()) == []
+
+
+def test_upload_with_a_valid_content_length_is_not_rejected_by_the_middleware(
+    working_dir: Path,
+) -> None:
+    # A truthful, under-the-limit Content-Length must sail through the new
+    # early check exactly as before -- proves it isn't just rejecting every
+    # upload outright.
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.post("/api/upload", files={"file": ("note.txt", b"hi")})
+    assert response.status_code == 200
 
 
 def test_upload_with_no_text_bridge_still_succeeds(working_dir: Path) -> None:

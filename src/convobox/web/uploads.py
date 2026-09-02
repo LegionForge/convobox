@@ -12,7 +12,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 
 # Executable/script extensions rejected outright. The working_dir fence
 # below is the real security boundary here -- an uploaded file can only
@@ -29,6 +30,7 @@ _BLOCKED_EXTENSIONS = frozenset(
 # because a legitimate reference image/PDF is expected to be small.
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _READ_CHUNK_BYTES = 1024 * 1024
+_UPLOAD_PATH = "/api/upload"
 
 
 def _safe_destination(base: Path, raw_filename: str) -> Path:
@@ -67,6 +69,45 @@ def add_upload_routes(
     -- run_convobox.py wires this to WebTextInputBridge.submit() so the
     backend is actually told a new file exists, the same way a spoken
     reference to it would reach the backend."""
+
+    @app.middleware("http")
+    async def reject_oversized_uploads(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Cross-session security review, 2026-09-02 ("SOL"): the
+        upload_file() handler's own per-chunk size check below runs too
+        late to be the real bound -- by the time `file: UploadFile =
+        File(...)` is populated, Starlette has already parsed the WHOLE
+        multipart body (its default UploadFile spools to a temp file
+        during that parse), so an oversized body already hit disk before
+        our 50MB check ever got a chance to reject it.
+
+        This middleware runs before routing/dependency resolution, so it
+        can reject on Content-Length alone -- before Starlette touches
+        the body at all -- for the one route that accepts a file. Not
+        airtight: Content-Length reflects the whole multipart body
+        (boundaries/field overhead included, slightly more than the raw
+        file), and a client using chunked transfer-encoding with no
+        Content-Length header bypasses this check entirely, falling back
+        to the same too-late per-chunk check below. Accepted as
+        proportionate to the actual threat model (loopback-only, and
+        POST already requires the CSRF header plus web_ui_token when
+        configured -- an attacker who can reach this route already has
+        much bigger levers than filling disk), not claimed as a hard
+        guarantee.
+        """
+        if request.url.path == _UPLOAD_PATH and request.method == "POST":
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    too_large = int(content_length) > _MAX_UPLOAD_BYTES
+                except ValueError:
+                    too_large = False
+                if too_large:
+                    return Response(
+                        status_code=413,
+                        content=f"file exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB "
+                        "upload limit",
+                    )
+        return await call_next(request)
 
     @app.post("/api/upload")
     async def upload_file(file: UploadFile = File(...)) -> dict[str, str]:  # noqa: B008 -- FastAPI's own required parameter-declaration idiom, not a real mutable-default bug
