@@ -76,7 +76,19 @@ def test_get_artifact_serves_an_allowed_file_type(working_dir: Path) -> None:
 # plain top-level navigation with no sandbox at all -- full same-origin
 # standing for an attacker-influenced HTML/SVG artifact's own script.
 # The response-level CSP sandbox header achieves the same isolation a
-# top-level navigation can't get from an iframe attribute. ---
+# top-level navigation can't get from an iframe attribute.
+#
+# 2026-09-02 (cross-session review): `sandbox` alone blocks same-origin
+# standing but not outbound network requests -- an attacker-influenced
+# artifact could still fetch()/<img>-beacon the bearer token embedded in
+# its own URL (authUrl()) out to an external host. `default-src 'none'`
+# closes that; `script-src`/`style-src 'unsafe-inline'` and `img-src
+# data:` keep a legitimate self-contained artifact working. ---
+
+_EXPECTED_SCRIPT_CAPABLE_CSP = (
+    "sandbox allow-scripts; default-src 'none'; "
+    "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:"
+)
 
 
 def test_get_artifact_sets_csp_sandbox_for_html(working_dir: Path) -> None:
@@ -85,7 +97,8 @@ def test_get_artifact_sets_csp_sandbox_for_html(working_dir: Path) -> None:
     with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/api/artifacts/page.html")
     assert response.status_code == 200
-    assert response.headers["content-security-policy"] == "sandbox allow-scripts"
+    assert response.headers["content-security-policy"] == _EXPECTED_SCRIPT_CAPABLE_CSP
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 def test_get_artifact_sets_csp_sandbox_for_svg(working_dir: Path) -> None:
@@ -94,7 +107,8 @@ def test_get_artifact_sets_csp_sandbox_for_svg(working_dir: Path) -> None:
     with TestClient(app, headers=_CSRF_HEADERS) as client:
         response = client.get("/api/artifacts/chart.svg")
     assert response.status_code == 200
-    assert response.headers["content-security-policy"] == "sandbox allow-scripts"
+    assert response.headers["content-security-policy"] == _EXPECTED_SCRIPT_CAPABLE_CSP
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 def test_get_artifact_does_not_set_csp_sandbox_for_non_script_types(working_dir: Path) -> None:
@@ -107,6 +121,7 @@ def test_get_artifact_does_not_set_csp_sandbox_for_non_script_types(working_dir:
         response = client.get("/api/artifacts/chart.png")
     assert response.status_code == 200
     assert "content-security-policy" not in response.headers
+    assert "referrer-policy" not in response.headers
 
 
 def test_get_artifact_serves_a_nested_path(working_dir: Path) -> None:

@@ -2086,9 +2086,19 @@ async def run(args: argparse.Namespace) -> None:
         web_url_host = (
             "127.0.0.1" if config.web.bind_address == "0.0.0.0" else config.web.bind_address  # nosec B104
         )
+        # Token deliberately kept OUT of the log.info call below: --tui
+        # mode redirects logging.basicConfig to a FileHandler
+        # (_TUI_LOG_FILE), so a token embedded there would sit in a
+        # persistent, plaintext log file rather than just this session's
+        # scrollback (2026-09-02, cross-session security review). print()
+        # goes to the actual console the user is looking at, not the log.
         log.info(
-            "web UI listening on http://%s:%d/?token=%s (history_tracking=%s)",
-            web_url_host, config.web.port, web_ui_token, config.web.history_tracking_enabled,
+            "web UI listening on http://%s:%d/ (history_tracking=%s)",
+            web_url_host, config.web.port, config.web.history_tracking_enabled,
+        )
+        print(
+            f"web UI: open http://{web_url_host}:{config.web.port}/?token={web_ui_token}",
+            flush=True,
         )
 
     # Live UAT, 2026-08-10: real NameError, reproduced on the first backend
