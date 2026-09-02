@@ -737,14 +737,31 @@ function apiFetch(url, options = {}) {
   return fetch(url, { ...options, headers: { ...AUTH_HEADERS, ...(options.headers || {}) } });
 }
 
-// The handful of GET-by-URL cases a browser can't attach a custom header
-// to (EventSource, <img src>/<iframe src>, a plain download <a href>) --
-// appends the token as a query param instead, which web/app.py's
+// The one remaining GET-by-URL case a browser can't attach a custom
+// header to that still needs the general token: EventSource (the live-
+// event stream). Appends it as a query param, which web/app.py's
 // require_web_ui_token also accepts for exactly this reason.
 function authUrl(url) {
   if (!AUTH_TOKEN) return url;
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}token=${encodeURIComponent(AUTH_TOKEN)}`;
+}
+
+// A SECOND, independently-random token (2026-09-02, cross-session
+// security review -- see require_web_ui_token's docstring in app.py),
+// narrowly scoped server-side to just the artifact-read routes. Used
+// for every artifact URL a browser loads by plain navigation/embed
+// (<img src>/<iframe src>, a download <a href>, "open in new tab") --
+// the cases AUTH_TOKEN used to cover. If an attacker-influenced HTML/
+// SVG artifact's own script reads this token back out of its own URL,
+// the most it can do with it is re-fetch artifact content -- it does
+// NOT authorize /api/quit, /api/settings, or anything outside
+// _is_artifact_read_path() (app.py).
+const ARTIFACT_TOKEN = new URLSearchParams(location.search).get("atoken") || "";
+function artifactUrl(url) {
+  if (!ARTIFACT_TOKEN) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}atoken=${encodeURIComponent(ARTIFACT_TOKEN)}`;
 }
 
 (function () {
@@ -1020,7 +1037,7 @@ function authUrl(url) {
     // never actually compared against anywhere until now.
     const loadId = artifactLoadCounter;
     const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-    const url = authUrl(`/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`);
+    const url = artifactUrl(`/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`);
     const filename = path.split("/").pop() || path;
     const dot = filename.lastIndexOf(".");
     const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
@@ -1225,7 +1242,7 @@ function authUrl(url) {
       const encodedPath = path.split("/").map(encodeURIComponent).join("/");
       const newTabLink = document.createElement("a");
       newTabLink.className = "artifact-browse-newtab";
-      newTabLink.href = authUrl(`/api/artifacts/${encodedPath}`);
+      newTabLink.href = artifactUrl(`/api/artifacts/${encodedPath}`);
       newTabLink.target = "_blank";
       newTabLink.rel = "noopener noreferrer";
       newTabLink.textContent = "Open in new tab";

@@ -61,6 +61,21 @@ _LOCALHOST_ORIGIN_REGEX = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
 _CSRF_HEADER = "x-convobox-client"
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+
+def _is_artifact_read_path(path: str, method: str) -> bool:
+    """True only for the two GET routes that serve/describe a single
+    already-named artifact (GET /api/artifacts/{path} and its
+    .../editor-uri sibling) -- see require_web_ui_token's docstring for
+    why these, and only these, may be authorized by the narrower
+    artifact_token instead of the general web_ui_token. Deliberately
+    excludes GET /api/artifacts (the bare working-directory listing --
+    a materially bigger disclosure than one already-named file) and the
+    POST /api/artifacts/active state report (a mutation, not a read);
+    the trailing "/" after "artifacts" is what tells the listing route
+    apart from a single-file route sharing the same prefix.
+    """
+    return method == "GET" and path.startswith("/api/artifacts/")
+
 # The plain HTML/JS frontend (docs/WEB-UI-ARCHITECTURE.md's "Next Steps":
 # start minimal, not a React/Vite toolchain). Path relative to this file,
 # not the process cwd, so it resolves correctly regardless of where
@@ -116,6 +131,7 @@ def create_app(
     mcp_token: str | None = None,
     web_forwarder: WebEventForwarder | None = None,
     web_ui_token: str | None = None,
+    artifact_token: str | None = None,
     port: int | None = None,
 ) -> FastAPI:
     broadcaster = broadcaster if broadcaster is not None else EventBroadcaster()
@@ -176,15 +192,42 @@ def create_app(
 
         Accepts the token via `Authorization: Bearer <token>` (what
         index.html's fetch() calls send) OR a `?token=` query param
-        (for the handful of GET-by-URL cases a browser can't attach a
-        custom header to: the EventSource live-event stream, and the
-        artifact pane's direct `<img src>`/`<iframe src>`/download-link
-        URLs). `web_ui_token=None` (most existing tests, and any
-        create_app() caller that doesn't pass one) leaves this check off
-        entirely -- run_convobox.py's own real startup path always
-        generates one when the web UI is enabled.
+        (for the one remaining GET-by-URL case a browser can't attach a
+        custom header to: the EventSource live-event stream).
+        `web_ui_token=None` (most existing tests, and any create_app()
+        caller that doesn't pass one) leaves this check off entirely --
+        run_convobox.py's own real startup path always generates one
+        when the web UI is enabled.
+
+        Separately, `artifact_token` -- a SECOND, independently-random
+        token, also query-param-only (`?atoken=`) -- authorizes ONLY
+        the narrow set of GET routes _is_artifact_read_path() names
+        (serving one already-named artifact's content). 2026-09-02,
+        cross-session security review ("SOL"): the general web_ui_token
+        used to be the one embedded in `<img src>`/`<iframe
+        src>`/download-link/"open in new tab" artifact URLs (the only
+        way to authenticate those -- plain URL loads, no header to
+        set). An attacker-influenced HTML/SVG artifact's own script
+        could read that token straight out of its own URL
+        (location.search) -- the CSP sandbox on script-capable
+        artifacts (artifacts.py's _SCRIPT_CAPABLE_CSP) closes the
+        outbound-exfil channel, but belt-and-suspenders, a token that
+        DOES leak should only ever be usable to re-fetch artifact
+        content, never to reach /api/quit, /api/settings, or anything
+        else. artifact_token is checked FIRST and, unlike web_ui_token,
+        is scope-checked against the request path/method before it's
+        accepted at all -- a leaked artifact_token authorizes nothing
+        outside _is_artifact_read_path(). web_ui_token continues to
+        authorize every /api/* route, including artifact reads (the
+        trusted same-origin frontend JS may use either).
         """
         if web_ui_token is None or not request.url.path.startswith("/api"):
+            return await call_next(request)
+        if (
+            artifact_token is not None
+            and _is_artifact_read_path(request.url.path, request.method)
+            and request.query_params.get("atoken") == artifact_token
+        ):
             return await call_next(request)
         auth_header = request.headers.get("authorization", "")
         if auth_header == f"Bearer {web_ui_token}" or request.query_params.get("token") == web_ui_token:

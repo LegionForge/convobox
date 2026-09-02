@@ -272,11 +272,10 @@ page's own trusted JS), so real per-session authentication was added.
   session prints (`http://host:port/?token=...`); `index.html` reads it
   back out of its own address bar once at load (`AUTH_TOKEN`) and
   attaches it to every `/api/*` call via `apiFetch()`'s `Authorization:
-  Bearer` header, or as a `?token=` query param for the handful of
-  GET-by-URL cases a browser can't attach a custom header to
-  (`EventSource`, the artifact pane's `<img src>`/`<iframe src>`/
-  download-link URLs). Deliberately NOT a cookie: a cookie is attached
-  by the browser automatically regardless of which page triggered the
+  Bearer` header, or as a `?token=` query param for the one remaining
+  GET-by-URL case a browser can't attach a custom header to
+  (`EventSource`). Deliberately NOT a cookie: a cookie is attached by
+  the browser automatically regardless of which page triggered the
   request (subject to `SameSite`, and exactly what a DNS-rebinding
   attacker page exploits) -- a bearer token/query param requires the
   calling JS to already know the value, which only this page's own
@@ -286,6 +285,25 @@ page's own trusted JS), so real per-session authentication was added.
   isn't sensitive, matching a Jupyter-style login flow that serves its
   shell unauthenticated but gates the actual API. `/mcp` is exempt
   (already has its own independent bearer-token auth below).
+- **Artifact token (2026-09-02).** A SECOND, independently-random
+  `secrets.token_hex(16)` (`run_convobox.py`, `?atoken=` on the printed
+  URL), narrowly scoped server-side to just the artifact-read GET
+  routes (`_is_artifact_read_path()`, `src/convobox/web/app.py`: GET
+  `/api/artifacts/{path}` and `.../editor-uri`, NOT the bare `GET
+  /api/artifacts` listing or the `POST .../active` state report). This
+  is the token `index.html`'s `artifactUrl()` embeds in every plain-URL
+  artifact load (`<img src>`/`<iframe src>`/download-link/"open in new
+  tab") -- the auth token above used to be embedded there instead,
+  which meant an attacker-influenced HTML/SVG artifact's own script
+  could read the FULL `/api/*` bearer token straight out of its own
+  URL (`location.search`). The artifact CSP sandbox below already
+  blocks that script from exfiltrating anything outbound; this is
+  belt-and-suspenders on top of it -- even a token that leaks some
+  other way authorizes nothing but re-fetching artifact content, never
+  `/api/quit` or `/api/settings`. The general auth token still works on
+  artifact routes too (the trusted frontend JS may use either); only
+  the narrower token is scope-restricted. (Cross-session security
+  review, "SOL".)
 - **CORS.** Loopback origins on the ACTUAL bound port only, when known
   (`create_app`'s `port` param) -- narrowed 2026-09-01 from "any
   loopback origin, any port" (`^https?://(127\.0\.0\.1|localhost)(:\d+)?$`),
