@@ -395,6 +395,46 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
 - This is the same mechanism the VS Code / VSCodium mid-term item below
   would likely ride on, if ACP (or a comparable editor-side protocol)
   turns out to cover that too.
+- **Second scoping question answered, 2026-09-01** (source-read from
+  [github.com/Kilo-Org/kilocode](https://github.com/Kilo-Org/kilocode),
+  not yet live-probed): **Kilo Code** is a second first-party ACP
+  candidate. Its CLI (`kilo acp`) is a genuine ACP server
+  (`@agentclientprotocol/sdk`), confirmed listed at
+  [zed.dev/acp/agent/kilo](https://zed.dev/acp/agent/kilo). Kilo's `kilo
+  serve` HTTP+SSE surface is also a hard fork of OpenCode's own protocol
+  (`@opencode-ai/core`/`@opencode-ai/protocol`, same event taxonomy --
+  `session.next.step.ended`'s `finish` field, `session.next.text.ended`,
+  etc. -- and the same `/api/session/:id/prompt`+`/interrupt` paths this
+  project's `opencode.py` already speaks), so a bespoke HTTP adapter for
+  Kilo (`backend.name: "kilo"`, same shape as `opencode.py`) is also a
+  live, lower-effort option if ACP work stalls.
+  - Kilo's ACP permission wiring directly answers this file's open
+    question above: `kilo acp`'s internal permission-request events map
+    onto ACP's real `session/request_permission`
+    (`allow_once`/`allow_always`/`reject_once`), confirmed from
+    `packages/opencode/src/acp/permission.ts` -- a live-answerable
+    approval channel exists, at least for Kilo, closing the "does ACP's
+    permission primitive cover our voice-gated approval channel"
+    unknown for this one backend (still unconfirmed for OpenCode's own
+    `opencode acp`).
+  - **Revised next step, still open**: build the ACP adapter as a
+    generic `src/convobox/adapters/acp.py` (transport modeled on
+    `codex.py`'s bidirectional JSON-RPC-over-stdio, not `opencode.py`'s
+    HTTP client -- ACP requires answering agent-initiated requests like
+    `session/request_permission`, which `opencode.py`'s shape can't do),
+    parameterized by which CLI command it spawns (`opencode acp` or
+    `kilo acp --cwd ...`) so it isn't backend-specific. Two open
+    unknowns need a live probe before committing to this, not assumable
+    from docs: whether ACP supports steering an in-flight turn
+    (`send_interject`) or only cancel-then-reprompt, and how
+    `backend.permission_mode` (plan/approve/permissive) should map onto
+    Kilo's allow/ask/deny permission-rule config vs. a single mode flag.
+  - Kilo's `kilo serve` also has two capabilities `opencode.py` doesn't
+    use today, relevant regardless of which path (ACP or bespoke HTTP)
+    is chosen: durable event replay via `GET
+    .../event?after=<seq>` (could remove the subscribe-after-send race
+    `wait_listening()` exists to dodge) and a live-answerable
+    `POST .../permission/:requestID/reply` endpoint.
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
