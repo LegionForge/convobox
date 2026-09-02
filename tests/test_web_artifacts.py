@@ -70,6 +70,45 @@ def test_get_artifact_serves_an_allowed_file_type(working_dir: Path) -> None:
     assert response.content == b"\x89PNG\r\n\x1a\nfakepngbytes"
 
 
+# --- CSP sandbox on script-capable artifact types (2026-09-01, GitHub
+# security review): the in-pane <iframe sandbox="allow-scripts"> path was
+# already safe, but the "Open in new tab" link opens the same URL as a
+# plain top-level navigation with no sandbox at all -- full same-origin
+# standing for an attacker-influenced HTML/SVG artifact's own script.
+# The response-level CSP sandbox header achieves the same isolation a
+# top-level navigation can't get from an iframe attribute. ---
+
+
+def test_get_artifact_sets_csp_sandbox_for_html(working_dir: Path) -> None:
+    (working_dir / "page.html").write_text("<html><body>hi</body></html>")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get("/api/artifacts/page.html")
+    assert response.status_code == 200
+    assert response.headers["content-security-policy"] == "sandbox allow-scripts"
+
+
+def test_get_artifact_sets_csp_sandbox_for_svg(working_dir: Path) -> None:
+    (working_dir / "chart.svg").write_text("<svg></svg>")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get("/api/artifacts/chart.svg")
+    assert response.status_code == 200
+    assert response.headers["content-security-policy"] == "sandbox allow-scripts"
+
+
+def test_get_artifact_does_not_set_csp_sandbox_for_non_script_types(working_dir: Path) -> None:
+    # Image/PDF/text artifacts can't execute script -- the header would be
+    # inert but shouldn't be there confusing a future reader into thinking
+    # it means something for these types.
+    (working_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    app = create_app(db=HistoryDB(Path(":memory:")), working_dir=working_dir)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get("/api/artifacts/chart.png")
+    assert response.status_code == 200
+    assert "content-security-policy" not in response.headers
+
+
 def test_get_artifact_serves_a_nested_path(working_dir: Path) -> None:
     nested = working_dir / "plots"
     nested.mkdir()

@@ -84,6 +84,57 @@ def test_get_requests_never_need_the_csrf_header() -> None:
     assert response.status_code == 200
 
 
+# --- require_web_ui_token (2026-09-01, GitHub security review): a real
+# per-session bearer token gating /api/* -- the CSRF header above forces
+# a preflight but checks a constant, public string, not a secret. Off
+# entirely (web_ui_token=None, every test above) unless a real token is
+# passed, matching how mcp_token already works for the MCP mount. ---
+
+_WEB_UI_TOKEN = "test-token-do-not-use-in-real-life"
+
+
+def test_api_request_without_token_is_rejected_when_configured() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get("/api/config")
+    assert response.status_code == 401
+
+
+def test_api_request_with_wrong_bearer_token_is_rejected() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
+    headers = {**_CSRF_HEADERS, "Authorization": "Bearer not-the-real-token"}
+    with TestClient(app, headers=headers) as client:
+        response = client.get("/api/config")
+    assert response.status_code == 401
+
+
+def test_api_request_with_correct_bearer_token_is_accepted() -> None:
+    app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
+    headers = {**_CSRF_HEADERS, "Authorization": f"Bearer {_WEB_UI_TOKEN}"}
+    with TestClient(app, headers=headers) as client:
+        response = client.get("/api/config")
+    assert response.status_code == 200
+
+
+def test_api_request_with_correct_query_param_token_is_accepted() -> None:
+    # The EventSource/img-src/iframe-src/download-link path -- a browser
+    # can't attach a custom header to these, so the query param is the
+    # only option for them.
+    app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        response = client.get(f"/api/config?token={_WEB_UI_TOKEN}")
+    assert response.status_code == 200
+
+
+def test_non_api_paths_are_not_gated_by_the_token() -> None:
+    # The static shell (index.html/JS/CSS) isn't sensitive on its own --
+    # only /api/* (where the real data/actions live) needs the token.
+    app = create_app(db=HistoryDB(Path(":memory:")), web_ui_token=_WEB_UI_TOKEN)
+    with TestClient(app) as client:  # deliberately no token anywhere
+        response = client.get("/health")
+    assert response.status_code == 200
+
+
 def test_get_display_config_defaults_to_no_overrides(client: TestClient) -> None:
     response = client.get("/api/config")
     assert response.status_code == 200
@@ -283,6 +334,20 @@ def test_cors_allows_a_loopback_origin_on_any_port(client: TestClient) -> None:
 def test_cors_rejects_a_non_loopback_origin(client: TestClient) -> None:
     response = client.get("/health", headers={"Origin": "http://evil.example.com"})
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_scoped_to_a_specific_port_rejects_other_loopback_ports() -> None:
+    # 2026-09-01 (GitHub security review): "any loopback origin, any
+    # port" trusts every other local process/page that happens to bind
+    # a port, not just this app's own frontend. When the real bound port
+    # is known (run_convobox.py's own real startup path always knows
+    # it), only THAT exact port is trusted.
+    app = create_app(db=HistoryDB(Path(":memory:")), port=5173)
+    with TestClient(app, headers=_CSRF_HEADERS) as client:
+        same_port = client.get("/health", headers={"Origin": "http://127.0.0.1:5173"})
+        other_port = client.get("/health", headers={"Origin": "http://127.0.0.1:54321"})
+    assert same_port.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+    assert "access-control-allow-origin" not in other_port.headers
 
 
 # --- Static frontend: mounted at "/" LAST, after every /api/* route, so it

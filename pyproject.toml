@@ -127,7 +127,17 @@ web = [
     # SDK, not hand-rolled JSON-RPC/SSE framing, since correctness here is
     # judged against a real external client (claude/codex's own MCP
     # client), not just ConvoBox's own tests.
-    "mcp>=1.0",
+    # Upper-bounded (2026-09-01, GitHub security review's supply-chain
+    # finding, confirmed by reproducing it): mcp 2.1.1 changes ToolError's
+    # message wrapping (every raised error now reads "Error executing
+    # tool show_document" instead of surfacing the real message), which
+    # breaks 3 of test_web_mcp_server.py's own tests that match on the
+    # underlying message text. uv.lock already pins 2.0.0, so this only
+    # protects a fresh resolve that bypasses the lock (`pip install`
+    # without `--frozen`, a new contributor's first `uv sync` after the
+    # lock ever drifts, etc.) -- same class of risk this repo already
+    # fixed once for ruff (see that dependency's own comment).
+    "mcp>=1.0,<2.1",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported

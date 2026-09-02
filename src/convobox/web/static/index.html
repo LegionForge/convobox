@@ -711,6 +711,42 @@
 // live via a real browser + console error check, not assumed.
 const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
+// Real per-session auth (2026-09-01, GitHub security review): the CSRF
+// header above forces a preflight but checks a constant, public string --
+// it stops a cross-origin page blind to what to send, but not a local
+// process/page that's already read this file. run_convobox.py generates
+// a random token per session and embeds it in the URL it prints
+// (http://host:port/?token=...); this page reads it back out of its own
+// address bar once at load and attaches it to every /api/* call from then
+// on. See web/app.py's require_web_ui_token for the full server-side
+// reasoning (why a token read from the URL, not a cookie).
+const AUTH_TOKEN = new URLSearchParams(location.search).get("token") || "";
+const AUTH_HEADERS = AUTH_TOKEN
+  ? { ...CSRF_HEADERS, Authorization: `Bearer ${AUTH_TOKEN}` }
+  : CSRF_HEADERS;
+
+// Every /api/* call in this page goes through this instead of a bare
+// fetch() -- a single choke point for attaching AUTH_HEADERS, so a new
+// call site added later can't silently reopen the gap the way
+// /api/settings/test's own missing escalation guard did (see
+// docs/KNOWN-ISSUES.md's NS/AGC entry's sibling finding for that
+// incident -- same root cause, an opt-in-per-call-site check). Merges
+// options.headers OVER AUTH_HEADERS so a caller's own Content-Type (or
+// anything else) still wins on an actual key conflict.
+function apiFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: { ...AUTH_HEADERS, ...(options.headers || {}) } });
+}
+
+// The handful of GET-by-URL cases a browser can't attach a custom header
+// to (EventSource, <img src>/<iframe src>, a plain download <a href>) --
+// appends the token as a query param instead, which web/app.py's
+// require_web_ui_token also accepts for exactly this reason.
+function authUrl(url) {
+  if (!AUTH_TOKEN) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(AUTH_TOKEN)}`;
+}
+
 (function () {
   "use strict";
 
@@ -946,7 +982,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     pre.appendChild(code);
     artifactBodyEl.appendChild(pre);
     try {
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       // textContent, never innerHTML -- this is agent-generated content,
@@ -984,7 +1020,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     // never actually compared against anywhere until now.
     const loadId = artifactLoadCounter;
     const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-    const url = `/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`;
+    const url = authUrl(`/api/artifacts/${encodedPath}?t=${Date.now()}_${artifactLoadCounter}`);
     const filename = path.split("/").pop() || path;
     const dot = filename.lastIndexOf(".");
     const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
@@ -1040,7 +1076,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     // overwrite the link with the wrong file's URI while the pane still
     // shows the newer, correct content. Live-reproduced 2026-08-11 -- see
     // docs/KNOWN-ISSUES.md.
-    fetch(`/api/artifacts/${encodedPath}/editor-uri`)
+    apiFetch(`/api/artifacts/${encodedPath}/editor-uri`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((data) => {
         if (loadId !== artifactLoadCounter) return;
@@ -1075,7 +1111,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   // number and having the server ignore anything not newer than what
   // it already applied removes the race regardless of processing order.
   function reportActiveArtifact(path, sequence) {
-    fetch("/api/artifacts/active", {
+    apiFetch("/api/artifacts/active", {
       method: "POST",
       headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ path, sequence }),
@@ -1152,7 +1188,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     artifactBrowseListEl.innerHTML = '<div class="artifact-browse-empty">Loading&hellip;</div>';
     let data;
     try {
-      const res = await fetch("/api/artifacts");
+      const res = await apiFetch("/api/artifacts");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
     } catch (err) {
@@ -1189,7 +1225,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       const encodedPath = path.split("/").map(encodeURIComponent).join("/");
       const newTabLink = document.createElement("a");
       newTabLink.className = "artifact-browse-newtab";
-      newTabLink.href = `/api/artifacts/${encodedPath}`;
+      newTabLink.href = authUrl(`/api/artifacts/${encodedPath}`);
       newTabLink.target = "_blank";
       newTabLink.rel = "noopener noreferrer";
       newTabLink.textContent = "Open in new tab";
@@ -1264,7 +1300,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
       let res, data;
       try {
-        res = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/approval`, {
+        res = await apiFetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/approval`, {
           method: "POST",
           headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
           body: JSON.stringify({ action }),
@@ -1428,7 +1464,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
   async function loadDisplayConfig() {
     try {
-      const res = await fetch("/api/config");
+      const res = await apiFetch("/api/config");
       const data = await res.json();
       if (data.user_color) document.documentElement.style.setProperty("--user-bg", data.user_color);
       if (data.assistant_color) document.documentElement.style.setProperty("--assistant-bg", data.assistant_color);
@@ -1452,7 +1488,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
 
   async function loadResumeWord() {
     try {
-      const res = await fetch("/api/settings");
+      const res = await apiFetch("/api/settings");
       const data = await res.json();
       resumeWord = data.values?.interaction?.resume_word || null;
       historyTrackingEnabled = data.values?.web?.history_tracking_enabled ?? null;
@@ -1462,7 +1498,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   async function loadSessions() {
-    const res = await fetch("/api/sessions");
+    const res = await apiFetch("/api/sessions");
     const data = await res.json();
     sessionSelect.innerHTML = "";
     if (data.sessions.length === 0) {
@@ -1505,7 +1541,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     reportActiveArtifact(null, artifactLoadCounter);
     renderArtifactTabs();
     if (!sessionId) return;
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
+    const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
     const data = await res.json();
     eventsEl.innerHTML = "";
     if (data.events.length === 0) {
@@ -1562,7 +1598,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   const _STALE_RECONNECT_MS = 8000;
 
   function connectStream() {
-    const source = new EventSource("/api/events/stream");
+    const source = new EventSource(authUrl("/api/events/stream"));
     let staleReconnectTimer = null;
 
     function clearStaleReconnectTimer() {
@@ -1637,7 +1673,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   listeningBtn.addEventListener("click", async () => {
     listeningBtn.disabled = true;
     try {
-      const res = await fetch("/api/listening", {
+      const res = await apiFetch("/api/listening", {
         method: "POST",
         headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ action: isPaused ? "resume" : "pause" }),
@@ -1660,7 +1696,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     const originalText = stopBtn.textContent;
     stopBtn.textContent = "Stopping…";
     try {
-      await fetch("/api/stop", { method: "POST", headers: CSRF_HEADERS });
+      await apiFetch("/api/stop", { method: "POST", headers: CSRF_HEADERS });
     } catch (err) {
       console.error("stop failed", err);
     } finally {
@@ -1689,7 +1725,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     composerInput.disabled = true;
     composerSendBtn.disabled = true;
     try {
-      const res = await fetch("/api/text", {
+      const res = await apiFetch("/api/text", {
         method: "POST",
         headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
@@ -1750,7 +1786,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       // manually breaks the upload (app.py's CSRF middleware landed
       // after this feature was first written -- every mutating route
       // needs this header now, see require_csrf_header's own docstring).
-      const res = await fetch("/api/upload", { method: "POST", headers: CSRF_HEADERS, body: formData });
+      const res = await apiFetch("/api/upload", { method: "POST", headers: CSRF_HEADERS, body: formData });
       if (!res.ok) {
         console.error("upload failed", file.name, res.status, await res.text());
       }
@@ -1773,7 +1809,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     const originalText = clearHistoryBtn.textContent;
     clearHistoryBtn.textContent = "Clearing…";
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/sessions/${encodeURIComponent(currentSessionId)}/clear`,
         { method: "POST", headers: CSRF_HEADERS }
       );
@@ -1818,7 +1854,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     quitBtn.disabled = true;
     quitBtnLabel.textContent = "Quitting…";
     try {
-      await fetch("/api/quit", { method: "POST", headers: CSRF_HEADERS });
+      await apiFetch("/api/quit", { method: "POST", headers: CSRF_HEADERS });
     } catch (err) {
       // The connection dying mid-request is the expected shape of a
       // process actually quitting, not a real error.
@@ -1833,7 +1869,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     const latest = await loadSessions();
     await loadHistory(latest);
     try {
-      const res = await fetch("/api/listening");
+      const res = await apiFetch("/api/listening");
       if (res.ok) setListeningButton((await res.json()).is_paused);
     } catch (err) {
       console.error("failed to load listening state", err);
@@ -1947,7 +1983,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   }
 
   async function fetchSchema() {
-    const res = await fetch("/api/settings/schema", {
+    const res = await apiFetch("/api/settings/schema", {
       method: "POST",
       headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ values: draft }),
@@ -2198,7 +2234,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
     tick();
     const timer = setInterval(tick, 1000);
     try {
-      const res = await fetch("/api/settings/test", {
+      const res = await apiFetch("/api/settings/test", {
         method: "POST",
         headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ section, field: field || null, values: draft }),
@@ -2236,7 +2272,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
       (s) => s.restart_required && JSON.stringify(draft[s.key]) !== JSON.stringify(originalValues[s.key])
     );
     try {
-      const res = await fetch("/api/settings/save", {
+      const res = await apiFetch("/api/settings/save", {
         method: "POST",
         headers: { ...CSRF_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ values: draft }),
@@ -2348,7 +2384,7 @@ const CSRF_HEADERS = { "X-ConvoBox-Client": "1" };
   testSectionBtn.addEventListener("click", () => runTest(activeKey, null));
 
   settingsBtn.addEventListener("click", async () => {
-    const res = await fetch("/api/settings");
+    const res = await apiFetch("/api/settings");
     const data = await res.json();
     originalValues = data.values;
     draft = JSON.parse(JSON.stringify(originalValues));
