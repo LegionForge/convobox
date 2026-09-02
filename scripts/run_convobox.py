@@ -2043,6 +2043,15 @@ async def run(args: argparse.Namespace) -> None:
         # prints below; see web/app.py's require_web_ui_token for the
         # full reasoning (why this, not a cookie).
         web_ui_token = secrets.token_hex(16)
+        # A SECOND, independently-random token, narrowly scoped to just
+        # the artifact-read routes (2026-09-02, cross-session security
+        # review -- see require_web_ui_token's docstring in app.py for
+        # the full reasoning). This is the one embedded in artifact
+        # `<img src>`/`<iframe src>`/download-link/"open in new tab"
+        # URLs, NOT web_ui_token -- if it leaks out of a malicious
+        # artifact, the most it authorizes is re-fetching artifact
+        # content, never /api/quit or /api/settings.
+        artifact_token = secrets.token_hex(16)
         web_app = create_app(
             db=web_app_history,
             broadcaster=web_broadcaster,
@@ -2059,6 +2068,7 @@ async def run(args: argparse.Namespace) -> None:
             mcp_token=mcp_token,
             web_forwarder=web_forwarder,
             web_ui_token=web_ui_token,
+            artifact_token=artifact_token,
             port=config.web.port,
         )
         web_uvicorn_config = uvicorn.Config(
@@ -2086,9 +2096,20 @@ async def run(args: argparse.Namespace) -> None:
         web_url_host = (
             "127.0.0.1" if config.web.bind_address == "0.0.0.0" else config.web.bind_address  # nosec B104
         )
+        # Token deliberately kept OUT of the log.info call below: --tui
+        # mode redirects logging.basicConfig to a FileHandler
+        # (_TUI_LOG_FILE), so a token embedded there would sit in a
+        # persistent, plaintext log file rather than just this session's
+        # scrollback (2026-09-02, cross-session security review). print()
+        # goes to the actual console the user is looking at, not the log.
         log.info(
-            "web UI listening on http://%s:%d/?token=%s (history_tracking=%s)",
-            web_url_host, config.web.port, web_ui_token, config.web.history_tracking_enabled,
+            "web UI listening on http://%s:%d/ (history_tracking=%s)",
+            web_url_host, config.web.port, config.web.history_tracking_enabled,
+        )
+        print(
+            f"web UI: open http://{web_url_host}:{config.web.port}/"
+            f"?token={web_ui_token}&atoken={artifact_token}",
+            flush=True,
         )
 
     # Live UAT, 2026-08-10: real NameError, reproduced on the first backend
