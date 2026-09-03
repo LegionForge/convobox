@@ -209,15 +209,72 @@ def _resolve_command(command: Sequence[str] | None) -> list[str]:
 # app-server` starts and honors the overrides. sandbox_mode enum:
 # read-only | workspace-write | danger-full-access; approval_policy
 # includes untrusted (escalate writes to approval) and never.
+#
+# "approve" has NO working entry here -- see _CODEX_APPROVE_MODE_ERROR
+# below for why, and docs/KNOWN-ISSUES.md's "Codex permission_mode:
+# approve" entry for the full live-verified writeup (superseded
+# 2026-09-02; originally diagnosed 2026-08-30 as "crashes", now confirmed
+# more precisely).
 _PERMISSION_CODEX_OVERRIDES: dict[str, tuple[str, str]] = {
     # (approval_policy, sandbox_mode)
     "plan": ("never", "read-only"),          # investigate; cannot write; no prompts
-    "approve": ("untrusted", "workspace-write"),  # writes escalate -> voice gate
     "permissive": ("never", "workspace-write"),   # writes freely, no prompts
 }
 
+# 2026-09-02: JP reported live (macOS) that `approve` mode "didn't
+# actually push approvals". Root-caused with a raw JSON-RPC probe against
+# the real codex-cli 0.152.1 app-server, bypassing this adapter entirely
+# -- NOT a ConvoBox protocol-usage bug, an upstream behavior:
+#
+# - `approval_policy=untrusted` (this dict's value until this fix): codex
+#   REJECTS it outright at spawn -- "approval_policy = 'untrusted' is no
+#   longer supported; remove this setting" -- confirmed unchanged from
+#   the 2026-08-30 diagnosis (docs/KNOWN-ISSUES.md), now against a newer
+#   codex-cli version too.
+# - `approval_policy=on-request` (or `on-failure`), `sandbox_mode=
+#   read-only` -- the two schema-valid candidates that dict's own comment
+#   floated as unverified -- BOTH silently bypass the sandbox instead of
+#   escalating to approval: a real write went through with ZERO
+#   `item/fileChange/requestApproval` (or `commandExecution/...`)
+#   ever sent, live-confirmed via a raw JSON-RPC probe with NO ConvoBox
+#   code in the loop at all (rules out an adapter-side detection bug).
+# - `approval_policy=never`, `sandbox_mode=read-only` (this is `plan`
+#   mode's own mapping) DOES correctly block the same write -- model
+#   response: "I can't create the file because this workspace is
+#   currently mounted read-only." Isolated A/B, changing ONLY
+#   approval_policy with sandbox_mode held constant at read-only: `never`
+#   blocks, `on-request` silently allows. This looks like an upstream
+#   codex-cli behavior change/regression (the module docstring's own
+#   2026-07-14 probe against 0.144.1 DID observe real
+#   `item/fileChange/requestApproval` escalation under the
+#   then-current `untrusted` policy) rather than anything fixable from
+#   ConvoBox's side of the protocol.
+#
+# No approval_policy value tried delivers real "escalate to a voice-gated
+# decision" behavior on this codex-cli version -- the ONLY combination
+# confirmed to actually prevent an unreviewed write is plan mode's own
+# (never/read-only). Rather than ship a config that silently provides
+# ZERO protection while claiming to gate writes (worse than the old
+# crash, which at least failed loudly), CodexAdapter refuses to start
+# under `approve` at all -- see its __init__.
+_CODEX_APPROVE_MODE_ERROR = (
+    "backend.permission_mode 'approve' is not currently safe to use with "
+    "the codex backend -- live-verified 2026-09-02 (docs/KNOWN-ISSUES.md) "
+    "that no codex-cli approval_policy value both starts successfully AND "
+    "actually escalates a write to a voice-gated approval on this "
+    "codex-cli version; the schema-valid candidates silently let the "
+    "write through with NO approval prompt at all, which is worse than "
+    "failing here. Use 'plan' (read-only, cannot write) if you want a "
+    "safe default, or 'permissive' if you specifically want codex to act "
+    "without asking. This is an upstream codex-cli gap, not a ConvoBox "
+    "config choice -- see docs/KNOWN-ISSUES.md for the full writeup and "
+    "to check whether it's since been resolved."
+)
+
 
 def _permission_config_args(permission_mode: str) -> list[str]:
+    if permission_mode == "approve":
+        raise RuntimeError(_CODEX_APPROVE_MODE_ERROR)
     override = _PERMISSION_CODEX_OVERRIDES.get(permission_mode)
     if override is None:
         return []

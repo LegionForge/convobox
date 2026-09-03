@@ -119,6 +119,16 @@ def test_startup_guard_passes_with_approval_phrase_set() -> None:
     _check_backend_permission_mode(backend, interaction)  # must not raise
 
 
+def test_startup_guard_exits_on_codex_approve_mode() -> None:
+    # Same clean SystemExit layer as the claude-code approval-gap check
+    # above -- fails here, not deep inside CodexAdapter.__init__, so this
+    # reads as a deliberate startup guard rather than a raw traceback.
+    backend = BackendConfig(name="codex", permission_mode="approve")
+    interaction = InteractionConfig()
+    with pytest.raises(SystemExit, match="not currently safe"):
+        _check_backend_permission_mode(backend, interaction)
+
+
 def test_startup_guard_still_catches_command_flag_conflicts() -> None:
     # Existing detect_permission_conflict() behavior must be unaffected by
     # the new check being added alongside it.
@@ -139,10 +149,21 @@ def test_codex_plan_is_read_only_no_prompts() -> None:
     assert "approval_policy=never" in args
 
 
-def test_codex_approve_escalates_writes() -> None:
-    args = _permission_config_args("approve")
-    assert "approval_policy=untrusted" in args
-    assert "sandbox_mode=workspace-write" in args
+# 2026-09-02: "approve" has no working codex-cli mapping -- live-verified
+# via a raw JSON-RPC probe (bypassing this adapter entirely, so this
+# isn't a ConvoBox protocol-usage bug) that no approval_policy value both
+# starts successfully AND actually escalates a write to approval on
+# current codex-cli. `untrusted` (the old value here) is rejected
+# outright at spawn; `on-request`/`on-failure` with `sandbox_mode=
+# read-only` both silently let the write through with zero approval RPC.
+# Only `never`/`read-only` (plan mode's own mapping) actually blocks a
+# write -- there's no way to get "ask before writing" out of codex-cli
+# right now, so this fails loudly instead of silently providing zero
+# protection. See docs/KNOWN-ISSUES.md and codex.py's
+# _CODEX_APPROVE_MODE_ERROR for the full writeup.
+def test_codex_approve_fails_loudly_instead_of_silently_unsafe() -> None:
+    with pytest.raises(RuntimeError, match="not currently safe"):
+        _permission_config_args("approve")
 
 
 def test_codex_permissive_writes_without_asking() -> None:
