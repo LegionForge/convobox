@@ -1507,30 +1507,43 @@ session. Full numbers:
 the "needs cross-platform confirmation before any default change" call,
 just adds a second candidate value to confirm there.
 
-**Update (2026-09-02): Windows (Helios) cross-platform run does NOT
-clearly confirm the Mac mini result -- and surfaces a bigger problem
-with the N=8-per-run methodology itself.** A first single-run pass per
-config looked wildly inconsistent (including a same-config repeat
-swinging 0% to 100% self-barge rejection), which first looked like an
-ambient-noise confound. A 20-run overnight battery (5 interleaved cycles
-x 4 configs, ambient RMS logged per run) showed ambient noise is only a
-weak factor overall (Pearson r=-0.2 across all runs, near-zero within
-three of the four configs) -- the real driver is **run-to-run variance
-at N=8 that's comparable in size to any difference between configs**.
-Pooled per-config (N=40 each): `ns_level=3` looks best (87.5% mean
-rejection, tightest spread) -- tentatively supporting the Mac mini's
-level-3-beats-level-2 finding -- but `ns_level=2` looks WORSE than doing
-nothing on Helios (60.0% mean vs baseline's 66.9%), contradicting the
-Mac mini's original ns-alone-helps result. `aec_agc` also showed a real,
-Helios-specific pattern the Mac mini data didn't surface: its outcome
-correlates with ambient noise (r=-0.66) -- degrades disproportionately
-in louder rooms -- while the other three configs don't. Full numbers,
-methodology, and caveats:
+**Update (2026-09-02): Windows (Helios) cross-platform run, extended to
+N=120 trials/config -- `ns_level=3` is now a statistically real winner
+over `ns_level=2`/`aec_agc`, but NOT yet distinguishable from doing
+nothing.** An initial N=8-per-run single pass looked wildly inconsistent
+(a same-config `aec_agc` repeat swung 0% to 100% self-barge rejection),
+which first looked like an ambient-noise confound -- a 20-run battery
+(N=40/config) showed that wasn't the real driver, run-to-run variance at
+N=8 was. Extended to 15 interleaved cycles (N=120 trials/config,
+ambient RMS logged per run throughout) to get real pairwise confidence
+intervals, not just point estimates:
+
+| config | mean rejection% | 95% CI |
+|---|---|---|
+| baseline | 72.3 | [61.6, 83.0] |
+| ns_level=2 | 58.5 | [46.6, 70.5] |
+| **ns_level=3** | **80.0** | **[72.9, 87.2]** |
+| aec_agc | 59.8 | [45.5, 74.0] |
+
+Pairwise: `ns_level=3` beats `ns_level=2` (+21.5pts, CI [+7.6,+35.4]) and
+`aec_agc` (+20.3pts, CI [+4.3,+36.2]) -- both real, CIs don't cross zero.
+`ns_level=3` vs baseline (+7.7pts, CI [-5.1,+20.6]) does NOT reach
+significance at this N, nor does `ns_level=2` vs baseline or `aec_agc`
+vs baseline (both cross zero despite looking worse in the raw means).
+Also confirmed live: daytime AC/HVAC noise roughly doubled the ambient
+floor mid-battery (~0.0013 overnight -> ~0.0024-0.0031 daytime),
+distributed evenly across configs by the interleaved design, not a
+confound for the comparisons above.
+
+**Revised candidate value, if this ever ships: `ns_level=3`, not the
+currently-documented `ns_level=2`.** But "beats level 2" and "beats off"
+are different claims -- only the first is established here. Full
+numbers, methodology, and caveats:
 `docs/field-notes/2026-09-02-e10-helios-windows-cross-platform-battery-run-to-run-variance-dominates.md`.
-Given the spread within each config, none of this is confident enough to
-act on yet -- **still not applied anywhere**, shipped default unchanged,
-`[E10]` stays open pending JP's review and likely a redesigned
-higher-N/repeat protocol rather than a straight go/no-go on Linux next.
+**Still not applied anywhere** -- shipped default unchanged, `[E10]`
+stays open pending JP's review and likely a third-platform (Linux) run
+or a similarly-sized Mac mini re-run of `ns_level=3` specifically
+against baseline before any default changes.
 
 **What's there but unused, with more real detail than previously
 recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)
