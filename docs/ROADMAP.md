@@ -176,6 +176,45 @@ not acted on now. Full sourcing and reasoning:
 Net recommendation: keep faster-whisper shipped, treat a real `onnx-asr`
 prototype as "when, not if" rather than urgent.
 
+**Real prototype run, 2026-09-03 (R&D pass, no code shipped) --
+revises the recommendation above.** Ran `onnx-asr`'s
+`nemo-parakeet-tdt-0.6b-v3` against 8 Kokoro-synthesized WAV files with
+known ground-truth text (this project's own `roundtrip_smoketest.py`
+methodology -- no real-human-voice fixture with known transcripts
+exists in this repo), compared against ConvoBox's actual shipped
+faster-whisper config on the identical audio. Full numbers and
+methodology: `docs/field-notes/2026-09-03-stt-parakeet-prototype-and-
+acp-protocol-probes.md`. Headline findings:
+- Real, measurable latency win once warmed up (~2-3x on these
+  short/medium clips, 0.2-0.6s vs 0.5-0.7s) -- but the Open ASR
+  Leaderboard's "~3,300x realtime" figure cited above is a batch/GPU
+  throughput number, not comparable to this single-utterance CPU
+  latency test; citing them together overstated the likely speedup.
+- One clear accuracy win ("hi" transcribed correctly vs.
+  faster-whisper's "high").
+- **The specific claim that motivated this candidate does not hold
+  up**: on the exact short/low-signal case that prompted interest (the
+  "Athena" resume-word hallucination, 2026-08-06 field note), Parakeet
+  did NOT recover the correct word -- it produced a different wrong
+  transcription, not a fix. Neither engine handles this case correctly
+  out of the box.
+- **New finding, not previously flagged**: `onnx-asr`'s public API has
+  no hotwords/prompt-biasing equivalent at all (confirmed by reading
+  `onnx_asr/adapters.py`'s `RecognizeOptions` directly) -- switching
+  would mean losing ConvoBox's existing, already-shipped `stt.hotwords`
+  mitigation for exactly this failure mode, for an engine that doesn't
+  independently solve it either.
+
+Revised recommendation: don't switch. Soften "when, not if" to "maybe,
+and not for the reason originally given" -- the latency win is real but
+this project isn't latency-bound on STT today, and the accuracy
+rationale specifically built around the hallucination problem didn't
+survive a real test. If STT engine work continues, the open question is
+whether Parakeet's accuracy holds up on genuinely noisy/reverberant
+REAL human audio (its actual claimed strength, untested here, since
+this pass used synthesized audio) -- unresolved, real mic captures
+needed to settle either way.
+
 ### ConvoBox Settings TUI (decided; shipped 0.2.0-cycle)
 One full-screen ASCII TUI (same rendering discipline as the voice
 picker: terminal-size-aware, no special fonts, unit-tested layout)
@@ -417,18 +456,58 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
     permission primitive cover our voice-gated approval channel"
     unknown for this one backend (still unconfirmed for OpenCode's own
     `opencode acp`).
+  - **Both open unknowns answered, 2026-09-03 (R&D pass, no code
+    shipped)** -- live JSON-RPC probes against a real spawned
+    `opencode acp` process (raw protocol, no ConvoBox adapter code),
+    plus the ACP spec itself. Full methodology and evidence:
+    `docs/field-notes/2026-09-03-stt-parakeet-prototype-and-acp-
+    protocol-probes.md`.
+    - **Steering: confirmed absent, straight from the spec.** ACP's
+      full JSON-RPC method list has exactly one way to interrupt a
+      running prompt -- `session/cancel` (stop everything). No
+      `send_interject` or equivalent exists anywhere in the protocol.
+      This is a real capability loss versus Codex's own live `turn/
+      steer`, not just an unconfirmed gap -- any backend migrated to
+      ACP falls back to cancel-and-restart for every mid-turn
+      correction.
+    - **Permission mapping: `session/request_permission` did NOT fire
+      by default** -- spawned `opencode acp`, sent a prompt requiring a
+      real file write with no special config, the write happened
+      immediately with zero permission-request calls. The "live-
+      answerable approval channel" framing above was verified for
+      Kilo's own documented internal wiring but NOT, until now, for
+      OpenCode's own `opencode acp` -- its default posture is full
+      trust, not ask-by-default. Separately, `session/set_mode(session,
+      "plan")` IS real and DOES block writes (the same file-write
+      prompt was correctly refused, agent explained it's in plan mode,
+      no file created) -- matches Codex's plan-mode outcome, though
+      whether this is a hard-enforced sandbox or just prompt-level
+      model compliance is unconfirmed (one successful test, no
+      adversarial probe attempted).
+    - **Practical mapping this suggests**: `session/request_permission`
+      is a CLIENT-implemented method (agent calls client) -- ConvoBox's
+      own ACP client code decides whether to answer it interactively
+      (voice-gated) or auto-answer, entirely on ConvoBox's own side of
+      the wire, regardless of agent-side config. `plan` -> `session/
+      set_mode("plan")`. `permissive` needs no protocol action --
+      default behavior already lets writes through unprompted. This
+      mapping keeps the decision authority in ConvoBox's own code
+      rather than trusting an agent-side config value actually means
+      what ConvoBox thinks it does -- a real advantage over Codex's
+      approach, which (as of this same week) turned out to have an
+      upstream regression making its own `approve` mode currently
+      unusable (`docs/KNOWN-ISSUES.md`).
   - **Revised next step, still open**: build the ACP adapter as a
     generic `src/convobox/adapters/acp.py` (transport modeled on
     `codex.py`'s bidirectional JSON-RPC-over-stdio, not `opencode.py`'s
     HTTP client -- ACP requires answering agent-initiated requests like
     `session/request_permission`, which `opencode.py`'s shape can't do),
     parameterized by which CLI command it spawns (`opencode acp` or
-    `kilo acp --cwd ...`) so it isn't backend-specific. Two open
-    unknowns need a live probe before committing to this, not assumable
-    from docs: whether ACP supports steering an in-flight turn
-    (`send_interject`) or only cancel-then-reprompt, and how
-    `backend.permission_mode` (plan/approve/permissive) should map onto
-    Kilo's allow/ask/deny permission-rule config vs. a single mode flag.
+    `kilo acp --cwd ...`) so it isn't backend-specific. Not yet
+    live-probed against Kilo specifically (not installed on the machine
+    the 2026-09-03 pass ran on) -- its permission-primitive claims
+    above remain source-read, not independently verified the way
+    OpenCode's now are.
   - Kilo's `kilo serve` also has two capabilities `opencode.py` doesn't
     use today, relevant regardless of which path (ACP or bespoke HTTP)
     is chosen: durable event replay via `GET
