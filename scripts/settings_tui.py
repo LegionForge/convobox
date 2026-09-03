@@ -46,7 +46,7 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from _console import use_utf8_console  # type: ignore[import-not-found]
+from _console import read_key, use_utf8_console  # type: ignore[import-not-found]
 
 from convobox.adapters import create_backend_adapter
 from convobox.config import (
@@ -366,6 +366,13 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("vad", "min_speech_ms", "Min speech ms", "int", help_text="Minimum speech burst to keep as a real utterance."),
             FieldSpec("vad", "max_utterance_s", "Max utterance s", "optional_float", help_text="Force an utterance to end after this many seconds, even without silence."),
             FieldSpec("vad", "trace_silero_calls", "Trace Silero calls", "bool", help_text="Diagnostic only, off by default -- logs every single Silero window call's duration (~31/s during active audio) at DEBUG level. Deliberately separate from --verbose: too noisy for normal use even at DEBUG. Turn on only when actively chasing the live-hit VAD-freeze issue (see docs/KNOWN-ISSUES.md)."),
+        ),
+    ),
+    SectionSpec(
+        key="web",
+        label="Web UI",
+        fields=(
+            FieldSpec("web", "history_tracking_enabled", "Save conversation history", "bool", help_text="Persist web UI events (transcripts, tool calls, responses) to a local SQLite database (.convobox-history) so past sessions survive a restart and appear in the session picker. Off by default (2026-09-02, JP asked live: no setting existed anywhere to turn this on/off). When off, the web UI still shows live events for the CURRENT session over SSE -- this only controls whether they're written to disk for later. Space/Left/Right toggles true/false."),
         ),
     ),
     SectionSpec(
@@ -803,6 +810,29 @@ def _piper_speaker_choices(config: AppConfig) -> list[str]:
     return [_PIPER_SPEAKER_DEFAULT, *sorted(speaker_map)]
 
 
+def _device_currently_unavailable(device: str, kind: Literal["input", "output"]) -> str | None:
+    """None if `device` matches a currently-connected device (or if
+    availability can't be checked at all -- same fail-open stance
+    `_device_choices` already takes, this must never turn INTO a crash
+    while checking FOR one), otherwise the reason it doesn't. Used by
+    validate_config() to surface a since-disconnected device (2026-09-02,
+    JP live on macOS) as a warning in the Settings TUI's own summary,
+    not just fail safely at actual runtime (run_convobox.py's
+    _validate_audio_device, same finding, the other half of the fix).
+    """
+    try:
+        import audio_devices as ad
+        import sounddevice as sd
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        devices = ad.collect_devices(sd, kind)
+        _, err = ad.resolve_spec(device, devices)
+    except Exception:  # noqa: BLE001
+        return None
+    return err
+
+
 def _device_choices(kind: Literal["input", "output"]) -> list[str]:
     """Real, deduped device names for the picker.
 
@@ -1188,6 +1218,27 @@ def validate_config(config: AppConfig) -> ValidationReport:
             PauseListeningDetector(config.interaction.pause_listening_phrases)
         except ValueError as exc:
             report.errors.append(f"interaction.pause_listening_phrases: {exc}")
+    for field_key, kind in (("input_device", "input"), ("output_device", "output")):
+        device = getattr(config.audio, field_key)
+        if device is None:
+            continue
+        # A warning, not an error: JP, live on macOS, 2026-09-02 -- a
+        # Bluetooth headset configured then disconnected made
+        # run_convobox.py crash on startup (device.py's
+        # _validate_audio_device fixes that half). This is the other
+        # half: SURFACE it here too, before the user ever tries to run,
+        # instead of only failing safe silently at runtime. Reconnecting
+        # the device (or picking a different one in this same field)
+        # makes the warning go away on its own -- no action needed if
+        # it's expected to be reconnected before the next real run.
+        not_found = _device_currently_unavailable(device, kind)  # type: ignore[arg-type]
+        if not_found is not None:
+            report.warnings.append(
+                f"audio.{field_key} {device!r} is not currently connected "
+                f"({not_found}) -- ConvoBox will fall back to the system "
+                "default if you run it right now. Reconnect the device, or "
+                "pick a different one, to clear this."
+            )
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
     if config.audio.aec_delay_ms is not None and config.audio.aec_delay_ms < 0:
@@ -2088,132 +2139,6 @@ def render(state: TuiState, width: int, height: int) -> list[str]:
 def _enable_ansi() -> None:
     if os.name == "nt":
         os.system("")  # nosec B605 B607
-
-
-def read_key() -> str:
-    if sys.platform == "win32":
-        import msvcrt
-
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):
-            code = msvcrt.getwch()
-            return {"H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT", "G": "HOME", "O": "END"}.get(code, "")
-        if ch == "\r":
-            return "ENTER"
-        if ch == "\x08":
-            return "BACKSPACE"
-        if ch == "\x1b":
-            return "ESC"
-        return ch
-
-    import select
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        # TCSANOW, not tty.setraw()'s own default (TCSAFLUSH): this runs at
-        # the top of EVERY read_key() call, not just once at startup, and
-        # TCSAFLUSH discards any bytes already sitting in the kernel's
-        # input queue at the exact moment it's applied. Live-reported
-        # 2026-08-31: pressing two different arrow keys shortly after each
-        # other (e.g. Right then Left) had the second one silently vanish
-        # -- the TUI stayed on Right's result as if Left had never been
-        # pressed. Reproduced directly with a pty harness (not inferred):
-        # feeding Right immediately followed by Left showed the Left bytes
-        # discarded right here, and the next read_key() call then hung
-        # waiting on genuinely new input that was never coming. TCSANOW
-        # switches into raw mode without touching whatever's already
-        # queued.
-        tty.setraw(fd, termios.TCSANOW)
-        # Read via the raw fd (os.read), never sys.stdin.read(): the same
-        # 2026-08-31 pty repro also caught a second, independent bug in the
-        # old sys.stdin.read()-based version -- Python's TextIOWrapper does
-        # its own userspace buffering, so a single sys.stdin.read(1) call
-        # can silently pull several already-arrived bytes into that buffer
-        # in one syscall. The select() below only sees the raw kernel fd,
-        # which by then has nothing left pending, so it times out on data
-        # that was sitting right there the whole time, just invisible to
-        # it. Reading everything through os.read() keeps what's been
-        # consumed exactly in sync with what select() can see. Text fields
-        # can contain non-ASCII input, so the leading byte is decoded as a
-        # full UTF-8 character (1-4 bytes), not assumed to be a single
-        # byte; the CSI/SS3 sequence bytes that follow an ESC are always
-        # plain ASCII by protocol.
-        ch = _read_utf8_char(fd)
-        if ch != "\x1b":
-            if ch in ("\r", "\n"):
-                return "ENTER"
-            if ch == "\x7f":
-                return "BACKSPACE"
-            return ch
-        # Live-reported 2026-08-30 on a slower (4th-gen i7) Linux laptop:
-        # arrow keys needed multiple presses before anything moved.
-        # CONVOBOX_TUI_DEBUG_KEYS instrumentation (run_tui()) caught it
-        # directly, not by inference: a single Right-arrow press was
-        # consistently split into three separate read_key() calls --
-        # 'ESC' (this select() timing out), then '[' and 'C' each read
-        # instantly on the NEXT two calls (already sitting in the kernel
-        # buffer by then, just arriving a beat after this timeout fired) --
-        # each landing as an independent no-op instead of one "RIGHT". An
-        # earlier attempt widened this from 50ms to 300ms on the same
-        # theory; live logs from that attempt showed 300ms still wasn't
-        # consistently enough (repeated ESC/[ /letter splits recorded with
-        # ~400-500ms between them). Widened further to 1.0s: still a
-        # non-issue for the one real standalone-ESC case (cancelling a
-        # modal) this timeout exists to keep responsive -- a human cannot
-        # perceive a <1s delay there as broken -- while giving real
-        # multi-byte sequences a much larger margin on this hardware's
-        # apparent inter-byte latency.
-        if not select.select([fd], [], [], 1.0)[0]:
-            return "ESC"
-        seq = os.read(fd, 1).decode("ascii", errors="replace")
-        # Arrow/Home/End keys arrive as either CSI ("\x1b[A") or SS3
-        # ("\x1bOA") sequences depending on the terminal's cursor-key mode
-        # (DECCKM) -- a real, live-reported gap, 2026-08-30: this only ever
-        # recognized CSI, so a terminal/multiplexer sending SS3 (common
-        # depending on TERM/DECCKM state) had its second byte ("O")
-        # swallowed here as a bare ESC, and the still-unread direction
-        # letter (A/B/C/D) then surfaced as a literal keystroke on the
-        # NEXT read_key() call instead of navigating. Both forms use the
-        # same direction-letter code, so one lookup table covers both.
-        if seq not in ("[", "O"):
-            return "ESC"
-        code = os.read(fd, 1).decode("ascii", errors="replace")
-        return {"A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT", "H": "HOME", "F": "END"}.get(code, "")
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
-
-def _read_utf8_char(fd: int) -> str:
-    """Read exactly one UTF-8 character from a raw fd via os.read() only.
-
-    Used instead of sys.stdin.read(1) -- see the 2026-08-31 comment in
-    read_key() for why mixing that buffered read with a raw-fd select()
-    call caused a live, reproduced bug. A leading byte's high bits say how
-    many continuation bytes (0-3) a multi-byte character needs; ASCII
-    (single-byte) input, the overwhelming majority of keystrokes here,
-    takes the fast path with no extra reads.
-    """
-    first = os.read(fd, 1)
-    if not first:
-        return ""
-    lead = first[0]
-    if lead < 0x80:
-        extra = 0
-    elif lead >> 5 == 0b110:
-        extra = 1
-    elif lead >> 4 == 0b1110:
-        extra = 2
-    elif lead >> 3 == 0b11110:
-        extra = 3
-    else:
-        extra = 0
-    raw = first
-    for _ in range(extra):
-        raw += os.read(fd, 1)
-    return raw.decode("utf-8", errors="replace")
 
 
 def draw(state: TuiState) -> None:

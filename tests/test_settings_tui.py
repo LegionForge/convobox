@@ -1162,6 +1162,62 @@ def test_validate_config_no_backend_warning_when_command_resolves(monkeypatch: p
     assert not any("not found on PATH" in w for w in report.warnings)
 
 
+# --- audio.input_device / output_device connectivity (2026-09-02, JP live
+# on macOS): a Bluetooth headset configured then disconnected made
+# run_convobox.py crash at runtime (fixed separately, run_convobox.py's
+# _validate_audio_device). This is the OTHER half -- surface it here too,
+# in the Settings TUI's own summary, before the user tries to run at all. ---
+
+
+def test_validate_config_warns_when_configured_input_device_is_not_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings_tui,
+        "_device_currently_unavailable",
+        lambda device, kind: f"no device matching {device!r}" if kind == "input" else None,
+    )
+    config = _make_config(**{"audio.input_device": "AirPods Pro, Core Audio"})
+    report = validate_config(config)
+    assert any(
+        "audio.input_device" in w and "AirPods Pro" in w and "not currently connected" in w
+        for w in report.warnings
+    )
+
+
+def test_validate_config_warns_when_configured_output_device_is_not_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings_tui,
+        "_device_currently_unavailable",
+        lambda device, kind: f"no device matching {device!r}" if kind == "output" else None,
+    )
+    config = _make_config(**{"audio.output_device": "AirPods Pro, Core Audio"})
+    report = validate_config(config)
+    assert any(
+        "audio.output_device" in w and "AirPods Pro" in w and "not currently connected" in w
+        for w in report.warnings
+    )
+
+
+def test_validate_config_no_device_warning_when_currently_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings_tui, "_device_currently_unavailable", lambda device, kind: None)
+    config = _make_config(**{"audio.input_device": "MacBook Pro Microphone, Core Audio"})
+    report = validate_config(config)
+    assert not any("not currently connected" in w for w in report.warnings)
+
+
+def test_validate_config_no_device_warning_when_device_is_unset() -> None:
+    # Unset (system default) has nothing to check -- must not even
+    # attempt device enumeration for it.
+    config = _make_config()
+    report = validate_config(config)
+    assert not any("not currently connected" in w for w in report.warnings)
+
+
 def test_validate_config_skips_path_check_for_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
     # opencode is HTTP, not a spawned CLI -- the PATH check must not apply.
     consulted: list[str] = []

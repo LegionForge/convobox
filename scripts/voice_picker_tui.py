@@ -42,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from _console import use_utf8_console
+from _console import read_key, use_utf8_console
 from voice_picker import (
     DEFAULT_SAMPLE_TEXT,
     Catalog,
@@ -214,58 +214,6 @@ def _enable_ansi() -> None:
         # no user input is involved, nothing is actually executed. Same
         # pattern, same rationale as scripts/voice_tui.py.
         os.system("")  # nosec B605 B607
-
-
-def read_key() -> str:
-    """Block for one keypress; arrows/specials come back as names."""
-    # sys.platform (not os.name): mypy narrows on it, so the POSIX branch
-    # below type-checks as unreachable on Windows instead of erroring on
-    # termios/tty being empty stubs there.
-    if sys.platform == "win32":
-        import msvcrt
-
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):
-            code = msvcrt.getwch()
-            return {
-                "H": "UP", "P": "DOWN", "I": "PGUP", "Q": "PGDN", "G": "HOME", "O": "END",
-            }.get(code, "")
-        if ch == "\r":
-            return "ENTER"
-        if ch == "\x08":
-            return "BACKSPACE"
-        if ch == "\x1b":
-            return "ESC"
-        return ch
-
-    import select
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch != "\x1b":
-            if ch in ("\r", "\n"):
-                return "ENTER"
-            if ch == "\x7f":
-                return "BACKSPACE"
-            return ch
-        if not select.select([sys.stdin], [], [], 0.05)[0]:
-            return "ESC"
-        seq = sys.stdin.read(1)
-        if seq != "[":
-            return "ESC"
-        code = sys.stdin.read(1)
-        if code == "5" and sys.stdin.read(1) == "~":
-            return "PGUP"
-        if code == "6" and sys.stdin.read(1) == "~":
-            return "PGDN"
-        return {"A": "UP", "B": "DOWN", "H": "HOME", "F": "END"}.get(code, "")
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def draw(state: TuiState) -> None:

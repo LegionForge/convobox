@@ -53,6 +53,7 @@ import signal
 import socket
 import sys
 import time
+import webbrowser
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -1066,8 +1067,56 @@ def utterance_overlapped_playback(
 
 def _resolve_device(cli_device: str | None, config_device: str | None) -> str | int | None:
     device = cli_device if cli_device is not None else config_device
-    if device is not None and device.isdigit():
-        return int(device)
+    if device is None:
+        return None
+    resolved: str | int = int(device) if device.isdigit() else device
+    return _validate_audio_device(resolved, "input")
+
+
+def _validate_audio_device(
+    device: str | int | None, kind: Literal["input", "output"]
+) -> str | int | None:
+    """Confirms `device` (already digit-converted to int if numeric)
+    actually matches a currently-connected device before it ever reaches
+    sounddevice.
+
+    JP, live, 2026-09-02: a Bluetooth headset configured in convobox.yaml
+    then disconnected made BOTH --tui and --web crash on startup with an
+    unhandled exception -- confirmed directly (not inferred):
+    `sd.InputStream(device="a name matching nothing")` raises
+    `ValueError` immediately on construction, and nothing on this path
+    (MicrophoneStream.start(), EchoAwarePlayer's own device= kwarg
+    passed straight from config) was catching it. Falls back to None
+    (system default) with a clear warning instead -- reconnect the
+    device and restart to use it again, same as unplugging any other
+    USB mic/speaker would require.
+
+    Reuses audio_devices.resolve_spec() (already used by settings_tui.py
+    for exactly this kind of check, already proven to fail safely rather
+    than raise) instead of re-deriving the same digit-vs-name matching
+    logic a second time.
+    """
+    if device is None:
+        return None
+    try:
+        import audio_devices as ad
+        import sounddevice as sd
+    except Exception:  # noqa: BLE001 -- can't validate; behave as before this existed
+        return device
+    try:
+        devices = ad.collect_devices(sd, kind)
+        _, err = ad.resolve_spec(str(device), devices)
+    except Exception:  # noqa: BLE001 -- same: don't let validation itself become a new crash
+        return device
+    if err is not None:
+        log.warning(
+            "configured audio.%s_device %r not found among currently connected "
+            "devices (%s) -- falling back to the system default for this run. "
+            "Reconnect it (e.g. a Bluetooth headset that's since disconnected) "
+            "and restart to use it again.",
+            kind, device, err,
+        )
+        return None
     return device
 
 
@@ -1948,7 +1997,7 @@ async def run(args: argparse.Namespace) -> None:
     echo_filter = SpokenEchoFilter()
     tts = SpokenTextRecorder(create_tts_engine(config.tts, DEFAULT_VOICES_DIR), echo_filter)
     player: EchoAwarePlayer = MutePlayer() if args.mute else EchoAwarePlayer(
-        device=config.audio.output_device
+        device=_validate_audio_device(config.audio.output_device, "output")
     )
     safeword = SafewordDetector(config.safeword.hard_stop_phrases)
     transcript_corrector = TranscriptCorrector(config.stt.corrections)
@@ -2119,11 +2168,22 @@ async def run(args: argparse.Namespace) -> None:
             "web UI listening on http://%s:%d/ (history_tracking=%s)",
             web_url_host, config.web.port, config.web.history_tracking_enabled,
         )
-        print(
-            f"web UI: open http://{web_url_host}:{config.web.port}/"
-            f"?token={web_ui_token}&atoken={artifact_token}",
-            flush=True,
+        web_ui_url = (
+            f"http://{web_url_host}:{config.web.port}/"
+            f"?token={web_ui_token}&atoken={artifact_token}"
         )
+        print(f"web UI: open {web_ui_url}", flush=True)
+        if not args.no_browser:
+            # JP, live, 2026-09-02: "we should try to open the webui in the
+            # user's default browser" -- best-effort only. webbrowser.open()
+            # can fail in a genuinely headless environment (no DISPLAY on
+            # Linux, no default handler registered, SSH with no X
+            # forwarding) -- never let that take the whole session down;
+            # the URL printed above is still right there either way.
+            try:
+                webbrowser.open(web_ui_url)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not auto-open the web UI in a browser: %s", exc)
 
     # Live UAT, 2026-08-10: real NameError, reproduced on the first backend
     # event of any --text run ("cannot access free variable 'indicator'").
@@ -3344,6 +3404,15 @@ def main() -> None:
             "web.enabled. See docs/WEB-UI-ARCHITECTURE.md. Requires the "
             "'web' extra (`uv sync --extra web`). Bind address/port/history "
             "settings still come from convobox.yaml's web.* fields."
+        ),
+    )
+    parser.add_argument(
+        "--no-browser", action="store_true",
+        help=(
+            "with --web, don't automatically open the printed URL in the "
+            "default browser (JP, 2026-09-02: opt-in default is to open it). "
+            "Useful when running headless/over SSH, or launching from a "
+            "script that manages its own browser tab."
         ),
     )
     parser.add_argument(

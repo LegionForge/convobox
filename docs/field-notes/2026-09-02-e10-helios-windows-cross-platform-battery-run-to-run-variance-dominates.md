@@ -163,3 +163,76 @@ tentative-not-confident framing throughout.
   this large at N=8 (mic self-noise drift, STT/VAD threshold edge
   sensitivity, subtle speaker driver behavior, or something else) --
   that's a real open question this note surfaces but does not answer.
+
+## Update (2026-09-02, later same day): extended to 15 cycles (N=120/config), real pairwise significance now possible
+
+JP asked whether more repeats would add real statistical value given the
+spread above, not just more of the same noise. Answer: yes -- standard
+error shrinks with 1/sqrt(n), and it was worth doing. Ran 10 more
+interleaved cycles (same driver, same methodology) on top of the
+original 5, for N=15 cycles / 120 trials per config total. One
+operational hiccup mid-run: cycles 13-15 initially failed 12/12 runs
+outright (`RuntimeError: another ConvoBox microphone session is
+running`) because a separate `run_convobox.py --web` instance, started
+for an unrelated live CSP-verification check on this same session, was
+left running and held ConvoBox's single-instance mic lock. Killed that
+process, cleared the failed placeholder entries, and re-ran cycles
+13-15 clean -- final dataset is 60/60 successful runs, no failures.
+
+**Also directly confirms JP's own live prediction, made mid-battery:**
+daytime AC/HVAC activity raising the noise floor. Ambient RMS climbed
+from ~0.0013 (cycles 1-5, overnight) to a sustained ~0.0024-0.0031
+(cycles 6-15, daytime) -- roughly double, and the interleaved-not-blocked
+design meant this drift landed on all four configs evenly rather than
+confounding one of them.
+
+**Pooled, N=15 cycles / 120 trials per config:**
+
+| config | mean rejection% | stdev | 95% CI | mean ambient RMS | utterance leaks (of 120) |
+|---|---|---|---|---|---|
+| baseline | 72.3 | 21.1 | [61.6, 83.0] | 0.002556 | 12 |
+| ns2 | 58.5 | 23.6 | [46.6, 70.5] | 0.002670 | 16 |
+| **ns3** | **80.0** | **14.1** | **[72.9, 87.2]** | 0.001874 | 7 |
+| agc | 59.8 | 28.2 | [45.5, 74.0] | 0.001313 | 23 |
+
+**Pairwise differences (95% CI on the difference, normal approximation)
+-- this is the part N=8-per-run single passes could never answer:**
+
+| comparison | difference | 95% CI | distinguishable at 95%? |
+|---|---|---|---|
+| ns3 vs ns2 | +21.5 pts | [+7.6, +35.4] | **yes -- real** |
+| ns3 vs agc | +20.3 pts | [+4.3, +36.2] | **yes -- real** |
+| ns3 vs baseline | +7.7 pts | [-5.1, +20.6] | no -- crosses zero |
+| ns2 vs baseline | -13.8 pts | [-29.8, +2.2] | no -- crosses zero |
+| agc vs baseline | -12.5 pts | [-30.4, +5.3] | no -- crosses zero |
+
+**The honest, defensible conclusion at this sample size:** `ns_level=3`
+is now a REAL, statistically significant improvement over `ns_level=2`
+and over `aec_agc` on Helios -- not just the best point estimate, a gap
+that survives a real confidence interval. It is NOT yet distinguishable
+from simply leaving NS/AGC off entirely (`ns3` vs `baseline` crosses
+zero), though it has the tightest spread and highest point estimate of
+all four configs. Neither `ns2` nor `agc` can be shown to differ from
+baseline at this N either, despite both looking worse in the raw means
+-- the spread is still wide enough that "worse than doing nothing"
+isn't confirmed, just unconfirmed-to-help.
+
+**Ambient correlation stayed unstable across the two passes** (N=5:
+baseline +0.08, ns2 +0.13, ns3 +0.10, agc -0.66; N=15: baseline -0.48,
+ns2 +0.02, ns3 -0.35, agc -0.50) -- signs flipped for 3 of 4 configs
+between passes. Given ambient RMS itself shifted this much within the
+session (night vs. day), a single Pearson coefficient over a
+non-stationary noise floor is a weak tool here; this note is not
+treating either pass's correlation numbers as reliable, just noting
+both for completeness.
+
+**Revised recommendation for `[E10]`:** if a shipped-default change is
+made based on this Helios data, `ns_level=3` (not the currently
+documented `ns_level=2`) is the only candidate value with a real,
+significant, cross-metric edge over the other NS/AGC configs -- but
+"beats level 2" is not the same claim as "beats off," and that second
+claim still isn't established here. A third platform (Linux) run, and/or
+a similarly-sized N on the Mac mini re-run with `ns_level=3` specifically
+against baseline (not just against level 2), would be the natural next
+step before any default changes. Still not applied anywhere --
+`convobox.yaml` is back at the safe baseline.
