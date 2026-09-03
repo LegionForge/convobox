@@ -88,6 +88,7 @@ from convobox.config import (
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
+from convobox.paths import default_log_path, migrate_legacy_layout
 from convobox.response_tiering import ContinueDetector
 from convobox.resumeword import ResumeWordDetector
 from convobox.safeword.detector import SafewordDetector
@@ -102,7 +103,10 @@ from convobox.web.stream import EventBroadcaster
 
 log = logging.getLogger("convobox.run")
 
-_TUI_LOG_FILE = "convobox-tui.log"
+# 2026-09-04, was the bare relative string "convobox-tui.log" (resolved
+# against whatever CWD `convobox` happened to be run from) -- see
+# convobox.paths' own module docstring.
+_TUI_LOG_FILE = str(default_log_path())
 
 # Utterances that started up to this long after playback ended still count
 # as overlapping it: room reverb plus VAD/timestamp slop.
@@ -1934,6 +1938,13 @@ async def _transcribe_with_timeout(
 
 async def run(args: argparse.Namespace) -> None:
     main_task = asyncio.current_task()
+    # One-time, best-effort move of anything still at the pre-2026-09-04
+    # CWD-relative locations into the new user-data directory -- see
+    # convobox.paths' own module docstring. Must run before
+    # resolve_config_path()/load_config() below, since a legacy
+    # convobox.yaml is one of the things it may relocate.
+    for moved in migrate_legacy_layout():
+        log.info("migrated to the new user-data directory: %s", moved)
     config_path = resolve_config_path(args.config)
     config = load_config(args.config)
     if args.permission_mode is not None:
@@ -3429,6 +3440,12 @@ def main() -> None:
     args = parser.parse_args()
     log_level = logging.DEBUG if args.verbose else logging.INFO
     if args.tui and args.text is None:
+        # The log now lives under the user-data directory (see
+        # convobox.paths), which may not exist yet on a fresh install --
+        # logging.basicConfig(filename=...) raises FileNotFoundError if
+        # its parent doesn't exist, unlike the old CWD-relative default,
+        # which was always writable (CWD always exists).
+        default_log_path().parent.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(
             level=log_level,
             format="%(asctime)s %(levelname)s %(message)s",
