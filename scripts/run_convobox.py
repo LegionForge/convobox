@@ -81,6 +81,7 @@ from convobox.audio.playback import AudioPlayer
 from convobox.config import (
     detect_claude_code_approval_gap,
     detect_permission_conflict,
+    detect_working_dir_not_git,
     load_config,
     resolve_config_path,
     write_aec_estimate,
@@ -1800,6 +1801,9 @@ def _check_backend_working_dir(backend: object) -> None:
             "workspace.",
             str(resolved),
         )
+    not_git = detect_working_dir_not_git(backend)  # type: ignore[arg-type]
+    if not_git is not None:
+        log.warning("%s", not_git)
 
 
 async def _cancel_main_on_web_server_exit(

@@ -10,12 +10,14 @@ from convobox.config import (
     STT_COMPUTE_TYPES_CUDA,
     AppConfig,
     AudioConfig,
+    BackendConfig,
     DisplayConfig,
     InteractionConfig,
     SafewordConfig,
     STTConfig,
     WebConfig,
     aec_estimate_path,
+    detect_working_dir_not_git,
     load_config,
     load_config_lenient,
     read_aec_estimate,
@@ -203,6 +205,67 @@ def test_kill_phrase_rejects_a_phrase_not_in_hard_stop_phrases() -> None:
             hard_stop_phrases=["stop stop stop"],
             kill_phrase="eject eject eject",
         )
+
+
+# --- detect_working_dir_not_git (2026-09-04, JP): a nudge, not a hard
+# error like detect_permission_conflict's siblings -- a working_dir kept
+# deliberately outside version control is legitimate, so this is a
+# warning + an off switch, not a block. Live-verified against real `git`
+# subprocess calls (real repos and real non-repos on disk), not mocked --
+# the whole point is confirming the actual `git rev-parse` invocation
+# behaves as expected, not just that this code calls *something*. ---
+
+
+def test_warns_when_working_dir_is_a_real_directory_with_no_git(tmp_path: Path) -> None:
+    backend = BackendConfig(working_dir=str(tmp_path))
+    warning = detect_working_dir_not_git(backend)
+    assert warning is not None
+    assert str(tmp_path) in warning
+    assert "git init" in warning
+
+
+def test_no_warning_when_working_dir_is_a_real_git_repo(tmp_path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    backend = BackendConfig(working_dir=str(tmp_path))
+    assert detect_working_dir_not_git(backend) is None
+
+
+def test_no_warning_when_the_toggle_is_off(tmp_path: Path) -> None:
+    backend = BackendConfig(working_dir=str(tmp_path), warn_if_working_dir_not_git=False)
+    assert detect_working_dir_not_git(backend) is None
+
+
+def test_no_warning_when_working_dir_is_unset() -> None:
+    assert detect_working_dir_not_git(BackendConfig(working_dir=None)) is None
+
+
+def test_no_warning_when_working_dir_does_not_exist_yet(tmp_path: Path) -> None:
+    # A nonexistent directory is a different, already-handled problem
+    # (run_convobox.py's own _check_backend_working_dir SystemExits on
+    # it) -- this check must not ALSO fire a confusing git warning about
+    # a directory that doesn't exist at all.
+    missing = tmp_path / "does-not-exist-yet"
+    backend = BackendConfig(working_dir=str(missing))
+    assert detect_working_dir_not_git(backend) is None
+
+
+def test_warn_if_working_dir_not_git_defaults_to_true() -> None:
+    assert BackendConfig().warn_if_working_dir_not_git is True
+
+
+def test_no_warning_when_git_is_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A missing `git` binary must never produce a false "not a repo"
+    # warning -- _is_git_repo's own contract: None (couldn't determine)
+    # is not the same as False (confirmed not a repo).
+    import convobox.config as config_module
+
+    monkeypatch.setattr(config_module.shutil, "which", lambda cmd: None)
+    backend = BackendConfig(working_dir=str(tmp_path))
+    assert detect_working_dir_not_git(backend) is None
 
 
 def test_kill_phrase_rejects_against_the_default_hard_stop_phrases() -> None:

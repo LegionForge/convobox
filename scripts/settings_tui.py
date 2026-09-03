@@ -57,6 +57,7 @@ from convobox.config import (
     TTSProfileConfig,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
+    detect_working_dir_not_git,
     load_config,
     load_config_lenient,
     read_aec_estimate,
@@ -331,6 +332,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex. Space-separated, e.g. `codex.cmd --model gpt-5.6-terra` -- NOT comma-separated like the list fields elsewhere in this TUI (e.g. safeword phrases); a stray comma becomes part of the argument text and the command will fail to launch."),
             FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default). approve: may act, but every write/command needs voice approval via your approval_phrase -- real on both Codex (native per-call approval channel) and Claude Code (a PreToolUse hook this adapter builds itself, since headless mode has no native one -- see claude_code.py's module docstring). While a request is pending, say 'explain'/'explanation'/'clarify'/'help' to have the full detail read back before deciding, or 'no' to deny -- the prompt stays open across a clarifying exchange. permissive: BYPASSES ALL PERMISSIONS -- acts without asking on every tool call (Bash, WebFetch/WebSearch, MCP, file edits, everything), not just writes (dangerous). No effect on opencode (set at `opencode serve` launch). Do NOT also set a permission flag in Command -- that's a conflict."),
             FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched). Override per-run with run_convobox.py --working-dir."),
+            FieldSpec("backend", "warn_if_working_dir_not_git", "Warn if working dir isn't a git repo", "bool", help_text="On by default. If Working dir above is set and isn't inside a git repository, show a warning here (and log one at startup) suggesting `git init` -- edits with no version control are unrecoverable the moment they happen. A nudge, not a requirement: turn this off if your working_dir is intentionally outside version control (e.g. a throwaway scratch workspace). No effect if Working dir is unset, doesn't exist yet, or `git` itself isn't installed (silently skipped, never a false warning). Space/Left/Right toggles true/false."),
         ),
     ),
     SectionSpec(
@@ -471,7 +473,9 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
     if backend_name in {"claude-code", "codex"}:
         return tuple(
             field for field in section.fields
-            if field.key in {"name", "command", "working_dir", "permission_mode"}
+            if field.key in {
+                "name", "command", "working_dir", "warn_if_working_dir_not_git", "permission_mode",
+            }
         )
     return section.fields
 
@@ -1173,6 +1177,9 @@ def validate_config(config: AppConfig) -> ValidationReport:
             "voice prompt (the safe fail-closed default, but likely not what you "
             "intended when choosing 'approve')"
         )
+    not_git = detect_working_dir_not_git(config.backend)
+    if not_git is not None:
+        report.warnings.append(not_git)
     if (
         config.backend.name == "opencode"
         and config.backend.model is not None

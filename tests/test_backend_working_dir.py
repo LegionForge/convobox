@@ -59,3 +59,25 @@ def test_check_warns_when_set_for_opencode(caplog: pytest.LogCaptureFixture) -> 
         BackendConfig(name="opencode", working_dir="C:/ws")
     )
     assert "NO effect on the opencode backend" in caplog.text
+
+
+# --- warn_if_working_dir_not_git (2026-09-04, JP): the startup half of
+# the same check validate_config() also runs -- see test_config.py's own
+# detect_working_dir_not_git tests for the live-`git`-subprocess coverage;
+# this just confirms the wiring here actually logs it. ---
+
+
+def test_check_warns_when_working_dir_is_not_a_git_repo(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _check_backend_working_dir(BackendConfig(name="codex", working_dir=str(tmp_path)))
+    assert "git init" in caplog.text
+
+
+def test_check_no_git_warning_when_the_toggle_is_off(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _check_backend_working_dir(
+        BackendConfig(name="codex", working_dir=str(tmp_path), warn_if_working_dir_not_git=False)
+    )
+    assert "git init" not in caplog.text
