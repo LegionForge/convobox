@@ -803,6 +803,29 @@ def _piper_speaker_choices(config: AppConfig) -> list[str]:
     return [_PIPER_SPEAKER_DEFAULT, *sorted(speaker_map)]
 
 
+def _device_currently_unavailable(device: str, kind: Literal["input", "output"]) -> str | None:
+    """None if `device` matches a currently-connected device (or if
+    availability can't be checked at all -- same fail-open stance
+    `_device_choices` already takes, this must never turn INTO a crash
+    while checking FOR one), otherwise the reason it doesn't. Used by
+    validate_config() to surface a since-disconnected device (2026-09-02,
+    JP live on macOS) as a warning in the Settings TUI's own summary,
+    not just fail safely at actual runtime (run_convobox.py's
+    _validate_audio_device, same finding, the other half of the fix).
+    """
+    try:
+        import audio_devices as ad
+        import sounddevice as sd
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        devices = ad.collect_devices(sd, kind)
+        _, err = ad.resolve_spec(device, devices)
+    except Exception:  # noqa: BLE001
+        return None
+    return err
+
+
 def _device_choices(kind: Literal["input", "output"]) -> list[str]:
     """Real, deduped device names for the picker.
 
@@ -1173,6 +1196,27 @@ def validate_config(config: AppConfig) -> ValidationReport:
             PauseListeningDetector(config.interaction.pause_listening_phrases)
         except ValueError as exc:
             report.errors.append(f"interaction.pause_listening_phrases: {exc}")
+    for field_key, kind in (("input_device", "input"), ("output_device", "output")):
+        device = getattr(config.audio, field_key)
+        if device is None:
+            continue
+        # A warning, not an error: JP, live on macOS, 2026-09-02 -- a
+        # Bluetooth headset configured then disconnected made
+        # run_convobox.py crash on startup (device.py's
+        # _validate_audio_device fixes that half). This is the other
+        # half: SURFACE it here too, before the user ever tries to run,
+        # instead of only failing safe silently at runtime. Reconnecting
+        # the device (or picking a different one in this same field)
+        # makes the warning go away on its own -- no action needed if
+        # it's expected to be reconnected before the next real run.
+        not_found = _device_currently_unavailable(device, kind)  # type: ignore[arg-type]
+        if not_found is not None:
+            report.warnings.append(
+                f"audio.{field_key} {device!r} is not currently connected "
+                f"({not_found}) -- ConvoBox will fall back to the system "
+                "default if you run it right now. Reconnect the device, or "
+                "pick a different one, to clear this."
+            )
     if config.audio.sample_rate <= 0:
         report.errors.append("audio.sample_rate must be positive")
     if config.audio.aec_delay_ms is not None and config.audio.aec_delay_ms < 0:
