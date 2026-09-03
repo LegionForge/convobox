@@ -226,13 +226,57 @@ non-stationary noise floor is a weak tool here; this note is not
 treating either pass's correlation numbers as reliable, just noting
 both for completeness.
 
-**Revised recommendation for `[E10]`:** if a shipped-default change is
-made based on this Helios data, `ns_level=3` (not the currently
-documented `ns_level=2`) is the only candidate value with a real,
-significant, cross-metric edge over the other NS/AGC configs -- but
-"beats level 2" is not the same claim as "beats off," and that second
-claim still isn't established here. A third platform (Linux) run, and/or
-a similarly-sized N on the Mac mini re-run with `ns_level=3` specifically
-against baseline (not just against level 2), would be the natural next
-step before any default changes. Still not applied anywhere --
-`convobox.yaml` is back at the safe baseline.
+**Revised recommendation for `[E10]`, as of the N=120 pass:** if a
+shipped-default change is made based on this Helios data, `ns_level=3`
+(not the currently documented `ns_level=2`) is the only candidate value
+with a real, significant, cross-metric edge over the other NS/AGC
+configs -- but "beats level 2" is not the same claim as "beats off," and
+that second claim still isn't established here. A third platform
+(Linux) run, and/or a similarly-sized N on the Mac mini re-run with
+`ns_level=3` specifically against baseline (not just against level 2),
+would be the natural next step before any default changes. Still not
+applied anywhere -- `convobox.yaml` is back at the safe baseline.
+
+## Update (2026-09-03): targeted `ns3`-vs-`baseline` extension to N=35 cycles/280 trials each -- the point estimate reversed sign, still not significant
+
+JP asked to extend testing specifically on the one comparison still
+sitting on the fence -- rather than growing all four configs equally,
+ran 20 more interleaved cycles of ONLY `baseline` and `ns3` (skipping
+`ns2`/`agc`, whose comparisons to `ns3` were already resolved), appended
+to the same battery on `convobox.yaml`'s safe baseline throughout.
+
+**Final: N=35 cycles / 280 trials each, for `baseline` and `ns3` specifically
+(`ns2`/`agc` unchanged from the N=15/120-trial figures above):**
+
+| config | mean rejection% | stdev | 95% CI | trials |
+|---|---|---|---|---|
+| **baseline** | **78.4** | 18.6 | [72.2, 84.6] | 280 |
+| ns2 | 58.5 | 23.6 | [46.6, 70.5] | 120 |
+| ns3 | 69.2 | 27.4 | [60.1, 78.2] | 280 |
+| agc | 59.8 | 28.2 | [45.5, 74.0] | 120 |
+
+**`ns3` vs `baseline` at N=35/35: -9.2pts, 95% CI [-20.2, +1.7]** -- the
+point estimate REVERSED SIGN from the N=15 pass (was +7.7pts, now
+-9.2pts) and moved closer to (but still doesn't cross) significance, in
+the OPPOSITE direction from the earlier tentative lean. This is the
+signature of a true effect size near zero with a wide, noisy spread --
+not "needs even more data to reveal a real positive gap." More data
+made baseline's own estimate tighten toward a real ~78% and pulled
+`ns3`'s mean down from its earlier N=15 high (80.0%) to 69.2%, while its
+stdev stayed the widest of any config (27.4).
+
+**Revised, final conclusion for this Helios dataset:** `ns_level=3`
+remains the clearly best NS/AGC *setting* if NS/AGC is going to be
+enabled at all (still beats `ns_level=2` and `aec_agc`, unchanged from
+the N=120 pass above -- those comparisons weren't re-run, no reason to
+expect they'd move). But **there is no confirmed evidence, at up to 280
+trials per config, that enabling any tested NS/AGC configuration beats
+leaving `echo_cancellation` alone with NS/AGC off** -- and the trend
+with more data leans slightly toward NS/AGC being net-neutral-to-mildly-
+harmful versus baseline, not helpful, though this still hasn't crossed
+the 95% threshold either. This meaningfully revises this note's own
+earlier "candidate value" framing: the honest recommendation is no
+longer "ship `ns_level=3` instead of `ns_level=2`" but "the case for
+enabling NS/AGC on Windows at all remains unproven, `ns_level=3` is only
+the best of the enabled options if one is chosen." Still not applied
+anywhere -- `convobox.yaml` restored to the safe baseline.
