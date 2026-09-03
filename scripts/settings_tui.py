@@ -63,6 +63,7 @@ from convobox.config import (
     resolve_config_path,
 )
 from convobox.listening_pause import PauseListeningDetector
+from convobox.paths import migrate_legacy_layout
 from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 from convobox.stt.base import TranscriptResult
 from convobox.stt.factory import create_stt_engine
@@ -980,6 +981,14 @@ def list_config_backups(path: Path) -> list[Path]:
 
 
 def write_config(path: Path, config: AppConfig) -> None:
+    # 2026-09-04: path.parent is no longer guaranteed to exist -- the
+    # default config path now lives under an OS user-data directory
+    # (convobox.paths) that may not have been created yet on a genuinely
+    # fresh install, unlike the old CWD-relative default (CWD always
+    # exists). A --config pointed at some other not-yet-created
+    # directory has the same need. NamedTemporaryFile below raises
+    # FileNotFoundError otherwise -- live-caught writing this.
+    path.parent.mkdir(parents=True, exist_ok=True)
     header = _read_leading_header(path)
     body = _dump_config(config)
     content = ("\n".join(header) + "\n") if header else ""
@@ -2887,10 +2896,18 @@ def _apply_load_recovery(state: TuiState, problems: list[str]) -> None:
 
 
 def run_tui(config_path: Path | None = None) -> None:
+    # One-time, best-effort move of anything still at the pre-2026-09-04
+    # CWD-relative locations into the new user-data directory -- see
+    # convobox.paths' own module docstring. Must run before
+    # default_config_path()/load_config_lenient() below, since a legacy
+    # convobox.yaml is one of the things it may relocate.
+    migrated = migrate_legacy_layout()
     path = config_path or default_config_path()
     config, _raw, problems = load_config_lenient(path)
     state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
     _apply_load_recovery(state, problems)
+    if migrated:
+        state.status = f"migrated {len(migrated)} item(s) to the new user-data directory"
     _enable_ansi()
     sys.stdout.write("\x1b[?25l\x1b[2J")
     sys.stdout.flush()
