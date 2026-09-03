@@ -71,6 +71,7 @@ from _console import use_utf8_console
 
 from convobox.adapters import create_backend_adapter
 from convobox.adapters.base import BackendEvent, BackendEventType
+from convobox.adapters.codex import _CODEX_APPROVE_MODE_ERROR
 from convobox.approval import ApprovalDetector
 from convobox.audio.ack_tones import SAMPLE_RATE_HZ as ACK_TONE_SAMPLE_RATE_HZ
 from convobox.audio.ack_tones import generate_ack_tone
@@ -1671,6 +1672,18 @@ def _check_backend_permission_mode(backend: object, interaction: object) -> None
             "configure them there. See docs/DESIGN-backend-sandboxing.md.",
             mode,
         )
+    if name == "codex" and mode == "approve":
+        # Fail here, at the same clean SystemExit layer as the claude-code
+        # approval-gap check above, rather than only inside
+        # CodexAdapter.__init__ (create_backend_adapter runs later) --
+        # same "fail closed with a clear message" stance, just moved
+        # earlier so the failure reads as a deliberate startup guard, not
+        # a raw traceback from deep in adapter construction. See
+        # codex.py's _CODEX_APPROVE_MODE_ERROR for the full reasoning
+        # (live-verified 2026-09-02, docs/KNOWN-ISSUES.md): no codex-cli
+        # approval_policy value both starts successfully AND actually
+        # escalates a write to approval on the current codex-cli version.
+        raise SystemExit(_CODEX_APPROVE_MODE_ERROR)
     log.info("backend permission_mode: %s (%s)", mode, name)
 
 

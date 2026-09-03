@@ -1110,6 +1110,21 @@ def validate_config(config: AppConfig) -> ValidationReport:
     conflict = detect_permission_conflict(config.backend)
     if conflict is not None:
         report.errors.append(conflict)
+    # A hard error, not a warning: run_convobox.py's own startup guard
+    # (_check_backend_permission_mode) SystemExits on this combination --
+    # live-verified 2026-09-02 (docs/KNOWN-ISSUES.md) that no codex-cli
+    # approval_policy value both starts successfully AND actually
+    # escalates a write to approval on the current codex-cli version, so
+    # this WILL fail at startup, not just behave unexpectedly.
+    if config.backend.name == "codex" and config.backend.permission_mode == "approve":
+        report.errors.append(
+            "backend.permission_mode 'approve' is not currently usable with the "
+            "codex backend -- it will fail at startup (docs/KNOWN-ISSUES.md has "
+            "the full writeup: no codex-cli approval_policy value both starts "
+            "and actually gates writes on the current codex-cli version). Use "
+            "'plan' for a safe read-only default, or 'permissive' if you "
+            "specifically want codex to act without asking."
+        )
     # claude-code specifically: this combination doesn't fail safe the way
     # the general warning below describes for other backends (codex denies
     # cleanly with no pending state) -- the hook still gets wired at

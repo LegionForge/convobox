@@ -1112,6 +1112,40 @@ def test_validate_config_warns_on_unrecognized_stt_model() -> None:
     )
 
 
+# --- codex + approve mode (2026-09-02): live-verified via a raw JSON-RPC
+# probe that no codex-cli approval_policy value both starts successfully
+# AND actually escalates a write to approval -- run_convobox.py's own
+# startup guard SystemExits on this, so it's a hard error here, not a
+# warning. See codex.py's _CODEX_APPROVE_MODE_ERROR / docs/KNOWN-ISSUES.md.
+
+
+def test_validate_config_errors_on_codex_approve_mode() -> None:
+    config = _make_config(**{"backend.name": "codex", "backend.permission_mode": "approve"})
+    report = validate_config(config)
+    assert any("codex" in e and "not currently usable" in e for e in report.errors)
+
+
+def test_validate_config_no_error_for_codex_plan_mode() -> None:
+    config = _make_config(**{"backend.name": "codex", "backend.permission_mode": "plan"})
+    report = validate_config(config)
+    assert not any("not currently usable" in e for e in report.errors)
+
+
+def test_validate_config_no_error_for_claude_code_approve_mode() -> None:
+    # The restriction is codex-specific -- claude-code's own "approve"
+    # support is real and unaffected (guarded separately by the approval-
+    # gap check above, which needs an approval_phrase, not a hard block).
+    config = _make_config(
+        **{
+            "backend.name": "claude-code",
+            "backend.permission_mode": "approve",
+            "interaction.approval_phrase": "alpha bravo charlie",
+        }
+    )
+    report = validate_config(config)
+    assert not any("not currently usable" in e for e in report.errors)
+
+
 def test_validate_config_warns_when_backend_command_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exact surprise from UAT: a schema-valid codex config that can't
     # actually launch. The dependency check must flag it at save time.

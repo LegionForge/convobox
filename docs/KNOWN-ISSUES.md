@@ -39,7 +39,7 @@ before trusting a voice session with write access; see also
 | [A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection](#a-macs-front-35mm-jack-mutes-the-internal-speaker-at-the-hardware-level-regardless-of-software-output-device-selection) | Audio output | macOS | Verified | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
-| [Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream](#codex-permission_mode-approve-crashes-on-current-codex-cli----approval_policyuntrusted-was-removed-upstream) | codex (upstream) | All | Diagnosed, unfixed | High |
+| [Codex `permission_mode: approve` has no working codex-cli mapping -- fails loudly by design, not just "unfixed"](#codex-permission_mode-approve-has-no-working-codex-cli-mapping----fails-loudly-by-design-not-just-unfixed) | codex (upstream) | All | Fails loudly (fixed); no real escalation exists upstream | High |
 | **Web UI** | | | | |
 | [Web UI: artifact pane gaps (0.3.0)](#web-ui-artifact-pane-gaps-030) | Web UI | All | Deferred | Low |
 | [Web UI: a short CancelledError traceback can appear on quit/Ctrl+C](#web-ui-a-short-cancellederror-traceback-can-appear-on-quitctrlc) | Web UI | All | Mostly mitigated | Low |
@@ -2365,58 +2365,137 @@ retry may also be needed the first time a server starts. Full write-up:
 
 ---
 
-### Codex `permission_mode: approve` crashes on current codex-cli -- `approval_policy=untrusted` was removed upstream
+### Codex `permission_mode: approve` has no working codex-cli mapping -- fails loudly by design, not just "unfixed"
 
-**Status:** diagnosed live 2026-08-30, unfixed. `backend.permission_mode:
-approve` for the codex backend is currently unusable against codex-cli
+**Status:** live-verified 2026-09-02 (supersedes the 2026-08-30 entry
+below, which only established the crash). `backend.permission_mode:
+approve` for the codex backend now refuses to start at all
+(`RuntimeError`/clean `SystemExit`, not a crash or a silent bypass) --
+confirmed against codex-cli 0.152.1 that no `approval_policy` value both
+starts successfully AND actually escalates a write to a voice-gated
+decision.
+
+**How this was found.** JP reported live on macOS: `approve` mode
+"didn't actually push approvals" (Codex backend specifically -- worked
+fine on Helios/Windows for other backends, and this is Codex-only).
+Reproduced end-to-end through ConvoBox's real orchestrator first (a real
+`--web` session, driven via the web UI's own `/api/text` + `/api/
+sessions/{id}/approval` routes instead of live speech -- deterministic,
+same approval-gate code path), then root-caused with a raw JSON-RPC
+probe against `codex app-server` directly, with **zero ConvoBox code in
+the loop** -- ruling out an adapter-side protocol-usage bug and pinning
+this on codex-cli's own behavior.
+
+**The 2026-08-30 crash reproduces unchanged on 0.152.1** (a newer
+version than that diagnosis used): `codex -c approval_policy=untrusted
+-c sandbox_mode=workspace-write app-server` -> `Error: approval_policy =
+"untrusted" is no longer supported; remove this setting`. Same error,
+same enum member, three CLI versions later.
+
+**Both schema-valid replacement candidates that entry called
+"not yet built" were tried and BOTH fail differently, but just as
+unsafely.** `approval_policy=on-request` and `approval_policy=on-failure`
+(each with `sandbox_mode=read-only`, the exact combination that entry
+proposed) both start without error -- and then silently let writes
+through with **zero** `item/fileChange/requestApproval` or
+`item/commandExecution/requestApproval` ever sent. Confirmed via a raw
+JSON-RPC probe (`codex app-server` spawned directly, no ConvoBox in the
+loop): asked it to create a file under `sandbox=read-only,
+approvalPolicy=on-request` (passed both as process-level `-c` flags AND
+as `thread/start`'s own v2 params, to rule out a param-placement issue)
+-- the file was created immediately, no approval request, no error, no
+indication anything was gated at all. A shell command (`touch`) under
+the same policy also ran with no approval RPC. This is a **worse**
+failure mode than the crash: the crash at least fails loudly, this
+provides zero protection while looking configured correctly.
+
+**Isolated the exact mechanism with a clean A/B, changing ONLY
+`approval_policy`, `sandbox_mode=read-only` held constant:**
+- `approval_policy=never` + `sandbox_mode=read-only` (this is `plan`
+  mode's own mapping): write correctly **blocked** -- model's own
+  response: *"I can't create the file because this workspace is
+  currently mounted read-only."* No file created. This is the ONLY
+  approval_policy value confirmed to actually prevent an unreviewed
+  write on this codex-cli version.
+- `approval_policy=on-request` + the identical `sandbox_mode=read-only`:
+  write succeeds, no escalation, no error, as above.
+
+This strongly suggests an upstream codex-cli regression, not a
+ConvoBox-side gap: the module docstring in `codex.py` itself records a
+live 2026-07-14 probe against codex-cli 0.144.1 where `approval_policy=
+untrusted` DID correctly trigger real `item/fileChange/
+requestApproval`/`item/commandExecution/requestApproval` escalation for
+both a shell command and a file edit. Something changed between 0.144.1
+and 0.152.1 such that only `never` (which never even attempts a write
+worth escalating) still respects the sandbox for codex's own native
+file-edit tool; every value that's supposed to *ask* instead silently
+permits.
+
+**Fix shipped:** rather than continue guessing at approval_policy values
+with no way to verify success beyond "did a live write get created,"
+`_permission_config_args("approve")` now raises `RuntimeError`
+immediately (`_CODEX_APPROVE_MODE_ERROR` in `codex.py`), and
+`run_convobox.py`'s `_check_backend_permission_mode` catches the same
+condition earlier with a clean `SystemExit` before any heavyweight
+startup happens -- same layer as the existing claude-code
+approval-gap guard. `settings_tui.py`'s `validate_config()` also flags
+this as a hard error (not a warning) so the Settings TUI/web UI catch it
+before the user ever tries to run. `plan` and `permissive` are
+unaffected and still work correctly (`plan` re-verified live in this
+same session: still correctly blocks a write with the identical
+read-only sandbox).
+
+**Not yet done:** no fix beyond "fail loudly" exists yet, because no
+value tried actually delivers real escalation. Worth periodically
+re-testing against newer codex-cli releases (the raw-probe methodology
+above is the fast way to check: spawn `codex app-server` directly with
+candidate `-c` flags, ask it to write a file, watch for
+`item/fileChange/requestApproval` on the wire) -- or filing this
+upstream if it hasn't been already, since the 0.144.1-vs-0.152.1
+regression looks like a genuine codex-cli bug, not an intentional
+behavior change.
+
+<details>
+<summary>Original 2026-08-30 diagnosis (superseded above, kept for history)</summary>
+
+**Status:** diagnosed live 2026-08-30. `backend.permission_mode:
+approve` for the codex backend was found unusable against codex-cli
 0.149.1 (the version installed at diagnosis time).
 
 **Symptom.** `_PERMISSION_CODEX_OVERRIDES` in
-`src/convobox/adapters/codex.py` hardcodes `("untrusted",
+`src/convobox/adapters/codex.py` hardcoded `("untrusted",
 "workspace-write")` for `approve` mode, injected as `-c
 approval_policy=untrusted -c sandbox_mode=workspace-write` at spawn --
 verified live against codex-cli as of 2026-07-20 (see the dict's own
-comment). Against 0.149.1, the very first turn fails immediately with
-`ConnectionError: codex app-server exited` (`codex.py`'s `_ensure_thread`
--> `_request` timing out because the pending future was resolved with
-that error from `_read_loop`'s cleanup). Running the exact spawn command
-by hand shows why: `codex -c approval_policy=untrusted -c
-sandbox_mode=workspace-write app-server` -> `Error: approval_policy =
-"untrusted" is no longer supported; remove this setting`. `plan`
-(`never`/`read-only`) and `permissive` (`never`/`workspace-write`) are
-unaffected -- only `approve`'s value has been deprecated upstream.
+comment at the time). Against 0.149.1, the very first turn failed
+immediately with `ConnectionError: codex app-server exited`
+(`codex.py`'s `_ensure_thread` -> `_request` timing out because the
+pending future was resolved with that error from `_read_loop`'s
+cleanup). Running the exact spawn command by hand showed why: `codex -c
+approval_policy=untrusted -c sandbox_mode=workspace-write app-server` ->
+`Error: approval_policy = "untrusted" is no longer supported; remove
+this setting`. `plan` (`never`/`read-only`) and `permissive`
+(`never`/`workspace-write`) were unaffected -- only `approve`'s value
+had been deprecated upstream.
 
 **Not a simple rename -- the underlying model changed, not just the
-enum's spelling.** The CLI's own error for a truly-unknown value lists
+enum's spelling.** The CLI's own error for a truly-unknown value listed
 the currently-valid `approval_policy` variants: `untrusted`,
 `on-failure`, `on-request`, `granular`, `never` (`untrusted` is still a
 *recognized* enum member, just explicitly rejected with a dedicated
 error rather than accepted or reported as unknown -- a deliberate
-deprecation, not a typo upstream). Swapping in `on-request` alone stops
-the crash but is a **false fix, live-confirmed same session**: with
-`sandbox_mode=workspace-write` still set, an in-workspace file-write
-prompt completed and the file was created with **no approval prompt at
-all** -- current codex-cli treats in-workspace writes as already
-permitted by `workspace-write` regardless of `approval_policy`, so the
-old "any write escalates to approval" behavior `approve` mode depends on
-no longer exists at that sandbox setting. That combination was reverted
-immediately rather than left in place, since it silently removes the
-safety gate `approve` mode exists for instead of preserving it.
-
-**Not yet built:** a real replacement mapping needs to be worked out and
-live-verified against the actual approval RPCs (`item/fileChange/
-requestApproval`, `item/commandExecution/requestApproval`) before
-trusting it -- e.g. `sandbox_mode=read-only` paired with `on-request`/
-`on-failure` (forcing every write to escalate, since the sandbox itself
-disallows it, rather than relying on `approval_policy` to intercept
-writes the sandbox already allows). Until then, `approve` mode fails
-loudly and immediately (a crash, not a silent bypass) for the codex
-backend specifically -- `plan` and `permissive` remain fine.
+deprecation, not a typo upstream). Swapping in `on-request` alone
+stopped the crash but was a **false fix, live-confirmed same session**:
+with `sandbox_mode=workspace-write` still set, an in-workspace
+file-write prompt completed and the file was created with **no approval
+prompt at all**.
 
 **How this was found:** while re-checking settings before a second live
 Codex UAT pass (`docs/UAT-codex-smoke.md`), specifically to exercise the
 still-untested "approval mid-flight" checklist item, which needs
 `approve` mode to trigger a real approval RPC at all.
+
+</details>
 
 ---
 
