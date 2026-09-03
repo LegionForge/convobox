@@ -1046,6 +1046,92 @@ def test_refresh_kokoro_voices_is_a_noop_outside_tts_section(monkeypatch: pytest
     assert "only available for tts.engine=kokoro" in state.status
 
 
+# --- [v] browse Piper voice catalog: hands the terminal to
+# voice_picker_tui.py's own picker in-process, applies whatever it
+# returns through THIS session's own state (not a second independent
+# writer to convobox.yaml). 2026-09-03, JP: "no way of downloading new
+# voices for kokoro or piper" -- kokoro already had [d]; this is piper's
+# equivalent. ---
+
+
+def test_browse_piper_voice_catalog_applies_the_chosen_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_tui(voices_dir: object, refresh: bool, offer_save: bool) -> str:
+        captured["voices_dir"] = voices_dir
+        captured["refresh"] = refresh
+        captured["offer_save"] = offer_save
+        return "en_US-lessac-medium"
+
+    fake_module = SimpleNamespace(run_tui=_fake_run_tui)
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", fake_module)
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    assert state.working.tts.voice == "en_US-lessac-medium"
+    assert state.dirty is True
+    assert "en_US-lessac-medium" in state.status
+    # offer_save=False -- this session must never let voice_picker_tui.py
+    # write to convobox.yaml on its own; settings_tui.py owns that via
+    # its own [S] Save.
+    assert captured["offer_save"] is False
+
+
+def test_browse_piper_voice_catalog_handles_no_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_US-lessac-medium"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    fake_module = SimpleNamespace(run_tui=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", fake_module)
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    # Unchanged -- quitting the catalog without choosing must not clear
+    # or otherwise touch the existing tts.voice value.
+    assert state.working.tts.voice == "en_US-lessac-medium"
+    assert state.dirty is False
+    assert "no voice was chosen" in state.status
+
+
+def test_browse_piper_voice_catalog_is_a_noop_for_kokoro(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "kokoro"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("should not launch the catalog browser for kokoro")
+
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", SimpleNamespace(run_tui=_fail_if_called))
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    assert "only available for tts.engine=piper" in state.status
+
+
+def test_browse_piper_voice_catalog_is_a_noop_outside_tts_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(**{"tts.engine": "piper"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("should not launch the catalog browser outside tts")
+
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", SimpleNamespace(run_tui=_fail_if_called))
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    assert "only available for tts.engine=piper" in state.status
+
+
 # --- STT device: pick-from-list rather than free text (JP's ask: "we
 # should have a chooser for cpu/gpu"). Only str kind before this. ---
 
