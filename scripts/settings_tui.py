@@ -369,6 +369,13 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         ),
     ),
     SectionSpec(
+        key="web",
+        label="Web UI",
+        fields=(
+            FieldSpec("web", "history_tracking_enabled", "Save conversation history", "bool", help_text="Persist web UI events (transcripts, tool calls, responses) to a local SQLite database (.convobox-history) so past sessions survive a restart and appear in the session picker. Off by default (2026-09-02, JP asked live: no setting existed anywhere to turn this on/off). When off, the web UI still shows live events for the CURRENT session over SSE -- this only controls whether they're written to disk for later. Space/Left/Right toggles true/false."),
+        ),
+    ),
+    SectionSpec(
         key="display",
         label="Display",
         # The one section a plain browser refresh picks up -- see
