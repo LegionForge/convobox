@@ -3354,6 +3354,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument(
+        "--version", action="version", version=f"convobox {_resolve_convobox_version()}"
+    )
     parser.add_argument("--config", default=None, help="path to a convobox.yaml config file")
     parser.add_argument(
         "--permission-mode", default=None,

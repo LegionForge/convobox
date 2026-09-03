@@ -174,6 +174,19 @@ a context you'd trust an unsupervised agent with: voice input can be
 misheard. Full per-backend behavior, and the two gotchas that bite people,
 in [docs/PERMISSION-MODEL.md](docs/PERMISSION-MODEL.md).
 
+## Updating
+
+Same command family as install, with `--upgrade` (pip) or `upgrade` (pipx):
+
+```bash
+pip install --upgrade legionforge-convobox    # or: pipx upgrade legionforge-convobox
+```
+
+Check what's installed with `pip show legionforge-convobox` (or `pipx list`),
+and see [CHANGELOG.md](CHANGELOG.md) for what changed between versions.
+Running from a source checkout instead? `git pull` then `uv sync` (or
+`pip install -e .` again).
+
 ## Uninstallation
 
 ConvoBox never installs any service, daemon, or registry/system entry —
