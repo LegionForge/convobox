@@ -53,6 +53,7 @@ import signal
 import socket
 import sys
 import time
+import webbrowser
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -2106,11 +2107,22 @@ async def run(args: argparse.Namespace) -> None:
             "web UI listening on http://%s:%d/ (history_tracking=%s)",
             web_url_host, config.web.port, config.web.history_tracking_enabled,
         )
-        print(
-            f"web UI: open http://{web_url_host}:{config.web.port}/"
-            f"?token={web_ui_token}&atoken={artifact_token}",
-            flush=True,
+        web_ui_url = (
+            f"http://{web_url_host}:{config.web.port}/"
+            f"?token={web_ui_token}&atoken={artifact_token}"
         )
+        print(f"web UI: open {web_ui_url}", flush=True)
+        if not args.no_browser:
+            # JP, live, 2026-09-02: "we should try to open the webui in the
+            # user's default browser" -- best-effort only. webbrowser.open()
+            # can fail in a genuinely headless environment (no DISPLAY on
+            # Linux, no default handler registered, SSH with no X
+            # forwarding) -- never let that take the whole session down;
+            # the URL printed above is still right there either way.
+            try:
+                webbrowser.open(web_ui_url)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not auto-open the web UI in a browser: %s", exc)
 
     # Live UAT, 2026-08-10: real NameError, reproduced on the first backend
     # event of any --text run ("cannot access free variable 'indicator'").
@@ -3331,6 +3343,15 @@ def main() -> None:
             "web.enabled. See docs/WEB-UI-ARCHITECTURE.md. Requires the "
             "'web' extra (`uv sync --extra web`). Bind address/port/history "
             "settings still come from convobox.yaml's web.* fields."
+        ),
+    )
+    parser.add_argument(
+        "--no-browser", action="store_true",
+        help=(
+            "with --web, don't automatically open the printed URL in the "
+            "default browser (JP, 2026-09-02: opt-in default is to open it). "
+            "Useful when running headless/over SSH, or launching from a "
+            "script that manages its own browser tab."
         ),
     )
     parser.add_argument(
