@@ -1384,6 +1384,21 @@ def test_backup_and_save_round_trip(tmp_path: Path) -> None:
     assert "voice: en_US-lessac-medium" in saved
 
 
+def test_write_config_creates_a_not_yet_existing_parent_directory(tmp_path: Path) -> None:
+    # 2026-09-04: the default config path now lives under an OS
+    # user-data directory (convobox.paths) that may not exist yet on a
+    # genuinely fresh install -- unlike the old CWD-relative default,
+    # whose parent (CWD) always existed. NamedTemporaryFile inside
+    # write_config raised FileNotFoundError here before this was fixed.
+    path = tmp_path / "not-yet-created" / "nested" / "convobox.yaml"
+    assert not path.parent.exists()
+    config = _make_config()
+
+    settings_tui.write_config(path, config)
+
+    assert path.exists()
+
+
 def test_save_with_backup_restores_original_on_write_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

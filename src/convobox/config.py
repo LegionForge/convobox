@@ -23,6 +23,7 @@ from pydantic import (
 from convobox.approval import ApprovalDetector
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import DEFAULT_PAUSE_PHRASES
+from convobox.paths import default_config_path, default_history_dir, default_kokoro_dir
 from convobox.resumeword import DEFAULT_RESUME_WORD
 
 
@@ -349,8 +350,12 @@ class TTSConfig(BaseModel):
     rate: float = 1.0
     volume: float = 1.0
     # kokoro only: the shared model/voice bundle and phonemizer language.
-    model_path: str = ".models/kokoro/kokoro-v1.0.onnx"
-    voices_path: str = ".models/kokoro/voices-v1.0.bin"
+    # default_factory (2026-09-04, was a bare ".models/kokoro/..." string
+    # relative to CWD -- see convobox.paths' own module docstring for
+    # why): computed, not a fixed literal, since the real default is an
+    # OS-dependent user-data directory.
+    model_path: str = Field(default_factory=lambda: str(default_kokoro_dir() / "kokoro-v1.0.onnx"))
+    voices_path: str = Field(default_factory=lambda: str(default_kokoro_dir() / "voices-v1.0.bin"))
     language: str = "en-us"
     # piper only: select a speaker for a multi-speaker voice, by name
     # (matching the voice's own speaker_id_map, e.g. "prudence" for
@@ -843,7 +848,9 @@ class WebConfig(BaseModel):
     # opt-in separate from `enabled` -- enabling the web UI alone must not
     # silently start writing history.
     history_tracking_enabled: bool = False
-    history_dir: str = ".convobox-history"
+    # default_factory (2026-09-04, was ".convobox-history" relative to
+    # CWD): see convobox.paths' own module docstring.
+    history_dir: str = Field(default_factory=lambda: str(default_history_dir()))
 
     @field_validator("bind_address")
     @classmethod
@@ -927,13 +934,25 @@ class AppConfig(BaseModel):
 
 
 def resolve_config_path(path: str | Path | None = None) -> Path:
-    """The same explicit-path / CONVOBOX_CONFIG / convobox.yaml fallback
+    """The same explicit-path / CONVOBOX_CONFIG / user-data-dir fallback
     load_config() uses, exposed so callers that need to know WHICH file
     would be loaded (not just its parsed contents) don't have to
     duplicate the resolution order -- settings_tui.py's own
     default_config_path() and run_convobox.py's AEC-estimate sidecar path
-    both need this."""
-    return Path(path) if path else Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+    both need this.
+
+    2026-09-04: the final fallback used to be the bare relative
+    `Path("convobox.yaml")` -- resolved against whatever directory
+    `convobox` happened to be run from, so two different CWDs silently
+    became two independent installs. Now falls back to
+    convobox.paths.default_config_path() (an OS-idiomatic user-data
+    directory) instead. CONVOBOX_CONFIG and an explicit path both still
+    work exactly as before -- only the fallback-of-the-fallback moved.
+    """
+    if path:
+        return Path(path)
+    env_path = os.environ.get("CONVOBOX_CONFIG")
+    return Path(env_path) if env_path else default_config_path()
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

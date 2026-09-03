@@ -27,7 +27,6 @@ import argparse
 import asyncio
 import difflib
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -47,6 +46,7 @@ from _console import use_utf8_console
 
 from convobox.audio.playback import AudioPlayer
 from convobox.config import TTSConfig
+from convobox.config import resolve_config_path as _resolve_config_path
 from convobox.tts import create_tts_engine
 from convobox.tts.factory import DEFAULT_VOICES_DIR
 
@@ -156,8 +156,15 @@ def print_config_snippet(key: str, rate: float, volume: float) -> None:
 
 
 def default_config_path() -> Path:
-    """The same file load_config() will read: CONVOBOX_CONFIG or ./convobox.yaml."""
-    return Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+    """The same file load_config() will read -- CONVOBOX_CONFIG, or the
+    OS-idiomatic user-data directory (convobox.paths). Delegates to
+    convobox.config's own resolve_config_path() (2026-09-04) rather than
+    a second, independent copy of the same resolution order -- this
+    file's own duplicate previously hardcoded the pre-user-data-dir
+    ".convobox.yaml relative to CWD" fallback and would have silently
+    drifted from the real default the day that changed.
+    """
+    return _resolve_config_path()
 
 
 def write_choice_to_config(
