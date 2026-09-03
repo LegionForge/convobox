@@ -365,7 +365,19 @@ def _handle_edit(state: TuiState, key: str) -> None:
             state.apply_filter()
 
 
-def run_tui(voices_dir: Path, refresh: bool) -> None:
+def run_tui(voices_dir: Path, refresh: bool, offer_save: bool = True) -> str | None:
+    """Returns the chosen voice's key (Enter'd, not just highlighted), or
+    None if the session quit without one.
+
+    offer_save=False (settings_tui.py's embedded launch, 2026-09-03):
+    skip offer_config_write()'s own interactive prompt -- it targets
+    default_config_path(), which may not be the SAME file settings_tui.py
+    is editing if that was launched with an explicit --config path.
+    settings_tui.py owns the "which file gets written" decision itself
+    (via this function's return value); this session is download/browse/
+    audition only when embedded, never a second, independent writer to
+    convobox.yaml.
+    """
     catalog = load_catalog(voices_dir, refresh=refresh)
     state = TuiState(catalog=catalog, voices_dir=voices_dir)
     player = AudioPlayer()
@@ -398,9 +410,11 @@ def run_tui(voices_dir: Path, refresh: bool) -> None:
         sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")  # cursor back, clean exit
         sys.stdout.flush()
     if state.chosen:
-        offer_config_write(state.chosen, state.rate, state.volume)
+        if offer_save:
+            offer_config_write(state.chosen, state.rate, state.volume)
     else:
         print("no voice selected (highlight one and press Enter before quitting)")
+    return state.chosen
 
 
 def main() -> None:
