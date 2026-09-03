@@ -190,18 +190,24 @@ Running from a source checkout instead? `git pull` then `uv sync` (or
 ## Uninstallation
 
 ConvoBox never installs any service, daemon, or registry/system entry —
-just the package (or the cloned source) plus whatever it downloaded. To
-remove it:
+just the package (or the cloned source), plus one user-data directory it
+writes config, downloaded voices, history, and logs into. To remove it:
 
 1. **Installed via `pip`/`pipx`?** `pip uninstall legionforge-convobox`
-   (or `pipx uninstall legionforge-convobox`). Also delete `convobox.yaml`
-   wherever you kept it — it isn't installed alongside the package.
+   (or `pipx uninstall legionforge-convobox`).
 2. **Installed from source?** Delete the project folder — this removes
-   the cloned source, the `uv`/`pip` virtual environment, your
-   `convobox.yaml`, and any downloaded TTS files (Kokoro's model/voices at
-   `.models/kokoro/`, or Piper voices at `.models/piper/` if you opted
-   into that extra).
-3. **Optional — reclaim the STT model cache.** faster-whisper downloads
+   the cloned source and the `uv`/`pip` virtual environment.
+3. **Either way, delete ConvoBox's user-data directory** — `convobox.yaml`,
+   downloaded Kokoro/Piper voice files, conversation history, settings
+   backups, and the `--tui` log all live under one OS-idiomatic location
+   (via [`platformdirs`](https://pypi.org/project/platformdirs/)):
+   - macOS: `~/Library/Application Support/ConvoBox`
+   - Linux: `~/.local/share/ConvoBox` (or `$XDG_DATA_HOME/ConvoBox`)
+   - Windows: `%LOCALAPPDATA%\ConvoBox`
+
+   (Pointed `--config`/`CONVOBOX_CONFIG` at a custom path instead? Delete
+   that file directly — only the default location above is covered here.)
+4. **Optional — reclaim the STT model cache.** faster-whisper downloads
    its speech-to-text model into the shared Hugging Face cache
    (`~/.cache/huggingface` on Linux/macOS, `%USERPROFILE%\.cache\huggingface`
    on Windows), not into the project folder. Only delete this if you don't
