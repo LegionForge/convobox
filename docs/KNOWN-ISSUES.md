@@ -1535,15 +1535,23 @@ floor mid-battery (~0.0013 overnight -> ~0.0024-0.0031 daytime),
 distributed evenly across configs by the interleaved design, not a
 confound for the comparisons above.
 
-**Revised candidate value, if this ever ships: `ns_level=3`, not the
-currently-documented `ns_level=2`.** But "beats level 2" and "beats off"
-are different claims -- only the first is established here. Full
-numbers, methodology, and caveats:
+**Update (2026-09-03): targeted N=35-cycle/280-trial extension on just
+`ns_level=3` vs baseline -- the point estimate reversed sign, revising
+the recommendation below.** At N=15 (above), `ns_level=3` led baseline
+by +7.7pts. Extending that ONE comparison to N=35 (280 trials each)
+moved it to **-9.2pts, 95% CI [-20.2,+1.7]** -- ns3 now trailing
+baseline, still not significant, but the reversal itself (not just
+"still inconclusive") is the signal: this looks like a true effect near
+zero with a wide spread, not noise obscuring a real positive gap.
+`ns_level=3` still clearly beats `ns_level=2`/`aec_agc` (that comparison
+wasn't re-run, no reason to expect it moved). **Revised conclusion: no
+tested NS/AGC configuration is confirmed to beat leaving it off
+entirely on Helios, at up to 280 trials/config** -- `ns_level=3` is only
+the best choice AMONG the enabled options, not a case for enabling NS/AGC
+at all. Full numbers:
 `docs/field-notes/2026-09-02-e10-helios-windows-cross-platform-battery-run-to-run-variance-dominates.md`.
 **Still not applied anywhere** -- shipped default unchanged, `[E10]`
-stays open pending JP's review and likely a third-platform (Linux) run
-or a similarly-sized Mac mini re-run of `ns_level=3` specifically
-against baseline before any default changes.
+stays open pending JP's review and likely a third-platform (Linux) run.
 
 **What's there but unused, with more real detail than previously
 recorded.** `EchoCanceller.__init__` (`src/convobox/audio/aec.py`)

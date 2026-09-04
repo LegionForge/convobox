@@ -7,11 +7,14 @@ import httpx
 import numpy as np
 
 from convobox.config import TTSConfig
+from convobox.paths import default_piper_voices_dir
 from convobox.tts.base import TTSEngine
 from convobox.tts.kokoro import KokoroTTSEngine
 from convobox.tts.piper import PiperTTSEngine
 
-DEFAULT_VOICES_DIR = Path(".models/piper")
+# 2026-09-04, was Path(".models/piper") relative to CWD -- see
+# convobox.paths' own module docstring for why that was a real problem.
+DEFAULT_VOICES_DIR = default_piper_voices_dir()
 
 # Same release tag hosts both files (confirmed against the kokoro-onnx
 # package's own README instructions, 2026-07-24) -- unlike Piper's
