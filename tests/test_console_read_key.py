@@ -13,18 +13,31 @@ macOS: an arrow-key press sometimes just quit the picker outright).
 
 from __future__ import annotations
 
-import fcntl
 import os
-import pty
-import select
-import struct
 import subprocess
 import sys
-import termios
 import time
 from pathlib import Path
 
 import pytest
+
+# pty/fcntl/termios are POSIX-only -- this file's whole premise (a real
+# pty reproducing an escape sequence's raw byte-timing) has no Windows
+# equivalent. Guarded at collection time (not per-test) because the
+# unconditional stdlib imports below would otherwise raise
+# ModuleNotFoundError and abort the ENTIRE test run's collection on
+# Windows, not just skip this file -- caught live, 2026-09-03 (Helios).
+if sys.platform == "win32":
+    pytest.skip(
+        "pty/fcntl/termios are POSIX-only -- see this module's own docstring",
+        allow_module_level=True,
+    )
+
+import fcntl  # noqa: E402
+import pty  # noqa: E402
+import select  # noqa: E402
+import struct  # noqa: E402
+import termios  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
