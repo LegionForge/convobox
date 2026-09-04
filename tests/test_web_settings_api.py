@@ -100,6 +100,26 @@ def test_schema_exposes_unset_sentinel_for_device_fields(client: TestClient) -> 
     assert input_device["choices"][0] == input_device["unset_value"]
 
 
+def test_schema_exposes_unset_sentinel_and_live_choices_for_kill_phrase(
+    client: TestClient,
+) -> None:
+    # Dynamic choices (from hard_stop_phrases), not a static list -- and
+    # unset_value must be wired the same way device/piper_speaker are, or
+    # the frontend has no way to map the sentinel back to null without
+    # hardcoding the literal string.
+    values = client.get("/api/settings").json()["values"]
+    values["safeword"]["hard_stop_phrases"] = ["stop stop stop", "eject eject eject"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    interaction_section = next(s for s in response.json()["sections"] if s["key"] == "interaction")
+    kill_phrase = next(f for f in interaction_section["fields"] if f["key"] == "kill_phrase")
+    assert kill_phrase["unset_value"] == "(none -- no phrase force-kills the backend)"
+    assert kill_phrase["choices"] == [
+        "(none -- no phrase force-kills the backend)",
+        "stop stop stop",
+        "eject eject eject",
+    ]
+
+
 def test_validate_reports_error_for_unsupported_backend(client: TestClient) -> None:
     values = client.get("/api/settings").json()["values"]
     values["backend"]["name"] = "not-a-real-backend"

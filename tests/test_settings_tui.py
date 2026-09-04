@@ -1046,6 +1046,93 @@ def test_refresh_kokoro_voices_is_a_noop_outside_tts_section(monkeypatch: pytest
     assert "only available for tts.engine=kokoro" in state.status
 
 
+# --- safeword.kill_phrase (2026-09-03, JP: "eject/quit doesn't have a
+# phrase" -- the config field existed but was never exposed in either
+# UI). A picker over hard_stop_phrases, not free text: config.py's own
+# validator rejects a kill_phrase not ALSO in hard_stop_phrases. ---
+
+
+def test_kill_phrase_choices_lists_unset_plus_hard_stop_phrases() -> None:
+    config = _make_config(
+        **{"safeword.hard_stop_phrases": ["stop stop stop", "eject eject eject"]}
+    )
+    assert settings_tui._kill_phrase_choices(config) == [
+        settings_tui._KILL_PHRASE_UNSET,
+        "stop stop stop",
+        "eject eject eject",
+    ]
+
+
+def test_kill_phrase_choices_never_empty_when_no_hard_stop_phrases() -> None:
+    config = _make_config(**{"safeword.hard_stop_phrases": []})
+    assert settings_tui._kill_phrase_choices(config) == [settings_tui._KILL_PHRASE_UNSET]
+
+
+def test_choices_for_dispatches_kill_phrase() -> None:
+    config = _make_config(**{"safeword.hard_stop_phrases": ["stop stop stop"]})
+    spec = FieldSpec("safeword", "kill_phrase", "Kill phrase", "kill_phrase")
+    assert settings_tui._choices_for(spec, config) == (
+        settings_tui._KILL_PHRASE_UNSET,
+        "stop stop stop",
+    )
+
+
+def test_toggle_or_cycle_kill_phrase_advances_to_a_real_phrase() -> None:
+    config = _make_config(
+        **{
+            "safeword.hard_stop_phrases": ["stop stop stop", "eject eject eject"],
+            "safeword.kill_phrase": None,
+        }
+    )
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "interaction")
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "kill_phrase"
+    )
+
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.safeword.kill_phrase == "stop stop stop"
+
+
+def test_toggle_or_cycle_kill_phrase_maps_unset_sentinel_back_to_none() -> None:
+    config = _make_config(
+        **{
+            "safeword.hard_stop_phrases": ["stop stop stop", "eject eject eject"],
+            "safeword.kill_phrase": "eject eject eject",
+        }
+    )
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "interaction")
+    state.selected_field = next(
+        i for i, f in enumerate(state.current_fields()) if f.key == "kill_phrase"
+    )
+
+    # Cycling from the last real phrase wraps back to the unset sentinel
+    # (index 0) -- must be written as None, not the literal sentinel text.
+    settings_tui._toggle_or_cycle(state)
+
+    assert state.working.safeword.kill_phrase is None
+
+
+def test_kill_phrase_field_produces_a_saveable_config(tmp_path: Path) -> None:
+    # End-to-end proof this can't produce config.py's own ValueError
+    # ("must also be listed in hard_stop_phrases") through normal use --
+    # every choice the picker offers is already a valid hard_stop_phrases
+    # entry by construction.
+    config = _make_config(
+        **{
+            "safeword.hard_stop_phrases": ["stop stop stop"],
+            "safeword.kill_phrase": "stop stop stop",
+        }
+    )
+    path = tmp_path / "convobox.yaml"
+    settings_tui.save_with_backup(path, config)
+    reloaded, _raw, problems = settings_tui.load_config_lenient(path)
+    assert problems == []
+    assert reloaded.safeword.kill_phrase == "stop stop stop"
+
+
 # --- [v] browse Piper voice catalog: hands the terminal to
 # voice_picker_tui.py's own picker in-process, applies whatever it
 # returns through THIS session's own state (not a second independent

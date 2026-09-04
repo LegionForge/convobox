@@ -2056,7 +2056,7 @@ function artifactUrl(url) {
   }
 
   // Kind -> control. Picker kinds (choice/device/kokoro_voice/piper_voice/
-  // piper_speaker) share one <select> path: field.unset_value/
+  // piper_speaker/kill_phrase) share one <select> path: field.unset_value/
   // unavailable_value (from settings_api.py's _field_to_dict) are the
   // TUI's own sentinel strings, never hardcoded here.
   function buildInput(field, path) {
@@ -2075,7 +2075,11 @@ function artifactUrl(url) {
       return input;
     }
 
-    if (["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"].includes(field.kind)) {
+    if (
+      ["choice", "device", "kokoro_voice", "piper_voice", "piper_speaker", "kill_phrase"].includes(
+        field.kind,
+      )
+    ) {
       const select = document.createElement("select");
       select.id = fieldId;
       for (const choice of field.choices) {
