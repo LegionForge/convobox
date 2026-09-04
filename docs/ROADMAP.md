@@ -514,6 +514,70 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
     .../event?after=<seq>` (could remove the subscribe-after-send race
     `wait_listening()` exists to dodge) and a live-answerable
     `POST .../permission/:requestID/reply` endpoint.
+  - **Kilo now live-probed too (2026-09-03/04, Helios -- `kilo` 7.5.6
+    was already installed), filling the exact gap the OpenCode pass
+    above flagged ("not yet live-probed against Kilo specifically").**
+    Raw JSON-RPC probes against a real spawned `kilo acp` process (a
+    small Python script, no ConvoBox adapter code) -- source at
+    `c:/tmp/.../scratchpad/kilo_acp_probe.py` this session, not
+    committed (throwaway probe driver, same convention as the OpenCode
+    pass's own).
+    - **Wire framing confirmed: newline-delimited JSON** (one JSON
+      object per line over stdin/stdout), not LSP-style
+      Content-Length-prefixed framing -- genuinely unconfirmed by the
+      public docs before this, now settled empirically.
+    - **A real, live-verified gotcha: an ACP session's default model is
+      NOT the same as `kilo run`'s own default.** `kilo run` (no `-m`)
+      resolved to `mercury-2` and worked. A fresh ACP `session/new`
+      instead defaulted `configOptions[model].currentValue` to
+      `kilo/google/gemini-3-pro-image` -- a Kilo-Gateway-hosted IMAGE
+      model, unauthenticated on this account ("Not authenticated with
+      Kilo Gateway" per `kilo profile`). Prompting without first
+      correcting this hangs -- the agent never responds, no error
+      either, because the underlying provider call itself never
+      resolves. Any real ConvoBox adapter MUST select a working model
+      via config before the first prompt, not assume ACP inherits
+      whatever `kilo run`/the TUI would default to.
+    - **The fix, live-confirmed:** `session/new`'s response really does
+      populate `configOptions` (contra this file's own earlier
+      uncertainty) with a `{id: "model", type: "select", currentValue,
+      options: [{value, name}]}` entry. The client sets it via
+      `session/set_config_option` -- **`{sessionId, configId, value}`,
+      not `optionId`** (found by reading the live `-32602 Invalid
+      params` error's own `configId` field name, not guessed). After
+      that one extra call, a full real round trip worked end-to-end:
+      `session/prompt` -> streamed `session/update` notifications
+      (`agent_thought_chunk`, `agent_message_chunk`, `tool_call`/
+      `tool_call_update`, `usage_update`) -> a final response with
+      `stopReason: "end_turn"`. Confirms responses and notifications
+      genuinely interleave on the wire (a naive "read one line, assume
+      it's my response" probe hung/misread messages until corrected to
+      id-correlate, same architecture `codex.py`'s real reader task
+      already uses) -- validates that design choice for the future
+      generic adapter.
+    - **Permission default posture: full-trust, same finding as
+      OpenCode's, NOT the "live-answerable approval channel" this file
+      previously implied from source-reading alone.** Same methodology
+      as the OpenCode pass: prompted a real file write with no special
+      config. Kilo's own `tool_call` update went `pending` ->
+      `in_progress` -> `completed` with **zero
+      `session/request_permission` calls** -- the write happened
+      (file-existence-confirmed on disk), no gate. The
+      `packages/opencode/src/acp/permission.ts` wiring this file cited
+      earlier is real INFRASTRUCTURE (it does exist in the source, and
+      would answer a permission request if one fired), but it isn't
+      triggered under Kilo's own default config any more than
+      OpenCode's is -- this file's earlier phrasing overstated what
+      source-reading alone could establish. Revises the "practical
+      mapping" above: for Kilo too, ConvoBox's own adapter would need
+      to actively configure a restrictive permission mode (if one
+      exists in Kilo's config surface -- not yet probed) rather than
+      assume the wiring fires by itself.
+    - **Not yet probed for Kilo specifically:** `session/set_mode`
+      (plan-mode equivalent, confirmed real for OpenCode above),
+      `session/cancel` (interject/steer is already confirmed absent at
+      the PROTOCOL level for any ACP agent, so no Kilo-specific test
+      needed there).
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
