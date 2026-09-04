@@ -402,11 +402,17 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   (interleaved design), not a confound for these comparisons. Full
   numbers:
   `docs/field-notes/2026-09-02-e10-helios-windows-cross-platform-battery-run-to-run-variance-dominates.md`.
-  Revised candidate value if this ships: `ns_level=3`, not the
-  documented `ns_level=2` -- but "beats level 2" isn't yet "beats off."
-  Next step: a third platform (Linux), or a same-sized Mac mini re-run
-  of `ns_level=3` specifically against baseline, before any default
-  changes.
+
+  **Update (2026-09-03): extended `ns_level=3` vs baseline specifically
+  to N=35 cycles/280 trials each -- point estimate reversed sign.** Was
+  +7.7pts at N=15; at N=35 it's **-9.2pts, 95% CI [-20.2,+1.7]** -- ns3
+  now trailing baseline, still not significant, but the reversal reads
+  as a true near-zero effect, not noise hiding a real gap. `ns_level=3`
+  still clearly beats `ns_level=2`/`aec_agc` (unchanged). **Revised
+  conclusion: no tested NS/AGC config confirmed to beat leaving it off
+  on Helios** -- `ns_level=3` is only the best of the enabled options,
+  not a case for enabling NS/AGC at all. Next step: a third platform
+  (Linux) before any default changes.
 
   **Prerequisites before running.**
   1. Real, OPEN speakers and a real mic in the same room -- NOT
