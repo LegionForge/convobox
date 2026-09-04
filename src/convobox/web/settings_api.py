@@ -128,6 +128,8 @@ def _field_to_dict(spec: Any, config: AppConfig, settings_tui: Any) -> dict[str,
         d["unavailable_value"] = settings_tui._KOKORO_VOICE_UNAVAILABLE
     elif spec.kind == "piper_voice":
         d["unavailable_value"] = settings_tui._PIPER_VOICE_UNAVAILABLE
+    elif spec.kind == "kill_phrase":
+        d["unset_value"] = settings_tui._KILL_PHRASE_UNSET
     return d
 
 
