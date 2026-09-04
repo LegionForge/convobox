@@ -189,6 +189,7 @@ class FieldSpec:
         "kokoro_voice",
         "piper_voice",
         "piper_speaker",
+        "kill_phrase",
     ]
     choices: tuple[str, ...] = ()
     help_text: str = ""
@@ -354,6 +355,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
             # what _get_value/_set_value actually use to resolve the real
             # config path -- this is a display-grouping change only.
             FieldSpec("safeword", "hard_stop_phrases", "Hard stop phrases", "list_str", help_text="Comma-separated phrases that immediately hard-stop the current turn, in every interrupt preset, paused or not -- the one always-on safety floor (docs/DESIGN-barge-in.md)."),
+            FieldSpec("safeword", "kill_phrase", "Kill phrase", "kill_phrase", help_text="Optional. One of the hard stop phrases above, chosen to ALSO end the whole ConvoBox session and force-kill the backend process (not just abort the current turn -- see the field's own list for what a plain hard stop already does). Unset (default) means no phrase does this -- every hard stop phrase just aborts the turn and keeps listening. Must be one of the phrases already listed above; add it there first if it isn't yet. KNOWN LIMIT: on Windows, a process the backend deliberately detached (e.g. via PowerShell's Start-Process) can survive this -- see docs/KNOWN-ISSUES.md."),
             FieldSpec("interaction", "pause_resume_ack", "Pause/resume sound", "choice", _CHOICE_PAUSE_RESUME_ACK, help_text="Audio cue when pausing/resuming listening. none (default): silent, matches every release before this one. tone: a short synthesized 3-note chime -- ascending on resume, descending on pause -- no extra files needed."),
             FieldSpec("interaction", "approval_phrase", "Approval phrase", "optional_str", help_text="Opt-in command/file approvals for Codex or Claude Code (needs backend.permission_mode: approve above). Leave unset to keep the safe default: every approval request is denied automatically, no prompts. When set, say this exact phrase to approve a pending request; say 'no' to deny; silence for approval_timeout_s denies. Use a distinctive multi-word phrase -- plain 'yes' is deliberately rejected. Same STT-reliability caution as the resume word: pick something clearly Whisper-transcribable. A NATO-alphabet-style phrase (e.g. 'juliette papa charlie') tends to round-trip more reliably than ordinary words -- verify with scripts/roundtrip_smoketest.py before relying on it."),
             FieldSpec("interaction", "approval_timeout_s", "Approval timeout s", "float", help_text="How long a pending approval waits for a voice decision before silence is treated as an explicit denial (never as consent)."),
@@ -817,6 +819,26 @@ def _piper_speaker_choices(config: AppConfig) -> list[str]:
     return [_PIPER_SPEAKER_DEFAULT, *sorted(speaker_map)]
 
 
+# safeword.kill_phrase (2026-09-03, JP: "eject/quit doesn't have a phrase" --
+# it does, in config, but was never exposed here). Same "unset sentinel
+# always first" convention as _SYSTEM_DEFAULT/_PIPER_SPEAKER_DEFAULT.
+_KILL_PHRASE_UNSET = "(none -- no phrase force-kills the backend)"
+
+
+def _kill_phrase_choices(config: AppConfig) -> list[str]:
+    """A picker, not free text: config.py's own validator rejects a
+    kill_phrase that isn't ALSO listed in safeword.hard_stop_phrases (it
+    can't fire a hard stop it isn't configured as a safeword for) --
+    offering only phrases already in that list makes the invalid state
+    unreachable through this field instead of surfacing as a save-time
+    ValidationError the user has to decode. Always includes the unset
+    sentinel first, even when hard_stop_phrases is empty (never an empty
+    choice list -- same "must never offer zero choices" stance every
+    other dynamic picker here takes).
+    """
+    return [_KILL_PHRASE_UNSET, *config.safeword.hard_stop_phrases]
+
+
 def _device_currently_unavailable(device: str, kind: Literal["input", "output"]) -> str | None:
     """None if `device` matches a currently-connected device (or if
     availability can't be checked at all -- same fail-open stance
@@ -880,6 +902,8 @@ def _choices_for(spec: FieldSpec, config: AppConfig) -> tuple[str, ...]:
         return tuple(_piper_voice_choices())
     if spec.kind == "piper_speaker":
         return tuple(_piper_speaker_choices(config))
+    if spec.kind == "kill_phrase":
+        return tuple(_kill_phrase_choices(config))
     if spec.kind == "bool":
         return ("false", "true")
     return spec.choices
@@ -897,6 +921,8 @@ def _choice_index(spec: FieldSpec, current: Any, config: AppConfig) -> int:
         lookup = current
     elif spec.kind == "piper_speaker":
         lookup = _PIPER_SPEAKER_DEFAULT
+    elif spec.kind == "kill_phrase":
+        lookup = _KILL_PHRASE_UNSET
     else:
         lookup = _SYSTEM_DEFAULT
     try:
@@ -1975,7 +2001,7 @@ def _browse_piper_voice_catalog(state: TuiState) -> None:
 
 @_tracks_modal_depth
 def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) -> tuple[bool, Any]:
-    is_pickable = spec.kind in ("choice", "device", "bool", "kokoro_voice")
+    is_pickable = spec.kind in ("choice", "device", "bool", "kokoro_voice", "kill_phrase")
     # Device fields are str | None; _format_value(None) is the display
     # string "(unset)", which isn't in _choices_for's list and would break
     # cycling/index-lookup. Seed the buffer with the picker's own sentinel
@@ -1983,6 +2009,8 @@ def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) ->
     # same as a "choice" field (which is never None) already is.
     if spec.kind == "device" and current is None:
         buffer = _SYSTEM_DEFAULT
+    elif spec.kind == "kill_phrase" and current is None:
+        buffer = _KILL_PHRASE_UNSET
     elif spec.kind == "command":
         # NOT _format_value() -- its generic list formatting is
         # comma-joined ("codex.cmd, --model, x"), correct for the OTHER
@@ -2038,6 +2066,8 @@ def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) ->
                 # this is a cancel, not a value (never write the
                 # placeholder text itself into tts.voice).
                 return False, current
+            if spec.kind == "kill_phrase" and buffer == _KILL_PHRASE_UNSET:
+                return True, None
             return True, _parse_value(spec, accepted, current)
         if is_pickable:
             if key in {"LEFT", "UP"}:
@@ -2251,7 +2281,9 @@ def _toggle_or_cycle(state: TuiState) -> None:
     new_value: bool | str | None
     if spec.kind == "bool":
         new_value = not bool(current)
-    elif spec.kind in ("choice", "device", "kokoro_voice", "piper_voice", "piper_speaker"):
+    elif spec.kind in (
+        "choice", "device", "kokoro_voice", "piper_voice", "piper_speaker", "kill_phrase",
+    ):
         try:
             new_value = _cycle_choice(spec, current, 1, state.working)
         except ValueError:
@@ -2268,7 +2300,7 @@ def _toggle_or_cycle(state: TuiState) -> None:
             state.status = "tts.voices_path not downloaded yet -- press [t] to fetch it"
             return
         if spec.kind == "piper_voice" and new_value == _PIPER_VOICE_UNAVAILABLE:
-            state.status = "no piper voices downloaded -- use scripts/voice_picker.py first"
+            state.status = "no piper voices downloaded -- press [V] to browse and download one"
             return
         if spec.kind == "piper_speaker":
             if new_value == _PIPER_SPEAKER_UNAVAILABLE:
@@ -2276,6 +2308,8 @@ def _toggle_or_cycle(state: TuiState) -> None:
                 return
             if new_value == _PIPER_SPEAKER_DEFAULT:
                 new_value = None
+        if spec.kind == "kill_phrase" and new_value == _KILL_PHRASE_UNSET:
+            new_value = None
     else:
         state.status = "space toggles booleans and cycles choices only"
         return
