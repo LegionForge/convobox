@@ -1133,6 +1133,92 @@ def test_kill_phrase_field_produces_a_saveable_config(tmp_path: Path) -> None:
     assert reloaded.safeword.kill_phrase == "stop stop stop"
 
 
+# --- [v] browse Piper voice catalog: hands the terminal to
+# voice_picker_tui.py's own picker in-process, applies whatever it
+# returns through THIS session's own state (not a second independent
+# writer to convobox.yaml). 2026-09-03, JP: "no way of downloading new
+# voices for kokoro or piper" -- kokoro already had [d]; this is piper's
+# equivalent. ---
+
+
+def test_browse_piper_voice_catalog_applies_the_chosen_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": None})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_tui(voices_dir: object, refresh: bool, offer_save: bool) -> str:
+        captured["voices_dir"] = voices_dir
+        captured["refresh"] = refresh
+        captured["offer_save"] = offer_save
+        return "en_US-lessac-medium"
+
+    fake_module = SimpleNamespace(run_tui=_fake_run_tui)
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", fake_module)
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    assert state.working.tts.voice == "en_US-lessac-medium"
+    assert state.dirty is True
+    assert "en_US-lessac-medium" in state.status
+    # offer_save=False -- this session must never let voice_picker_tui.py
+    # write to convobox.yaml on its own; settings_tui.py owns that via
+    # its own [S] Save.
+    assert captured["offer_save"] is False
+
+
+def test_browse_piper_voice_catalog_handles_no_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "piper", "tts.voice": "en_US-lessac-medium"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    fake_module = SimpleNamespace(run_tui=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", fake_module)
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    # Unchanged -- quitting the catalog without choosing must not clear
+    # or otherwise touch the existing tts.voice value.
+    assert state.working.tts.voice == "en_US-lessac-medium"
+    assert state.dirty is False
+    assert "no voice was chosen" in state.status
+
+
+def test_browse_piper_voice_catalog_is_a_noop_for_kokoro(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_config(**{"tts.engine": "kokoro"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "tts")
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("should not launch the catalog browser for kokoro")
+
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", SimpleNamespace(run_tui=_fail_if_called))
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    assert "only available for tts.engine=piper" in state.status
+
+
+def test_browse_piper_voice_catalog_is_a_noop_outside_tts_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(**{"tts.engine": "piper"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, s in enumerate(state.sections) if s.key == "audio")
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("should not launch the catalog browser outside tts")
+
+    monkeypatch.setitem(sys.modules, "voice_picker_tui", SimpleNamespace(run_tui=_fail_if_called))
+
+    settings_tui._browse_piper_voice_catalog(state)
+
+    assert "only available for tts.engine=piper" in state.status
+
+
 # --- STT device: pick-from-list rather than free text (JP's ask: "we
 # should have a chooser for cpu/gpu"). Only str kind before this. ---
 
@@ -1364,6 +1450,21 @@ def test_backup_and_save_round_trip(tmp_path: Path) -> None:
     saved = path.read_text(encoding="utf-8")
     assert "tts:" in saved
     assert "voice: en_US-lessac-medium" in saved
+
+
+def test_write_config_creates_a_not_yet_existing_parent_directory(tmp_path: Path) -> None:
+    # 2026-09-04: the default config path now lives under an OS
+    # user-data directory (convobox.paths) that may not exist yet on a
+    # genuinely fresh install -- unlike the old CWD-relative default,
+    # whose parent (CWD) always existed. NamedTemporaryFile inside
+    # write_config raised FileNotFoundError here before this was fixed.
+    path = tmp_path / "not-yet-created" / "nested" / "convobox.yaml"
+    assert not path.parent.exists()
+    config = _make_config()
+
+    settings_tui.write_config(path, config)
+
+    assert path.exists()
 
 
 def test_save_with_backup_restores_original_on_write_failure(

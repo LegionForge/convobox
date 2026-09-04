@@ -63,6 +63,7 @@ from convobox.config import (
     resolve_config_path,
 )
 from convobox.listening_pause import PauseListeningDetector
+from convobox.paths import migrate_legacy_layout
 from convobox.resumeword import ROUNDTRIP_REJECTED_RESUME_WORDS, ResumeWordDetector
 from convobox.stt.base import TranscriptResult
 from convobox.stt.factory import create_stt_engine
@@ -313,7 +314,7 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         label="TTS",
         fields=(
             FieldSpec("tts", "engine", "Engine", "choice", _CHOICE_TTS_ENGINES, help_text="Text-to-speech backend. kokoro (default) is permissively licensed (MIT + Apache-2.0); piper is GPL-3.0 and requires the separate `piper` extra (`uv sync --extra piper`). Each engine's own voice/settings are remembered when you switch away and back."),
-            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="piper only: an installed Piper voice key, such as en_US-lessac-medium."),
+            FieldSpec("tts", "voice", "Voice", "optional_str", help_text="piper only: an installed Piper voice key, such as en_US-lessac-medium. Space/Left/Right cycles voices already downloaded; press [V] to browse, search, audition, download, and delete voices from Piper's full HuggingFace catalog."),
             FieldSpec("tts", "model_path", "Model path", "str", help_text="kokoro only: path to the kokoro-v1.0.onnx model file."),
             FieldSpec("tts", "voices_path", "Voices path", "str", help_text="kokoro only: path to the voices-v1.0.bin voice bundle."),
             FieldSpec("tts", "language", "Language", "str", help_text="kokoro only: phonemizer language code, e.g. en-us."),
@@ -762,7 +763,7 @@ def _kokoro_voice_choices(config: AppConfig) -> list[str]:
 
 
 # Same "never offer zero choices" reasoning as _KOKORO_VOICE_UNAVAILABLE.
-_PIPER_VOICE_UNAVAILABLE = "(no voices downloaded -- use scripts/voice_picker.py to download one)"
+_PIPER_VOICE_UNAVAILABLE = "(no voices downloaded -- press [V] to browse and download one)"
 # Piper speaker picker's "use this voice's own default speaker" choice --
 # always first, same role as _SYSTEM_DEFAULT for device fields (tts.speaker
 # is str | None; None means "voice's default", not a literal string to save).
@@ -774,9 +775,11 @@ def _piper_voice_choices() -> list[str]:
     """Locally installed Piper voice keys (e.g. "en_US-lessac-medium"),
     or the placeholder above if none are downloaded yet. Deliberately
     does NOT browse Piper's full 163-voice HuggingFace catalog here --
-    that's scripts/voice_picker.py's job (search/download/audition);
-    this picker, like the Kokoro one, only offers what's already on
-    disk, so cycling here never triggers a surprise network download.
+    cycling only offers what's already on disk, so it never triggers a
+    surprise network download. [V] (_browse_piper_voice_catalog) is the
+    deliberate, explicit action for searching/downloading/auditioning
+    the full catalog -- voice_picker_tui.py's own picker, launched
+    in-process.
     """
     import voice_picker
 
@@ -1004,6 +1007,14 @@ def list_config_backups(path: Path) -> list[Path]:
 
 
 def write_config(path: Path, config: AppConfig) -> None:
+    # 2026-09-04: path.parent is no longer guaranteed to exist -- the
+    # default config path now lives under an OS user-data directory
+    # (convobox.paths) that may not have been created yet on a genuinely
+    # fresh install, unlike the old CWD-relative default (CWD always
+    # exists). A --config pointed at some other not-yet-created
+    # directory has the same need. NamedTemporaryFile below raises
+    # FileNotFoundError otherwise -- live-caught writing this.
+    path.parent.mkdir(parents=True, exist_ok=True)
     header = _read_leading_header(path)
     body = _dump_config(config)
     content = ("\n".join(header) + "\n") if header else ""
@@ -1935,6 +1946,53 @@ def _tracks_modal_depth(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 @_tracks_modal_depth
+def _browse_piper_voice_catalog(state: TuiState) -> None:
+    """[v]: hand the whole terminal to voice_picker_tui.py's own full
+    picker (search/download/audition/delete against Piper's real
+    HuggingFace catalog) IN-PROCESS -- a plain function call, not a
+    subprocess. Both TUIs are plain read_key()/write-escape-codes loops
+    over the same real terminal, each already correctly entering and
+    restoring cursor/screen state around its own run -- there is nothing
+    a subprocess boundary would add here except complexity (a second
+    process to manage, stdio to not accidentally capture). 2026-09-03,
+    JP: "no way of downloading new voices for kokoro or piper" -- kokoro
+    already had [d] (refresh_kokoro_voices above); piper had nothing
+    short of manually running scripts/voice_picker.py/voice_picker_tui.py
+    as a SEPARATE tool the user had to already know existed.
+
+    @_tracks_modal_depth (same decorator every OTHER screen-owning flow
+    here uses) makes run_tui()'s own SIGWINCH handler skip repainting
+    the settings-TUI screen while this owns the terminal -- without it, a
+    resize during the sub-session could interleave a stray settings-TUI
+    frame with voice_picker_tui.py's own redraw.
+
+    offer_save=False: voice_picker_tui.py's own end-of-session "write to
+    convobox.yaml?" prompt targets default_config_path(), which may not
+    be the file THIS settings_tui.py session is editing (an explicit
+    --config path). Never let a second, independent writer touch the
+    config file -- take the chosen key from run_tui()'s return value
+    instead and apply it through this session's own state exactly like
+    any other field edit, so [S] Save still goes through the one real
+    write path (save_with_backup) and un-saved-changes/revert semantics
+    keep working normally.
+    """
+    if state.current_section().key != "tts" or state.working.tts.engine != "piper":
+        state.status = "[v] browse voice catalog is only available for tts.engine=piper"
+        return
+    import voice_picker_tui
+
+    chosen = voice_picker_tui.run_tui(DEFAULT_VOICES_DIR, refresh=False, offer_save=False)
+    sys.stdout.write("\x1b[?25l\x1b[2J")  # hide cursor again, clear voice_picker_tui.py's own screen
+    sys.stdout.flush()
+    if chosen is not None:
+        state.working.tts.voice = chosen
+        state.dirty = True
+        state.status = f"tts.voice set to {chosen} -- [S] to save"
+    else:
+        state.status = "voice catalog closed -- no voice was chosen"
+
+
+@_tracks_modal_depth
 def _edit_value_interactive(spec: FieldSpec, current: Any, config: AppConfig) -> tuple[bool, Any]:
     is_pickable = spec.kind in ("choice", "device", "bool", "kokoro_voice", "kill_phrase")
     # Device fields are str | None; _format_value(None) is the display
@@ -2836,6 +2894,8 @@ def _handle_browse(state: TuiState, key: str) -> bool:
         asyncio.run(_compare_tts_engines(state))
     elif lowered == "d":
         _refresh_kokoro_voices(state)
+    elif lowered == "v":
+        _browse_piper_voice_catalog(state)
     return True
 
 
@@ -2870,10 +2930,18 @@ def _apply_load_recovery(state: TuiState, problems: list[str]) -> None:
 
 
 def run_tui(config_path: Path | None = None) -> None:
+    # One-time, best-effort move of anything still at the pre-2026-09-04
+    # CWD-relative locations into the new user-data directory -- see
+    # convobox.paths' own module docstring. Must run before
+    # default_config_path()/load_config_lenient() below, since a legacy
+    # convobox.yaml is one of the things it may relocate.
+    migrated = migrate_legacy_layout()
     path = config_path or default_config_path()
     config, _raw, problems = load_config_lenient(path)
     state = TuiState(path=path, original=config, working=config.model_copy(deep=True))
     _apply_load_recovery(state, problems)
+    if migrated:
+        state.status = f"migrated {len(migrated)} item(s) to the new user-data directory"
     _enable_ansi()
     sys.stdout.write("\x1b[?25l\x1b[2J")
     sys.stdout.flush()

@@ -22,6 +22,7 @@ from convobox.config import (
     resolve_config_path,
     write_aec_estimate,
 )
+from convobox.paths import default_config_path
 
 # --- resolve_config_path: the explicit-path / CONVOBOX_CONFIG / default
 # fallback order load_config() and settings_tui.py's default_config_path()
@@ -39,9 +40,17 @@ def test_resolve_config_path_uses_the_env_var_when_no_explicit_path(
     assert resolve_config_path() == Path("from-env.yaml")
 
 
-def test_resolve_config_path_defaults_to_convobox_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_config_path_defaults_to_the_user_data_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 2026-09-04: the fallback-of-the-fallback moved from a bare
+    # "convobox.yaml" relative to CWD to convobox.paths.default_config_path()
+    # (an OS-idiomatic user-data directory) -- see that module's own
+    # docstring for why (uninstall/upgrade was a mess when every default
+    # depended on whatever directory `convobox` happened to be run from).
     monkeypatch.delenv("CONVOBOX_CONFIG", raising=False)
-    assert resolve_config_path() == Path("convobox.yaml")
+    assert resolve_config_path() == default_config_path()
+    assert resolve_config_path().name == "convobox.yaml"
 
 
 def test_resolve_config_path_explicit_path_wins_over_env_var(

@@ -54,6 +54,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _console import use_utf8_console
 
+from convobox.config import resolve_config_path as _resolve_config_path
+
 
 def collect_devices(sd: Any, kind: str) -> list[dict[str, Any]]:
     """Normalize sounddevice's device table for one direction.
@@ -298,10 +300,15 @@ def test_input_device(
 
 
 def default_config_path() -> Path:
-    """The file load_config() reads: CONVOBOX_CONFIG or ./convobox.yaml."""
-    import os
-
-    return Path(os.environ.get("CONVOBOX_CONFIG", "convobox.yaml"))
+    """The file load_config() reads -- CONVOBOX_CONFIG, or the
+    OS-idiomatic user-data directory (convobox.paths). Delegates to
+    convobox.config's own resolve_config_path() (2026-09-04) rather than
+    a second, independent copy of the same resolution order -- this
+    file's own duplicate previously hardcoded the pre-user-data-dir
+    "convobox.yaml relative to CWD" fallback and would have silently
+    drifted from the real default the day that changed.
+    """
+    return _resolve_config_path()
 
 
 def write_device_to_config(kind: str, value: str, config_path: Path) -> Path:
