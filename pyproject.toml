@@ -161,6 +161,7 @@ calibration = [
 convobox = "scripts.run_convobox:main"
 convobox-spike = "scripts.spike:main"
 convobox-settings = "scripts.settings_tui:main"
+convobox-audio-devices = "scripts.audio_devices:main"
 
 [build-system]
 requires = ["hatchling"]

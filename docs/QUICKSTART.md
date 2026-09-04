@@ -7,61 +7,88 @@ as subprocesses).
 
 ## 1. Install
 
+Just want to run it? It's a real PyPI package — no clone needed:
+
+```bash
+pip install legionforge-convobox    # or: pipx install legionforge-convobox
+```
+
+This gives you the `convobox`, `convobox-settings`, and
+`convobox-audio-devices` commands used throughout this guide. Contributing,
+or want the `dev` extra's test/lint tooling? Clone instead:
+
 ```bash
 git clone https://github.com/LegionForge/convobox
 cd convobox
 uv sync                    # or: pip install -e .
 ```
 
-Optional extras, installed only if you want them:
+From a source checkout, run each tool as `python scripts/<name>.py` instead
+of `convobox-<name>` (e.g. `python scripts/audio_devices.py --setup`).
 
-```bash
-uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wheels)
-uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB, CUDA-only
-uv sync --extra dev        # test/lint tooling
-```
+Optional extras, installed only if you want them — same names either way:
+`pip install "legionforge-convobox[aec]"` or, from a source checkout,
+`uv sync --extra aec`:
 
-ConvoBox never bundles a TTS/STT engine you didn't ask for. Piper (the default
-voice engine) and the Whisper STT model download on first use.
+| Extra | What it adds |
+|---|---|
+| `aec` | acoustic echo cancellation (WebRTC AEC3, Windows wheels) |
+| `cuda` | GPU inference for STT (`stt.device: cuda`/`auto`), ~1GB, CUDA-only |
+| `piper` | Piper TTS voices, 160+ (opt-in; Kokoro is the default engine) |
+| `dev` | test/lint tooling (source checkout only) |
+
+ConvoBox never bundles a TTS/STT engine you didn't ask for. The default TTS
+engine (Kokoro) and the Whisper STT model download on first use.
 
 ## 2. Pick a voice
 
-Piper has 160+ voices. Browse, audition through your speakers, and save your
-choice straight into the config:
-
-```bash
-python scripts/voice_picker_tui.py     # full-screen: arrow keys, / to filter,
-                                        # P to play, Enter to choose, Q to save
-```
-
-(There's also a scriptable REPL/flag version at `scripts/voice_picker.py`.)
+Kokoro (the default engine) ships a small built-in set of voices, cycled
+with Space/Left/Right on the `tts.voice` field in the Settings TUI
+(`convobox-settings`). For 160+ additional voices, switch `tts.engine` to
+`piper` (requires the `piper` extra) and press `[V]` on the voice field to
+browse, audition, download, and save straight into the config from Piper's
+full catalog.
 
 ## 3. Find your audio device (if the default isn't right)
 
 Especially on Windows, the same jack shows up under several host APIs with
-different latency and behavior. List them and play a test tone:
+different latency and behavior. The guided setup tests your default speaker
+and mic and saves whichever one works:
 
 ```bash
-python scripts/audio_devices.py         # list output + input devices
-python scripts/audio_devices.py --test 5   # play a tone to device 5
+convobox-audio-devices --setup
+```
+
+Or list devices and play a test tone by hand:
+
+```bash
+convobox-audio-devices          # list output + input devices
+convobox-audio-devices --test 5 # play a tone to device 5
 ```
 
 Whichever one you *hear* is the device to pin.
 
 Already picked devices in `convobox.yaml` and just want to confirm they're
-right? The Settings TUI (`python scripts/settings_tui.py`) can test both in
-place: select **Audio → Input device** or **Output device** and press
-`[t]`. Testing the input device records ~1 second from the mic and plays
-the recording straight back through the configured output device — if you
-hear yourself, both ends of the pipeline are correctly wired.
+right? The Settings TUI (`convobox-settings`) can test both in place: select
+**Audio → Input device** or **Output device** and press `[t]`. Testing the
+input device records ~1 second from the mic and plays the recording
+straight back through the configured output device — if you hear yourself,
+both ends of the pipeline are correctly wired.
 
 ## 4. Configure
+
+ConvoBox runs with no config file at all (all defaults) — write one only to
+override what you need. Easiest path: `convobox-settings` (the Settings
+TUI) edits and validates `convobox.yaml` for you, creating it on first save.
+
+From a source checkout, you can instead start from the fully-commented
+example file:
 
 ```bash
 cp convobox.example.yaml convobox.yaml
 ```
 
-Edit `convobox.yaml` — it's fully commented. The essentials:
+Either way, the essentials:
 
 ```yaml
 backend:
@@ -79,25 +106,32 @@ audio:
   output_device: "Headphones (Realtek(R) Audio), MME"
 ```
 
-ConvoBox runs with no config file at all (all defaults) — the file only
-overrides what you set.
-
 ## 5. Run
 
 Start your backend first (for OpenCode: `opencode serve`). Then, without a
 microphone, confirm the whole loop works:
 
 ```bash
-python scripts/run_convobox.py --text "Reply with one short sentence: it works."
+convobox --text "Reply with one short sentence: it works."
 ```
 
 You should hear the reply. Now go live:
 
 ```bash
-python scripts/run_convobox.py
+convobox
 ```
 
 Speak a command; it transcribes, sends it to the agent, and speaks the reply.
+(Source checkout: `python scripts/run_convobox.py` in place of `convobox`.)
+
+## Updating
+
+```bash
+pip install --upgrade legionforge-convobox    # or: pipx upgrade legionforge-convobox
+```
+
+Source checkout: `git pull` then `uv sync` (or `pip install -e .` again).
+See [CHANGELOG.md](../CHANGELOG.md) for what changed.
 
 ## Talking to it
 
@@ -136,8 +170,8 @@ back) is planned as a configurable option, off by default.
 ## Troubleshooting
 
 - **No audio, but it's transcribing you fine.** Almost always the output
-  device. Run `python scripts/audio_devices.py --test <n>` down your devices
-  until you hear a tone, then pin that one.
+  device. Run `convobox-audio-devices --test <n>` down your devices until
+  you hear a tone, then pin that one.
 - **`Invalid sample rate` crash.** A WASAPI device rejecting the voice's rate
   — pin the MME or DirectSound variant of the same device instead (they
   resample), or update to a build with playback resampling.

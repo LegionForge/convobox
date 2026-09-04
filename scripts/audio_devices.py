@@ -5,12 +5,15 @@ DirectSound, WASAPI, WDM-KS), each with different latency and sample-rate
 behavior -- and that split is exactly where ConvoBox device configuration
 goes wrong. This tool makes the choice visible and testable:
 
-    python scripts/audio_devices.py                 # list output + input devices
-    python scripts/audio_devices.py --inputs        # input devices only
-    python scripts/audio_devices.py --test 5        # play a test tone to device 5
-    python scripts/audio_devices.py --test-input 1  # record from device 1, show a level meter
-    python scripts/audio_devices.py --setup         # GUIDED: test your default
-                                                    # speaker & mic, save to convobox.yaml
+    convobox-audio-devices                 # list output + input devices
+    convobox-audio-devices --inputs        # input devices only
+    convobox-audio-devices --test 5        # play a test tone to device 5
+    convobox-audio-devices --test-input 1  # record from device 1, show a level meter
+    convobox-audio-devices --setup         # GUIDED: test your default
+                                            # speaker & mic, save to convobox.yaml
+
+(Running from a source checkout instead of a pip install? Use
+`python scripts/audio_devices.py` in place of `convobox-audio-devices`.)
 
 Most people should just run --setup. It tries your system's default
 speaker and microphone first and tests each one -- a looping tone you
@@ -780,16 +783,16 @@ def guided_setup(sd: Any, config_path: Path | None = None) -> None:
     if chosen_in is None:
         print(
             "\n  WARNING: no microphone selected. ConvoBox can't hear you without one --"
-            "\n  re-run  python scripts/audio_devices.py --setup  and choose a mic"
+            "\n  re-run  convobox-audio-devices --setup  and choose a mic"
             "\n  (a 'very quiet' mic still works; press [y] to keep it)."
         )
     if chosen_out is None:
         print(
             "\n  WARNING: no speaker selected. ConvoBox can't talk back without one --"
-            "\n  re-run  python scripts/audio_devices.py --setup  and choose a speaker."
+            "\n  re-run  convobox-audio-devices --setup  and choose a speaker."
         )
     if chosen_in is not None and chosen_out is not None:
-        print("\nAll set. Run  python scripts/run_convobox.py  to start talking.")
+        print("\nAll set. Run  convobox  to start talking.")
 
 
 def main() -> None:
