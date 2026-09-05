@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess  # nosec B404 -- see _is_git_repo's own use for why
 import time
 from pathlib import Path
 from typing import Any
@@ -635,6 +637,15 @@ class BackendConfig(BaseModel):
     # `opencode serve` was launched) -- a warning is logged if this is set
     # for opencode. See docs/DESIGN-backend-sandboxing.md.
     permission_mode: str = "plan"
+    # 2026-09-04, JP: a coding agent editing a directory with no version
+    # control at all means every edit is unrecoverable the moment it
+    # happens -- worth nudging toward `git init`, but a nudge, not a
+    # block (a brand-new scratch workspace, or one deliberately kept
+    # outside git, are both legitimate). On by default (the safe
+    # direction for a warning that's cheap to show and easy to dismiss/
+    # disable); toggleable in both the Settings TUI and web UI, see
+    # detect_working_dir_not_git() below.
+    warn_if_working_dir_not_git: bool = True
 
     @field_validator("model")
     @classmethod
@@ -753,6 +764,69 @@ def detect_claude_code_approval_gap(
         "then every later one is silently auto-denied for the rest of "
         "the session. Set interaction.approval_phrase, or use a "
         "different permission_mode (\"plan\"/\"permissive\")."
+    )
+
+
+def _is_git_repo(path: Path) -> bool | None:
+    """True if `path` is inside a real git working tree, False if the
+    directory exists but isn't one, None if this genuinely couldn't be
+    determined (git isn't installed, or an unexpected process error) --
+    callers MUST treat None as "skip the check, say nothing," never as
+    "not a repo." A missing `git` binary must never turn into a false
+    warning telling someone to `git init` a repo that already has one.
+    """
+    git_exe = shutil.which("git")
+    if git_exe is None:
+        return None
+    try:
+        # SECURITY: git_exe is shutil.which()'s own resolved absolute
+        # path (never a bare "git" the shell could resolve differently),
+        # and the only other argument is a fixed literal -- no user
+        # input reaches this command line, same pattern
+        # adapters/codex.py's _resolve_command() already establishes.
+        result = subprocess.run(  # nosec B603
+            [git_exe, "rev-parse", "--is-inside-work-tree"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip() == "true"
+
+
+def detect_working_dir_not_git(backend: BackendConfig) -> str | None:
+    """Return a warning message if backend.working_dir is set, exists,
+    the warn_if_working_dir_not_git toggle is on, and the directory
+    isn't inside a git repository, else None.
+
+    2026-09-04, JP: a coding agent editing a directory with no version
+    control means every edit is unrecoverable the moment it happens --
+    worth a nudge toward `git init`. Deliberately a WARNING, not an
+    error like detect_permission_conflict's sibling checks above: a
+    fresh scratch workspace, or a directory kept outside git on
+    purpose, are both legitimate -- this is a suggestion the operator
+    can act on or dismiss, not a safety control blocking a save/start.
+    """
+    if not backend.warn_if_working_dir_not_git:
+        return None
+    if not backend.working_dir:
+        return None
+    path = Path(backend.working_dir).expanduser()
+    if not path.is_dir():
+        return None
+    if _is_git_repo(path) is not False:
+        return None  # True (already a repo) or None (couldn't tell) -- no warning
+    return (
+        f"backend.working_dir {backend.working_dir!r} is not a git repository -- "
+        "the agent's edits there have no version history to fall back on. "
+        "Consider running `git init` in that directory (this is a nudge, not "
+        "a requirement -- set backend.warn_if_working_dir_not_git to false if "
+        "this working_dir is intentionally outside version control)."
     )
 
 

@@ -249,7 +249,7 @@ def test_backend_section_hides_irrelevant_field_per_backend() -> None:
 
     settings_tui._switch_backend(state.working, "codex")
     assert [field.key for field in state.current_fields()] == [
-        "name", "command", "permission_mode", "working_dir",
+        "name", "command", "permission_mode", "working_dir", "warn_if_working_dir_not_git",
     ]
 
 
@@ -1317,6 +1317,25 @@ def test_validate_config_no_error_for_claude_code_approve_mode() -> None:
     )
     report = validate_config(config)
     assert not any("not currently usable" in e for e in report.errors)
+
+
+# --- backend.warn_if_working_dir_not_git (2026-09-04, JP): wired through
+# validate_config() so both the Settings TUI and the web UI (which reuses
+# this exact function) surface the same warning. ---
+
+
+def test_validate_config_warns_when_working_dir_is_not_a_git_repo(tmp_path: Path) -> None:
+    config = _make_config(**{"backend.working_dir": str(tmp_path)})
+    report = validate_config(config)
+    assert any("git init" in w for w in report.warnings)
+
+
+def test_validate_config_no_warning_when_the_toggle_is_off(tmp_path: Path) -> None:
+    config = _make_config(
+        **{"backend.working_dir": str(tmp_path), "backend.warn_if_working_dir_not_git": False}
+    )
+    report = validate_config(config)
+    assert not any("git init" in w for w in report.warnings)
 
 
 def test_validate_config_warns_when_backend_command_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
