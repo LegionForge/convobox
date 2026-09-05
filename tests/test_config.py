@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-import convobox.config as config_module
 from convobox.config import (
     STT_COMPUTE_TYPES,
     STT_COMPUTE_TYPES_CPU,
@@ -271,7 +270,7 @@ def test_no_warning_when_git_is_not_installed(
     # A missing `git` binary must never produce a false "not a repo"
     # warning -- _is_git_repo's own contract: None (couldn't determine)
     # is not the same as False (confirmed not a repo).
-    monkeypatch.setattr(config_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr("convobox.config.shutil.which", lambda cmd: None)
     backend = BackendConfig(working_dir=str(tmp_path))
     assert detect_working_dir_not_git(backend) is None
 
