@@ -100,6 +100,29 @@ def test_schema_exposes_unset_sentinel_for_device_fields(client: TestClient) -> 
     assert input_device["choices"][0] == input_device["unset_value"]
 
 
+# --- backend.warn_if_working_dir_not_git (2026-09-04): only meaningful
+# alongside working_dir, which opencode doesn't use -- must show for
+# codex/claude-code, stay hidden for opencode. ---
+
+
+def test_schema_exposes_the_git_warning_toggle_for_codex(client: TestClient) -> None:
+    values = client.get("/api/settings").json()["values"]
+    values["backend"]["name"] = "codex"
+    response = client.post("/api/settings/schema", json={"values": values})
+    backend_section = next(s for s in response.json()["sections"] if s["key"] == "backend")
+    keys = {f["key"] for f in backend_section["fields"]}
+    assert "warn_if_working_dir_not_git" in keys
+
+
+def test_schema_hides_the_git_warning_toggle_for_opencode(client: TestClient) -> None:
+    values = client.get("/api/settings").json()["values"]
+    values["backend"]["name"] = "opencode"
+    response = client.post("/api/settings/schema", json={"values": values})
+    backend_section = next(s for s in response.json()["sections"] if s["key"] == "backend")
+    keys = {f["key"] for f in backend_section["fields"]}
+    assert "warn_if_working_dir_not_git" not in keys
+
+
 def test_schema_exposes_unset_sentinel_and_live_choices_for_kill_phrase(
     client: TestClient,
 ) -> None:
