@@ -822,7 +822,11 @@ def detect_working_dir_not_git(backend: BackendConfig) -> str | None:
     if _is_git_repo(path) is not False:
         return None  # True (already a repo) or None (couldn't tell) -- no warning
     return (
-        f"backend.working_dir {backend.working_dir!r} is not a git repository -- "
+        # NOT !r: on Windows, repr() doubles the path's backslashes
+        # (C:\foo -> 'C:\\\\foo' once printed), which is confusing to
+        # read and doesn't match the operator's own configured string.
+        # A plain quoted f-string shows the real path unescaped.
+        f"backend.working_dir '{backend.working_dir}' is not a git repository -- "
         "the agent's edits there have no version history to fall back on. "
         "Consider running `git init` in that directory (this is a nudge, not "
         "a requirement -- set backend.warn_if_working_dir_not_git to false if "
