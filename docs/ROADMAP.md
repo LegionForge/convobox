@@ -573,11 +573,36 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
       to actively configure a restrictive permission mode (if one
       exists in Kilo's config surface -- not yet probed) rather than
       assume the wiring fires by itself.
-    - **Not yet probed for Kilo specifically:** `session/set_mode`
-      (plan-mode equivalent, confirmed real for OpenCode above),
-      `session/cancel` (interject/steer is already confirmed absent at
-      the PROTOCOL level for any ACP agent, so no Kilo-specific test
-      needed there).
+    - **Follow-up probes (2026-09-04), closing the two items above:**
+      - **`session/cancel` genuinely stops an in-flight shell command
+        -- not just ConvoBox's own view of the turn.** Same
+        methodology as the field note that found Codex's `turn/
+        interrupt` leaves a dispatched tool call's underlying process
+        running: prompted a PowerShell `Start-Sleep -Seconds 8;
+        Set-Content ...` (a real side effect provable on disk), sent
+        `session/cancel` ~2s in (well before the sleep would finish),
+        got `stopReason: "cancelled"` back in 0.3s, then waited a
+        further 8s past the original sleep window. The proof file
+        never appeared -- Kilo's cancel genuinely killed the
+        underlying subprocess, a real point in its favor versus
+        Codex's own documented gap on exactly this question.
+      - **`session/set_mode("plan")` is real and enforcing for Kilo
+        too**, matching the OpenCode finding above. Same test: set
+        plan mode, then prompted a file write with no other
+        instruction. The file was never created, and the model's own
+        streamed reasoning made the mechanism explicit ("my system
+        instructions are clear that I should not run mutating commands
+        in plan mode... I need to inform the user..."). Same caveat as
+        the OpenCode result: this is visible model-level compliance
+        with a system instruction, not independently confirmed as a
+        hard-enforced sandbox (no adversarial probe attempted here
+        either).
+      - Net: Kilo's ACP surface is now live-verified across every
+        primitive this file's "practical mapping" above depends on
+        (prompt, cancel, set_mode, config-option/model-selection,
+        permission-request default posture) -- source-reading is done,
+        the remaining gap is building the actual adapter, not more
+        protocol discovery.
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
