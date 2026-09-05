@@ -33,11 +33,11 @@ if sys.platform == "win32":
         allow_module_level=True,
     )
 
-import fcntl  # noqa: E402
-import pty  # noqa: E402
-import select  # noqa: E402
-import struct  # noqa: E402
-import termios  # noqa: E402
+import fcntl
+import pty
+import select
+import struct
+import termios
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
