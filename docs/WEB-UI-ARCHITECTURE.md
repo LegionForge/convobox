@@ -9,10 +9,14 @@ What the optional browser companion actually is, as built. For using it see
 Server-Sent Events, optionally persists them to SQLite, and serves a single
 static HTML file as the entire frontend.
 
-It is **opt-in** (`web.enabled` or `--web`), **loopback-only**, and
-**unauthenticated by design** — a same-machine trust model, not an
-oversight. When unused it has zero effect on the core voice pipeline; the
-`fastapi`/`uvicorn` imports are lazy, behind the optional `web` extra.
+It is **opt-in** (`web.enabled` or `--web`) and **loopback-only** by
+default — a same-machine trust model, not an oversight — but it is
+**not unauthenticated**: real per-session bearer-token auth was added
+2026-09-01/02 after a security review found the earlier no-auth
+assumption didn't hold (see "Security model" below for the full
+mechanism). When unused it has zero effect on the core voice pipeline;
+the `fastapi`/`uvicorn` imports are lazy, behind the optional `web`
+extra.
 
 ---
 
