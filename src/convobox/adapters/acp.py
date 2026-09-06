@@ -270,7 +270,7 @@ class ACPAdapter(BackendAdapter):
                     # Auto-decline all permissions for now
                     request_id = payload.get("id")
                     if request_id is not None:
-                        deny = {"permissions": {}} if "permission" in payload.get("method", "") else {}
+                        deny: dict[str, Any] = {"permissions": {}} if "permission" in payload.get("method", "") else {}
                         await self._write({
                             "jsonrpc": "2.0",
                             "id": request_id,
