@@ -124,12 +124,16 @@ class ACPAdapter(BackendAdapter):
     async def send_interject(self, text: str) -> None:
         """Send a soft interject (mid-turn steering) to the backend.
 
-        ACP doesn't distinguish between "steer" (like Codex) and "queue"
-        (like Claude Code) in the protocol, so this degrades to send_text
-        if nothing is currently busy, or queues a continuation otherwise.
+        NOTE: OpenCode ACP's support for mid-turn interjection is not yet
+        verified. This implementation assumes a session/steer endpoint exists,
+        but this needs to be confirmed via live probing or documentation before
+        this method can be trusted with real backends. For now, degrades to
+        send_text() if nothing is currently busy, which is safe but may not
+        be the intended behavior for true mid-turn steering.
         """
         if self._busy and self._session_id is not None:
             # Attempt to steer the active session (backend-dependent behavior)
+            # TODO: Verify session/steer endpoint exists in OpenCode ACP (issue #385)
             await self._request(
                 "session/steer",
                 {"sessionId": self._session_id, "text": text},
