@@ -603,6 +603,35 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
         permission-request default posture) -- source-reading is done,
         the remaining gap is building the actual adapter, not more
         protocol discovery.
+  - **The adapter got built (PR #384) -- and its first commit's method
+    names/payload shapes turned out to be wrong in five places, caught
+    and fixed 2026-09-06 by actually running it against a real spawned
+    `opencode acp` process** (`initialize` not `session/initialize`;
+    `session/new` not `session/start`; `session/prompt`'s content-block
+    array, not a bare `text` string; `session/cancel` must be a
+    notification, not a request; and a notification-routing bug in
+    `_read_loop` that silently dropped every real `session/update` event,
+    the single biggest one). Full methodology, evidence, and what's still
+    not live-verified (Kilo specifically, permission-response shape, a
+    real tool failure):
+    `docs/field-notes/2026-09-06-acp-adapter-live-fixes-wrong-method-
+    names-and-notification-routing-bug.md`. `src/convobox/adapters/acp.py`
+    is now live-verified for its core loop end to end (handshake, session
+    creation, streamed text, tool calls, hard-stop), and
+    `create_backend_adapter()` already dispatches `backend.name: "acp"` to
+    it (PR #384). **Still open**: `"acp"` isn't in `settings_tui.py`'s own
+    `_CHOICE_BACKENDS` allowlist, so `validate_config()` (shared by the
+    Settings TUI and the web UI) currently rejects `backend.name: acp` as
+    invalid before either UI would let a user save it -- a hand-edited
+    `convobox.yaml` bypassing both UIs works today (confirmed by this
+    pass's own live runs), but there's no UI path to it yet. Deliberately
+    not fixed in the same pass: which backend.command shape the UI should
+    default/validate to (`["opencode", "acp"]` vs `["kilo", "acp"]`), and
+    whether run_convobox.py's own `_check_backend_permission_mode`/
+    `_check_backend_working_dir` startup guards (currently opencode/codex/
+    claude-code-specific) need an ACP-aware branch, are real UX decisions
+    that deserve their own discussion rather than a same-night addition
+    on top of a live-verification pass.
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
