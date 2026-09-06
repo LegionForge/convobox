@@ -138,7 +138,7 @@ web = [
     # without `--frozen`, a new contributor's first `uv sync` after the
     # lock ever drifts, etc.) -- same class of risk this repo already
     # fixed once for ruff (see that dependency's own comment).
-    "mcp>=1.0,<2.1",
+    "mcp>=1.0,<2.2",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
