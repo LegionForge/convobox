@@ -107,6 +107,16 @@ The single-file choice is deliberate and load-bearing: it survives
 default), and it means a contributor can edit the UI with no toolchain
 installed.
 
+**Standing requirement (2026-09-05, JP): any browser-facing UI this project
+ships uses the real LegionForge favicon, not a generic/default one.**
+`static/img/favicon.ico` is fetched directly from `legionforge.org` (not
+regenerated from the vector logo -- use the org's own served asset so it
+stays in sync with whatever LegionForge itself ships) and referenced via
+`<link rel="icon" href="img/favicon.ico">` in `index.html`'s `<head>`. If a
+future UI surface is added to this project (a second static bundle, a
+different mount point, etc.), it inherits this same requirement -- copy
+the existing `favicon.ico`, don't invent a new one.
+
 ---
 
 ## Event fan-out
