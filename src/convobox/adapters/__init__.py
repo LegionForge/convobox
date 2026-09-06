@@ -1,3 +1,4 @@
+from convobox.adapters.acp import ACPAdapter
 from convobox.adapters.base import BackendAdapter
 from convobox.adapters.claude_code import ClaudeCodeAdapter
 from convobox.adapters.codex import CodexAdapter
@@ -5,6 +6,7 @@ from convobox.adapters.opencode import OpenCodeAdapter
 from convobox.config import BackendConfig
 
 __all__ = [
+    "ACPAdapter",
     "BackendAdapter",
     "ClaudeCodeAdapter",
     "CodexAdapter",
