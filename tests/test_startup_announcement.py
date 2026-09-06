@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.metadata
+
 from scripts.run_convobox import _resolve_convobox_version, startup_announcement
 
 
@@ -21,3 +23,15 @@ def test_resolve_convobox_version_returns_a_non_empty_string() -> None:
     # function's own docstring for the "dev" fallback).
     version = _resolve_convobox_version()
     assert isinstance(version, str) and version
+
+
+def test_resolve_convobox_version_matches_the_real_installed_distribution() -> None:
+    # A bare "non-empty string" assertion (the test above) is satisfied by
+    # the "dev" fallback too -- it never caught a real regression where
+    # _resolve_convobox_version() looked up the wrong distribution name
+    # ("convobox" instead of the actual "legionforge-convobox" from
+    # pyproject.toml) and silently fell back to "dev" on every install,
+    # not just a fresh checkout. Assert against the real distribution
+    # metadata directly so a reintroduced name mismatch fails loudly here
+    # instead of only being visible as a wrong startup banner.
+    assert _resolve_convobox_version() == importlib.metadata.version("legionforge-convobox")

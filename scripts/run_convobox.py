@@ -1134,7 +1134,7 @@ def _resolve_convobox_version() -> str:
     cosmetic version string.
     """
     try:
-        return importlib.metadata.version("convobox")
+        return importlib.metadata.version("legionforge-convobox")
     except importlib.metadata.PackageNotFoundError:
         return "dev"
 
