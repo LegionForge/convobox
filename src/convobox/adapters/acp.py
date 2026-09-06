@@ -35,7 +35,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
@@ -174,7 +173,7 @@ class ACPAdapter(BackendAdapter):
             self._proc.terminate()
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._proc.kill()
                 await self._proc.wait()
 
@@ -224,7 +223,7 @@ class ACPAdapter(BackendAdapter):
                                 "value": "claude-3.5-sonnet",  # default; can be overridden by caller
                             },
                         )
-                    except Exception as e:
+                    except RuntimeError as e:
                         logger.warning(f"Failed to set Kilo model: {e}")
 
             return self._session_id
@@ -293,15 +292,7 @@ class ACPAdapter(BackendAdapter):
         # to BackendEventType (TEXT, TOOL_CALL, TOOL_RESULT, etc.)
 
         # Example: agent_message_chunk / agent_message_done -> TEXT
-        if payload.get("type") == "agent_message_chunk":
-            text = payload.get("text", "")
-            if text:
-                event = BackendEvent(
-                    type=BackendEventType.TEXT,
-                    content=text,
-                )
-                await self._events.put(event)
-        elif payload.get("type") == "agent_message_done":
+        if payload.get("type") == "agent_message_chunk" or payload.get("type") == "agent_message_done":
             text = payload.get("text", "")
             if text:
                 event = BackendEvent(
@@ -337,7 +328,7 @@ class ACPAdapter(BackendAdapter):
         try:
             await self._write(payload)
             return await asyncio.wait_for(future, timeout=_RESPONSE_TIMEOUT_S)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             del self._pending[request_id]
             raise RuntimeError(f"ACP request {method} timed out after {_RESPONSE_TIMEOUT_S}s")
 
