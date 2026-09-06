@@ -171,6 +171,7 @@ class ACPAdapter(BackendAdapter):
             try:
                 await self._reader_task
             except asyncio.CancelledError:
+                # Expected when cancelling the read loop task
                 pass
 
         if self._proc is not None:
@@ -285,6 +286,7 @@ class ACPAdapter(BackendAdapter):
                     await self._process_notification(payload)
 
         except asyncio.CancelledError:
+            # Read loop cancelled, clean shutdown expected
             pass
         finally:
             await self._events.put(_EOF)

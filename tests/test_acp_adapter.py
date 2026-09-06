@@ -1,7 +1,7 @@
 """Tests for ACPAdapter transport and request/response routing."""
 
 import asyncio
-import json
+
 import pytest
 
 from convobox.adapters.acp import ACPAdapter
