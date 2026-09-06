@@ -1,3 +1,4 @@
+from convobox.adapters.acp import ACPAdapter
 from convobox.adapters.base import BackendAdapter
 from convobox.adapters.claude_code import ClaudeCodeAdapter
 from convobox.adapters.codex import CodexAdapter
@@ -5,6 +6,7 @@ from convobox.adapters.opencode import OpenCodeAdapter
 from convobox.config import BackendConfig
 
 __all__ = [
+    "ACPAdapter",
     "BackendAdapter",
     "ClaudeCodeAdapter",
     "CodexAdapter",
@@ -55,7 +57,20 @@ def create_backend_adapter(
             permission_mode=config.permission_mode,
             working_dir=config.working_dir,
         )
+    if config.name == "acp":
+        # ACP backend: command specifies which backend (opencode, kilo, etc.)
+        # e.g., command=["opencode", "acp"] or command=["kilo", "acp", "--cwd", "/path"]
+        # First element determines the backend type.
+        backend = "opencode"  # default
+        if config.command and len(config.command) > 0:
+            backend = config.command[0].lower()
+        return ACPAdapter(
+            config.command,
+            backend=backend,
+            permission_mode=config.permission_mode,
+            working_dir=config.working_dir,
+        )
     raise ValueError(
         f"unknown backend.name {config.name!r} "
-        "(implemented: 'opencode', 'claude-code', 'codex')"
+        "(implemented: 'opencode', 'claude-code', 'codex', 'acp')"
     )
