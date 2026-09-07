@@ -36,9 +36,10 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import subprocess
+import subprocess  # nosec B404 -- see the osascript call below for why
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -104,7 +105,7 @@ def set_macos_output_volume(percent: int) -> None:
             "by hand between runs and invoke this script once per level."
         )
     percent = max(0, min(100, percent))
-    subprocess.run(
+    subprocess.run(  # nosec B603 B607 -- fixed argv, no shell; percent is clamped to 0-100 above
         ["osascript", "-e", f"set volume output volume {percent}"],
         check=True,
     )
@@ -414,7 +415,7 @@ def run_ess_trial(
     rt60_window = ir[peak_idx : peak_idx + int(min(tail_silence_s * 0.9, 1.8) * sample_rate)]
     rt60 = schroeder_rt60(rt60_window, sample_rate)
 
-    harmonics = {}
+    harmonics: dict[str, dict[str, Any] | None] = {}
     fundamental_peak_mag = float(np.max(np.abs(ir[max(0, peak_idx - 50) : peak_idx + 50])))
     for n_harm in range(2, n_harmonics + 2):
         offset = harmonic_offset_samples(n_harm, r, duration, sample_rate)
@@ -463,7 +464,7 @@ def cmd_thd(args: argparse.Namespace) -> None:
 
     frequencies = [float(f.strip()) for f in args.frequencies.split(",")]
     volumes = _resolve_volumes(args.volumes)
-    results = []
+    results: list[dict[str, Any]] = []
     for volume in volumes:
         if volume is not None:
             set_macos_output_volume(volume)
