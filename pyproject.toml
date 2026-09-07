@@ -236,17 +236,20 @@ platform = "linux"
 # what `mypy ... --ignore-missing-imports` already did for the whole tree.
 #
 # aec_audio_processing, piper/piper.*, fastapi/starlette/uvicorn/mcp,
-# matplotlib, pycaw, and nvidia/nvidia.* are a different reason for the
-# same fix: all are opt-in extras (`uv sync --extra aec`/`--extra piper`/
-# `--extra web`/`--extra analysis`/`--extra calibration`/`--extra cuda`)
-# deliberately NOT installed by CI's default lint job (see
-# DEPENDENCY_LICENSE_AUDIT.md for why piper-tts specifically must stay
-# opt-in, not default -- it's GPL-3.0; web's own reason is pyproject.toml's
-# own comment on the `web` extra; matplotlib's is the `analysis` extra's
-# own comment -- plotting-only, scripts/analyze_incident.py's --plot flag;
-# pycaw/nvidia are scripts/check_venv_extras.py's own calibration/cuda
-# probes, same reasoning), so mypy can never resolve them there regardless
-# of whether stubs exist upstream.
+# matplotlib, pycaw, nvidia/nvidia.*, and playwright are a different
+# reason for the same fix: all are opt-in extras (`uv sync --extra aec`/
+# `--extra piper`/`--extra web`/`--extra analysis`/`--extra calibration`/
+# `--extra cuda`/`--extra browser`) deliberately NOT installed by CI's
+# default lint job (see DEPENDENCY_LICENSE_AUDIT.md for why piper-tts
+# specifically must stay opt-in, not default -- it's GPL-3.0; web's own
+# reason is pyproject.toml's own comment on the `web` extra; matplotlib's
+# is the `analysis` extra's own comment -- plotting-only, scripts/
+# analyze_incident.py's --plot flag; pycaw/nvidia are scripts/
+# check_venv_extras.py's own calibration/cuda probes, same reasoning;
+# playwright is that same script's browser probe -- missed when the
+# browser extra was added, live-caught by CI's lint job actually failing
+# on a clean `dev`-only install, 2026-09-07), so mypy can never resolve
+# them there regardless of whether stubs exist upstream.
 #
 # voice_picker/audio_devices/_console/run_convobox/roundtrip_smoketest/
 # voice_picker_tui are a third reason again: real first-party modules
@@ -288,6 +291,8 @@ module = [
     "pycaw.*",
     "nvidia",
     "nvidia.*",
+    "playwright",
+    "playwright.*",
     "voice_picker",
     "audio_devices",
     "_console",
