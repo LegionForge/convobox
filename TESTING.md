@@ -12,10 +12,13 @@ piper-tts, sounddevice, httpx, pytest) into `.venv/`.
 
 ## CI / LegionForge dev-rig
 
-`.github/workflows/ci.yml` runs six independent, parallel jobs on every PR
-and push to `main`, each a reusable workflow from
+`.github/workflows/ci.yml` runs seven independent, parallel jobs on every
+PR and push to `main`. Most are reusable workflows from
 [LegionForge/dev-rig](https://github.com/LegionForge/dev-rig) rather than
-tool config duplicated here. Pinned to a commit SHA
+tool config duplicated here; `web-tests` (below) is a local job instead,
+same as `process-kill-matrix`/`safety-phrase-matrix` further down this
+file, since it needs a different extras set than dev-rig's reusable
+`test.yml` takes as input. Pinned to a commit SHA
 (`468d5a7c30f6540a472a32d8b3bea1ac381f2017`), not a tag -- dev-rig has cut
 no tagged release as of this writing; see the comment at the top of
 `ci.yml` for why that's the correct choice today and what to do once one
@@ -24,6 +27,7 @@ exists.
 | Job | Checks | Run locally first |
 |---|---|---|
 | **test** | pytest + coverage (`--cov=convobox --cov-fail-under=80`; actual coverage 91%) | `pytest --cov=convobox --cov-report=term-missing tests/` |
+| **web-tests** | pytest against `tests/test_web_*.py` with the real `web` extra installed (`dev` alone leaves every web test module's own `pytest.importorskip("fastapi", ...)` silently skipping -- this job exists so that can't happen unnoticed; see this file's own "Guaranteeing web tests actually run in CI" section below) | `uv sync --extra dev --extra web && uv run python -c "import fastapi, uvicorn, multipart, mcp" && uv run pytest tests/test_web_*.py -v` |
 | **lint** | ruff, bandit, mypy against `src/convobox` and `scripts` | `ruff check src/convobox scripts`, `bandit -r src/convobox scripts -c pyproject.toml`, `mypy src/convobox scripts` |
 | **sast** | semgrep (`p/python p/fastapi p/security-audit` -- `p/fastapi` restored 2026-08-17 now that a real FastAPI web UI exists) + CodeQL, against `src/convobox` and `scripts` | `semgrep --config=p/python --config=p/fastapi --config=p/security-audit src/convobox scripts --error` |
 | **audit** | pip-audit (CVEs) + pip-licenses (fails on GPL/AGPL) | `pip-audit`; `pip-licenses --fail-on="GPL;AGPL"` |
@@ -62,6 +66,38 @@ linking) -- this needs a licensing decision, not a lint fix. See the
 README's existing "Open questions" -> Licensing model note, which is
 about ConvoBox's own license choice; this is the sharper, more concrete
 version of that same open question.
+
+## Guaranteeing web tests actually run in CI
+
+Found 2026-09-07 during a repository review: dev-rig's reusable
+`test.yml` (the `test` job) runs `pip install -e ".[dev]"` plus its own
+`extra-deps` input -- which defaults to `types-PyYAML` and `ci.yml` never
+overrides. It never installs the `web` extra. Every web test module
+(`tests/test_web_app.py`, `test_web_artifacts.py`, `test_web_mcp_server.py`,
+`test_web_settings_api.py`, `test_web_uploads.py` -- 142 tests total)
+opens with `pytest.importorskip("fastapi", ...)`, so all of them silently
+skipped in that job, every run, for as long as it's existed -- a green
+`test` job never actually meant the web UI's HTTP layer had run.
+
+Fixed by adding `web-tests` as its own local job (not a dev-rig `uses:`
+call -- dev-rig's `test.yml` has no per-job extras input, only the one
+`extra-deps` string shared across however many callers use it, so a
+second reusable-workflow call couldn't ask for a different extras set
+without also duplicating the coverage run) that installs `dev` + `web`
+explicitly, asserts the import actually succeeds (`import fastapi,
+uvicorn, multipart, mcp`) BEFORE running pytest, then runs
+`pytest tests/test_web_*.py`. The import-assertion step is the part that
+actually satisfies "guarantee," not just "add coverage": if the `web`
+extra ever silently stops resolving (a typo, a dropped dependency, a
+future refactor), this step fails the build loudly instead of quietly
+going back to all-skipped-and-green.
+
+Verified against a real clean install (`UV_PROJECT_ENVIRONMENT=<throwaway>
+uv sync --extra dev --extra web` from this repo, not the existing dev
+`.venv` which already has every extra): the import check passes, and
+`pytest tests/test_web_*.py` collects and runs 263 tests (3 skipped, both
+legitimate Windows-only platform gaps -- symlink elevation, POSIX file-mode
+semantics -- that `web-tests`' own `ubuntu-latest` runner won't hit).
 
 ## Keeping local, CI, and UAT environments in sync
 
