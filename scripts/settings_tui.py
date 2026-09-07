@@ -2634,10 +2634,12 @@ def _prompt_edit(state: TuiState) -> None:
         # backend.name is always a "choice" field (never one of the
         # picker kinds above that can return None), so this is a real
         # invariant, not a defensive workaround.
-        assert isinstance(new_value, str)
+        assert isinstance(new_value, str)  # nosec B101 -- real invariant, see comment above
         _switch_backend(state.working, new_value)
     elif spec.section == "tts" and spec.key == "engine":
-        assert isinstance(new_value, str)
+        # tts.engine is likewise always a "choice" field -- same invariant
+        # as backend.name above.
+        assert isinstance(new_value, str)  # nosec B101
         _switch_tts_engine(state.working, new_value)
     else:
         _set_value(state.working, spec, new_value)
