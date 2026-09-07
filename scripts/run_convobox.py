@@ -42,7 +42,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import importlib.metadata
 import logging
 import math
 import os
@@ -93,11 +92,14 @@ from convobox.paths import default_log_path, migrate_legacy_layout
 from convobox.response_tiering import ContinueDetector
 from convobox.resumeword import ResumeWordDetector
 from convobox.safeword.detector import SafewordDetector
+from convobox.startup import _resolve_convobox_version, startup_announcement
 from convobox.stt.base import STTEngine, TranscriptResult
 from convobox.stt.corrections import TranscriptCorrector
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, TuiStatus, render_conversation_frame
+from convobox.tui.render import _RESET as _ANSI_RESET
+from convobox.tui.render import _heartbeat_color
 from convobox.web.bridge import WebEventForwarder
 from convobox.web.history import HistoryDB, new_session_id
 from convobox.web.stream import EventBroadcaster
@@ -783,25 +785,18 @@ class ApprovalPromptGate:
 # reads as "is it broken?" rather than "still thinking." Color makes the
 # SAME log line readable at a glance without tailing it: green = just
 # started, yellow = grinding a while, red = long stall worth a look.
-_HEARTBEAT_GREEN_MAX_S = 10.0
-_HEARTBEAT_YELLOW_MAX_S = 60.0
-_ANSI_GREEN = "\x1b[32m"
-_ANSI_YELLOW = "\x1b[33m"
-_ANSI_RED = "\x1b[31m"
-_ANSI_RESET = "\x1b[0m"
-
-
-def _heartbeat_color(elapsed_s: float) -> str:
-    """ANSI color for a heartbeat line's elapsed-seconds value.
-
-    Pure function (no I/O), so the threshold boundaries are unit-testable
-    without a real terminal.
-    """
-    if elapsed_s < _HEARTBEAT_GREEN_MAX_S:
-        return _ANSI_GREEN
-    if elapsed_s < _HEARTBEAT_YELLOW_MAX_S:
-        return _ANSI_YELLOW
-    return _ANSI_RED
+#
+# _heartbeat_color itself lives in convobox.tui.render (imported below,
+# not redefined here): that module's own copy used to be an intentional
+# duplicate ("this package's layering stays clean" -- src/convobox must
+# not depend on scripts/) before this import existed, tracked with a
+# "keep both in sync if the thresholds ever change" comment. That
+# constraint only ever ruled out src/convobox depending on scripts/, not
+# the reverse -- scripts/ already imports plenty from src/convobox (see
+# the ConversationTuiState/TuiStatus/render_conversation_frame import
+# above) -- so importing the one real definition from there instead
+# removes a real "two copies to keep in sync" liability rather than
+# accepting it.
 
 
 class WorkingIndicator:
@@ -1123,34 +1118,6 @@ def _validate_audio_device(
         )
         return None
     return device
-
-
-def _resolve_convobox_version() -> str:
-    """Best-effort package version for the startup announcement.
-
-    Falls back to "dev" rather than raising -- a source checkout without
-    installed metadata (e.g. a fresh clone before `uv sync`/`pip install
-    -e .` has registered the package) must never crash startup over a
-    cosmetic version string.
-    """
-    try:
-        return importlib.metadata.version("legionforge-convobox")
-    except importlib.metadata.PackageNotFoundError:
-        return "dev"
-
-
-def startup_announcement(version: str) -> str:
-    """The spoken "I'm ready" line, once STT/TTS/backend setup is done.
-
-    Exists because the FIRST utterance being silently discarded (root
-    cause: cuBLAS delay-loading on the first real transcribe() call,
-    fixed at its source in LocalTranscriber._warm_up) still left no
-    signal for the user that ConvoBox was actually ready to hear them --
-    "say something and see if it works" isn't a great first experience.
-    A pure function (not inlined at the call site) so the exact wording
-    is unit-testable without a real TTS/audio stack.
-    """
-    return f"LegionForge ConvoBox, version {version}, ready and standing by."
 
 
 async def _working_watchdog(  # type: ignore[no-untyped-def]
