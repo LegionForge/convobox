@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 
-from scripts.run_convobox import _resolve_convobox_version, startup_announcement
+from convobox.startup import _resolve_convobox_version, startup_announcement
 
 
 def test_startup_announcement_includes_the_version() -> None:

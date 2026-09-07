@@ -320,9 +320,10 @@ def test_diagnostics_line_shows_rec_tag_with_elapsed_seconds_when_dumping() -> N
     assert "REC 3s" in lines[1]  # 300 frames * 10ms/frame = 3.0s
 
 
-def test_heartbeat_color_thresholds_match_run_convobox_pys_own() -> None:
-    # Mirrors scripts/run_convobox.py's _heartbeat_color boundary tests
-    # (test_barge_in.py) -- must stay in sync with that copy.
+def test_heartbeat_color_thresholds() -> None:
+    # scripts/run_convobox.py's own plain-text heartbeat log line imports
+    # this same function (2026-09-07) rather than keeping a second copy in
+    # sync by hand -- these boundary checks cover both call sites now.
     assert _heartbeat_color(9.9) == _GREEN
     assert _heartbeat_color(10.0) == _YELLOW
     assert _heartbeat_color(59.9) == _YELLOW

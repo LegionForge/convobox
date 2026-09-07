@@ -354,37 +354,15 @@ def test_current_activity_clears_when_idle() -> None:
     assert ind.current_activity is None
 
 
-# --- heartbeat coloring (live-validated thresholds, JP's 2026-07-14/15
-# headset UAT: the heartbeat is the only feedback during a silent-busy
-# stretch, but is invisible when interacting through a backend's own chat
-# UI rather than watching this terminal -- color makes it glanceable) ---
-
-from scripts.run_convobox import (
-    _ANSI_GREEN,
-    _ANSI_RED,
-    _ANSI_YELLOW,
-    _heartbeat_color,
-)
-
-
-def test_heartbeat_color_green_just_under_ten_seconds() -> None:
-    assert _heartbeat_color(9.9) == _ANSI_GREEN
-
-
-def test_heartbeat_color_yellow_at_ten_seconds() -> None:
-    assert _heartbeat_color(10.0) == _ANSI_YELLOW
-
-
-def test_heartbeat_color_yellow_just_under_sixty_seconds() -> None:
-    assert _heartbeat_color(59.9) == _ANSI_YELLOW
-
-
-def test_heartbeat_color_red_at_sixty_seconds() -> None:
-    assert _heartbeat_color(60.0) == _ANSI_RED
-
-
-def test_heartbeat_color_red_for_a_long_stall() -> None:
-    assert _heartbeat_color(600.0) == _ANSI_RED
+# Heartbeat-coloring tests used to live here (live-validated thresholds,
+# JP's 2026-07-14/15 headset UAT), against scripts/run_convobox.py's own
+# copy of _heartbeat_color. That copy is gone (2026-09-07): run_convobox.py
+# now imports the single definition from convobox.tui.render instead of
+# keeping a second one in sync by hand, and tests/test_conversation_tui.py
+# already covers the exact same thresholds against that canonical
+# definition -- see its own test_heartbeat_color_thresholds_match_run_
+# convobox_pys_own (name kept for history; there's only one implementation
+# to match now).
 
 
 # --- backchannel filtering (docs/DESIGN-barge-in.md, "Backchannel filtering") ---
