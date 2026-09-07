@@ -61,6 +61,10 @@ Step "uv sync --extra dev (installs torch, faster-whisper, silero-vad, piper-tts
     uv sync --extra dev
 }
 
+Step "verify venv: no package left half-installed by an interrupted sync (docs/KNOWN-ISSUES.md)" {
+    .\.venv\Scripts\python.exe scripts\check_venv_extras.py
+}
+
 Step "pytest: 63 tests, pure logic + mocked hardware, no mic/models needed" {
     .\.venv\Scripts\python.exe -m pytest tests/ -q
 }
