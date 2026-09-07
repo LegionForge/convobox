@@ -138,3 +138,21 @@ install-cross-contamination.md): this bit the project 3+ times in one
 evening — a config field that "should" exist but didn't, and a live "I
 can't scroll anymore" report that turned out to be the UAT checkout's
 older script running against dev's newer library.*
+
+## 14. After any `uv sync`, verify the venv actually works — don't trust
+a clean exit
+
+Run `python scripts/check_venv_extras.py` after combining or changing
+extras. `uv sync` only installs the extras named on that exact command
+and silently removes others from a previous run; rarer, an interrupted
+sync can leave one package's dist-info hollow while later syncs keep
+reporting success because they see the right version already
+"installed" and skip it.
+
+*Incident (docs/KNOWN-ISSUES.md, "An interrupted `uv sync` can leave one
+package's metadata hollow..."): `aec-audio-processing`'s dist-info lost
+its `RECORD`/`METADATA` mid-sync on Helios/Windows 2026-09-06 — the
+package still imported without error (an empty namespace package), and
+`uv sync --extra aec` kept reporting success afterward. Nothing
+surfaced until `--web` actually tried to construct an `EchoCanceller`,
+hours later.*

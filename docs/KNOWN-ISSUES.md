@@ -37,6 +37,7 @@ before trusting a voice session with write access; see also
 | [WASAPI output plays speech an octave too high ("static chipmunk")](#wasapi-output-plays-speech-an-octave-too-high-static-chipmunk) | Audio output | Windows | Deferred | Medium |
 | [AEC builds from source on macOS](#aec-builds-from-source-on-macos--pypi-just-doesnt-ship-a-wheel-for-it) | Install (AEC extra) | macOS | Verified | Low |
 | [A Mac's front 3.5mm jack mutes the internal speaker at the hardware level, regardless of software output-device selection](#a-macs-front-35mm-jack-mutes-the-internal-speaker-at-the-hardware-level-regardless-of-software-output-device-selection) | Audio output | macOS | Verified | Low |
+| [An interrupted `uv sync` can leave one package's metadata hollow while later syncs keep reporting success](#an-interrupted-uv-sync-can-leave-one-packages-metadata-hollow-while-later-syncs-keep-reporting-success----mitigated) | Install (venv/uv) | Windows (mechanism likely platform-agnostic) | Mitigated | Low |
 | **Backend integration (including upstream bugs)** | | | | |
 | [opencode 1.18.3: session-level model pin silently never generates (upstream)](#opencode-1183-session-level-model-pin-silently-never-generates-upstream) | opencode (upstream) | All | Upstream, no fix | Medium |
 | [Codex `permission_mode: approve` has no working codex-cli mapping -- fails loudly by design, not just "unfixed"](#codex-permission_mode-approve-has-no-working-codex-cli-mapping----fails-loudly-by-design-not-just-unfixed) | codex (upstream) | All | Fails loudly (fixed); no real escalation exists upstream | High |
@@ -2090,6 +2091,49 @@ instead of a hardcoded path — but is this repo's read of someone else's
 build script, not confirmed against their intent); no Linux wheel
 published or vendored for this repo's CI, same reasoning as the macOS
 entry's deferral.
+
+### An interrupted `uv sync` can leave one package's metadata hollow while later syncs keep reporting success — mitigated
+
+**Status:** live-confirmed 2026-09-06 on Helios/Windows, mitigated with
+a verify script (`scripts/check_venv_extras.py`), not a `uv` fix (this
+is a real `uv` reliability gap, not a ConvoBox bug). A full
+`uv sync --extra web --extra dev --extra aec --extra cuda --extra piper
+--extra calibration` left `aec-audio-processing`'s dist-info
+(`aec_audio_processing-1.0.1.dist-info/`) missing `RECORD`/`METADATA` —
+only its `licenses/` subfolder survived — while the package's own
+compiled content (`.pyd`/`.dll`) was untouched. The Application event
+log shows a power-source-change event in the same window, the likely
+trigger. Every later `uv sync` (including ones that explicitly named
+`--extra aec`) reported success and did nothing: it saw
+`aec-audio-processing==1.0.1` already "installed" at the right version
+and skipped it, never checking the dist-info was hollow. The package
+still imported cleanly too — Python silently treated the directory as
+an empty namespace package (no error) — so nothing surfaced until
+`EchoCanceller.__init__`'s own `from aec_audio_processing import
+AudioProcessor` line raised `ImportError` at `--web` launch time, hours
+after the sync that actually broke it.
+
+**Fix for an already-broken venv:**
+
+```
+uv sync --reinstall-package aec-audio-processing
+```
+
+(substitute the actual broken package name — `--reinstall-package`
+forces uv past the "already installed" skip that let this go
+unnoticed.)
+
+**Mitigation, not prevention:** `scripts/check_venv_extras.py` (new)
+scans every installed `*.dist-info` for missing `RECORD`/`METADATA`
+(catches this exact shape for any package, not just AEC) and separately
+smoke-imports the actual symbol product code uses for each extra
+present (`from aec_audio_processing import AudioProcessor`, not just
+`import aec_audio_processing` — the bare import is exactly what stayed
+silent here). Run it after any `uv sync`; README.md's extras section
+now points to it. This is the dev checkout's equivalent of the UAT
+checkout's `_uat-sync.ps1`, which already guards its own syncs the same
+way after hitting a similar silent-partial-sync failure earlier
+(numpy/pytest missing, not AEC specifically).
 
 ---
 

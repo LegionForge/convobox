@@ -107,6 +107,16 @@ uv sync --extra dev        # test/lint tooling
 (Not running from source? The same extras install straight from PyPI:
 `pip install "legionforge-convobox[web]"`, etc.)
 
+`uv sync` only installs the extras you name on that exact command and
+silently *removes* others from a previous run -- and, rarely, an
+interrupted sync can leave one package's metadata hollow while `uv sync`
+itself keeps reporting success (see docs/KNOWN-ISSUES.md). After
+combining/changing extras, verify the venv actually works:
+
+```bash
+python scripts/check_venv_extras.py
+```
+
 ConvoBox never bundles a speech engine you didn't ask for — the default
 STT model (faster-whisper) and TTS engine (Kokoro, Apache 2.0 — Piper is
 available as an opt-in `--extra piper`, see below) download the first
