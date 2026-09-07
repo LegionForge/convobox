@@ -62,9 +62,68 @@ jobs:
           name: dist
           path: dist/
 
+  smoke-test:
+    name: Smoke-test the built wheel
+    # Live-verified 2026-08-03 (pyproject.toml's own [tool.hatch.build.
+    # targets.wheel] comment): a built wheel once shipped with every
+    # [project.scripts] entry point broken (scripts/ missing from the
+    # wheel, ModuleNotFoundError at runtime) despite every editable-
+    # checkout test passing -- editable installs resolve src/convobox and
+    # scripts/ directly off the filesystem, so they can't catch a
+    # packaging-manifest gap between them. This job is the guard: install
+    # the actual built wheel into an isolated environment and prove the
+    # things editable tests structurally cannot -- that the distribution
+    # PyPI is about to receive actually has working entry points and its
+    # bundled web static assets, before publish runs.
+    #
+    # Deliberately no `actions/checkout` here: this job never needs the
+    # repo's source tree, only the built dist/ artifact -- checking out
+    # the repo alongside it would risk `import convobox` accidentally
+    # resolving against a stray src/convobox on the path instead of the
+    # installed wheel, which is exactly the false-confidence editable
+    # installs already give every other test run. Steps also `cd` to a
+    # neutral directory before running anything, so cwd itself can't
+    # matter either.
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist/
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the built wheel (no extras -- entry points and
+          static assets need neither live audio nor a backend login)
+        run: pip install dist/*.whl
+
+      - name: CLI entry points actually run
+        working-directory: ${{ runner.temp }}
+        run: |
+          convobox --version
+          convobox --help
+          convobox-settings --help
+          convobox-audio-devices --help
+          convobox-spike --help
+
+      - name: Bundled web static assets are actually packaged
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -c "
+          import importlib.resources as r
+          p = r.files('convobox.web') / 'static' / 'index.html'
+          assert p.is_file(), f'packaged index.html missing: {p}'
+          print(f'OK: {p} ({p.stat().st_size} bytes)')
+          "
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, smoke-test]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
