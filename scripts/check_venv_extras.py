@@ -100,6 +100,10 @@ def _probe_dev() -> None:
     import ruff  # noqa: F401
 
 
+def _probe_browser() -> None:
+    import playwright.sync_api  # noqa: F401
+
+
 @dataclass(frozen=True)
 class ExtraCheck:
     extra: str
@@ -118,6 +122,12 @@ EXTRA_CHECKS: tuple[ExtraCheck, ...] = (
         "calibration", "Windows volume calibration", "pycaw", _probe_calibration, windows_only=True
     ),
     ExtraCheck("dev", "dev tooling (pytest/mypy/ruff)", "pytest", _probe_dev),
+    ExtraCheck(
+        "browser",
+        "browser regression suite (playwright)",
+        "playwright",
+        _probe_browser,
+    ),
 )
 
 

@@ -240,3 +240,39 @@ jobs:
 
       - name: Safety-phrase TTS->STT->detector battery
         run: uv run python scripts/safety_phrase_battery.py --repeats 5
+
+  browser-tests:
+    name: Browser regression suite
+    # Drives a real Chromium against a real running web server
+    # (tests/test_browser_regression.py) -- the first coverage of
+    # index.html's own JS (DOM updates, EventSource reconnect, click
+    # handlers), which the `web-tests` job above (HTTP-level only) can't
+    # exercise at all. Gated the same way process-kill-matrix/safety-
+    # phrase-matrix are (push-to-main + manual dispatch, not every PR):
+    # a real Chromium download + launch adds real time on top of this
+    # file's other jobs, and this is brand-new test infrastructure
+    # (2026-09-07, Astra repo review) without an established reliability
+    # track record yet -- promote to every-PR once it's proven out.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dev + web + browser dependencies
+        run: uv sync --extra dev --extra web --extra browser
+
+      - name: Install the Chromium browser binary and its OS-level dependencies
+        run: uv run playwright install --with-deps chromium
+
+      - name: Browser regression suite
+        run: uv run pytest tests/test_browser_regression.py -v

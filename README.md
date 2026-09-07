@@ -102,6 +102,8 @@ uv sync --extra aec        # acoustic echo cancellation (WebRTC AEC3, Windows wh
 uv sync --extra cuda       # GPU inference for STT (stt.device: cuda/auto), ~1GB, CUDA-only
 uv sync --extra web        # local browser UI for a live session (--web), see below
 uv sync --extra dev        # test/lint tooling
+uv sync --extra browser    # tests/test_browser_regression.py's real-Chromium suite; also needs
+                           # `uv run playwright install chromium` (a real ~150MB browser download)
 ```
 
 (Not running from source? The same extras install straight from PyPI:
