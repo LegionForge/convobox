@@ -25,7 +25,7 @@ import math
 import re
 import socket
 import statistics
-import subprocess
+import subprocess  # nosec B404 -- see the wpctl call below for why
 import sys
 import threading
 import time
@@ -94,7 +94,7 @@ def _wpctl(*args: str) -> str:
     FileNotFoundError surface.
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607 -- fixed argv, no shell, "wpctl" is a well-known system tool name
             ["wpctl", *args], capture_output=True, text=True, check=True
         )
     except FileNotFoundError as exc:
@@ -730,7 +730,7 @@ def run(args: argparse.Namespace) -> Path:
                         item.strip().lower() for item in args.delay_candidates.split(",")
                     ]
                     for token in candidate_tokens:
-                        if token == "auto":
+                        if token == "auto":  # nosec B105 -- a CLI mode keyword, not a password
                             delay = None
                         else:
                             delay = int(token)

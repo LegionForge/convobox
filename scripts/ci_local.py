@@ -12,12 +12,17 @@ in sync when .github/workflows/ci.yml changes.
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404 -- see the fixed CHECKS table below for why
 import sys
 
 CHECKS: list[tuple[str, list[str]]] = [
     ("ruff", [sys.executable, "-m", "ruff", "check", "src", "scripts", "tests"]),
-    ("mypy", [sys.executable, "-m", "mypy", "src/convobox"]),
+    # Matches CI's actual scope (.github/workflows/ci.yml's lint job) --
+    # deliberately not "tests" too, same as CI: bandit's B101 (assert-used)
+    # noise from pytest's own idiom is excluded there (pyproject.toml's
+    # [tool.bandit] exclude_dirs), and ci.yml's lint job never claimed to
+    # cover tests/ in the first place.
+    ("mypy", [sys.executable, "-m", "mypy", "src/convobox", "scripts"]),
     ("pytest", [sys.executable, "-m", "pytest", "-q"]),
 ]
 
@@ -26,7 +31,7 @@ def main() -> int:
     failed: list[str] = []
     for name, cmd in CHECKS:
         print(f"--- {name}: {' '.join(cmd[1:])}", flush=True)
-        if subprocess.run(cmd, check=False).returncode != 0:
+        if subprocess.run(cmd, check=False).returncode != 0:  # nosec B603 -- cmd comes only from the fixed CHECKS table above, never user input
             failed.append(name)
     if failed:
         print(f"ci_local: FAILED -> {', '.join(failed)}", flush=True)
