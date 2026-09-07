@@ -112,11 +112,11 @@ def _elapsed_label(state: ConversationTuiState, now: float) -> str:
 
 
 def _heartbeat_color(elapsed_s: float) -> str:
-    """Mirrors scripts/run_convobox.py's _heartbeat_color thresholds
-    (<10s green, 10-60s yellow, >60s red) -- duplicated rather than
-    imported so this package's layering stays clean (src/convobox must
-    not depend on scripts/, which imports FROM src/convobox, not the
-    other way around). Keep both in sync if the thresholds ever change."""
+    """ANSI color for a heartbeat's elapsed-seconds value: <10s green,
+    10-60s yellow, >60s red. The single definition -- scripts/
+    run_convobox.py's own plain-text heartbeat log line imports this
+    directly (2026-09-07) rather than keeping its own copy in sync by
+    hand, the way it used to."""
     if elapsed_s < 10.0:
         return _GREEN
     if elapsed_s < 60.0:
