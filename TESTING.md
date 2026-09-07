@@ -28,8 +28,8 @@ exists.
 |---|---|---|
 | **test** | pytest + coverage (`--cov=convobox --cov-fail-under=80`; actual coverage 91%) | `pytest --cov=convobox --cov-report=term-missing tests/` |
 | **web-tests** | pytest against `tests/test_web_*.py` with the real `web` extra installed (`dev` alone leaves every web test module's own `pytest.importorskip("fastapi", ...)` silently skipping -- this job exists so that can't happen unnoticed; see this file's own "Guaranteeing web tests actually run in CI" section below) | `uv sync --extra dev --extra web && uv run python -c "import fastapi, uvicorn, multipart, mcp" && uv run pytest tests/test_web_*.py -v` |
-| **lint** | ruff, bandit, mypy against `src/convobox` | `ruff check src/convobox`, `bandit -r src/convobox`, `mypy src/convobox` |
-| **sast** | semgrep (`p/python p/security-audit` -- swapped from dev-rig's `p/fastapi` default, ConvoBox has no web framework yet) + CodeQL | `semgrep --config=p/python --config=p/security-audit src/convobox --error` |
+| **lint** | ruff, bandit, mypy against `src/convobox` and `scripts` | `ruff check src/convobox scripts`, `bandit -r src/convobox scripts -c pyproject.toml`, `mypy src/convobox scripts` |
+| **sast** | semgrep (`p/python p/fastapi p/security-audit` -- `p/fastapi` restored 2026-08-17 now that a real FastAPI web UI exists) + CodeQL, against `src/convobox` and `scripts` | `semgrep --config=p/python --config=p/fastapi --config=p/security-audit src/convobox scripts --error` |
 | **audit** | pip-audit (CVEs) + pip-licenses (fails on GPL/AGPL) | `pip-audit`; `pip-licenses --fail-on="GPL;AGPL"` |
 | **sbom** | CycloneDX SBOM, uploaded as a build artifact | `cyclonedx-py environment --output-format json` |
 | **secrets** | gitleaks over full commit history | download the [gitleaks release](https://github.com/gitleaks/gitleaks/releases) for your platform, verify its checksum, `gitleaks detect --source . --log-opts="HEAD"` |
@@ -118,32 +118,41 @@ CI, and live-mic UAT sessions could silently drift apart. Three findings:
    (`requires-python = ">=3.12"`, `uv.lock` regenerated, README/
    QUICKSTART updated) rather than adding untested 3.11 CI coverage for a
    version nobody has actually run this against.
-3. **Two gaps found but deliberately NOT changed here, since fixing them
+3. **One gap found but deliberately NOT changed here, since fixing it
    means changing behavior this project doesn't own or hasn't scoped:**
-   - `ruff`/`bandit`/`mypy` in CI run against whatever `pip install -e
-     ".[dev]"` resolves at CI time (confirmed by reading
-     `LegionForge/dev-rig`'s actual `lint.yml`); locally, `uv sync
-     --extra dev` resolves the same version *constraints* through `uv`
-     instead. Same `pyproject.toml` constraints, but no shared lockfile
-     between the two installers and no upper version bounds on
-     ruff/mypy/bandit -- so "green locally" and "green in CI" can drift
-     apart over time as new tool versions release, with no code change
-     on either side. Living with this for now; a real fix would mean
-     either pinning exact tool versions in `pyproject.toml` or getting
-     `LegionForge/dev-rig`'s reusable workflow to consume `uv.lock`
-     directly, both bigger changes than "sync the environments" implied.
-   - CI's lint job only ever checks `source-dirs: "src/convobox"` --
-     `scripts/*.py` (the actual entrypoints: `run_convobox.py`,
-     `settings_tui.py`, `voice_picker.py`, etc.) get **no** ruff/mypy/
-     bandit coverage in CI, matching what this doc tells you to run
-     locally (same scope, so at least the two agree with each other).
-     Confirmed this gap firsthand while adding the conversation TUI's
-     scroll feature: `mypy scripts/run_convobox.py` gave two false
-     `termios`-attribute errors when run locally with mypy's default
-     Windows target, but came back clean with `--platform linux` -- the
-     same target CI's `ubuntu-latest` runner actually uses. A real fix
-     (adding `scripts` to `source-dirs`) would need vetting every file
-     under `scripts/` for new findings first, out of scope for this pass.
+   `ruff`/`bandit`/`mypy` in CI run against whatever `pip install -e
+   ".[dev]"` resolves at CI time (confirmed by reading
+   `LegionForge/dev-rig`'s actual `lint.yml`); locally, `uv sync
+   --extra dev` resolves the same version *constraints* through `uv`
+   instead. Same `pyproject.toml` constraints, but no shared lockfile
+   between the two installers and no upper version bounds on
+   ruff/mypy/bandit -- so "green locally" and "green in CI" can drift
+   apart over time as new tool versions release, with no code change
+   on either side. Living with this for now; a real fix would mean
+   either pinning exact tool versions in `pyproject.toml` or getting
+   `LegionForge/dev-rig`'s reusable workflow to consume `uv.lock`
+   directly, both bigger changes than "sync the environments" implied.
+
+   A second gap found the same day -- CI's lint job only ever checked
+   `source-dirs: "src/convobox"`, so `scripts/*.py` (the actual
+   entrypoints: `run_convobox.py`, `settings_tui.py`, `voice_picker.py`,
+   etc.) got **no** ruff/mypy/bandit coverage in CI -- was **fixed
+   2026-09-07** (PR #243, 2026-08-08, had already done the prep work to
+   make `scripts/` mypy-clean and flagged the actual `source-dirs` change
+   as a needed follow-up, but mistakenly believed it required a change in
+   `LegionForge/dev-rig` itself; it's actually a caller-supplied
+   `workflow_call` input, set right here in `ci.yml`, so the follow-up
+   was a same-repo one-line-per-job change once picked up). `source-dirs`
+   is now `"src/convobox scripts"` for both the `lint` and `sast` jobs.
+   Confirmed via the exact CI invocation (`mypy --platform linux
+   src/convobox scripts`, matching `pyproject.toml`'s pinned
+   `platform = "linux"` -- a bare Windows-target run gives two false
+   `termios`-attribute errors that don't reproduce with `linux` pinned,
+   the same finding that first surfaced this gap while adding the
+   conversation TUI's scroll feature); the six previously-unseen
+   third-party/first-party-sibling-import findings this surfaced are
+   documented in `pyproject.toml`'s `[[tool.mypy.overrides]]` comment
+   rather than silenced with a broad exclusion.
 
 4. **New finding (2026-07-20), confirmed by direct reproduction: `uv`'s
    local build cache can cross-contaminate editable installs between two

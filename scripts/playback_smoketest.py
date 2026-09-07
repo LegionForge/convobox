@@ -33,11 +33,11 @@ async def main() -> None:
     duration_s = len(audio) / tts.sample_rate
     print(f"synthesized {duration_s:.2f}s of audio, playing...")
 
-    assert player.is_playing() is False, "should not be playing before play() is called"
+    assert player.is_playing() is False, "should not be playing before play() is called"  # nosec B101 -- this script's own pass/fail signal, not a runtime invariant
     player.play(audio, tts.sample_rate)
-    assert player.is_playing() is True, "should be playing immediately after play()"
+    assert player.is_playing() is True, "should be playing immediately after play()"  # nosec B101 -- this script's own pass/fail signal, not a runtime invariant
     player.wait()
-    assert player.is_playing() is False, "should not be playing after wait() returns"
+    assert player.is_playing() is False, "should not be playing after wait() returns"  # nosec B101 -- this script's own pass/fail signal, not a runtime invariant
     print("PASS: played to completion, is_playing() correct before/during/after")
 
     print("\n--- test 2: barge-in (stop() mid-playback) against real hardware timing ---")
@@ -53,10 +53,10 @@ async def main() -> None:
     t0 = time.perf_counter()
     player.play(audio, tts.sample_rate)
     await asyncio.sleep(0.5)
-    assert player.is_playing() is True, "should still be playing 0.5s in"
+    assert player.is_playing() is True, "should still be playing 0.5s in"  # nosec B101 -- this script's own pass/fail signal, not a runtime invariant
     player.stop()
     stopped_at = time.perf_counter() - t0
-    assert player.is_playing() is False, "should not be playing after stop()"
+    assert player.is_playing() is False, "should not be playing after stop()"  # nosec B101 -- this script's own pass/fail signal, not a runtime invariant
 
     print(f"stop() called at ~0.5s, playback actually halted at {stopped_at:.2f}s")
     if stopped_at >= duration_s:
