@@ -368,7 +368,7 @@ def _interactive(voices_dir: Path, refresh: bool) -> None:
                 if key not in installed:
                     print(f"{key} is not downloaded ('list' shows what is)")
                     continue
-                reply = input(f"delete {key} from disk? [y/N] ").strip().lower()
+                reply = input(f"delete {key} from disk? [y/N] ").strip().lower()  # nosec B608 -- a confirmation prompt string, not a SQL query
                 if reply != "y":
                     continue
                 for removed in delete_voice(key, voices_dir):
