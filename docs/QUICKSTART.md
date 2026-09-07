@@ -13,8 +13,8 @@ Just want to run it? It's a real PyPI package — no clone needed:
 pip install legionforge-convobox    # or: pipx install legionforge-convobox
 ```
 
-This gives you the `convobox`, `convobox-settings`, and
-`convobox-audio-devices` commands used throughout this guide. Contributing,
+This gives you the `convobox`, `convobox-settings`, `convobox-audio-devices`,
+and `convobox-doctor` commands used throughout this guide. Contributing,
 or want the `dev` extra's test/lint tooling? Clone instead:
 
 ```bash
@@ -169,6 +169,13 @@ back) is planned as a configurable option, off by default.
 
 ## Troubleshooting
 
+- **Not sure what's wrong?** `convobox-doctor` checks your config for the
+  known-dangerous combinations (a `permission_mode`/command-flag conflict,
+  claude-code's approval hook with nothing able to answer it, a missing
+  extra for whatever you've turned on) in one shot, with no side effects.
+  Add `--audio`/`--stt`/`--tts`/`--backend` (or `--all`) to also test those
+  live — each may download a model or briefly spawn the real backend CLI,
+  so they're opt-in, not run by default.
 - **No audio, but it's transcribing you fine.** Almost always the output
   device. Run `convobox-audio-devices --test <n>` down your devices until
   you hear a tone, then pin that one.
