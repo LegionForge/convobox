@@ -163,6 +163,20 @@ analysis = [
 calibration = [
     "pycaw>=20230407; sys_platform == 'win32'",
 ]
+# Real-browser regression suite (tests/test_browser_regression.py) --
+# drives an actual Chromium against a real running web server, exercising
+# index.html's own JS (DOM updates, EventSource reconnect, click handlers)
+# that HTTP-level tests (test_web_app.py etc.) structurally cannot reach.
+# A separate extra, not part of dev/web: needs a real browser binary
+# fetched via a SEPARATE step this extra alone can't do --
+# `uv run playwright install chromium` after syncing this extra -- and
+# that download (~150MB) has no business being part of every `--extra dev`
+# sync. Requires `web` too (the app under test); not folded into `web`
+# itself since most `--extra web` installs (running the actual product)
+# never need a browser at all.
+browser = [
+    "playwright>=1.47",
+]
 
 [project.scripts]
 convobox = "scripts.run_convobox:main"

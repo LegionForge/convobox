@@ -29,6 +29,7 @@ exists.
 | **audit** | pip-audit (CVEs) + pip-licenses (fails on GPL/AGPL) | `pip-audit`; `pip-licenses --fail-on="GPL;AGPL"` |
 | **sbom** | CycloneDX SBOM, uploaded as a build artifact | `cyclonedx-py environment --output-format json` |
 | **secrets** | gitleaks over full commit history | download the [gitleaks release](https://github.com/gitleaks/gitleaks/releases) for your platform, verify its checksum, `gitleaks detect --source . --log-opts="HEAD"` |
+| **browser-tests** | a real Chromium against a real running web server (`tests/test_browser_regression.py`) -- approval actions, SSE reconnect, artifact tab switching, settings persistence. Push-to-main + manual dispatch only, not every PR (see this file's own "Browser regression suite" section) | `uv sync --extra dev --extra web --extra browser && uv run playwright install chromium && uv run pytest tests/test_browser_regression.py -v` |
 
 All six ran clean against this repo before `ci.yml` was added, with two
 exceptions, both already fixed in this branch:
@@ -62,6 +63,43 @@ linking) -- this needs a licensing decision, not a lint fix. See the
 README's existing "Open questions" -> Licensing model note, which is
 about ConvoBox's own license choice; this is the sharper, more concrete
 version of that same open question.
+
+## Browser regression suite
+
+Added 2026-09-07 (Astra repo review): `test_web_app.py` and friends prove
+the web UI's HTTP API responds correctly, entirely at the `httpx`/ASGI-
+in-process level -- none of them can exercise the browser-side JS that
+actually consumes those responses (DOM updates, `EventSource` reconnect,
+click handlers). `tests/test_browser_regression.py` is the first coverage
+of that layer: a real Chromium (Playwright), driven against a real
+running `uvicorn` server, exercising four representative flows --
+approval actions, SSE stream reconnect, artifact tab switching, and
+settings persistence.
+
+Needs the `browser` extra (`uv sync --extra browser`) AND a real browser
+binary (`uv run playwright install chromium`, a separate ~150MB download
+`uv sync` alone can't do). Gated to push-to-main + manual dispatch in CI
+(`browser-tests` job), not every PR, same reasoning as `process-kill-
+matrix`/`safety-phrase-matrix`: real per-run cost, and this is brand-new
+test infrastructure without an established reliability track record yet.
+
+**A real, live-verified gotcha found while building this:** the
+reconnect test needs a way to make an open SSE connection actually drop,
+the way a server crash or restart would. Forcibly cancelling an
+in-thread `uvicorn.Server`'s serving task on `should_exit` (even with
+`timeout_graceful_shutdown` set low, and confirming the thread and its
+event loop both fully exited) does **not** reliably close an
+already-open client-facing socket -- polled a real Chromium's
+`EventSource` status for 10+ seconds after that shutdown and it never
+left "connected". Whatever cleanup normally happens on an ordinary
+client-initiated disconnect doesn't automatically happen in reverse for
+a forced server-side shutdown of a still-open stream. `tests/
+test_browser_regression.py`'s `SubprocessLiveServer` works around this
+by running the server in a genuine OS process instead of a thread: a
+`kill()` there means the kernel closes every file descriptor -- sockets
+included -- unconditionally, no ambiguity. The in-thread `LiveServer`
+class stays for the other three tests, which only need to push
+synthetic backend events, not survive a real teardown.
 
 ## Keeping local, CI, and UAT environments in sync
 
