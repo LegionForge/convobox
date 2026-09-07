@@ -45,7 +45,16 @@ jobs:
     name: Lint & Type Check
     uses: LegionForge/dev-rig/.github/workflows/lint.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
     with:
-      source-dirs: "src/convobox"
+      # `scripts/` is this repo's own shipped entry points (run_convobox.py,
+      # settings_tui.py, etc.), not build tooling -- excluding it here was
+      # never intentional (see pyproject.toml's [[tool.mypy.overrides]]
+      # comment, which already documented "mypy src/convobox scripts" as
+      # the intended invocation). PR #243 (issue #235, finding D1) did the
+      # prep to make scripts/ mypy-clean but mistakenly believed this
+      # `source-dirs` value lived in LegionForge/dev-rig itself -- it's
+      # actually a caller-supplied input to dev-rig's reusable lint.yml,
+      # set right here, so no cross-repo change was ever needed.
+      source-dirs: "src/convobox scripts"
       python-version: "3.12"
       # types-PyYAML is the default already; explicit for clarity. mypy's
       # remaining untyped third-party deps (faster-whisper, sounddevice,
@@ -61,7 +70,9 @@ jobs:
       contents: read
       security-events: write # required for the CodeQL upload-sarif step inside sast.yml
     with:
-      source-dirs: "src/convobox"
+      # Same scope-expansion reasoning as the lint job above: scripts/ is
+      # shipped, first-party code and belongs in SAST too.
+      source-dirs: "src/convobox scripts"
       # Restored p/fastapi 2026-08-17: ConvoBox now has a real FastAPI web
       # UI (src/convobox/web/) plus a mounted MCP HTTP server with a CSRF
       # exemption for its own routes -- exactly the trust-boundary code
