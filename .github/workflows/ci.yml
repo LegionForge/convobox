@@ -41,6 +41,42 @@ jobs:
       coverage-source: "convobox"
       python-version: "3.12"
 
+  web-tests:
+    name: Web UI tests (dev + web extras)
+    # A local job, NOT a dev-rig `uses:` call: dev-rig's reusable test.yml
+    # (the `test` job above) only ever installs the `dev` extra --
+    # `pip install -e ".[dev]"` plus its own `extra-deps` input, which
+    # defaults to "types-PyYAML" and this repo never overrides -- so every
+    # web test module's `pytest.importorskip("fastapi", ...)` has silently
+    # skipped in that job for as long as it's existed. A green `test` job
+    # has never actually meant "the web UI's HTTP layer ran." This job
+    # installs the real `web` extra and asserts the imports actually
+    # succeed BEFORE running pytest, so a future regression here (a typo,
+    # a dropped extra, `web` quietly stopping resolving) fails loudly
+    # instead of skipping again unnoticed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dev + web dependencies
+        run: uv sync --extra dev --extra web
+
+      - name: Verify the web extra actually imports (fail loudly, don't silently skip)
+        run: uv run python -c "import fastapi, uvicorn, multipart, mcp"
+
+      - name: Web UI test modules
+        run: uv run pytest tests/test_web_*.py -v
+
   lint:
     name: Lint & Type Check
     uses: LegionForge/dev-rig/.github/workflows/lint.yml@468d5a7c30f6540a472a32d8b3bea1ac381f2017
