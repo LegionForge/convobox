@@ -635,6 +635,17 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
   - **Every item deliberately left open above is now closed (2026-09-07/
     08), plus two more severe bugs this pass found while live-verifying
     them:**
+    - **`"acp"` added to `settings_tui.py`'s `_CHOICE_BACKENDS`**, with a
+      `_BACKEND_PROFILE_DEFAULTS["acp"]` entry defaulting `command` to
+      `["opencode", "acp"]` -- opencode is ACP's own low-risk first
+      candidate (better-tested than Kilo, no separate install/auth
+      beyond what opencode already needs; swap to `["kilo", "acp"]` for
+      Kilo). Found and fixed a real bug surfaced while wiring this in:
+      `_apply_backend_profile`/`_backend_profile_from_active` forced
+      `backend.model = None` for any backend that wasn't `"opencode"` --
+      switching to/from `"acp"` in the TUI would have silently dropped a
+      pinned model, since acp honors `backend.model` too (see below).
+      Both functions now special-case `"acp"` alongside `"opencode"`.
     - **Two safety-critical bugs found and fixed while live-verifying
       Kilo through the real adapter (not just raw protocol probes,
       closing this file's own long-standing "not yet live-probed through

@@ -241,6 +241,32 @@ def test_switching_backends_remembers_opencodes_model() -> None:
     assert state.working.backend.model == "openai/gpt-5.6-sol"
 
 
+def test_switching_backends_remembers_acps_model() -> None:
+    # acp DOES honor backend.model (session/set_config_option, both
+    # opencode and kilo) -- unlike claude-code/codex, so it must not be
+    # force-cleared to None the way the generic branch does for those.
+    config = _make_config(**{"backend.name": "acp"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.working.backend.model = "inception/mercury-2"
+
+    settings_tui._switch_backend(state.working, "codex")
+    assert state.working.backend.model is None
+    assert state.working.backend_profiles["acp"].model == "inception/mercury-2"
+
+    settings_tui._switch_backend(state.working, "acp")
+    assert state.working.backend.model == "inception/mercury-2"
+    assert state.working.backend.command == ["opencode", "acp"]
+
+
+def test_backend_section_shows_acp_fields_including_model() -> None:
+    config = _make_config(**{"backend.name": "acp"})
+    state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
+    state.selected_section = next(i for i, section in enumerate(state.sections) if section.key == "backend")
+    assert [field.key for field in state.current_fields()] == [
+        "name", "model", "command", "permission_mode", "working_dir", "warn_if_working_dir_not_git",
+    ]
+
+
 def test_backend_section_hides_irrelevant_field_per_backend() -> None:
     config = _make_config(**{"backend.name": "opencode"})
     state = TuiState(path=Path("convobox.yaml"), original=config, working=config.model_copy(deep=True))
