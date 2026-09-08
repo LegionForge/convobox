@@ -310,6 +310,7 @@ class ACPAdapter(BackendAdapter):
             try:
                 await self._prompt_task
             except asyncio.CancelledError:
+                # Expected when cancelling an in-flight prompt on close.
                 pass
 
         if self._reader_task is not None:

@@ -425,6 +425,9 @@ async def test_acp_adapter_stale_prompt_task_does_not_clear_busy(monkeypatch):
     # Simulate a new send_text() superseding the stale task before it resolves.
     adapter._prompt_task = asyncio.create_task(asyncio.sleep(3600))
 
+    # Awaited for synchronization only (its return value, always None, isn't
+    # the point) -- drives the stale task through its own race-guard check
+    # in _await_prompt before the assertions below verify that check held.
     await stale_task
 
     assert adapter.is_busy() is True  # untouched by the stale task
