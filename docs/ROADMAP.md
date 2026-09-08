@@ -632,6 +632,88 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
     claude-code-specific) need an ACP-aware branch, are real UX decisions
     that deserve their own discussion rather than a same-night addition
     on top of a live-verification pass.
+  - **Every item deliberately left open above is now closed (2026-09-07/
+    08), plus two more severe bugs this pass found while live-verifying
+    them:**
+    - **Two safety-critical bugs found and fixed while live-verifying
+      Kilo through the real adapter (not just raw protocol probes,
+      closing this file's own long-standing "not yet live-probed through
+      the actual adapter" gap):**
+      - `send_text()` used to `await` `session/prompt` INLINE -- since
+        ACP's own `session/prompt` response only resolves once the WHOLE
+        turn completes (unlike codex.py's `turn/start`, which just acks),
+        this blocked the entire calling coroutine
+        (`Orchestrator.handle_transcript()`, called directly from
+        ConvoBox's own mic loop) for the full turn duration, with
+        `is_busy()` incorrectly reporting `False` the ENTIRE time --
+        `busy` was only ever set after the blocking await returned, i.e.
+        after the turn was already over. A mid-turn utterance would have
+        been routed to a second concurrent `send_text()` instead of
+        `send_interject()` at the Orchestrator's own `is_busy()` check.
+        Fixed the same way `codex.py`'s own `send_text` is structured:
+        `busy` is set before the request, and a background task (no
+        separate "turn completed" notification exists in ACP the way
+        `codex.py`'s `turn/completed` does, so a background task fills
+        that role instead) clears it and emits `DONE`/`ERROR` once
+        `session/prompt` actually resolves, with a task-identity race
+        guard so a superseded task (post `send_hard_stop()` + a new
+        `send_text()`) can't touch state after the fact. Live-verified:
+        `send_text()` now returns in 0.00s vs. 30s+ before.
+      - A fresh ACP session can default to an unauthenticated/unusable
+        model for BOTH opencode and Kilo, not Kilo-only as this file
+        previously believed (2026-09-03/04 findings above) -- observed
+        opencode's own default session pick `openai/gpt-5.6-terra` on
+        this account while the real working model is
+        `inception/mercury-2`; prompting against it doesn't error, it
+        just never resolves until the response timeout elapses.
+        `backend.model` (the same field/format `OpenCodeAdapter` already
+        used) now wires through to `ACPAdapter` generally via
+        `session/set_config_option`, replacing the old hardcoded
+        Kilo-only guess (`"claude-3.5-sonnet"`, itself confirmed broken
+        live: `-32602 model not found`).
+    - **`permission_mode` was a complete no-op for ACP** -- stored in
+      `ACPAdapter.__init__` and never referenced anywhere else in the
+      file, meaning `backend.permission_mode: plan` provided ZERO actual
+      protection for ACP backends; every session silently ran in full
+      `build` (execute) mode regardless of config. Fixed: `_ensure_session`
+      now calls `session/set_mode(sessionId, "plan")` (`modeId`, not
+      `mode` -- found from the live `-32602` error's own field name, not
+      guessed) when `permission_mode == "plan"`, live-verified 2026-09-07
+      to genuinely block a real write (the model declines outright, zero
+      `tool_call` emitted, no file created). `"permissive"` needs no
+      protocol call (full trust is the session's own default already,
+      confirmed still lets a real write through end to end).
+      `"approve"` has no ACP equivalent -- there is no live-answerable
+      per-tool approval channel by default for either backend (see the
+      permission-request finding below) -- so `run_convobox.py`'s startup
+      guard now rejects `backend.name: acp` with `permission_mode:
+      approve` outright at launch, same fail-closed stance as the
+      existing codex `approve`-mode guard, rather than silently
+      downgrading to `plan` or upgrading to full trust.
+    - **`session/request_permission`'s response shape is now CONFIRMED,
+      not a best-effort guess** -- it does not fire by default (matching
+      every earlier pass) and ACP's own `session/set_mode` has no third
+      "ask" option (just `build`/`plan`), but it DOES fire when OpenCode's
+      own PROJECT config (an `opencode.json` in the session's cwd with
+      `{"permission": {"edit": "ask", "bash": "ask"}}`) requests it -- a
+      posture set entirely on the agent's own side, invisible to and not
+      reachable through `backend.permission_mode` at all. This adapter's
+      existing auto-decline (`{"outcome": {"outcome": "cancelled"}}`) was
+      accepted with no protocol error, and the tool call it was for then
+      correctly reported `status: "failed"` with a human-readable "The
+      user rejected permission to use this specific tool call." message.
+      This also gave a REAL (not inferred) tool-failure case to verify
+      the `tool_call_update` `status: "failed"` handling against -- and
+      found it was subtly wrong: a `failed` update carries the same
+      `content` text-block array a `completed` one does (e.g. "File not
+      found: ..."), but the code only surfaced the raw `rawOutput` JSON
+      blob (`{"error": "..."}`) instead of that human-readable text.
+      Fixed to share the same text-preferring extraction both statuses
+      already use -- a tool failure shouldn't read worse than its own
+      success path. No live-answerable voice-gated channel is being
+      built for `session/request_permission` itself -- auto-decline
+      stays the deliberate, fail-closed default, since this posture
+      isn't reachable from ConvoBox's own config surface at all.
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
