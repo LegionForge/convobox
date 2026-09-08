@@ -37,6 +37,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 # Reused as-is, not reimplemented -- see this module's own docstring.
+from check_venv_extras import (  # type: ignore[import-not-found]
+    _probe_aec,
+    _probe_piper,
+    _probe_web,
+)
 from settings_tui import (  # type: ignore[import-not-found]
     probe_audio,
     probe_backend,
@@ -84,18 +89,32 @@ def static_config_findings(config: AppConfig, problems: list[str]) -> list[Findi
 def extras_findings(config: AppConfig) -> list[Finding]:
     """Only checks the extra(s) THIS config actually needs, not every
     extra that exists (that's check_venv_extras.py's job, for the dev
-    checkout as a whole)."""
+    checkout as a whole) -- but reuses THAT module's own probes to do it,
+    not a bare `import package_name`.
+
+    That distinction is not cosmetic: the aec extra's real 2026-09-06
+    incident (docs/KNOWN-ISSUES.md) left aec_audio_processing installed
+    as an empty namespace package with a hollow dist-info -- a bare
+    `import aec_audio_processing` raised nothing at all, only the exact
+    `from aec_audio_processing import AudioProcessor` line aec.py
+    actually uses did. check_venv_extras.py's _probe_aec already checks
+    that specific symbol for exactly this reason; an earlier version of
+    this function used a bare import instead and would have missed that
+    same incident had it existed at the time (caught 2026-09-08, JP
+    asking whether this had actually been tested against real venv
+    errors, not just missing-package ones).
+    """
     findings: list[Finding] = []
 
     if config.audio.echo_cancellation:
         try:
-            import aec_audio_processing  # noqa: F401
-        except ImportError:
+            _probe_aec()
+        except Exception as exc:  # noqa: BLE001 -- report every probe's own failure, keep checking the rest
             findings.append(
                 Finding(
                     "audio.echo_cancellation",
                     "fail",
-                    "enabled, but the 'aec' extra is not installed -- install it with: "
+                    f"enabled, but the 'aec' extra isn't usable ({exc}) -- install it with: "
                     'uv pip install -e ".[aec]" (Windows wheels; other platforms may need '
                     "a source build, see docs/KNOWN-ISSUES.md)",
                 )
@@ -103,28 +122,27 @@ def extras_findings(config: AppConfig) -> list[Finding]:
 
     if config.web.enabled:
         try:
-            import fastapi  # noqa: F401
-            import uvicorn  # noqa: F401
-        except ImportError:
+            _probe_web()
+        except Exception as exc:  # noqa: BLE001
             findings.append(
                 Finding(
                     "web.enabled",
                     "fail",
-                    "enabled, but the 'web' extra is not installed -- install it with: "
+                    f"enabled, but the 'web' extra isn't usable ({exc}) -- install it with: "
                     "uv sync --extra web",
                 )
             )
 
     if config.tts.engine == "piper":
         try:
-            import piper  # noqa: F401
-        except ImportError:
+            _probe_piper()
+        except Exception as exc:  # noqa: BLE001
             findings.append(
                 Finding(
                     "tts.engine",
                     "fail",
-                    "set to 'piper', but the 'piper' extra is not installed -- install it "
-                    "with: uv sync --extra piper",
+                    f"set to 'piper', but the 'piper' extra isn't usable ({exc}) -- install "
+                    "it with: uv sync --extra piper",
                 )
             )
 

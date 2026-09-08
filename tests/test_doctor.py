@@ -72,7 +72,10 @@ def test_static_config_findings_clean_config_reports_nothing() -> None:
 def test_extras_findings_reports_missing_aec_when_echo_cancellation_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(sys.modules, "aec_audio_processing", None)
+    def fake_probe_aec() -> None:
+        raise ImportError("No module named 'aec_audio_processing'")
+
+    monkeypatch.setattr(doctor, "_probe_aec", fake_probe_aec)
     config = AppConfig()
     config.audio.echo_cancellation = True
     findings = doctor.extras_findings(config)
@@ -82,15 +85,49 @@ def test_extras_findings_reports_missing_aec_when_echo_cancellation_enabled(
     assert "uv pip install" in findings[0].message
 
 
+def test_extras_findings_catches_a_hollow_aec_install_not_just_a_missing_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact regression class this reuse fixes (2026-09-08): a bare
+    `import aec_audio_processing` succeeds against an empty namespace
+    package with no AudioProcessor attribute -- the real shape of the
+    2026-09-06 incident (docs/KNOWN-ISSUES.md) -- and would silently miss
+    this. check_venv_extras.py's own _probe_aec checks the specific
+    symbol instead, so doctor.py reusing it directly (not a bare import)
+    must still flag this case."""
+
+    def hollow_probe_aec() -> None:
+        from aec_audio_processing import AudioProcessor  # noqa: F401
+
+    # Simulate the hollow package directly: a real module object, present
+    # in sys.modules, with no AudioProcessor attribute -- reproduces the
+    # exact ImportError check_venv_extras.py's _probe_aec would hit.
+    import types
+
+    hollow = types.ModuleType("aec_audio_processing")
+    monkeypatch.setitem(sys.modules, "aec_audio_processing", hollow)
+    monkeypatch.setattr(doctor, "_probe_aec", hollow_probe_aec)
+
+    config = AppConfig()
+    config.audio.echo_cancellation = True
+    findings = doctor.extras_findings(config)
+    assert len(findings) == 1
+    assert findings[0].check == "audio.echo_cancellation"
+    assert findings[0].level == "fail"
+
+
 def test_extras_findings_says_nothing_when_aec_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "aec_audio_processing", object())
+    monkeypatch.setattr(doctor, "_probe_aec", lambda: None)
     config = AppConfig()
     config.audio.echo_cancellation = True
     assert doctor.extras_findings(config) == []
 
 
 def test_extras_findings_reports_missing_web_extra(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "fastapi", None)
+    def fake_probe_web() -> None:
+        raise ImportError("No module named 'fastapi'")
+
+    monkeypatch.setattr(doctor, "_probe_web", fake_probe_web)
     config = AppConfig()
     config.web.enabled = True
     findings = doctor.extras_findings(config)
@@ -100,7 +137,10 @@ def test_extras_findings_reports_missing_web_extra(monkeypatch: pytest.MonkeyPat
 
 
 def test_extras_findings_reports_missing_piper_extra(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "piper", None)
+    def fake_probe_piper() -> None:
+        raise ImportError("No module named 'piper'")
+
+    monkeypatch.setattr(doctor, "_probe_piper", fake_probe_piper)
     config = AppConfig()
     config.tts.engine = "piper"
     findings = doctor.extras_findings(config)
