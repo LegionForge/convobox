@@ -21,12 +21,15 @@ def create_backend_adapter(
     mcp_url: str | None = None,
     mcp_token: str | None = None,
 ) -> BackendAdapter:
-    # permission_mode is only honored by claude-code and codex today (see
-    # each adapter's module docstring) -- opencode silently ignores it
-    # rather than erroring, same "not every adapter can do everything"
-    # stance as wait_listening's default no-op. ClaudeCodeAdapter derives
-    # its own hook-wiring decision from permission_mode internally (see
-    # its __init__) -- no separate flag needed here.
+    # permission_mode is honored by claude-code and codex today, and by
+    # acp for "plan" only (mapped onto session/set_mode -- see acp.py's
+    # own module docstring; "approve" is rejected earlier at
+    # run_convobox.py's own startup guard, never reaches here in
+    # practice). opencode silently ignores it rather than erroring, same
+    # "not every adapter can do everything" stance as wait_listening's
+    # default no-op. ClaudeCodeAdapter derives its own hook-wiring
+    # decision from permission_mode internally (see its __init__) -- no
+    # separate flag needed here.
     #
     # mcp_url/mcp_token (the "show_document" tool, web/mcp_server.py) are
     # claude-code-only so far -- see docs/ARTIFACT-PANE-SCOPE.md's "Agent-
@@ -69,6 +72,7 @@ def create_backend_adapter(
             backend=backend,
             permission_mode=config.permission_mode,
             working_dir=config.working_dir,
+            model=config.model,
         )
     raise ValueError(
         f"unknown backend.name {config.name!r} "

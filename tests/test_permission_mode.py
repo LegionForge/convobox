@@ -129,6 +129,27 @@ def test_startup_guard_exits_on_codex_approve_mode() -> None:
         _check_backend_permission_mode(backend, interaction)
 
 
+def test_startup_guard_exits_on_acp_approve_mode() -> None:
+    # ACP (opencode/kilo) has no live-answerable per-tool approval channel
+    # by default -- session/request_permission simply never fires under
+    # either backend's default config (live-verified 2026-09-03/2026-09-07,
+    # docs/ROADMAP.md), and the adapter's own handler for it just
+    # auto-declines if it ever somehow arrives. Same fail-closed stance as
+    # the codex "approve" guard above: fail loudly rather than silently
+    # downgrade to "plan" or upgrade to full trust.
+    backend = BackendConfig(name="acp", permission_mode="approve")
+    interaction = InteractionConfig()
+    with pytest.raises(SystemExit, match="not supported"):
+        _check_backend_permission_mode(backend, interaction)
+
+
+@pytest.mark.parametrize("mode", ["plan", "permissive"])
+def test_startup_guard_passes_for_acp_plan_and_permissive(mode: str) -> None:
+    backend = BackendConfig(name="acp", permission_mode=mode)
+    interaction = InteractionConfig()
+    _check_backend_permission_mode(backend, interaction)  # must not raise
+
+
 def test_startup_guard_still_catches_command_flag_conflicts() -> None:
     # Existing detect_permission_conflict() behavior must be unaffected by
     # the new check being added alongside it.

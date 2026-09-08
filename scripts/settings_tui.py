@@ -124,7 +124,7 @@ def _highlight_keys(text: str) -> str:
     text = _KEY_NAME_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
     return _BRACKET_KEY_RE.sub(lambda m: f"{_BOLD}{_CYAN}{m.group(0)}{_RESET}", text)
 
-_CHOICE_BACKENDS = ("opencode", "claude-code", "codex")
+_CHOICE_BACKENDS = ("opencode", "claude-code", "codex", "acp")
 _CHOICE_PERMISSION_MODES = ("plan", "approve", "permissive")
 _CHOICE_TTS_ENGINES = ("kokoro", "piper")
 _CHOICE_STT_ENGINES = ("faster-whisper",)
@@ -153,6 +153,11 @@ _BACKEND_PROFILE_DEFAULTS: dict[str, BackendProfileConfig] = {
     "opencode": BackendProfileConfig(url="http://localhost:4096"),
     "claude-code": BackendProfileConfig(url="http://localhost:4096", command=["claude"]),
     "codex": BackendProfileConfig(url="http://localhost:4096", command=["codex"]),
+    # opencode is ACP's own low-risk first candidate (docs/ROADMAP.md) --
+    # better-tested than kilo, no separate install/auth needed beyond
+    # what opencode already requires. Swap command to ["kilo", "acp"] for
+    # Kilo instead.
+    "acp": BackendProfileConfig(url="http://localhost:4096", command=["opencode", "acp"]),
 }
 # Same per-engine-memory pattern as _BACKEND_PROFILE_DEFAULTS above --
 # schema defaults per tts.engine, used both to seed a never-configured
@@ -330,10 +335,10 @@ SECTION_SPECS: tuple[SectionSpec, ...] = (
         fields=(
             FieldSpec("backend", "name", "Name", "choice", _CHOICE_BACKENDS, help_text="Which coding agent ConvoBox should drive."),
             FieldSpec("backend", "url", "URL", "str", help_text="HTTP/SSE endpoint for OpenCode."),
-            FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for opencode's own default -- which may be a hosted free-tier model, not necessarily your own configured provider. NOT a CLI flag: `opencode serve` has no -m option; this is sent via the session-creation API instead."),
-            FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code or Codex. Space-separated, e.g. `codex.cmd --model gpt-5.6-terra` -- NOT comma-separated like the list fields elsewhere in this TUI (e.g. safeword phrases); a stray comma becomes part of the argument text and the command will fail to launch."),
-            FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default). approve: may act, but every write/command needs voice approval via your approval_phrase -- real on both Codex (native per-call approval channel) and Claude Code (a PreToolUse hook this adapter builds itself, since headless mode has no native one -- see claude_code.py's module docstring). While a request is pending, say 'explain'/'explanation'/'clarify'/'help' to have the full detail read back before deciding, or 'no' to deny -- the prompt stays open across a clarifying exchange. permissive: BYPASSES ALL PERMISSIONS -- acts without asking on every tool call (Bash, WebFetch/WebSearch, MCP, file edits, everything), not just writes (dangerous). No effect on opencode (set at `opencode serve` launch). Do NOT also set a permission flag in Command -- that's a conflict."),
-            FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched). Override per-run with run_convobox.py --working-dir."),
+            FieldSpec("backend", "model", "Model", "optional_str", help_text="opencode and acp only: provider/model-id to pin (e.g. openai/gpt-5.6-sol -- see `opencode models` for the full list). Leave unset for the backend's own default -- which may be a hosted/unauthenticated model, not necessarily your own configured provider (for acp specifically, an unusable default doesn't error -- the first prompt just never resolves until its own response timeout elapses). NOT a CLI flag: sent via the session-creation API (opencode) or session/set_config_option (acp) instead."),
+            FieldSpec("backend", "command", "Command", "command", help_text="Base CLI command for subprocess backends such as Claude Code, Codex, or ACP (`opencode acp` / `kilo acp` -- the first token picks which ACP-speaking backend gets spawned, see create_backend_adapter()). Space-separated, e.g. `codex.cmd --model gpt-5.6-terra` -- NOT comma-separated like the list fields elsewhere in this TUI (e.g. safeword phrases); a stray comma becomes part of the argument text and the command will fail to launch."),
+            FieldSpec("backend", "permission_mode", "Permission mode", "choice", _CHOICE_PERMISSION_MODES, help_text="How much the coding agent may DO. plan: read-only, cannot write or run commands (safe default) -- for acp this maps to session/set_mode('plan'), live-verified 2026-09-07 to genuinely block a real write (the model declines outright, no tool call attempted). approve: may act, but every write/command needs voice approval via your approval_phrase -- real on both Codex (native per-call approval channel) and Claude Code (a PreToolUse hook this adapter builds itself, since headless mode has no native one -- see claude_code.py's module docstring). NOT SUPPORTED for acp -- opencode/kilo have no live-answerable per-tool approval channel by default (session/request_permission never fires), so this value is rejected at startup rather than silently running some other posture. While a request is pending (codex/claude-code only), say 'explain'/'explanation'/'clarify'/'help' to have the full detail read back before deciding, or 'no' to deny -- the prompt stays open across a clarifying exchange. permissive: BYPASSES ALL PERMISSIONS -- acts without asking on every tool call (Bash, WebFetch/WebSearch, MCP, file edits, everything), not just writes (dangerous). No effect on opencode (set at `opencode serve` launch) or on acp (full trust is already its own default -- no protocol call needed). Do NOT also set a permission flag in Command -- that's a conflict."),
+            FieldSpec("backend", "working_dir", "Working dir", "optional_str", help_text="The directory the spawned coding agent (Codex/Claude Code/acp) runs and EDITS files in. SECURITY: leave unset and the agent inherits ConvoBox's own directory -- a voice session could then modify ConvoBox's source. Point it at an isolated workspace (a scratch/UAT dir separate from any repo you care about) so the agent's edits land there. No effect on opencode (its dir is set by where `opencode serve` was launched); acp DOES respect this (passed as session/new's own `cwd`). Override per-run with run_convobox.py --working-dir."),
             FieldSpec("backend", "warn_if_working_dir_not_git", "Warn if working dir isn't a git repo", "bool", help_text="On by default. If Working dir above is set and isn't inside a git repository, show a warning here (and log one at startup) suggesting `git init` -- edits with no version control are unrecoverable the moment they happen. A nudge, not a requirement: turn this off if your working_dir is intentionally outside version control (e.g. a throwaway scratch workspace). No effect if Working dir is unset, doesn't exist yet, or `git` itself isn't installed (silently skipped, never a false warning). Space/Left/Right toggles true/false."),
         ),
     ),
@@ -480,6 +485,18 @@ def _visible_fields_for_section(config: AppConfig, section: SectionSpec) -> tupl
                 "name", "command", "working_dir", "warn_if_working_dir_not_git", "permission_mode",
             }
         )
+    if backend_name == "acp":
+        # No url field: acp is a spawned subprocess (opencode/kilo acp),
+        # not an HTTP server ConvoBox connects to -- same shape as
+        # claude-code/codex above, plus model (which acp DOES honor,
+        # unlike claude-code/codex -- see _apply_backend_profile).
+        return tuple(
+            field for field in section.fields
+            if field.key in {
+                "name", "command", "model", "permission_mode", "working_dir",
+                "warn_if_working_dir_not_git",
+            }
+        )
     return section.fields
 
 
@@ -565,6 +582,16 @@ def _set_backend_profile(config: AppConfig, name: str, profile: BackendProfileCo
 def _backend_profile_from_active(config: AppConfig, name: str) -> BackendProfileConfig:
     if name == "opencode":
         return BackendProfileConfig(url=config.backend.url, model=config.backend.model)
+    if name == "acp":
+        # acp honors backend.model too (session/set_config_option, both
+        # opencode and kilo -- live-verified 2026-09-08), not opencode-only
+        # as the generic fallback branch below assumes -- capture it here
+        # so switching away and back doesn't silently drop a pinned model.
+        return BackendProfileConfig(
+            url=config.backend.url,
+            command=list(config.backend.command) if config.backend.command is not None else None,
+            model=config.backend.model,
+        )
     if name in {"claude-code", "codex"}:
         return BackendProfileConfig(
             url=config.backend.url,
@@ -586,6 +613,15 @@ def _apply_backend_profile(config: AppConfig, name: str) -> None:
     if name == "opencode":
         config.backend.command = None
         config.backend.model = profile.model if profile.model is not None else defaults.model
+    elif name == "acp":
+        # Unlike claude-code/codex, acp DOES honor backend.model (see
+        # _backend_profile_from_active's own "acp" branch) -- must not be
+        # forced to None the way the generic branch below does.
+        config.backend.model = profile.model if profile.model is not None else defaults.model
+        if profile.command is not None:
+            config.backend.command = list(profile.command)
+        else:
+            config.backend.command = list(defaults.command) if defaults.command is not None else None
     else:
         config.backend.model = None
         if profile.command is not None:

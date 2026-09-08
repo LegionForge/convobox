@@ -588,19 +588,26 @@ class BackendConfig(BaseModel):
     # spawn, e.g. ["claude"] or ["claude", "--model", "claude-haiku-4-5"].
     # The adapter appends the protocol flags it needs itself.
     command: list[str] | None = None
-    # opencode only: pin which model a NEW session uses, "provider/model-id"
+    # opencode and acp: pin which model a NEW session uses, "provider/model-id"
     # (matches `opencode models`' own output format, e.g.
-    # "openai/gpt-5.6-sol"). None (default) leaves it to opencode's own
-    # default -- confirmed live, 2026-07-14, that this can silently be a
-    # hosted free-tier model (OpenCode Zen's own default) rather than the
-    # user's own configured provider, with no error or warning either way.
-    # NOT a CLI flag: `opencode serve` (the mode this adapter connects to)
-    # has no -m/--model option at all (confirmed via `opencode serve
-    # --help`) -- that flag only exists on `opencode run`/the interactive
-    # TUI, neither of which this project's HTTP+SSE adapter uses. The real
-    # mechanism, confirmed against a live server's own OpenAPI spec
-    # (`GET /doc`), is `POST /api/session`'s optional `model: {providerID,
-    # id}` field -- see OpenCodeAdapter._ensure_session().
+    # "openai/gpt-5.6-sol"). None (default) leaves it to the backend's own
+    # default -- confirmed live, 2026-07-14 (opencode) and 2026-09-08 (acp),
+    # that this can silently be a hosted/unauthenticated model rather than
+    # the user's own configured provider, with no error or warning either
+    # way -- for opencode's own bespoke adapter this means a wrong-but-
+    # answering model; for the acp adapter it means session/prompt never
+    # resolves until its own response timeout elapses (ACPAdapter.__init__'s
+    # own `model` param docstring has the live-verified specifics). NOT a
+    # CLI flag for either: `opencode serve` (the mode OpenCodeAdapter
+    # connects to) has no -m/--model option at all (confirmed via `opencode
+    # serve --help`) -- that flag only exists on `opencode run`/the
+    # interactive TUI, neither of which this project's HTTP+SSE adapter
+    # uses. The real mechanism, confirmed against a live server's own
+    # OpenAPI spec (`GET /doc`), is `POST /api/session`'s optional `model:
+    # {providerID, id}` field -- see OpenCodeAdapter._ensure_session().
+    # ACPAdapter instead sends this via session/set_config_option
+    # (configId="model"), the same mechanism confirmed live for Kilo
+    # (docs/ROADMAP.md, 2026-09-03/04) and now also used for OpenCode.
     model: str | None = None
     # The directory the spawned coding agent (codex, claude-code) runs in --
     # i.e. where it reads and WRITES files. SECURITY-RELEVANT: a coding
