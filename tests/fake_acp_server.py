@@ -24,12 +24,13 @@ Turn behavior is scripted by the prompt text:
                                 turn/completed(status="failed") -- a
                                 failed TOOL doesn't mean a failed TURN)
   contains "needs approval" -> a server->client session/request_permission
-                                REQUEST mid-turn (method+id, no reply
-                                read back -- the real adapter's own
-                                auto-decline doesn't change what the
-                                agent reports next either, live-verified
-                                2026-09-07), followed by a rejected tool
-                                call in the same shape "tool fails" uses
+                                REQUEST mid-turn (method+id); the reply IS
+                                read back and its outcome echoed into the
+                                rejected tool call's own text (proves the
+                                real adapter's auto-decline actually
+                                reaches this fake over the real pipe, not
+                                just that _read_loop's dispatch logic
+                                routes it correctly in isolation)
   contains "fail"           -> session/prompt's own JSON-RPC response is
                                 an ERROR (checked after "tool fails" --
                                 see below -- there is no ACP equivalent
@@ -108,12 +109,19 @@ def tool_call_completed(tool_id: str, text: str) -> None:
     })
 
 
+_PERMISSION_REQUEST_ID = 9001
+
+
 def main() -> None:
     # id of a currently-pending session/prompt request that hasn't
     # resolved yet (the "hang" scenario) -- session/cancel (a notification,
     # no id of its own) resolves THIS request when it arrives, same as a
     # real opencode/kilo acp process does.
     hung_request_id: object | None = None
+    # id of a session/prompt request waiting on the CLIENT's answer to our
+    # own server->client session/request_permission (the "needs approval"
+    # scenario) -- resolved once that reply arrives, not immediately.
+    pending_approval_prompt_id: object | None = None
 
     for line in sys.stdin:
         line = line.strip()
@@ -138,6 +146,22 @@ def main() -> None:
             if hung_request_id is not None:
                 respond(hung_request_id, {"stopReason": "cancelled"})
                 hung_request_id = None
+        elif method is None and req_id == _PERMISSION_REQUEST_ID:
+            # The CLIENT's reply to OUR OWN server->client
+            # session/request_permission -- has no "method" (a plain
+            # JSON-RPC response), unlike every other branch here. Echo
+            # what it answered into the rejected tool call's own text so
+            # a test can assert the real adapter's auto-decline shape
+            # ({"outcome": {"outcome": "cancelled"}}) actually reached
+            # this fake over the real pipe, not just that _read_loop's
+            # dispatch logic routes a server-request correctly in
+            # isolation.
+            outcome = ((msg.get("result") or {}).get("outcome") or {}).get("outcome", "<missing>")
+            tool_call("call_1", "write", "edit")
+            tool_call_failed("call_1", f"permission outcome was: {outcome}")
+            if pending_approval_prompt_id is not None:
+                respond(pending_approval_prompt_id, {"stopReason": "end_turn"})
+                pending_approval_prompt_id = None
         elif method == "session/prompt":
             text = " ".join(
                 block.get("text", "")
@@ -158,23 +182,17 @@ def main() -> None:
                 respond(req_id, {"stopReason": "end_turn"})
                 continue
             if "needs approval" in text:
-                # Server->client REQUEST mid-turn -- the real adapter
-                # auto-declines with {"outcome": {"outcome": "cancelled"}}
-                # (acp.py's own _read_loop). This fake doesn't read the
-                # reply back (the real agent's own next step doesn't
-                # depend on it either, live-verified 2026-09-07): the
-                # tool call is simply reported rejected regardless.
+                # Server->client REQUEST mid-turn -- session/prompt itself
+                # does NOT resolve until the reply arrives (see the
+                # `method is None and req_id == _PERMISSION_REQUEST_ID`
+                # branch above), matching a real turn actually waiting on
+                # the outcome before deciding how to proceed.
+                pending_approval_prompt_id = req_id
                 emit({
-                    "jsonrpc": "2.0", "id": 9001,
+                    "jsonrpc": "2.0", "id": _PERMISSION_REQUEST_ID,
                     "method": "session/request_permission",
                     "params": {"sessionId": SESSION_ID},
                 })
-                tool_call("call_1", "write", "edit")
-                tool_call_failed(
-                    "call_1",
-                    "The user rejected permission to use this specific tool call.",
-                )
-                respond(req_id, {"stopReason": "end_turn"})
                 continue
             if "fail" in text:
                 respond_error(req_id, "model exploded")
