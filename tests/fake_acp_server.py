@@ -44,6 +44,14 @@ Turn behavior is scripted by the prompt text:
                                 see acp.py's own send_hard_stop() comment
   contains "die"            -> exits the process mid-turn, no response
                                 ever sent
+  contains "report methods" -> agent_message_chunk listing every method
+                                received so far (comma-separated, in
+                                order, THIS session/prompt included) --
+                                lets a test assert the real sequence
+                                _ensure_session sent (initialize,
+                                session/new, session/set_config_option,
+                                session/set_mode, ...) instead of only
+                                proving nothing crashed
   contains "emit garbage first" -> one malformed (non-JSON) line before
                                 the normal notification/response
   anything else             -> agent_message_chunk echoing the text,
@@ -122,6 +130,12 @@ def main() -> None:
     # own server->client session/request_permission (the "needs approval"
     # scenario) -- resolved once that reply arrives, not immediately.
     pending_approval_prompt_id: object | None = None
+    # Every method received, in order (including the current session/prompt
+    # itself) -- reported back via the "report methods" trigger below so a
+    # test can assert the real sequence _ensure_session sent (initialize,
+    # session/new, session/set_config_option, session/set_mode, ...)
+    # instead of only proving nothing crashed.
+    received_methods: list[str] = []
 
     for line in sys.stdin:
         line = line.strip()
@@ -133,6 +147,8 @@ def main() -> None:
             continue
         method = msg.get("method")
         req_id = msg.get("id")
+        if method is not None:
+            received_methods.append(method)
 
         if method == "initialize":
             respond(req_id, {"protocolVersion": 1, "agentCapabilities": {}})
@@ -140,12 +156,24 @@ def main() -> None:
             respond(req_id, {"sessionId": SESSION_ID})
         elif method in ("session/set_config_option", "session/set_mode"):
             respond(req_id, {})
-        elif method == "session/cancel":
-            # Notification -- no id, no reply expected for THIS message.
-            # Resolves whatever session/prompt request is still pending.
+        elif method == "session/cancel" and "id" not in msg:
+            # Genuine notification -- no id, no reply expected for THIS
+            # message. Resolves whatever session/prompt request is still
+            # pending.
             if hung_request_id is not None:
                 respond(hung_request_id, {"stopReason": "cancelled"})
                 hung_request_id = None
+        elif method == "session/cancel":
+            # Sent as a REQUEST (has an "id") -- the actual shipped bug
+            # fixed 2026-09-06 (see acp.py's own send_hard_stop
+            # docstring). Real opencode returns -32601 for this exact
+            # mistake; matching that here (instead of silently treating
+            # it the same as the notification form above) means a
+            # regression back to the request form leaves the hung
+            # session/prompt UNRESOLVED, so
+            # test_send_hard_stop_cancels_a_hanging_turn genuinely times
+            # out rather than passing for the wrong reason.
+            respond_error(req_id, "Method not found")
         elif method is None and req_id == _PERMISSION_REQUEST_ID:
             # The CLIENT's reply to OUR OWN server->client
             # session/request_permission -- has no "method" (a plain
@@ -170,6 +198,10 @@ def main() -> None:
             )
             if "die" in text:
                 sys.exit(0)
+            if "report methods" in text:
+                agent_text(",".join(received_methods))
+                respond(req_id, {"stopReason": "end_turn"})
+                continue
             if "emit garbage first" in text:
                 sys.stdout.write("not valid json at all {{{\n")
                 sys.stdout.flush()

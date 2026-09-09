@@ -351,19 +351,18 @@ class ACPAdapter(BackendAdapter):
         """Close the adapter and clean up resources."""
         if self._prompt_task is not None:
             self._prompt_task.cancel()
-            try:
+            # Awaited for synchronization only (Task[None] -- assigning its
+            # result would trip mypy's func-returns-value check, so this
+            # stays a bare statement rather than this file's usual `_ =
+            # await expr` house style; matches codex.py's own identical
+            # shape in _terminate_and_kill_process).
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._prompt_task
-            except asyncio.CancelledError:
-                # Expected when cancelling an in-flight prompt on close.
-                pass
 
         if self._reader_task is not None:
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                # Expected when cancelling the read loop task
-                pass
 
         # Cleared here (not left in self._proc) so a second aclose()/
         # force_kill() call -- force_kill() has no override of its own and
@@ -511,6 +510,7 @@ class ACPAdapter(BackendAdapter):
         only ever reads its own old proc's stdout, never a newer one's.
         """
         assert proc.stdout is not None  # nosec B101
+        task = asyncio.current_task()
 
         try:
             while True:
@@ -648,9 +648,21 @@ class ACPAdapter(BackendAdapter):
             # -- this is best-effort ordering, not something that should
             # ever block real teardown.
             if prompt_task is not None and not prompt_task.done():
-                with contextlib.suppress(Exception):
+                try:
                     await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)
-            self._events.put_nowait(_EOF)
+                except BaseException:  # noqa: BLE001, S110 -- must not skip the _EOF push below no matter what happens in this await, including a CancelledError landing here (nothing to log: this is expected on the cancellation path, not a bug). Live-caught 2026-09-09 by an independent verification review of this exact fix: contextlib.suppress(Exception), used in an earlier version of this line, does NOT catch CancelledError (a BaseException since 3.8) -- cancelling prompt_task elsewhere (aclose() cancels it directly) while this shielded await is in flight propagates ITS cancellation through the shield's own outer future regardless, which used to skip put_nowait(_EOF) entirely and permanently hang events() for the rest of the session (Orchestrator only re-creates its consumer task when it's .done(), not merely stuck).
+                    pass
+            # Live-caught 2026-09-09 by the same review: a STALE reader
+            # (this one) can still be inside the shielded await above when
+            # _ensure_session's respawn branch reassigns self._reader_task
+            # to a fresh reader for a NEW process. Pushing _EOF after that
+            # point would end the NEW generation's own events() consumer
+            # with a leftover from a generation that's already gone --
+            # only push it if nothing has superseded this exact task in
+            # the meantime, same identity check _await_prompt already uses
+            # for the same reason.
+            if self._reader_task is task:
+                self._events.put_nowait(_EOF)
 
     async def _process_notification(self, update: dict[str, Any]) -> None:
         """Convert one session/update's `update` object into a BackendEvent.

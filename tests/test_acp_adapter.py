@@ -397,7 +397,7 @@ async def test_acp_adapter_send_text_is_nonblocking(monkeypatch):
     assert adapter.is_busy() is True
 
     release.set()
-    await adapter._prompt_task
+    _ = await adapter._prompt_task  # awaited for synchronization only
 
     assert adapter.is_busy() is False
     event = adapter._events.get_nowait()
@@ -421,7 +421,7 @@ async def test_acp_adapter_send_text_error_clears_busy_and_emits_error(monkeypat
     monkeypatch.setattr(adapter, "_request", fake_request)
 
     await adapter.send_text("hello")
-    await adapter._prompt_task
+    _ = await adapter._prompt_task  # awaited for synchronization only
 
     assert adapter.is_busy() is False
     event = adapter._events.get_nowait()
@@ -453,10 +453,9 @@ async def test_acp_adapter_stale_prompt_task_does_not_clear_busy(monkeypatch):
     # Simulate a new send_text() superseding the stale task before it resolves.
     adapter._prompt_task = asyncio.create_task(asyncio.sleep(3600))
 
-    # Awaited for synchronization only (its return value, always None, isn't
-    # the point) -- drives the stale task through its own race-guard check
-    # in _await_prompt before the assertions below verify that check held.
-    await stale_task
+    # Drives the stale task through its own race-guard check in
+    # _await_prompt before the assertions below verify that check held.
+    _ = await stale_task  # awaited for synchronization only; see this module's own house style
 
     assert adapter.is_busy() is True  # untouched by the stale task
     assert adapter._events.empty()
@@ -492,7 +491,7 @@ async def test_process_death_mid_turn_fails_fast_and_clears_busy() -> None:
     adapter = _real_adapter()
     try:
         await adapter.send_text("please die now")
-        await asyncio.wait_for(adapter._prompt_task, timeout=5.0)
+        _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
         assert adapter.is_busy() is False
         event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
         assert event.type == BackendEventType.ERROR
@@ -529,7 +528,7 @@ async def test_send_hard_stop_cancels_a_hanging_turn() -> None:
         await asyncio.sleep(0.2)
         await adapter.send_hard_stop()
         assert adapter.is_busy() is False
-        await asyncio.wait_for(adapter._prompt_task, timeout=5.0)
+        _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
         event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
         assert event.type == BackendEventType.DONE
     finally:
@@ -600,7 +599,7 @@ async def test_request_level_failure_yields_error_event_through_real_pipe() -> N
     adapter = _real_adapter()
     try:
         await adapter.send_text("please fail this turn")
-        await asyncio.wait_for(adapter._prompt_task, timeout=5.0)
+        _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
         assert adapter.is_busy() is False
         event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
         assert event.type == BackendEventType.ERROR
@@ -677,13 +676,20 @@ async def test_full_handshake_with_model_and_plan_mode_completes_a_turn() -> Non
     session/set_mode) against a real process -- every _ensure_session
     test above monkeypatches _request entirely, so none of them can
     catch set_config_option/set_mode's real {} response being mishandled
-    or an initialize-before-session/new ordering regression.
+    or an initialize-before-session/new ordering regression. Asserts the
+    ACTUAL method sequence the fake received (via its own "report
+    methods" echo), not just that a turn completed -- dropping
+    set_config_option or set_mode, or reordering initialize/session/new,
+    would still pass a version of this test that only checked TEXT+DONE.
     """
     adapter = _real_adapter(permission_mode="plan", model="some/model")
     try:
-        await adapter.send_text("hello there")
+        await adapter.send_text("please report methods received so far")
         events = await _collect(adapter, 2)
         assert events[0].type == BackendEventType.TEXT
+        assert events[0].content == (
+            "initialize,session/new,session/set_config_option,session/set_mode,session/prompt"
+        )
         assert events[1].type == BackendEventType.DONE
         assert adapter.is_busy() is False
     finally:
@@ -747,7 +753,7 @@ async def test_request_removes_pending_entry_even_when_cancelled(monkeypatch) ->
     assert len(adapter._pending) == 1
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        _ = await task  # awaited for synchronization only; see this module's own house style
     assert adapter._pending == {}
 
 
