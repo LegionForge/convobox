@@ -55,6 +55,7 @@ from convobox.config import (
     BackendProfileConfig,
     TTSConfig,
     TTSProfileConfig,
+    detect_acp_approve_unsupported,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
     detect_working_dir_not_git,
@@ -1232,6 +1233,16 @@ def validate_config(config: AppConfig) -> ValidationReport:
             "'plan' for a safe read-only default, or 'permissive' if you "
             "specifically want codex to act without asking."
         )
+    # acp specifically: no per-tool voice-gated approval channel exists at
+    # all for this backend (unlike codex's case above, which merely has no
+    # currently-WORKING codex-cli mapping) -- run_convobox.py's own
+    # startup guard SystemExits on this combination too. Shared with
+    # doctor.py's static checks and run_convobox.py's own guard via one
+    # detect_*() function (2026-09-09) rather than three independently
+    # drifting inline checks -- see that function's own docstring.
+    acp_approve = detect_acp_approve_unsupported(config.backend)
+    if acp_approve is not None:
+        report.errors.append(acp_approve)
     # claude-code specifically: this combination doesn't fail safe the way
     # the general warning below describes for other backends (codex denies
     # cleanly with no pending state) -- the hook still gets wired at

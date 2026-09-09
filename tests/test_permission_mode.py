@@ -7,6 +7,7 @@ from convobox.adapters.codex import _permission_config_args
 from convobox.config import (
     BackendConfig,
     InteractionConfig,
+    detect_acp_approve_unsupported,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
 )
@@ -100,6 +101,32 @@ def test_approval_gap_not_flagged_for_codex() -> None:
     backend = BackendConfig(name="codex", permission_mode="approve")
     interaction = InteractionConfig(approval_phrase=None)
     assert detect_claude_code_approval_gap(backend, interaction) is None
+
+
+# --- detect_acp_approve_unsupported: shared by run_convobox.py's startup
+# guard, doctor.py's static checks, and settings_tui.py's validate_config
+# (2026-09-09) -- previously an inline check in run_convobox.py ONLY, so
+# a user could save backend.name=acp + permission_mode=approve through
+# either UI, or get a clean convobox-doctor report for it, and only
+# discover the problem at actual startup.
+
+def test_acp_approve_unsupported_flagged() -> None:
+    backend = BackendConfig(name="acp", permission_mode="approve")
+    assert detect_acp_approve_unsupported(backend) is not None
+
+
+@pytest.mark.parametrize("mode", ["plan", "permissive"])
+def test_acp_approve_unsupported_clear_for_other_modes(mode: str) -> None:
+    backend = BackendConfig(name="acp", permission_mode=mode)
+    assert detect_acp_approve_unsupported(backend) is None
+
+
+def test_acp_approve_unsupported_not_flagged_for_other_backends() -> None:
+    # approve is fine for claude-code (has a real approval hook) and
+    # merely broken-not-missing for codex (its own separate check) --
+    # this function is acp-specific.
+    backend = BackendConfig(name="claude-code", permission_mode="approve")
+    assert detect_acp_approve_unsupported(backend) is None
 
 
 # --- _check_backend_permission_mode: the real CLI startup guard, same

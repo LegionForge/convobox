@@ -78,6 +78,7 @@ from convobox.audio.ack_tones import generate_ack_tone
 from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
+    detect_acp_approve_unsupported,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
     detect_working_dir_not_git,
@@ -1705,23 +1706,13 @@ def _check_backend_permission_mode(backend: object, interaction: object) -> None
         # approval_policy value both starts successfully AND actually
         # escalates a write to approval on the current codex-cli version.
         raise SystemExit(_CODEX_APPROVE_MODE_ERROR)
-    if name == "acp" and mode == "approve":
-        # Same fail-closed stance as the codex block above: ACP has no
-        # live-answerable per-tool approval channel by default for either
-        # backend it can speak (opencode or kilo) -- session/request_
-        # permission simply never fires (live-verified 2026-09-03/2026-09-07,
-        # docs/ROADMAP.md), and the adapter's own handler for it just
-        # auto-declines if it ever somehow arrives. Silently mapping
-        # "approve" to "plan" or to full trust would both violate what the
-        # user actually configured without telling them, so this fails
-        # loudly instead. See adapters/acp.py's own module docstring.
-        raise SystemExit(
-            "backend.permission_mode=\"approve\" is not supported for "
-            "backend.name=\"acp\" -- ACP (opencode/kilo) has no per-tool "
-            "voice-gated approval channel; session/request_permission does "
-            "not fire under either backend's default configuration. Use "
-            "\"plan\" (blocks writes) or \"permissive\" (full trust) instead."
-        )
+    acp_approve_error = detect_acp_approve_unsupported(backend)  # type: ignore[arg-type]
+    if acp_approve_error is not None:
+        # Pulled into a shared config.py function 2026-09-09 so
+        # doctor.py/settings_tui.py can catch this same misconfiguration
+        # too, not just this startup guard -- see that function's own
+        # docstring for the gap this closes.
+        raise SystemExit(acp_approve_error)
     log.info("backend permission_mode: %s (%s)", mode, name)
 
 

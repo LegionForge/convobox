@@ -774,6 +774,51 @@ def detect_claude_code_approval_gap(
     )
 
 
+def detect_acp_approve_unsupported(backend: BackendConfig) -> str | None:
+    """Return an error message if backend.name is "acp" and
+    permission_mode is "approve", else None.
+
+    Found while auditing doctor/settings-TUI coverage before the 0.5.0
+    release that ships ACP as a first-class backend choice, 2026-09-09:
+    this exact combination was already rejected at `run_convobox.py`'s
+    own startup guard (`_check_backend_permission_mode`, added alongside
+    the codex-approve guard in PR #396) as an inline check, but that
+    guard is the ONLY place it was ever caught -- neither
+    `scripts/doctor.py`'s static config checks nor
+    `scripts/settings_tui.py`'s `validate_config()` called anything
+    equivalent, so a user could save this exact misconfiguration through
+    either UI, or have `convobox-doctor` report a clean bill of health
+    for it, and only discover the problem when actually launching
+    ConvoBox and hitting the SystemExit. Pulled out into a shared
+    pure function, same "one detect_*() function, three call sites"
+    shape `detect_permission_conflict`/`detect_claude_code_approval_gap`
+    already use, so doctor/settings-TUI/run_convobox.py can't drift out
+    of sync on this again.
+
+    ACP (opencode/kilo) has no live-answerable per-tool approval channel
+    by default for either backend it can speak -- session/request_permission
+    simply never fires under either backend's own default configuration
+    (live-verified 2026-09-03/2026-09-07, docs/ROADMAP.md), and the
+    adapter's own handler for it just auto-declines if it ever somehow
+    arrives. Silently mapping "approve" to "plan" or to full trust would
+    both violate what the user actually configured without telling them,
+    so this fails loudly instead -- same fail-closed stance as codex's
+    own currently-broken "approve" mode. See adapters/acp.py's own module
+    docstring.
+    """
+    if backend.name != "acp":
+        return None
+    if backend.permission_mode != "approve":
+        return None
+    return (
+        "backend.permission_mode=\"approve\" is not supported for "
+        "backend.name=\"acp\" -- ACP (opencode/kilo) has no per-tool "
+        "voice-gated approval channel; session/request_permission does "
+        "not fire under either backend's default configuration. Use "
+        "\"plan\" (blocks writes) or \"permissive\" (full trust) instead."
+    )
+
+
 def _is_git_repo(path: Path) -> bool | None:
     """True if `path` is inside a real git working tree, False if the
     directory exists but isn't one, None if this genuinely couldn't be
