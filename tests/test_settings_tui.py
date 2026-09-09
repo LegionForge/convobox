@@ -1330,6 +1330,22 @@ def test_validate_config_no_error_for_codex_plan_mode() -> None:
     assert not any("not currently usable" in e for e in report.errors)
 
 
+def test_validate_config_errors_on_acp_approve_mode() -> None:
+    # Previously only caught at run_convobox.py's own startup guard --
+    # a user could save this exact misconfiguration through this UI
+    # before 2026-09-09's shared-function refactor.
+    config = _make_config(**{"backend.name": "acp", "backend.permission_mode": "approve"})
+    report = validate_config(config)
+    assert any("not supported for" in e for e in report.errors)
+
+
+@pytest.mark.parametrize("mode", ["plan", "permissive"])
+def test_validate_config_no_error_for_acp_plan_and_permissive(mode: str) -> None:
+    config = _make_config(**{"backend.name": "acp", "backend.permission_mode": mode})
+    report = validate_config(config)
+    assert not any("not supported for" in e for e in report.errors)
+
+
 def test_validate_config_no_error_for_claude_code_approve_mode() -> None:
     # The restriction is codex-specific -- claude-code's own "approve"
     # support is real and unaffected (guarded separately by the approval-

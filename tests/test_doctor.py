@@ -1,9 +1,10 @@
 """Tests for scripts/doctor.py's own orchestration logic.
 
 Deliberately does NOT re-test detect_permission_conflict/detect_claude_code_
-approval_gap/detect_working_dir_not_git or probe_audio/probe_stt/probe_tts/
-probe_backend themselves -- each already has its own exhaustive test
-coverage (test_config.py, test_permission_mode.py, test_settings_tui.py).
+approval_gap/detect_acp_approve_unsupported/detect_working_dir_not_git or
+probe_audio/probe_stt/probe_tts/probe_backend themselves -- each already
+has its own exhaustive test coverage (test_config.py, test_permission_mode.py,
+test_settings_tui.py).
 These tests only cover doctor.py's own wiring: does it call the right
 function, wrap a non-None/raised result into the right Finding, and get
 main()'s exit code right.
@@ -53,6 +54,18 @@ def test_static_config_findings_reports_claude_code_approval_gap() -> None:
     assert findings[0].check == "backend.permission_mode"
     assert findings[0].level == "fail"
     assert "approval_phrase is unset" in findings[0].message
+
+
+def test_static_config_findings_reports_acp_approve_unsupported() -> None:
+    # Previously an inline check in run_convobox.py's own startup guard
+    # ONLY -- convobox-doctor gave this exact misconfiguration a clean
+    # bill of health before 2026-09-09's shared-function refactor.
+    config = AppConfig(backend=BackendConfig(name="acp", permission_mode="approve"))
+    findings = doctor.static_config_findings(config, [])
+    assert len(findings) == 1
+    assert findings[0].check == "backend.permission_mode"
+    assert findings[0].level == "fail"
+    assert "not supported for" in findings[0].message
 
 
 def test_static_config_findings_reports_working_dir_not_git(tmp_path: Path) -> None:

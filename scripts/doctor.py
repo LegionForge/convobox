@@ -51,6 +51,7 @@ from settings_tui import (  # type: ignore[import-not-found]
 
 from convobox.config import (
     AppConfig,
+    detect_acp_approve_unsupported,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
     detect_working_dir_not_git,
@@ -78,6 +79,10 @@ def static_config_findings(config: AppConfig, problems: list[str]) -> list[Findi
     gap = detect_claude_code_approval_gap(config.backend, config.interaction)
     if gap:
         findings.append(Finding("backend.permission_mode", "fail", gap))
+
+    acp_approve = detect_acp_approve_unsupported(config.backend)
+    if acp_approve:
+        findings.append(Finding("backend.permission_mode", "fail", acp_approve))
 
     not_git = detect_working_dir_not_git(config.backend)
     if not_git:
