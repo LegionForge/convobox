@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+from convobox.adapters.acp import ACPAdapter
 from convobox.adapters.base import BackendAdapter
 from convobox.adapters.claude_code import ClaudeCodeAdapter
 from convobox.adapters.codex import CodexAdapter
@@ -50,8 +51,9 @@ from ._opencode_loopback import OpenCodeServer, _frame
 
 _FAKE_CLI = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))]
 _FAKE_CODEX = [sys.executable, str(Path(__file__).with_name("fake_codex_appserver.py"))]
+_FAKE_ACP = [sys.executable, str(Path(__file__).with_name("fake_acp_server.py"))]
 
-_BACKENDS = ["claude-code", "codex", "opencode"]
+_BACKENDS = ["claude-code", "codex", "opencode", "acp"]
 
 _ONE_STEP_OPENCODE_FRAMES: list[dict[str, object]] = [
     _frame(1, "session.next.step.started", {}),
@@ -87,6 +89,12 @@ async def _adapter(backend: str) -> AsyncIterator[BackendAdapter]:
         finally:
             await adapter.aclose()
             await server.stop()
+    elif backend == "acp":
+        adapter = ACPAdapter(_FAKE_ACP, backend="opencode")
+        try:
+            yield adapter
+        finally:
+            await adapter.aclose()
     else:
         raise ValueError(backend)
 
@@ -95,11 +103,14 @@ async def _send_one_turn(adapter: BackendAdapter) -> None:
     """Puts the adapter into the "has an active/recently-active turn"
     state the kill_phrase path actually encounters in Orchestrator,
     unlike a bare freshly-constructed adapter. send_text() itself only
-    dispatches the request and flips busy state for all three real
+    dispatches the request and flips busy state for all four real
     adapters (spawns+writes for claude-code, POSTs turn/start for codex,
-    POSTs the prompt for opencode) -- none of them need events() actively
-    consumed for send_text() to return, so no consumer task is needed
-    just to reach this state.
+    POSTs the prompt for opencode, writes session/prompt for acp without
+    awaiting its resolution -- live-verified 2026-09-08, see acp.py's own
+    send_text() docstring for why that background-task dispatch is
+    required at all) -- none of them need events() actively consumed for
+    send_text() to return, so no consumer task is needed just to reach
+    this state.
     """
     await adapter.send_text("hello")
 
@@ -174,6 +185,37 @@ async def test_opencode_force_kill_is_local_disconnect_only() -> None:
         )
         await adapter.force_kill()
         assert adapter._client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_acp_force_kill_has_no_override_but_still_kills_the_real_process() -> None:
+    """Unlike claude-code/codex, ACPAdapter has no separate teardown step
+    (approval-server shutdown, settings-file cleanup, etc.) a dedicated
+    force_kill() would need to skip -- and unlike opencode, it DOES own a
+    real subprocess. Its aclose() cancels _prompt_task/_reader_task
+    first: this is safe even against a genuinely wedged subprocess,
+    because Task.cancel() unwinds the COROUTINE at its current await
+    point regardless of whether the subprocess itself ever responds --
+    it does not wait on the process. The actual process-kill escalation
+    that follows (terminate(), then kill() after a 5s wait) is identical
+    to what codex.py's own dedicated force_kill() does. So delegating to
+    aclose() (the same choice opencode.py makes, for a different reason
+    -- see that test above) is a deliberate fit here, not a gap left
+    over from copying opencode's shape uncritically. Confirmed by
+    actually checking the real subprocess dies.
+    """
+    async with _adapter("acp") as adapter:
+        assert isinstance(adapter, ACPAdapter)
+        assert type(adapter).force_kill is BackendAdapter.force_kill, (
+            "ACPAdapter must not define its own force_kill() override -- "
+            "if this ever changes, this test (and its own comment above) "
+            "needs a human to re-decide what to assert, not just be deleted."
+        )
+        await _send_one_turn(adapter)
+        proc = adapter._proc
+        assert proc is not None and proc.returncode is None
+        await adapter.force_kill()
+        assert proc.returncode is not None
 
 
 @pytest.mark.asyncio

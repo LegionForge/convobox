@@ -110,6 +110,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -321,13 +322,30 @@ class ACPAdapter(BackendAdapter):
                 # Expected when cancelling the read loop task
                 pass
 
-        if self._proc is not None:
-            self._proc.terminate()
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except TimeoutError:
-                self._proc.kill()
-                await self._proc.wait()
+        # Cleared here (not left in self._proc) so a second aclose()/
+        # force_kill() call -- force_kill() has no override of its own and
+        # delegates straight here, see BackendAdapter.force_kill()'s
+        # contract -- sees proc is None and returns immediately instead of
+        # calling .terminate() on an already-dead process. Live-caught
+        # 2026-09-09: on Windows, .terminate() on a transport whose real
+        # OS process already exited raises ProcessLookupError from
+        # asyncio's own _check_proc(), which the old unguarded `if
+        # self._proc is not None: self._proc.terminate()` had no defense
+        # against -- violating aclose()'s own documented "must be
+        # idempotent and must not raise" contract. Mirrors codex.py's own
+        # _terminate_and_kill_process() for the same reason.
+        proc, self._proc = self._proc, None
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
 
     async def _ensure_session(self) -> str:
         """Ensure the process is spawned and a session is initialized."""
