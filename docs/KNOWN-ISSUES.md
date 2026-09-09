@@ -46,6 +46,7 @@ before trusting a voice session with write access; see also
 | [Web UI: a short CancelledError traceback can appear on quit/Ctrl+C](#web-ui-a-short-cancellederror-traceback-can-appear-on-quitctrlc) | Web UI | All | Mostly mitigated | Low |
 | ["Open in editor" occasionally opens a different file than the one clicked](#open-in-editor-occasionally-opens-a-different-file-than-the-one-clicked----fixed) | Web UI | All | Fixed | — |
 | **Cosmetic and diagnostic** | | | | |
+| [Windows: a subprocess-backed adapter can print a harmless "Event loop is closed" / "unclosed transport" traceback after a short-lived asyncio.run() exits](#windows-a-subprocess-backed-adapter-can-print-a-harmless-event-loop-is-closed--unclosed-transport-traceback-after-a-short-lived-asynciorun-exits) | Adapters (codex, claude-code, acp) | Windows | Diagnosed | Low |
 | [A hard-stopped in-flight turn can show as a generic "error_during_execution" turn](#a-hard-stopped-in-flight-turn-can-show-as-a-generic-error_during_execution-turn----cosmetic-mislabel) | TUI / labels | All | Diagnosed | Low |
 | [Settings TUI ignores real terminal size below 80x24, and never repaints on resize alone](#settings-tui-ignores-real-terminal-size-below-80x24-and-never-repaints-on-resize-alone) | Settings TUI | All | Fixed, live-confirmed | — |
 | [Settings TUI arrow keys silently did nothing](#settings-tui-arrow-keys-silently-did-nothing----root-caused-and-fixed-confirmed-live-via-key-by-key-debug-instrumentation) | Settings TUI | All | Fixed, live-confirmed | — |
@@ -2775,6 +2776,48 @@ the stale response is now discarded and the href stays correct.
 
 Real but low-consequence: wrong labels, noisy output, nothing
 functionally broken.
+
+### Windows: a subprocess-backed adapter can print a harmless "Event loop is closed" / "unclosed transport" traceback after a short-lived `asyncio.run()` exits
+
+**Status:** diagnosed, documented at the code site (`BackendAdapter.aclose()`'s
+own docstring in `src/convobox/adapters/base.py`), not tracked here until
+now. A fix was attempted for `ACPAdapter` specifically (an explicit
+`transport.close()`), couldn't be verified to actually help, and was
+reverted rather than ship an unproven change to shutdown code all three
+subprocess-backed adapters (`codex.py`, `claude_code.py`, `acp.py`) share
+the same pattern for. Cosmetic only -- the process still exits and the
+backend is still correctly terminated; nothing hangs or misbehaves.
+
+**Symptom.** `convobox-doctor --backend` on Windows can print an
+`Exception ignored in: <function BaseSubprocessTransport.__del__>` /
+"Event loop is closed" traceback to stderr right after a successful
+check, immediately alarming for anyone reading doctor's output as a
+pass/fail signal even though the check itself did pass. First noticed via
+`convobox-doctor`'s own `--backend` probe (a short-lived `asyncio.run()`
+per check); confirmed the same underlying mechanism reproduces for the
+ACP adapter specifically during live Kilo Code probing, so it isn't
+limited to whichever backend happened to surface it first.
+
+**Root cause.** `aclose()`'s own docstring already states the rule: an
+adapter that owns a subprocess must close its transport WHILE THE EVENT
+LOOP IS STILL RUNNING, or Python finalizes the pipe transport's `__del__`
+after the loop that owned it has already closed. `codex.py`'s and
+`claude_code.py`'s own `_terminate_and_kill_process()` do this correctly
+inside a long-lived loop (the TUI, `run_convobox.py`'s main loop) and
+never hit it there in practice -- the symptom is specific to a
+short-lived `asyncio.run()` (doctor's own per-check pattern) where the
+loop closes immediately after the check's coroutine returns, racing the
+transport's own deferred cleanup.
+
+**Not yet fixed.** A real fix belongs in the shared subprocess-adapter
+shutdown pattern (`aclose()`/`_terminate_and_kill_process()`), not
+doctor-specific -- doctor is just the first thing to run adapters inside
+a short-lived loop repeatedly enough to make it visible. Worth a real
+attempt with live before/after verification (not just "add a
+`transport.close()` call and hope"), same bar this project already holds
+its safety-relevant fixes to.
+
+---
 
 ### A hard-stopped in-flight turn can show as a generic "error_during_execution" turn -- cosmetic mislabel
 
