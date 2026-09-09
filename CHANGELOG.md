@@ -134,6 +134,14 @@ minor versions carry feature and behavior changes.
   real short commands like `sleep 90`).
 - **The working-dir-not-git warning** no longer double-escapes Windows
   paths in its own message text.
+- **`backend.name: acp` + `permission_mode: approve` (unsupported --
+  ACP has no approve-mode equivalent) was only caught by
+  `run_convobox.py`'s own startup guard**, so both the Settings TUI and
+  `convobox-doctor` could report this exact misconfiguration as clean.
+  Pulled into a shared `detect_acp_approve_unsupported()`
+  (`src/convobox/config.py`, matching the existing
+  `detect_permission_conflict`/`detect_claude_code_approval_gap`
+  pattern) and wired into all three consumers.
 
 ### Also this cycle
 Extensive live UAT and R&D, documented in `docs/field-notes/` and
@@ -150,12 +158,19 @@ wheel before PyPI publish, a real-browser regression suite for the web
 UI).
 
 ### Known issues
-Carried forward from 0.4.0, still open: **Windows: `kill_phrase` does
-not reach a process the agent deliberately detached** (see
-`docs/KNOWN-ISSUES.md`'s force-kill entry). The new Job Object
-visibility piece above makes such a process observable; it does not yet
-close this gap for Codex, and `ClaudeCodeAdapter`'s equivalent wiring is
-still a follow-up.
+- Carried forward from 0.4.0, still open: **Windows: `kill_phrase` does
+  not reach a process the agent deliberately detached** (see
+  `docs/KNOWN-ISSUES.md`'s force-kill entry). The new Job Object
+  visibility piece above makes such a process observable; it does not
+  yet close this gap for Codex, and `ClaudeCodeAdapter`'s equivalent
+  wiring is still a follow-up.
+- **New, cosmetic only: on Windows, a subprocess-backed adapter
+  (`codex`, `claude-code`, or the new `acp`) can print a harmless
+  "Event loop is closed" / "unclosed transport" traceback** after a
+  short-lived `asyncio.run()` exits -- most visible via
+  `convobox-doctor --backend`'s own per-check pattern. The check itself
+  still passes; nothing hangs or misbehaves. See
+  `docs/KNOWN-ISSUES.md`'s Cosmetic section.
 
 ## [0.4.0] — 2026-08-22
 
