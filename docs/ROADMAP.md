@@ -396,7 +396,7 @@ differs per person, so the bar is a setting, not a constant. Current
 bar is honest: "a feeling." Instrument first (AEC telemetry was the
 template), then set defaults from data.
 
-### Agent Client Protocol (ACP) support (decided: pursue; scoping in progress)
+### Agent Client Protocol (ACP) support (shipped: both OpenCode and Kilo live-verified end to end, 2026-09-08)
 JP, 2026-07-29, after comparing ConvoBox to
 [katipally/openlive](https://github.com/katipally/openlive) (see
 [docs/field-notes/2026-07-29-openlive-comparison-and-acp-direction.md](field-notes/2026-07-29-openlive-comparison-and-acp-direction.md)):
@@ -725,6 +725,60 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
       built for `session/request_permission` itself -- auto-decline
       stays the deliberate, fail-closed default, since this posture
       isn't reachable from ConvoBox's own config surface at all.
+  - **Kilo now confirmed working end to end through the REAL
+    `create_backend_adapter()` -> `ACPAdapter` path (2026-09-08)** --
+    every fix and finding above re-run against a real spawned `kilo acp`
+    process (`kilo` 7.5.6, `kilo auth list` shows Inception + OpenRouter
+    credentials; not authenticated with Kilo Gateway specifically),
+    closing the residual "confirmed for OpenCode, not yet for Kilo
+    through the real adapter" gap this file has carried since the
+    2026-09-03/04 raw-probe passes:
+    - **`send_text()` is non-blocking for Kilo too** (0.00s once a
+      session already exists; the first call's own ~7s is one-time
+      process-spawn + handshake + `session/set_config_option` cost, not
+      per-turn overhead).
+    - **A fresh, unconfigured Kilo session still defaults to
+      `kilo/google/gemini-3-pro-image`** (a Kilo-Gateway-hosted image
+      model, unauthenticated on this account) -- confirms the
+      model-selection bug this pass fixed is a live, current issue for
+      Kilo, not a stale finding from an earlier Kilo install. Pinning
+      `backend.model: inception/mercury-2` (the same model already
+      verified for OpenCode -- `kilo auth list`/`kilo models inception`
+      confirm the credential and the model both exist for Kilo too)
+      resolves it the same way.
+    - **`permission_mode: permissive` still lets a real write through
+      end to end** (file created on disk), matching OpenCode.
+    - **`permission_mode: plan` blocks the same write, but via a
+      DIFFERENT mechanism than OpenCode's.** OpenCode's own model
+      self-declines (a `TEXT` response explaining it's in read-only
+      mode, zero `tool_call` ever attempted). Kilo instead lets the
+      model attempt the tool call, then REJECTS it at an explicit
+      rule-enforcement layer -- the resulting `ERROR` event's own text
+      is a literal dump of Kilo's deny-rule list (`{"permission": "edit",
+      "pattern": "*", "action": "deny"}`, with a couple of narrow
+      `.kilo/plans/*.md`-style allow exceptions). Same practical outcome
+      (no file created) as OpenCode, but this actually PARTIALLY ANSWERS
+      an open question this file has carried since the first Kilo pass
+      ("whether this is a hard-enforced sandbox or just prompt-level
+      model compliance is unconfirmed") -- for Kilo specifically, this
+      looks like a real enforced permission engine, not just the model
+      choosing to comply with a system instruction the way OpenCode's
+      plan mode does. Still not adversarially probed (no attempt to find
+      a prompt-injection bypass of either mechanism).
+    - **A real tool failure (`read` on a nonexistent path) produces the
+      identical `tool_call_update` `status: "failed"` shape already
+      confirmed for OpenCode** (`content` text-block array with the
+      human-readable "File not found: ..." message) -- the failed-branch
+      text-extraction fix generalizes to Kilo with no Kilo-specific code
+      needed.
+    - **Net**: Kilo is now exercised through every code path this file's
+      own "please add all 5" pass fixed, with no Kilo-specific gap left
+      open in `acp.py` itself. `settings_tui.py`'s own default
+      (`["opencode", "acp"]`) stays OpenCode, deliberately -- Kilo works,
+      but its separate install/auth requirement and its own distinct
+      permission-rule engine (just discovered above) are both real
+      behavioral surface a naive default shouldn't need a user to
+      already understand.
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
