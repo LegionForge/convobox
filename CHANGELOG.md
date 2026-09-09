@@ -4,6 +4,174 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
+## [0.5.0] — TBD (drafted 2026-09-09, pending live UAT with Kilo Code before tagging)
+
+### Added
+- **A new backend: ACP (Agent Client Protocol) over JSON-RPC-over-stdio,
+  driving either OpenCode (`opencode acp`) or Kilo Code (`kilo acp`) as a
+  subprocess.** `backend.name: acp` is now selectable from the Settings
+  TUI and web UI, not just a hand-edited config. Built and hardened over
+  several passes this cycle, not shipped as a first draft: the initial
+  skeleton had five wrong wire-level details (wrong handshake/session-
+  creation method names, a bug that silently dropped every real
+  `session/update` notification, `session/cancel` sent as the wrong
+  JSON-RPC shape) -- all found and fixed by actually spawning a real
+  `opencode acp` process rather than trusting the schema. A second pass
+  closed the adapter's three remaining open unknowns (Kilo confirmed
+  working end to end, `session/request_permission`'s real response shape
+  finally observed by triggering a live permission prompt, a real tool
+  failure triggered and correctly surfaced) and, in the process, found
+  and fixed four separate `asyncio` safety bugs via a shared cross-adapter
+  conformance suite plus two independent LLM code reviews: `send_text()`
+  blocking ConvoBox's entire mic loop for the full turn duration (0.00s
+  after the fix, vs. 30+ seconds before), `permission_mode` being a
+  complete no-op for every ACP session, an `aclose()` idempotency crash
+  on a second force-kill, and a dead backend process leaving `is_busy()`
+  stuck permanently. Full history in `docs/ROADMAP.md`'s ACP section and
+  its linked field notes.
+- **`convobox-doctor`**: a new command that diagnoses config/environment
+  problems. Two tiers: static checks (config loads and validates, the
+  three known-dangerous config combinations `config.py` already
+  detects, and whether the extras this specific config actually needs
+  -- `aec`, `web`, `piper` -- are installed) and opt-in live checks
+  (`--audio`/`--stt`/`--tts`/`--backend`) that reuse `settings_tui.py`'s
+  own probe functions rather than reimplementing them.
+- **`convobox-audio-devices`** console-script entry point -- the guided
+  `--setup` audio wizard QUICKSTART.md has always recommended was
+  previously unreachable for a `pip`/`pipx` install (no command existed
+  for it at all, only `python scripts/audio_devices.py` from a source
+  checkout).
+- **`convobox --version`.**
+- **A consolidated, OS-idiomatic user-data directory** (via
+  `platformdirs`): `convobox.yaml`, downloaded Kokoro/Piper voices,
+  conversation history, settings backups, and the `--tui` log file all
+  move from paths relative to whatever directory `convobox` happened to
+  be launched from to one real location per OS (macOS: `~/Library/
+  Application Support/ConvoBox`; Linux: XDG data home; Windows:
+  `%LOCALAPPDATA%\ConvoBox`) -- the thing that made upgrade/uninstall
+  messy before. A one-time, non-destructive migration moves anything
+  found at the old locations on first run after upgrading.
+- **A warning when `backend.working_dir` isn't a git repo**
+  (`backend.warn_if_working_dir_not_git`, on by default, toggleable in
+  both UIs) -- a coding agent editing an unversioned directory has no
+  safety net if it makes a mistake.
+- **`safeword.kill_phrase` exposed in the Settings TUI and web UI** --
+  the config field existed but had no field in either UI before.
+- **`[v]` in the Settings TUI**: browse, audition, download, and choose
+  from Piper's full voice catalog without leaving the TUI.
+- **Web UI**: a settings toggle for `web.history_tracking_enabled`
+  (previously hand-edit-only); auto-opens the default browser on
+  `--web` (new `--no-browser` flag to opt out); uses the real
+  LegionForge favicon.
+- **Windows background-job visibility**: a ctypes-only Job Object
+  wrapper (deliberately never sets `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+  so it adds visibility into detached descendant processes without also
+  taking on a kill guarantee broader than `kill_phrase` itself provides)
+  wired into the Codex adapter, plus a new `background_jobs()`/
+  `stop_background_job()` adapter seam (`ClaudeCodeAdapter` fully wired,
+  using its own protocol-level background-task list and kill RPC).
+
+### Changed
+- **`backend.permission_mode: approve` on Codex now fails loudly at
+  startup instead of silently providing zero protection**, on the
+  upstream `codex-cli` versions where that mode is currently broken
+  (`docs/KNOWN-ISSUES.md`).
+- README leads with the `pip`/`pipx install` path; QUICKSTART.md gained
+  the same pip/pipx path (previously git-clone-only) and an "Updating"
+  section (previously missing entirely, on both docs); Uninstallation
+  rewritten for the new user-data directory above; a stale claim that
+  Piper is the default TTS engine corrected (Kokoro has been default
+  since 0.4.0's predecessor cycle).
+
+### Fixed
+- **Security (independently cross-reviewed, each finding reproduced
+  against this repo's real code before fixing):**
+  - `/api/settings/test` could reach `asyncio.create_subprocess_exec()`
+    with an attacker-controlled `backend.command` on a single same-origin
+    POST, with no save required at all -- the same escalation guard
+    `save_settings()` already applied was missing here.
+  - The web UI had no real authentication (a constant, public CSRF
+    string) and trusted any loopback origin at any port. Added a random
+    per-session bearer token, checked on every `/api/*` route; CORS
+    narrowed to the actual bound port. Both are off unless `run_convobox.py`'s
+    real startup path turns them on.
+  - The artifact pane's "open in new tab" link had full same-origin
+    standing for an attacker-influenced HTML/SVG artifact's own script
+    (the in-pane render path was already sandboxed; the new-tab link
+    wasn't). Fixed with a sandboxed CSP on the artifact response, a
+    second narrowly-scoped artifact-read token (can't authorize any
+    other route), egress-restricting CSP (closes outbound
+    `fetch()`/`<img>` exfil channels), `Referrer-Policy: no-referrer`,
+    and no longer logging the token-bearing UI URL to a file.
+  - File uploads over the 50MB limit were rejected only after Starlette
+    had already spooled the entire body to disk. Now rejected by
+    `Content-Length` before the body is touched at all (chunked
+    transfer-encoding with no `Content-Length` still falls back to the
+    old, later check -- documented, accepted as proportionate for a
+    loopback-only, already-authenticated route).
+  - `mcp`'s dependency floor tightened from an unverified `>=1.0`
+    (`mcp==1.0.0` doesn't even have the module `mcp_server.py` imports)
+    to `>=2.0,<2.1` -- the exact range this project has actually tested;
+    `2.1.x` is confirmed to break 3 of `test_web_mcp_server.py`'s own
+    tests via a deliberate upstream error-message-wrapping change.
+- **Startup banner said "version dev" on every real install**, not just
+  a source checkout -- looked up the wrong distribution name
+  (`convobox` instead of the actually-registered `legionforge-convobox`).
+- **macOS: arrow keys could quit the Piper voice-picker TUI outright**
+  instead of navigating.
+- **A disconnected Bluetooth audio device crashed startup** instead of
+  falling back.
+- **OpenCode: a model-rejected session could hang forever** --
+  `session.next.step.failed` wasn't recognized, so `is_busy()` never
+  cleared.
+- **`--text` mode + `permission_mode: approve`** now explicitly denies
+  an abandoned pending approval instead of leaving it hanging.
+- **Settings TUI**: terminal resize (`SIGWINCH`) now repaints live
+  instead of leaving stale content on screen; a second arrow-key press
+  during a repaint is no longer silently swallowed.
+- **`force_kill()`'s `pgrep` fallback** no longer misses legitimate short
+  commands (a blanket 15-character minimum-length guard also excluded
+  real short commands like `sleep 90`).
+- **The working-dir-not-git warning** no longer double-escapes Windows
+  paths in its own message text.
+- **`backend.name: acp` + `permission_mode: approve` (unsupported --
+  ACP has no approve-mode equivalent) was only caught by
+  `run_convobox.py`'s own startup guard**, so both the Settings TUI and
+  `convobox-doctor` could report this exact misconfiguration as clean.
+  Pulled into a shared `detect_acp_approve_unsupported()`
+  (`src/convobox/config.py`, matching the existing
+  `detect_permission_conflict`/`detect_claude_code_approval_gap`
+  pattern) and wired into all three consumers.
+
+### Also this cycle
+Extensive live UAT and R&D, documented in `docs/field-notes/` and
+`docs/ROADMAP.md` rather than summarized here: a first full Linux
+platform-validation pass (AEC/barge-in, TUI/Web UI, OpenCode adapter,
+real voice, two further UAT rounds), a committed cross-backend/cross-
+platform regression matrix and a TTS→STT safety-phrase reliability
+battery (both now running in CI), a Windows NS/AGC parameter sweep
+(N=120, inconclusive vs. baseline -- documented honestly rather than
+forcing a conclusion), an evaluated-and-declined NVIDIA Parakeet TDT STT
+candidate, and CI hardening (scripts/ now covered by lint/SAST, a real
+dev+web job so web UI tests actually execute, a smoke test of the built
+wheel before PyPI publish, a real-browser regression suite for the web
+UI).
+
+### Known issues
+- Carried forward from 0.4.0, still open: **Windows: `kill_phrase` does
+  not reach a process the agent deliberately detached** (see
+  `docs/KNOWN-ISSUES.md`'s force-kill entry). The new Job Object
+  visibility piece above makes such a process observable; it does not
+  yet close this gap for Codex, and `ClaudeCodeAdapter`'s equivalent
+  wiring is still a follow-up.
+- **New, cosmetic only: on Windows, a subprocess-backed adapter
+  (`codex`, `claude-code`, or the new `acp`) can print a harmless
+  "Event loop is closed" / "unclosed transport" traceback** after a
+  short-lived `asyncio.run()` exits -- most visible via
+  `convobox-doctor --backend`'s own per-check pattern. The check itself
+  still passes; nothing hangs or misbehaves. See
+  `docs/KNOWN-ISSUES.md`'s Cosmetic section.
+
 ## [0.4.0] — 2026-08-22
 
 First tagged and published release since `0.3.0` -- `0.3.1` was never
