@@ -1,11 +1,39 @@
 """Tests for ACPAdapter transport and request/response routing."""
 
 import asyncio
+import sys
+from pathlib import Path
 
 import pytest
 
-from convobox.adapters.acp import ACPAdapter
+from convobox.adapters.acp import ACPAdapter, ACPBackendDied
 from convobox.adapters.base import BackendEvent, BackendEventType
+
+_FAKE_ACP = [sys.executable, str(Path(__file__).with_name("fake_acp_server.py"))]
+
+
+def _real_adapter(**kwargs: object) -> ACPAdapter:
+    """A real subprocess fake, not a monkeypatched double -- exercises the
+    genuine wire framing (tests/fake_acp_server.py), unlike every other
+    test in this file, which stubs out _request/_ensure_session or feeds
+    _read_loop a hand-built fake stdout. Same discipline as
+    test_codex_adapter.py's own _adapter() helper against
+    fake_codex_appserver.py.
+    """
+    return ACPAdapter(_FAKE_ACP, backend="opencode", **kwargs)  # type: ignore[arg-type]
+
+
+async def _collect(adapter: ACPAdapter, count: int, timeout: float = 10.0) -> list[BackendEvent]:
+    events: list[BackendEvent] = []
+
+    async def take() -> None:
+        async for event in adapter.events():
+            events.append(event)
+            if len(events) >= count:
+                return
+
+    await asyncio.wait_for(take(), timeout=timeout)
+    return events
 
 
 @pytest.mark.asyncio
@@ -233,7 +261,7 @@ async def test_acp_adapter_read_loop_routes_notification_vs_request(monkeypatch)
     fake_proc.stdout = FakeStdout([notification_line, request_line, b""])
     adapter._proc = fake_proc
 
-    await adapter._read_loop()
+    await adapter._read_loop(fake_proc)
 
     event = adapter._events.get_nowait()
     assert event.type == BackendEventType.TEXT
@@ -369,7 +397,7 @@ async def test_acp_adapter_send_text_is_nonblocking(monkeypatch):
     assert adapter.is_busy() is True
 
     release.set()
-    await adapter._prompt_task
+    _ = await adapter._prompt_task  # awaited for synchronization only
 
     assert adapter.is_busy() is False
     event = adapter._events.get_nowait()
@@ -393,7 +421,7 @@ async def test_acp_adapter_send_text_error_clears_busy_and_emits_error(monkeypat
     monkeypatch.setattr(adapter, "_request", fake_request)
 
     await adapter.send_text("hello")
-    await adapter._prompt_task
+    _ = await adapter._prompt_task  # awaited for synchronization only
 
     assert adapter.is_busy() is False
     event = adapter._events.get_nowait()
@@ -425,12 +453,343 @@ async def test_acp_adapter_stale_prompt_task_does_not_clear_busy(monkeypatch):
     # Simulate a new send_text() superseding the stale task before it resolves.
     adapter._prompt_task = asyncio.create_task(asyncio.sleep(3600))
 
-    # Awaited for synchronization only (its return value, always None, isn't
-    # the point) -- drives the stale task through its own race-guard check
-    # in _await_prompt before the assertions below verify that check held.
-    await stale_task
+    # Drives the stale task through its own race-guard check in
+    # _await_prompt before the assertions below verify that check held.
+    _ = await stale_task  # awaited for synchronization only; see this module's own house style
 
     assert adapter.is_busy() is True  # untouched by the stale task
     assert adapter._events.empty()
 
     adapter._prompt_task.cancel()
+
+
+# --- Real-subprocess integration tests, against tests/fake_acp_server.py.
+# Everything above this point stubs out _request/_ensure_session or feeds
+# _read_loop a hand-built fake stdout -- nothing before this exercises
+# self._pending, _request, _write, or genuine wire framing at all. Found
+# by an independent second-opinion review (2026-09-09) after this file's
+# own fake server was built with seven scripted scenarios and none of
+# them were actually exercised by a test.
+
+
+@pytest.mark.asyncio
+async def test_process_death_mid_turn_fails_fast_and_clears_busy() -> None:
+    """Regression test for the most severe finding of that review:
+    _read_loop's own finally block used to only push _EOF -- it never
+    rejected whatever was still in self._pending, nor cleared self._busy.
+    A backend dying mid-turn left the caller's own session/prompt request
+    waiting the full _RESPONSE_TIMEOUT_S (30s) to time out on its own, and
+    left is_busy() reporting True forever afterward (routing the next
+    utterance to send_interject() instead of send_text() while believing
+    a dead turn was still live). Must resolve in well under 30s -- 5s is
+    generous slack for process spawn/exit on a loaded CI box -- and
+    aclose() afterward must not raise (a second bug in the same area:
+    _read_loop used to catch only CancelledError, so any other exception
+    from a dying process escaped as the task's own exception and
+    aclose()'s `await self._reader_task` re-raised it right back out).
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please die now")
+        _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
+        assert adapter.is_busy() is False
+        event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
+        assert event.type == BackendEventType.ERROR
+        assert event.content == (
+            "ACPBackendDied: ACP backend process exited before a response arrived"
+        )
+    finally:
+        await adapter.aclose()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_send_hard_stop_cancels_a_hanging_turn() -> None:
+    """send_hard_stop() was completely untested for ACP before this --
+    the only end-to-end proof that session/cancel goes out as a
+    NOTIFICATION (no "id"), not a request. Sending it as a request was
+    the actual shipped bug fixed 2026-09-06 (see acp.py's own
+    send_hard_stop docstring); nothing before this test would catch a
+    regression back to the request form, since opencode replies
+    -32601 Method not found to that shape rather than raising locally.
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please hang forever")
+        assert adapter.is_busy() is True
+        # send_text() only CREATES _prompt_task (asyncio.create_task does
+        # not run it) -- a real safeword always arrives well after the
+        # backend has actually seen the prompt (it takes real audio/STT
+        # time to recognize a separate utterance), but calling
+        # send_hard_stop() with no yield at all here would race
+        # session/cancel onto the wire BEFORE session/prompt itself (the
+        # fake's own `stdin.drain()` doesn't suspend for a write this
+        # small, so nothing here would otherwise force that ordering).
+        # This sleep stands in for that always-present real-world gap.
+        await asyncio.sleep(0.2)
+        await adapter.send_hard_stop()
+        assert adapter.is_busy() is False
+        _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
+        event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
+        assert event.type == BackendEventType.DONE
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_hard_stop_before_any_send_is_a_noop() -> None:
+    adapter = _real_adapter()
+    await adapter.send_hard_stop()
+    assert adapter.is_busy() is False
+    assert adapter._proc is None  # must not spawn a process just to stop it
+
+
+@pytest.mark.asyncio
+async def test_send_hard_stop_guards_on_proc_liveness_not_just_busy() -> None:
+    """Regression test for the exact conditions that used to reach
+    _notify -> _write's own `assert self._proc is not None`, raising
+    AssertionError out of Orchestrator.hard_stop() and skipping
+    stop_event_loop()/approval_gate.cancel_wait() entirely: a stray
+    safeword arriving while self._busy is (for whatever reason) still
+    True but self._proc is already None/dead -- e.g. force_kill() ran,
+    which has no override for ACP and delegates straight to aclose().
+    Manipulates state directly rather than going through a real
+    force_kill(), so this pins send_hard_stop()'s OWN guard specifically,
+    independent of whichever other fix might also happen to clear busy
+    by the time a real force_kill() finishes.
+    """
+    adapter = ACPAdapter()
+    adapter._session_id = "sess_whatever"
+    adapter._busy = True
+    adapter._proc = None
+    await adapter.send_hard_stop()  # must not raise
+    assert adapter.is_busy() is False
+
+
+@pytest.mark.asyncio
+async def test_tool_call_event_ordering_through_real_pipe() -> None:
+    """Proves _read_loop unwraps params.update off a genuine newline-
+    delimited stream, that ordering survives the queue, and that DONE
+    (which comes from session/prompt's own RESPONSE, a different
+    transport path than the notifications) lands after them -- none of
+    which the existing mocked-_process_notification unit tests above can
+    prove on their own.
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please use a tool")
+        events = await _collect(adapter, 4)
+        assert events[0].type == BackendEventType.TOOL_CALL
+        assert events[0].tool == "bash"
+        assert events[1].type == BackendEventType.TOOL_RESULT
+        assert events[1].tool_output == "hi\n"
+        assert events[2].type == BackendEventType.TEXT
+        assert events[2].content == "the tool ran"
+        assert events[3].type == BackendEventType.DONE
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_level_failure_yields_error_event_through_real_pipe() -> None:
+    """The existing mocked unit test for this path
+    (test_acp_adapter_send_text_error_clears_busy_and_emits_error) raises
+    a Python RuntimeError from a stubbed _request -- it never touches
+    _read_loop's own "id"+"error" branch or future.set_exception.
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please fail this turn")
+        _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
+        assert adapter.is_busy() is False
+        event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
+        assert event.type == BackendEventType.ERROR
+        assert "model exploded" in event.content
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_yields_error_then_done_through_real_pipe() -> None:
+    """A failed TOOL is not a failed TURN -- ACP has no equivalent of
+    codex's turn/completed(status="failed"). Confirms both the
+    human-readable text extraction (already unit-tested against a
+    hand-built dict) AND that the turn still completes with DONE
+    afterward, over a genuine pipe.
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please demonstrate a tool fails case")
+        events = await _collect(adapter, 3)
+        assert events[0].type == BackendEventType.TOOL_CALL
+        assert events[1].type == BackendEventType.ERROR
+        assert events[1].content == "File not found: nope.txt"
+        assert events[2].type == BackendEventType.DONE
+        assert adapter.is_busy() is False
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_needs_approval_auto_decline_reaches_the_real_process() -> None:
+    """Proves the real adapter's auto-decline ({"outcome": {"outcome":
+    "cancelled"}}) actually gets serialized to the child's stdin and read
+    back by it -- the existing unit test
+    (test_acp_adapter_read_loop_routes_notification_vs_request)
+    monkeypatches _write, so it proves _read_loop's OWN dispatch/routing
+    logic but not that the reply crosses a genuine pipe, nor that
+    `await self._write(...)` from INSIDE _read_loop's own server-request
+    branch doesn't stall the reader.
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("this needs approval first")
+        events = await _collect(adapter, 3)
+        assert events[0].type == BackendEventType.TOOL_CALL
+        assert events[1].type == BackendEventType.ERROR
+        assert events[1].content == "permission outcome was: cancelled"
+        assert events[2].type == BackendEventType.DONE
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_garbage_line_is_skipped_and_real_response_still_routes() -> None:
+    """Nothing before this fed _read_loop an undecodable line over a real
+    pipe -- the malformed line must be skipped, not kill the loop or
+    desync framing for the real response right behind it.
+    """
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please emit garbage first then respond")
+        events = await _collect(adapter, 2)
+        assert events[0].type == BackendEventType.TEXT
+        assert events[0].content.startswith("echo:")
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_full_handshake_with_model_and_plan_mode_completes_a_turn() -> None:
+    """The only test that runs _ensure_session's full sequence
+    (initialize -> session/new -> session/set_config_option ->
+    session/set_mode) against a real process -- every _ensure_session
+    test above monkeypatches _request entirely, so none of them can
+    catch set_config_option/set_mode's real {} response being mishandled
+    or an initialize-before-session/new ordering regression. Asserts the
+    ACTUAL method sequence the fake received (via its own "report
+    methods" echo), not just that a turn completed -- dropping
+    set_config_option or set_mode, or reordering initialize/session/new,
+    would still pass a version of this test that only checked TEXT+DONE.
+    """
+    adapter = _real_adapter(permission_mode="plan", model="some/model")
+    try:
+        await adapter.send_text("please report methods received so far")
+        events = await _collect(adapter, 2)
+        assert events[0].type == BackendEventType.TEXT
+        assert events[0].content == (
+            "initialize,session/new,session/set_config_option,session/set_mode,session/prompt"
+        )
+        assert events[1].type == BackendEventType.DONE
+        assert adapter.is_busy() is False
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_read_loop_ignores_a_response_for_an_already_done_future() -> None:
+    """Regression test: asyncio.wait_for's own timeout path cancels the
+    future FIRST and only removes it from self._pending afterward, on the
+    timed-out coroutine's own turn -- a response arriving in that exact
+    gap used to hit set_result on an already-cancelled future and raise
+    InvalidStateError, killing the whole read loop (and, per the same
+    finally-block bug this file's other new tests pin, everything else
+    still pending with it).
+    """
+    adapter = ACPAdapter()
+
+    future: asyncio.Future = asyncio.Future()
+    future.cancel()
+    adapter._pending[42] = future
+
+    class FakeStdout:
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+    class FakeProc:
+        returncode = None
+        stdout = None
+
+    fake_proc = FakeProc()
+    fake_proc.stdout = FakeStdout([
+        b'{"jsonrpc": "2.0", "id": 42, "result": {"ok": true}}\n',
+        b"",
+    ])
+
+    await adapter._read_loop(fake_proc)  # must not raise InvalidStateError
+
+    assert 42 not in adapter._pending
+
+
+@pytest.mark.asyncio
+async def test_request_removes_pending_entry_even_when_cancelled(monkeypatch) -> None:
+    """Regression test: _request used to remove its own self._pending
+    entry only in the TimeoutError branch -- the coroutine awaiting it
+    being cancelled (aclose() cancelling _prompt_task mid session/prompt)
+    used to leak the Future in self._pending forever.
+    """
+    adapter = ACPAdapter()
+
+    async def fake_write(payload):
+        return None  # never resolves the future -- lets us cancel from outside
+
+    monkeypatch.setattr(adapter, "_write", fake_write)
+
+    task = asyncio.create_task(adapter._request("session/prompt", {}))
+    await asyncio.sleep(0)  # let it register in _pending and start awaiting
+    assert len(adapter._pending) == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        _ = await task  # awaited for synchronization only; see this module's own house style
+    assert adapter._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_reraises_acp_backend_died_for_model(monkeypatch) -> None:
+    """ACPBackendDied must propagate out of _ensure_session, not be
+    swallowed by the same `except RuntimeError` that deliberately
+    log-and-continues on an ordinary per-call failure (a bad model name,
+    an unsupported mode) -- trying the NEXT call against a process that
+    has already exited is pointless.
+    """
+    adapter = ACPAdapter(permission_mode="permissive", model="some/model")
+    adapter._proc = _FakeAliveProc()
+
+    async def fake_request(method, params):
+        if method == "session/new":
+            return {"sessionId": "s1"}
+        raise ACPBackendDied("gone")
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    with pytest.raises(ACPBackendDied):
+        await adapter._ensure_session()
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_reraises_acp_backend_died_for_plan_mode(monkeypatch) -> None:
+    adapter = ACPAdapter(permission_mode="plan")
+    adapter._proc = _FakeAliveProc()
+
+    async def fake_request(method, params):
+        if method == "session/new":
+            return {"sessionId": "s1"}
+        raise ACPBackendDied("gone")
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    with pytest.raises(ACPBackendDied):
+        await adapter._ensure_session()

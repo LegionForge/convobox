@@ -152,9 +152,25 @@ async def test_force_kill_then_later_aclose_is_idempotent_and_never_raises(
     force_kill() first (must not go through the backend's own possibly-
     wedged channel), then a normal aclose() moments later (runs whatever
     teardown force_kill() deliberately skipped). Asserted identically
-    across all three backends -- today no single test file asserts this
+    across all four backends -- today no single test file asserts this
     ordered pair for any of them, only force_kill() alone or aclose()
     alone.
+
+    Deliberately does NOT assert is_busy() is False here: claude-code and
+    opencode only clear busy from events()'s own generator finally block
+    (a "last resort... if the consumer stops for any reason" safety net),
+    which never runs since _send_one_turn's whole point is reaching this
+    state WITHOUT an events() consumer -- see its own docstring. ACP and
+    codex both also clear busy directly in their read loop's own finally,
+    independent of any consumer, so they don't share this gap -- see
+    test_acp_force_kill_has_no_override_but_still_kills_the_real_process
+    below for that assertion, scoped to the one adapter this session
+    touched. Orchestrator.force_kill()'s own docstring documents that
+    callers are expected to end the whole session immediately after it
+    returns, which is why a stuck is_busy() on claude-code/opencode in
+    this exact no-consumer scenario hasn't caused a live incident --
+    fixing those two adapters to match is a separate, un-asked-for
+    work-set, not folded in here.
     """
     async with _adapter(backend) as adapter:
         await _send_one_turn(adapter)
@@ -203,6 +219,14 @@ async def test_acp_force_kill_has_no_override_but_still_kills_the_real_process()
     -- see that test above) is a deliberate fit here, not a gap left
     over from copying opencode's shape uncritically. Confirmed by
     actually checking the real subprocess dies.
+
+    Also asserts is_busy() is False afterward -- unlike claude-code and
+    opencode (see the shared idempotency test's own comment above), ACP
+    clears busy directly in _read_loop's own finally block regardless of
+    whether anything is consuming events(), a real bug an independent
+    second-opinion review found and this session fixed (a stuck
+    is_busy()=True used to make a subsequent send_hard_stop() raise
+    AssertionError instead of a safe no-op).
     """
     async with _adapter("acp") as adapter:
         assert isinstance(adapter, ACPAdapter)
@@ -216,6 +240,7 @@ async def test_acp_force_kill_has_no_override_but_still_kills_the_real_process()
         assert proc is not None and proc.returncode is None
         await adapter.force_kill()
         assert proc.returncode is not None
+        assert not adapter.is_busy()
 
 
 @pytest.mark.asyncio

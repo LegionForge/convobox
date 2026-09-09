@@ -24,12 +24,13 @@ Turn behavior is scripted by the prompt text:
                                 turn/completed(status="failed") -- a
                                 failed TOOL doesn't mean a failed TURN)
   contains "needs approval" -> a server->client session/request_permission
-                                REQUEST mid-turn (method+id, no reply
-                                read back -- the real adapter's own
-                                auto-decline doesn't change what the
-                                agent reports next either, live-verified
-                                2026-09-07), followed by a rejected tool
-                                call in the same shape "tool fails" uses
+                                REQUEST mid-turn (method+id); the reply IS
+                                read back and its outcome echoed into the
+                                rejected tool call's own text (proves the
+                                real adapter's auto-decline actually
+                                reaches this fake over the real pipe, not
+                                just that _read_loop's dispatch logic
+                                routes it correctly in isolation)
   contains "fail"           -> session/prompt's own JSON-RPC response is
                                 an ERROR (checked after "tool fails" --
                                 see below -- there is no ACP equivalent
@@ -43,6 +44,14 @@ Turn behavior is scripted by the prompt text:
                                 see acp.py's own send_hard_stop() comment
   contains "die"            -> exits the process mid-turn, no response
                                 ever sent
+  contains "report methods" -> agent_message_chunk listing every method
+                                received so far (comma-separated, in
+                                order, THIS session/prompt included) --
+                                lets a test assert the real sequence
+                                _ensure_session sent (initialize,
+                                session/new, session/set_config_option,
+                                session/set_mode, ...) instead of only
+                                proving nothing crashed
   contains "emit garbage first" -> one malformed (non-JSON) line before
                                 the normal notification/response
   anything else             -> agent_message_chunk echoing the text,
@@ -108,12 +117,25 @@ def tool_call_completed(tool_id: str, text: str) -> None:
     })
 
 
+_PERMISSION_REQUEST_ID = 9001
+
+
 def main() -> None:
     # id of a currently-pending session/prompt request that hasn't
     # resolved yet (the "hang" scenario) -- session/cancel (a notification,
     # no id of its own) resolves THIS request when it arrives, same as a
     # real opencode/kilo acp process does.
     hung_request_id: object | None = None
+    # id of a session/prompt request waiting on the CLIENT's answer to our
+    # own server->client session/request_permission (the "needs approval"
+    # scenario) -- resolved once that reply arrives, not immediately.
+    pending_approval_prompt_id: object | None = None
+    # Every method received, in order (including the current session/prompt
+    # itself) -- reported back via the "report methods" trigger below so a
+    # test can assert the real sequence _ensure_session sent (initialize,
+    # session/new, session/set_config_option, session/set_mode, ...)
+    # instead of only proving nothing crashed.
+    received_methods: list[str] = []
 
     for line in sys.stdin:
         line = line.strip()
@@ -125,6 +147,8 @@ def main() -> None:
             continue
         method = msg.get("method")
         req_id = msg.get("id")
+        if method is not None:
+            received_methods.append(method)
 
         if method == "initialize":
             respond(req_id, {"protocolVersion": 1, "agentCapabilities": {}})
@@ -132,12 +156,40 @@ def main() -> None:
             respond(req_id, {"sessionId": SESSION_ID})
         elif method in ("session/set_config_option", "session/set_mode"):
             respond(req_id, {})
-        elif method == "session/cancel":
-            # Notification -- no id, no reply expected for THIS message.
-            # Resolves whatever session/prompt request is still pending.
+        elif method == "session/cancel" and "id" not in msg:
+            # Genuine notification -- no id, no reply expected for THIS
+            # message. Resolves whatever session/prompt request is still
+            # pending.
             if hung_request_id is not None:
                 respond(hung_request_id, {"stopReason": "cancelled"})
                 hung_request_id = None
+        elif method == "session/cancel":
+            # Sent as a REQUEST (has an "id") -- the actual shipped bug
+            # fixed 2026-09-06 (see acp.py's own send_hard_stop
+            # docstring). Real opencode returns -32601 for this exact
+            # mistake; matching that here (instead of silently treating
+            # it the same as the notification form above) means a
+            # regression back to the request form leaves the hung
+            # session/prompt UNRESOLVED, so
+            # test_send_hard_stop_cancels_a_hanging_turn genuinely times
+            # out rather than passing for the wrong reason.
+            respond_error(req_id, "Method not found")
+        elif method is None and req_id == _PERMISSION_REQUEST_ID:
+            # The CLIENT's reply to OUR OWN server->client
+            # session/request_permission -- has no "method" (a plain
+            # JSON-RPC response), unlike every other branch here. Echo
+            # what it answered into the rejected tool call's own text so
+            # a test can assert the real adapter's auto-decline shape
+            # ({"outcome": {"outcome": "cancelled"}}) actually reached
+            # this fake over the real pipe, not just that _read_loop's
+            # dispatch logic routes a server-request correctly in
+            # isolation.
+            outcome = ((msg.get("result") or {}).get("outcome") or {}).get("outcome", "<missing>")
+            tool_call("call_1", "write", "edit")
+            tool_call_failed("call_1", f"permission outcome was: {outcome}")
+            if pending_approval_prompt_id is not None:
+                respond(pending_approval_prompt_id, {"stopReason": "end_turn"})
+                pending_approval_prompt_id = None
         elif method == "session/prompt":
             text = " ".join(
                 block.get("text", "")
@@ -146,6 +198,10 @@ def main() -> None:
             )
             if "die" in text:
                 sys.exit(0)
+            if "report methods" in text:
+                agent_text(",".join(received_methods))
+                respond(req_id, {"stopReason": "end_turn"})
+                continue
             if "emit garbage first" in text:
                 sys.stdout.write("not valid json at all {{{\n")
                 sys.stdout.flush()
@@ -158,23 +214,17 @@ def main() -> None:
                 respond(req_id, {"stopReason": "end_turn"})
                 continue
             if "needs approval" in text:
-                # Server->client REQUEST mid-turn -- the real adapter
-                # auto-declines with {"outcome": {"outcome": "cancelled"}}
-                # (acp.py's own _read_loop). This fake doesn't read the
-                # reply back (the real agent's own next step doesn't
-                # depend on it either, live-verified 2026-09-07): the
-                # tool call is simply reported rejected regardless.
+                # Server->client REQUEST mid-turn -- session/prompt itself
+                # does NOT resolve until the reply arrives (see the
+                # `method is None and req_id == _PERMISSION_REQUEST_ID`
+                # branch above), matching a real turn actually waiting on
+                # the outcome before deciding how to proceed.
+                pending_approval_prompt_id = req_id
                 emit({
-                    "jsonrpc": "2.0", "id": 9001,
+                    "jsonrpc": "2.0", "id": _PERMISSION_REQUEST_ID,
                     "method": "session/request_permission",
                     "params": {"sessionId": SESSION_ID},
                 })
-                tool_call("call_1", "write", "edit")
-                tool_call_failed(
-                    "call_1",
-                    "The user rejected permission to use this specific tool call.",
-                )
-                respond(req_id, {"stopReason": "end_turn"})
                 continue
             if "fail" in text:
                 respond_error(req_id, "model exploded")

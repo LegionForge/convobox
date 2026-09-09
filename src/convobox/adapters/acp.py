@@ -156,6 +156,19 @@ def _resolve_command(command: Sequence[str] | None, backend: str = "opencode") -
 _EOF = object()
 
 
+class ACPBackendDied(RuntimeError):
+    """Raised for every request still pending when the backend process
+    exits (or its stdout pipe closes) before answering -- see
+    _read_loop()'s own finally block. A distinct subclass of RuntimeError,
+    not a bare one, so _ensure_session()'s own `except RuntimeError`
+    blocks (around session/set_config_option / session/set_mode, which
+    deliberately log-and-continue on an ordinary per-call failure) can
+    tell "this one call failed" apart from "the whole backend is gone"
+    and re-raise the latter instead of silently swallowing it and trying
+    the next call against a process that no longer exists.
+    """
+
+
 class ACPAdapter(BackendAdapter):
     """Adapter for ACP (Agent Control Protocol) backends (OpenCode, Kilo)."""
 
@@ -283,13 +296,38 @@ class ACPAdapter(BackendAdapter):
         found. As a notification it genuinely aborts an in-flight tool
         call; session/prompt's own pending response then resolves with
         stopReason: "cancelled" rather than ever timing out.
+
+        Guards on the process actually being alive, not just
+        self._session_id/self._busy: a stray safeword arriving after
+        force_kill() (which has no override here and delegates straight
+        to aclose() -- self._proc is None afterward, but self._session_id
+        is deliberately left set, see _ensure_session's own respawn
+        check) used to reach `_notify` -> `_write`'s own `assert
+        self._proc is not None`, raising AssertionError out of
+        Orchestrator.hard_stop() and skipping stop_event_loop()/
+        approval_gate.cancel_wait() entirely. Same proc-liveness guard
+        codex.py's own send_hard_stop uses, for the same reason.
         """
-        if self._session_id is not None and self._busy:
+        if (
+            self._proc is None
+            or self._proc.returncode is not None
+            or self._session_id is None
+            or not self._busy
+        ):
+            # Nothing in flight (or nothing left alive to interrupt) -- a
+            # stray safeword must be a safe no-op, not spawn a process
+            # just to stop it, and must still clear busy so a stale True
+            # doesn't linger past whatever left it that way.
+            self._busy = False
+            return
+        try:
             await self._notify(
                 "session/cancel",
                 {"sessionId": self._session_id},
             )
-            self._busy = False
+        except OSError:
+            logger.warning("ACP session/cancel failed", exc_info=True)
+        self._busy = False
 
     def is_busy(self) -> bool:
         """Return True if the adapter is currently processing a prompt."""
@@ -297,30 +335,34 @@ class ACPAdapter(BackendAdapter):
 
     async def events(self) -> AsyncGenerator[BackendEvent, None]:
         """Async generator of BackendEvents from the backend."""
-        while True:
-            event = await self._events.get()
-            if event is _EOF:
-                break
-            if isinstance(event, BackendEvent):
-                yield event
+        try:
+            while True:
+                event = await self._events.get()
+                if event is _EOF:
+                    return
+                if isinstance(event, BackendEvent):
+                    yield event
+        finally:
+            # Last-resort safety net, same as codex.py's own events(): if
+            # the consumer stops for any reason, nothing else clears busy.
+            self._busy = False
 
     async def aclose(self) -> None:
         """Close the adapter and clean up resources."""
         if self._prompt_task is not None:
             self._prompt_task.cancel()
-            try:
+            # Awaited for synchronization only (Task[None] -- assigning its
+            # result would trip mypy's func-returns-value check, so this
+            # stays a bare statement rather than this file's usual `_ =
+            # await expr` house style; matches codex.py's own identical
+            # shape in _terminate_and_kill_process).
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._prompt_task
-            except asyncio.CancelledError:
-                # Expected when cancelling an in-flight prompt on close.
-                pass
 
         if self._reader_task is not None:
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                # Expected when cancelling the read loop task
-                pass
 
         # Cleared here (not left in self._proc) so a second aclose()/
         # force_kill() call -- force_kill() has no override of its own and
@@ -351,6 +393,23 @@ class ACPAdapter(BackendAdapter):
         """Ensure the process is spawned and a session is initialized."""
         async with self._lock:
             if self._proc is None or self._proc.returncode is not None:
+                if self._reader_task is not None:
+                    # A stale reader from a previous, now-dead process --
+                    # live-caught 2026-09-09: _read_loop() used to
+                    # dereference self._proc fresh on every iteration
+                    # instead of taking the process as a parameter, so an
+                    # old reader could still be draining its last buffered
+                    # lines when this respawn overwrote self._proc/
+                    # self._reader_task, then loop back around and call
+                    # readline() on the NEW process's stdout concurrently
+                    # with the new reader -- "readline() called while
+                    # another coroutine is already waiting for incoming
+                    # data". _read_loop is now pinned to the process it
+                    # was started for (see its own signature), so this
+                    # cancel is just tidiness (no reference to the old
+                    # task would otherwise remain), not load-bearing for
+                    # correctness the way it would have been before.
+                    self._reader_task.cancel()
                 self._proc = await asyncio.create_subprocess_exec(
                     *self._command,
                     stdin=asyncio.subprocess.PIPE,
@@ -362,7 +421,7 @@ class ACPAdapter(BackendAdapter):
                 self._session_id = None
                 self._busy = False
                 self._pending = {}
-                self._reader_task = asyncio.create_task(self._read_loop())
+                self._reader_task = asyncio.create_task(self._read_loop(self._proc))
 
                 # ACP handshake: a top-level `initialize`, not scoped under
                 # session/ -- live-verified 2026-09-06 against opencode
@@ -409,6 +468,8 @@ class ACPAdapter(BackendAdapter):
                                 "value": self._model,
                             },
                         )
+                    except ACPBackendDied:
+                        raise
                     except RuntimeError as e:
                         logger.warning(f"Failed to set ACP model to {self._model!r}: {e}")
 
@@ -427,27 +488,42 @@ class ACPAdapter(BackendAdapter):
                             "session/set_mode",
                             {"sessionId": session_id, "modeId": "plan"},
                         )
+                    except ACPBackendDied:
+                        raise
                     except RuntimeError as e:
                         logger.warning(f"Failed to set ACP session mode to 'plan': {e}")
 
             return self._session_id
 
-    async def _read_loop(self) -> None:
-        """Background task that reads responses and notifications from the backend."""
-        assert self._proc is not None and self._proc.stdout is not None  # nosec B101
+    async def _read_loop(self, proc: asyncio.subprocess.Process) -> None:
+        """Background task that reads responses and notifications from the
+        backend.
+
+        Takes `proc` as a parameter rather than reading self._proc fresh
+        each iteration -- live-caught 2026-09-09: dereferencing self._proc
+        let a stale reader (still draining its final buffered lines after
+        its own process died) collide with a freshly spawned respawn's own
+        reader on the SAME StreamReader object, "readline() called while
+        another coroutine is already waiting for incoming data" -- pinning
+        this task to the exact process it was started for (same choice
+        codex.py's own _read_loop(proc) already makes) means an old reader
+        only ever reads its own old proc's stdout, never a newer one's.
+        """
+        assert proc.stdout is not None  # nosec B101
+        task = asyncio.current_task()
 
         try:
             while True:
                 line = await readline_with_stall_diagnostic(
-                    self._proc.stdout,
-                    self._proc,
+                    proc.stdout,
+                    proc,
                     label="ACP",
                     busy=self.is_busy,
                 )
 
                 if not line:
                     logger.info("ACP backend closed stdout")
-                    break
+                    return
 
                 try:
                     payload = json.loads(line.decode())
@@ -455,20 +531,28 @@ class ACPAdapter(BackendAdapter):
                     logger.warning(f"Failed to decode ACP line: {e}")
                     continue
 
-                # Route responses to pending requests
+                # Route responses to pending requests. future.done() is
+                # checked before touching it in both branches (live-caught
+                # 2026-09-09): asyncio.wait_for's own timeout path cancels
+                # the future first and only removes it from self._pending
+                # afterward, on the timed-out coroutine's own turn -- a
+                # response arriving in that same gap would otherwise hit
+                # set_result/set_exception on an already-cancelled future
+                # and raise InvalidStateError, killing this whole loop.
                 if "id" in payload and "result" in payload:
                     request_id = payload["id"]
-                    if request_id in self._pending:
-                        self._pending[request_id].set_result(payload.get("result", {}))
-                        del self._pending[request_id]
+                    future = self._pending.get(request_id)
+                    if future is not None and not future.done():
+                        result = payload.get("result")
+                        future.set_result(result if isinstance(result, dict) else {})
+                    self._pending.pop(request_id, None)
                 elif "id" in payload and "error" in payload:
                     request_id = payload["id"]
-                    if request_id in self._pending:
+                    future = self._pending.get(request_id)
+                    if future is not None and not future.done():
                         error = payload.get("error", {})
-                        self._pending[request_id].set_exception(
-                            RuntimeError(f"ACP error: {error}")
-                        )
-                        del self._pending[request_id]
+                        future.set_exception(RuntimeError(f"ACP error: {error}"))
+                    self._pending.pop(request_id, None)
                 elif "method" in payload and "id" in payload:
                     # Server REQUEST (e.g., session/request_permission) --
                     # has both method and id, unlike a notification, and
@@ -498,10 +582,87 @@ class ACPAdapter(BackendAdapter):
                         await self._process_notification(update)
 
         except asyncio.CancelledError:
-            # Read loop cancelled, clean shutdown expected
-            pass
+            # Read loop cancelled, clean shutdown expected -- aclose()
+            # already tears down proc/pending on its own; nothing further
+            # to reject here (see the finally block's own guard below).
+            raise
+        except (OSError, ValueError):
+            # Live-caught 2026-09-09: this loop previously caught ONLY
+            # CancelledError, so a readline()/drain() OSError (broken
+            # pipe) or a ValueError (a line over _STREAM_LIMIT) escaped
+            # as this TASK's own exception -- aclose()'s `await
+            # self._reader_task` then re-raised it right back out of
+            # aclose(), violating that method's own documented "must not
+            # raise" contract (and, since force_kill() has no override
+            # and delegates straight to aclose(), force_kill() too).
+            # Mirrors codex.py's own _read_loop, which catches exactly
+            # these two for the same reason.
+            logger.warning("ACP read loop died", exc_info=True)
+        except Exception:
+            # True last resort: aclose()/force_kill() escalating a
+            # kill_phrase/safeword eject must NEVER raise (base.py's own
+            # contract), and an eject silently failing to fire is worse
+            # than logging an unanticipated bug and tearing down cleanly
+            # anyway.
+            logger.exception("ACP read loop died from an unexpected exception")
         finally:
-            await self._events.put(_EOF)
+            # Live-caught 2026-09-09: this used to be `await
+            # self._events.put(_EOF)` alone -- no self._busy = False, and
+            # no rejection of whatever's still in self._pending. Losing
+            # busy meant is_busy() stayed True forever after the backend
+            # died, routing the next utterance to send_interject() instead
+            # of send_text() while believing a dead turn was still live.
+            # Losing the pending rejection meant a request awaiting
+            # _RESPONSE_TIMEOUT_S (30s) had no way to learn the backend
+            # was already gone -- it just sat there for the full 30s
+            # before timing out on its own, and if the caller was
+            # _await_prompt (session/prompt itself), the resulting ERROR
+            # event usually arrived too late to reach anyone: events()
+            # had already returned on the _EOF pushed here, and
+            # Orchestrator's own consumer does not re-subscribe to a
+            # cleanly-ended generator. put_nowait (not the awaited put()
+            # this used to be) matches codex.py's own idiom -- safe today
+            # regardless since self._events has no maxsize, but a future
+            # bounded queue wouldn't silently reintroduce a cancellation
+            # hazard here the way an awaited put() would.
+            self._busy = False
+            prompt_task = self._prompt_task
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(
+                        ACPBackendDied("ACP backend process exited before a response arrived")
+                    )
+            # Live-caught 2026-09-09, in the test written to pin the fix
+            # above: future.set_exception() only SCHEDULES _await_prompt's
+            # own reaction (it awaits this exact future via _request) --
+            # it does not run it. Pushing _EOF immediately afterward, in
+            # the same synchronous stretch, put it on the queue BEFORE
+            # _await_prompt ever got a turn to push its own ERROR event
+            # behind it, so events()'s consumer saw _EOF first and
+            # returned without ever seeing the ERROR that followed it one
+            # queue slot too late. aclose() already awaits _prompt_task
+            # BEFORE cancelling _reader_task, so in the aclose()-triggered
+            # shutdown path this is already done and the await below is a
+            # no-op; it only actually waits in the "backend died on its
+            # own" path finding #1 above is about. Bounded and swallowed
+            # -- this is best-effort ordering, not something that should
+            # ever block real teardown.
+            if prompt_task is not None and not prompt_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)
+                except (asyncio.CancelledError, TimeoutError):  # must not skip the _EOF push below no matter what happens in this await (nothing to log: both are expected outcomes here, not bugs). TimeoutError is wait_for's own bound firing; CancelledError is the one that actually matters -- live-caught 2026-09-09 by an independent verification review of this exact fix: contextlib.suppress(Exception), used in an earlier version of this line, does NOT catch CancelledError (a BaseException since 3.8) -- cancelling prompt_task elsewhere (aclose() cancels it directly) while this shielded await is in flight propagates ITS cancellation through the shield's own outer future regardless, which used to skip put_nowait(_EOF) entirely and permanently hang events() for the rest of the session (Orchestrator only re-creates its consumer task when it's .done(), not merely stuck). Deliberately NOT a bare `except BaseException`: _await_prompt (the only thing prompt_task can ever be) never lets anything else escape it -- it catches Exception broadly and CancelledError specifically, always completing normally or via one of these two -- so a narrower tuple here is both correct and avoids also swallowing KeyboardInterrupt/SystemExit/GeneratorExit the way a blind BaseException catch would.
+                    pass
+            # Live-caught 2026-09-09 by the same review: a STALE reader
+            # (this one) can still be inside the shielded await above when
+            # _ensure_session's respawn branch reassigns self._reader_task
+            # to a fresh reader for a NEW process. Pushing _EOF after that
+            # point would end the NEW generation's own events() consumer
+            # with a leftover from a generation that's already gone --
+            # only push it if nothing has superseded this exact task in
+            # the meantime, same identity check _await_prompt already uses
+            # for the same reason.
+            if self._reader_task is task:
+                self._events.put_nowait(_EOF)
 
     async def _process_notification(self, update: dict[str, Any]) -> None:
         """Convert one session/update's `update` object into a BackendEvent.
@@ -516,7 +677,8 @@ class ACPAdapter(BackendAdapter):
         """
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
-            text = (update.get("content") or {}).get("text", "")
+            content = update.get("content")
+            text = content.get("text", "") if isinstance(content, dict) else ""
             if text:
                 await self._events.put(BackendEvent(type=BackendEventType.TEXT, content=text))
         elif kind == "tool_call":
@@ -582,8 +744,18 @@ class ACPAdapter(BackendAdapter):
             await self._write(payload)
             return await asyncio.wait_for(future, timeout=_RESPONSE_TIMEOUT_S)
         except TimeoutError:
-            del self._pending[request_id]
             raise RuntimeError(f"ACP request {method} timed out after {_RESPONSE_TIMEOUT_S}s")
+        finally:
+            # Not just in the TimeoutError branch above -- live-caught
+            # 2026-09-09: a write failure (_write raising, e.g. a broken
+            # pipe) or this coroutine itself being cancelled (aclose()
+            # cancelling _prompt_task mid session/prompt) both used to
+            # leave this request's Future in self._pending forever, with
+            # nothing left to ever pop it. pop(..., None) rather than del
+            # -- _read_loop's own finally block may have already rejected
+            # and removed every pending entry by the time this runs (the
+            # backend died while this exact request was in flight).
+            self._pending.pop(request_id, None)
 
     async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a JSON-RPC notification (no "id", no response expected).
