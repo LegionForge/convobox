@@ -34,6 +34,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from convobox.adapters.base import ARTIFACT_MEDIA_TYPES, BackendEvent, BackendEventType
 from convobox.web.artifacts import _resolve_artifact
@@ -138,13 +139,21 @@ def add_mcp_routes(
         # thread'" the first time this was run through a real claude CLI
         # session; async keeps this on the main loop instead (the SDK
         # awaits async tool functions directly, no thread offload).
+        # ToolError, not a bare exception: mcp >=2.1 (see this module's own
+        # git history / docs/KNOWN-ISSUES.md) treats any OTHER exception as
+        # an unexpected crash and deliberately hides its message from the
+        # caller, keeping the real text server-side only (__cause__) --
+        # correct default behavior for an unanticipated bug, but wrong for
+        # these three deliberate, safe-to-show validation rejections. Root
+        # cause of the "Error executing tool show_document" tests once
+        # matched on the underlying ValueError message here.
         try:
             candidate = _resolve_artifact(working_dir, path)
         except HTTPException as exc:
-            raise ValueError(str(exc.detail)) from exc
+            raise ToolError(str(exc.detail)) from exc
         media_type = ARTIFACT_MEDIA_TYPES.get(candidate.suffix.lower())
         if media_type is None:
-            raise ValueError(f"{candidate.suffix!r} is not a servable artifact type")
+            raise ToolError(f"{candidate.suffix!r} is not a servable artifact type")
         # working_dir is guaranteed non-None here -- add_mcp_routes()
         # already returned above otherwise, and _resolve_artifact would
         # have raised its own 503 first if it were.
