@@ -356,11 +356,25 @@ instruction arrived BY VOICE (where mishearing is a real input mode):
   path to closing the open-mic trust boundary, not speaker-ID on
   every utterance.
 
-### Session persistence (decided: configurable, tiered)
+### Session persistence (decided: configurable, tiered -- but not what's actually built, see below)
 Whether a conversation survives restart depends on what the user has:
 nothing -> flat files -> sqlite -> postgres/pgvector, user-configurable,
 with ConvoBox suggesting optional installs as needs grow. (Same
 install-at-setup philosophy as engines.)
+
+**Reality check, 2026-09-10 R&D survey**
+(`docs/field-notes/2026-09-10-roadmap-rd-survey-session-persistence-gap-
+and-prosody-landscape.md`): the "sqlite" tier is real (`HistoryDB`,
+`src/convobox/web/history.py`) but is constructed in exactly one place,
+entirely inside `scripts/run_convobox.py`'s `if config.web.enabled:`
+branch -- a pure voice session with no `--web` has zero persistence,
+unconditionally, regardless of config. "Flat files" and "postgres" don't
+exist in any form. This is not a spectrum a user currently picks a point
+on; it's "on, but only as a side effect of running the web server" or
+"off." Decoupling this into a real, independent, voice-session-first
+feature is a product decision (does a voice-only user want their
+conversation persisted by default at all), not just an engineering task
+-- still open, not scoped further than the field note above.
 
 ### Tone-of-voice / prosody perception (proposed, not yet decided)
 JP, 2026-07-23: a read-only prototype that gives the response layer a
