@@ -50,6 +50,14 @@ uv run mypy src/ scripts/
   coding agent's help; the project has no preference between the two,
   just a preference for it being disclosed.
 
+## Handling dependency updates
+
+[DEPENDENCY-UPDATES.md](DEPENDENCY-UPDATES.md) is the checklist for
+Dependabot PRs and manual version bumps — live-test the target version
+before merging OR declining, never just read the changelog. Applies to
+both ends of a version range, not just the one a PR happens to be
+proposing.
+
 ## Reporting bugs
 
 Open a GitHub issue. Include your platform, backend (OpenCode/Claude
