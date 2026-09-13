@@ -128,24 +128,27 @@ web = [
     # SDK, not hand-rolled JSON-RPC/SSE framing, since correctness here is
     # judged against a real external client (claude/codex's own MCP
     # client), not just ConvoBox's own tests.
-    # Upper-bounded (2026-09-01, GitHub security review's supply-chain
-    # finding, confirmed by reproducing it): mcp 2.1.0 (not just 2.1.1 --
-    # re-verified 2026-09-06 against both) changes ToolError's message
-    # wrapping (every raised error now reads "Error executing tool
-    # show_document" instead of surfacing the real message, traced to a
-    # deliberate ToolError/UnexpectedToolError split introduced in that
-    # release), which breaks 3 of test_web_mcp_server.py's own tests that
-    # match on the underlying message text. uv.lock already pins 2.0.0,
-    # so this only protects a fresh resolve that bypasses the lock (`pip
-    # install` without `--frozen`, a new contributor's first `uv sync`
-    # after the lock ever drifts, etc.) -- same class of risk this repo
-    # already fixed once for ruff (see that dependency's own comment).
-    # Floor raised from >=1.0 to >=2.0 the same day (2026-09-06): >=1.0
-    # was never actually verified and turned out to be broken, not just
-    # loose -- mcp==1.0.0 doesn't even have the mcp.server.mcpserver
-    # module src/convobox/web/mcp_server.py imports (a fresh resolve
-    # landing there would fail at import time, confirmed live).
-    "mcp>=2.0,<2.1",
+    # Was upper-bounded at <2.1 (2026-09-01/06): mcp 2.1.0 introduced a
+    # deliberate ToolError/UnexpectedToolError split -- any exception
+    # OTHER than mcp's own ToolError is now treated as an unexpected
+    # crash, with its real message hidden from the caller (server-side
+    # __cause__ only) and replaced with a generic "Error executing tool
+    # <name>". mcp_server.py's show_document tool raised plain
+    # ValueError for its three deliberate validation rejections, so
+    # THOSE got swept into the "unexpected crash" bucket too, breaking 3
+    # of test_web_mcp_server.py's tests that match on the real message.
+    # Root-caused and fixed 2026-09-13: show_document now raises mcp's
+    # own ToolError (imported from mcp.server.mcpserver.exceptions,
+    # present in every version from 2.0.0 on) for those three cases --
+    # the SDK's own sanctioned way to mark a message safe to show a
+    # caller. Live-verified against 2.0.0, 2.0.1, 2.1.0, 2.1.1, and
+    # 2.2.0 -- all five now pass test_web_mcp_server.py's full suite
+    # (13/13), where only the first two did before this fix. Ceiling
+    # raised to <2.3 (2.3 doesn't exist yet; re-verify against it the
+    # same way before raising further). Floor stays >=2.0 -- see the
+    # 2026-09-06 fix this comment used to describe: mcp==1.0.0 doesn't
+    # have the mcp.server.mcpserver module this file imports at all.
+    "mcp>=2.0,<2.3",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
