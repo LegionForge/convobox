@@ -145,7 +145,7 @@ web = [
     # loose -- mcp==1.0.0 doesn't even have the mcp.server.mcpserver
     # module src/convobox/web/mcp_server.py imports (a fresh resolve
     # landing there would fail at import time, confirmed live).
-    "mcp>=2.0,<2.1",
+    "mcp>=2.0,<2.3",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
