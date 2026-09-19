@@ -414,6 +414,14 @@ Implements in `scripts/run_convobox.py`: `SpokenEchoFilter`, `EchoAwarePlayer`,
   not a case for enabling NS/AGC at all. Next step: a third platform
   (Linux) before any default changes.
 
+  **Closed (2026-09-16): GitHub issue #323 closed** -- both outcomes
+  the issue asked for are in hand (AGC: clean negative, confirmed
+  harmful; NS: real but not significant vs. fully off). Neither knob
+  changes from its current off-by-default. Cross-platform (Linux)
+  confirmation and any default change remain open, non-blocking future
+  work, not tracked by an open issue any more -- see discussion #324 if
+  picked back up.
+
   **Prerequisites before running.**
   1. Real, OPEN speakers and a real mic in the same room -- NOT
      headphones/headset. This trial specifically exercises the
