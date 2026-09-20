@@ -251,6 +251,19 @@ safeword:
   # PowerShell's Start-Process) can survive -- reproduced live 5/5, not
   # yet fixed. Not a guarantee every spawned process is dead. See
   # docs/KNOWN-ISSUES.md.
+  # KNOWN LIMIT (macOS, codex backend only): reliably kills the session
+  # and the app-server process; a real spawned shell child is reached
+  # via a best-effort ps/pgrep-style text match, live-verified for
+  # common command shapes (short commands, multi-line scripts), but a
+  # sufficiently complex generated command can still slip past the
+  # matcher and survive -- see docs/field-notes/2026-08-23-macos-heavy-
+  # multiline-command-survives-force-kill.md's "not done here" section.
+  # claude-code on macOS is solid (3/3 live, matching an earlier 10/10):
+  # it force-kills its own subprocess directly, which has reliably
+  # reached the real child too. opencode is architecturally unable to
+  # guarantee this on any platform -- the real process lives on a
+  # remote `opencode serve` you don't own; see docs/KNOWN-ISSUES.md's
+  # "opencode's kill behavior is unpredictable" entry.
   # kill_phrase: "eject eject eject"
 
 # ---------------------------------------------------------------------------
