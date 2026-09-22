@@ -1238,6 +1238,23 @@ def test_kill_by_command_text_requests_a_wide_ps_column_regardless_of_environmen
     )
 
 
+def test_kill_by_command_text_degrades_to_empty_list_when_ps_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # force_kill()'s own contract (BackendAdapter.force_kill()'s docstring):
+    # must be idempotent and must not raise. This fallback's `ps` call
+    # failing outright (binary missing, spawn error) must degrade to "no
+    # matches found," not propagate an exception up into force_kill().
+    import convobox.adapters.codex as mod
+
+    def _raise(*a: object, **k: object) -> None:
+        raise OSError("ps: command not found")
+
+    monkeypatch.setattr(mod.subprocess, "run", _raise)
+
+    assert mod._kill_by_command_text("sleep 90") == []
+
+
 # --- background_jobs() via the Windows Job Object (observation only) --
 # mocks convobox.adapters._windows_job_object directly, NOT real ctypes/
 # Win32 calls (that mechanism's own real-API and live-integration tests
