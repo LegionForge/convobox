@@ -825,3 +825,112 @@ async def test_stop_background_job_returns_false_for_an_unknown_job_id(
     # or never-spawned process.
     adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
     assert await adapter.stop_background_job("never-seen") is False
+
+
+async def test_stop_background_job_returns_false_when_process_is_alive_but_job_unknown(
+    tmp_path: Path,
+) -> None:
+    # Distinct from the no-process case above: the process IS live, but
+    # this job_id was never observed via background_jobs() -- must still
+    # fail closed rather than write a stop request for a job that was
+    # never actually seen running.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("hi")  # spawns a real process
+        assert await adapter.stop_background_job("never-seen") is False
+    finally:
+        await _shutdown(adapter)
+
+
+async def test_stop_background_job_succeeds_for_a_known_job_with_a_live_process(
+    tmp_path: Path,
+) -> None:
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("hi")  # spawns a real process
+        adapter._to_backend_events(
+            {"type": "system", "subtype": "task_started", "task_id": "b64cpi75b"}
+        )
+        assert await adapter.stop_background_job("b64cpi75b") is True
+    finally:
+        await _shutdown(adapter)
+
+
+async def test_stop_background_job_write_failure_returns_false_not_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A real, observed job with a live process, but the stop_task write
+    # itself fails (pipe closed) -- same "must not raise into the caller"
+    # policy as send_hard_stop's own write-failure handling above.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    try:
+        await adapter.send_text("hi")  # spawns a real process
+        adapter._to_backend_events(
+            {"type": "system", "subtype": "task_started", "task_id": "b64cpi75b"}
+        )
+
+        async def _raise(payload: dict[str, object]) -> None:
+            raise OSError("pipe closed")
+
+        monkeypatch.setattr(adapter, "_write_line", _raise)
+
+        assert await adapter.stop_background_job("b64cpi75b") is False
+    finally:
+        await _shutdown(adapter)
+
+
+def test_background_tasks_changed_does_not_resurrect_an_already_exited_job(
+    tmp_path: Path,
+) -> None:
+    # Per _observe_background_task_system_message's own docstring: a task
+    # that already recorded EXITED via task_updated must NOT be flipped
+    # back to RUNNING just because a later background_tasks_changed
+    # listing still (briefly) includes it -- the list can lag a task's
+    # own real completion.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(
+        {"type": "system", "subtype": "task_updated", "task_id": "b64cpi75b", "patch": {"status": "killed"}}
+    )
+    adapter._to_backend_events(
+        {
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [{"task_id": "b64cpi75b", "description": "still listed"}],
+        }
+    )
+    (job,) = adapter.background_jobs()
+    assert job.state == JobState.EXITED  # NOT resurrected to RUNNING
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # background_tasks_changed: a task entry with a missing/wrong-type
+        # task_id must be skipped, not raise, and must not register a job.
+        {
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [{"description": "no task_id here"}],
+        },
+        {
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [{"task_id": 12345}],  # wrong type, not str
+        },
+        {"type": "system", "subtype": "task_started"},  # task_id missing
+        {"type": "system", "subtype": "task_started", "task_id": None},
+        {"type": "system", "subtype": "task_updated"},  # task_id missing
+        {"type": "system", "subtype": "task_updated", "task_id": 1},
+        {"type": "system", "subtype": "task_notification"},  # task_id missing
+        {"type": "system", "subtype": "task_notification", "task_id": []},
+    ],
+)
+def test_observe_background_task_ignores_malformed_task_id(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    # Schema drift/malformed payloads must degrade to "nothing recorded",
+    # never raise and break the read loop -- see
+    # _observe_background_task_system_message's own docstring.
+    adapter = ClaudeCodeAdapter(_FAKE_CLI, working_dir=str(tmp_path))
+    adapter._to_backend_events(payload)
+    assert adapter.background_jobs() == ()
