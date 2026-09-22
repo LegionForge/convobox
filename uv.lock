@@ -1118,6 +1118,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "silero-vad" },
     { name = "sounddevice" },
+    { name = "torch" },
 ]
 
 [package.optional-dependencies]
@@ -1185,6 +1186,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<0.17" },
     { name = "silero-vad", specifier = ">=5.1" },
     { name = "sounddevice", specifier = ">=0.4.7" },
+    { name = "torch", specifier = ">=2.13" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.30" },
 ]
 provides-extras = ["dev", "aec", "cuda", "piper", "web", "analysis", "calibration", "browser"]

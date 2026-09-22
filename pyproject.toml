@@ -37,6 +37,18 @@ dependencies = [
     "sounddevice>=0.4.7",
     "numpy>=1.26",
     "silero-vad>=5.1",
+    # torch itself is only a transitive dep of silero-vad (no version floor
+    # of its own there) -- pinned explicitly because pip's fresh resolver
+    # (used by CI's Dependency Audit job, which installs from pyproject.toml
+    # directly rather than uv.lock) backtracks to torch 2.9.1, which carries
+    # 3 fixable known CVEs (PYSEC-2025-194/195, PYSEC-2026-2286). >=2.13
+    # matches what uv.lock already resolves for local dev. A 4th CVE,
+    # PYSEC-2026-139 (pt2 Loading Handler deserialization, local-only,
+    # requires loading an untrusted .pt2 package), has no fix version
+    # upstream as of 2026-09-19 -- not applicable here since ConvoBox only
+    # uses torch via silero-vad's own VAD inference, never loads external
+    # .pt2 packages.
+    "torch>=2.13",
     "faster-whisper>=1.0",
     "kokoro-onnx>=0.4",
     "httpx>=0.27",
