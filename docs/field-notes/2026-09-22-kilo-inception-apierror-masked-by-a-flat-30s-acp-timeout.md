@@ -162,3 +162,10 @@ source of the delay).
   problem, not a test bug or a convobox regression) -- re-run
   `pytest tests/test_kilo_live.py` once Inception's status is confirmed
   clear before treating a continued failure as still-open.
+- **update, same night**: a fourth attempt against `mercury-2`, roughly an
+  hour after the first, reproduced the identical `-32603`/`APIError:
+  Internal server error` at 76.97s -- same error, same shape, comparable
+  duration. Four for four across ~an hour rules out a brief blip; this
+  looks like a sustained condition on Inception's side (or kilo's bridge
+  to it), not one bad request. Still unconfirmed whether it is
+  account-specific or affects every kilo+Inception user right now.
