@@ -793,6 +793,17 @@ use of it to support Claude Code/Codex/Cursor/OpenCode/Hermes uniformly.
       permission-rule engine (just discovered above) are both real
       behavioral surface a naive default shouldn't need a user to
       already understand.
+  - **This entire Kilo battery is now a real, repeatable automated test,
+    not just a one-time manual pass (2026-09-09):** `tests/test_kilo_live.py`
+    spawns the real `kilo acp` binary (skipped automatically when `kilo`
+    isn't installed -- CI never runs it) and asserts every finding above
+    still holds. Deliberately NOT part of the fake-based suite every
+    other adapter test in this repo uses (`fake_acp_server.py` doesn't
+    distinguish "kilo" from "opencode" at all, by design -- it just
+    speaks generic ACP) -- a fake is frozen at whatever shape it was
+    built against and structurally cannot catch a future `kilo` CLI
+    update changing real wire behavior. Run it manually before a release
+    or after upgrading `kilo` itself: `pytest tests/test_kilo_live.py`.
 
 ## Mid-term
 - VS Code / VSCodium extension: voice channel + editor-navigation
