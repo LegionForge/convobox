@@ -2817,6 +2817,14 @@ attempt with live before/after verification (not just "add a
 `transport.close()` call and hope"), same bar this project already holds
 its safety-relevant fixes to.
 
+**Repro attempt, 2026-09-24 (Windows/Helios):** `convobox-doctor --backend`
+run 10x back to back (5x codex, 5x claude-code, spawn-only probe, no
+prompt sent) did not reproduce the traceback once -- confirms this is a
+genuine timing race, not a reliably-hit condition on this Python/Windows
+build as currently installed. Not attempting a fix blind without a live
+repro to verify against; left as-is for whoever next hits it live to
+capture the exact traceback and conditions.
+
 ---
 
 ### A hard-stopped in-flight turn can show as a generic "error_during_execution" turn -- cosmetic mislabel
