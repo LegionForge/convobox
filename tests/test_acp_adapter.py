@@ -856,3 +856,70 @@ async def test_ensure_session_reraises_acp_backend_died_for_plan_mode(monkeypatc
 
     with pytest.raises(ACPBackendDied):
         await adapter._ensure_session()
+
+
+# acp._resolve_command had no dedicated unit test at all -- codex.py's own
+# equivalent function has both a mocked-shutil.which test
+# (test_codex_adapter_resolves_windows_cmd_shim) AND a real-machine-dependent
+# one that turned out to be broken (fixed in
+# test_create_backend_adapter_codex_defaults, see that test's own comment):
+# it asserted shutil.which("codex") resolves to a real codex.cmd on whatever
+# machine runs pytest, which silently depended on the install method (npm
+# global vs. OpenAI's native Windows installer) rather than testing the
+# resolution logic itself. These tests follow the corrected, mocked pattern
+# from the start, for both backends _resolve_command actually special-cases
+# (opencode, kilo), so the same class of bug can't hide here uncaught.
+@pytest.mark.parametrize("backend", ["opencode", "kilo"])
+def test_acp_resolve_command_resolves_windows_cmd_shim(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    monkeypatch.setattr(acp.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        acp.shutil,
+        "which",
+        lambda name: f"C:/bin/{name}" if name == f"{backend}.cmd" else None,
+    )
+
+    resolved = acp._resolve_command([backend], backend=backend)
+
+    assert resolved == [f"C:/bin/{backend}.cmd"]
+
+
+@pytest.mark.parametrize("backend", ["opencode", "kilo"])
+def test_acp_resolve_command_falls_back_to_exe_when_no_cmd_shim(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    # The case this project's own machine hit for codex (native installer,
+    # no npm-global .cmd shim on PATH) -- the fallback order's second rung.
+    monkeypatch.setattr(acp.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        acp.shutil,
+        "which",
+        lambda name: f"C:/bin/{name}" if name == f"{backend}.exe" else None,
+    )
+
+    resolved = acp._resolve_command([backend], backend=backend)
+
+    assert resolved == [f"C:/bin/{backend}.exe"]
+
+
+def test_acp_resolve_command_never_consults_which_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(acp.os, "name", "posix", raising=False)
+
+    def _unexpected_which(name: str) -> str | None:
+        raise AssertionError(f"shutil.which should not be called off Windows, got {name!r}")
+
+    monkeypatch.setattr(acp.shutil, "which", _unexpected_which)
+
+    assert acp._resolve_command(["opencode"], backend="opencode") == ["opencode"]
+
+
+def test_acp_resolve_command_leaves_a_non_default_command_untouched() -> None:
+    # An explicit, non-bare command (a real path, or a name that isn't
+    # opencode/kilo) is honored verbatim -- _resolve_command only
+    # second-guesses the two names it knows how to look up.
+    assert acp._resolve_command(["/usr/local/bin/my-opencode"], backend="opencode") == [
+        "/usr/local/bin/my-opencode"
+    ]
