@@ -2,10 +2,12 @@
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from convobox.adapters import acp
 from convobox.adapters.acp import ACPAdapter, ACPBackendDied
 from convobox.adapters.base import BackendEvent, BackendEventType
 
@@ -384,7 +386,7 @@ async def test_acp_adapter_send_text_is_nonblocking(monkeypatch):
 
     release = asyncio.Event()
 
-    async def fake_request(method, params):
+    async def fake_request(method, params, **kwargs):
         assert method == "session/prompt"
         await release.wait()
         return {"stopReason": "end_turn"}
@@ -414,7 +416,7 @@ async def test_acp_adapter_send_text_error_clears_busy_and_emits_error(monkeypat
     async def fake_ensure_session():
         return "s1"
 
-    async def fake_request(method, params):
+    async def fake_request(method, params, **kwargs):
         raise RuntimeError("ACP error: boom")
 
     monkeypatch.setattr(adapter, "_ensure_session", fake_ensure_session)
@@ -478,8 +480,8 @@ async def test_process_death_mid_turn_fails_fast_and_clears_busy() -> None:
     _read_loop's own finally block used to only push _EOF -- it never
     rejected whatever was still in self._pending, nor cleared self._busy.
     A backend dying mid-turn left the caller's own session/prompt request
-    waiting the full _RESPONSE_TIMEOUT_S (30s) to time out on its own, and
-    left is_busy() reporting True forever afterward (routing the next
+    waiting the full _PROMPT_STALL_TIMEOUT_S (30s) to time out on its own,
+    and left is_busy() reporting True forever afterward (routing the next
     utterance to send_interject() instead of send_text() while believing
     a dead turn was still live). Must resolve in well under 30s -- 5s is
     generous slack for process spawn/exit on a loaded CI box -- and
@@ -531,6 +533,67 @@ async def test_send_hard_stop_cancels_a_hanging_turn() -> None:
         _ = await asyncio.wait_for(adapter._prompt_task, timeout=5.0)  # awaited for synchronization only
         event = await asyncio.wait_for(adapter._events.get(), timeout=1.0)
         assert event.type == BackendEventType.DONE
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_stall_timeout_fires_on_true_silence(monkeypatch) -> None:
+    """A backend that never responds AND never streams anything (the
+    "hang" scenario, tests/fake_acp_server.py) must be given up on via
+    the stall path, not left waiting for _PROMPT_MAX_TIMEOUT_S -- see
+    acp.py's own "session/prompt uses a stall-based timeout" docstring
+    bullet and docs/field-notes/2026-09-22-kilo-inception-apierror-
+    masked-by-a-flat-30s-acp-timeout.md, the live incident this
+    mechanism exists to handle better. Both constants patched down so
+    this stays fast; the assertion is on WHICH message fires ("stalled",
+    not "absolute"), pinning that a pure-silence backend is caught by
+    the silence check specifically, not merely by the backstop
+    eventually kicking in regardless of shape.
+    """
+    monkeypatch.setattr(acp, "_PROMPT_STALL_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(acp, "_PROMPT_MAX_TIMEOUT_S", 5.0)
+    adapter = _real_adapter()
+    try:
+        await adapter.send_text("please hang forever")
+        event = await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+        assert event.type == BackendEventType.ERROR
+        assert "stalled" in event.content
+        assert adapter.is_busy() is False
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_survives_past_stall_timeout_while_active(monkeypatch) -> None:
+    """A backend that keeps streaming SOMETHING (the "heartbeat"
+    scenario) but never actually resolves must survive well past its own
+    stall timeout -- proving _last_activity really does reset on each
+    inbound notification, not just on the final response -- and only
+    give up at the absolute backstop. This is the core claim of the
+    2026-09-23 timeout redesign: a real, actively-progressing turn (tool
+    calls, streamed text) must not be killed by an arbitrary cap. Both
+    constants patched tiny so the test stays fast; the assertion is on
+    WHICH message fires ("absolute", not "stalled") and that it took
+    meaningfully longer than the stall value alone, not just that it
+    eventually gave up somehow.
+    """
+    monkeypatch.setattr(acp, "_PROMPT_STALL_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(acp, "_PROMPT_MAX_TIMEOUT_S", 0.6)
+    adapter = _real_adapter()
+    try:
+        start = time.monotonic()
+        await adapter.send_text("please heartbeat forever")
+        # The heartbeats themselves arrive as ordinary TEXT events (that's
+        # the whole point -- real activity, not silence) -- skip past them
+        # to the terminal ERROR the eventual backstop produces.
+        event = await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+        while event.type == BackendEventType.TEXT:
+            event = await asyncio.wait_for(adapter._events.get(), timeout=5.0)
+        elapsed = time.monotonic() - start
+        assert event.type == BackendEventType.ERROR
+        assert "absolute" in event.content
+        assert elapsed > 0.4  # well past the 0.15s stall timeout alone
     finally:
         await adapter.aclose()
 

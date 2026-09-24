@@ -42,6 +42,15 @@ Turn behavior is scripted by the prompt text:
                                 once a session/cancel NOTIFICATION
                                 arrives for it -- live-verified shape,
                                 see acp.py's own send_hard_stop() comment
+  contains "heartbeat"      -> session/prompt never resolves either, but
+                                (unlike plain "hang") emits a harmless
+                                agent_message_chunk notification every
+                                0.05s forever -- for testing that
+                                _wait_with_stall_detection's activity
+                                reset keeps a still-progressing turn
+                                alive past its own stall timeout (see
+                                acp.py's own "session/prompt uses a
+                                stall-based timeout" docstring bullet)
   contains "die"            -> exits the process mid-turn, no response
                                 ever sent
   contains "report methods" -> agent_message_chunk listing every method
@@ -63,6 +72,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 
 SESSION_ID = "sess_test"
 
@@ -205,6 +216,18 @@ def main() -> None:
             if "emit garbage first" in text:
                 sys.stdout.write("not valid json at all {{{\n")
                 sys.stdout.flush()
+            if "heartbeat" in text:
+                # Never resolves (like "hang"), but a daemon thread keeps
+                # emitting harmless notifications forever -- the main
+                # thread's stdin loop below just blocks waiting for more
+                # input, same as the plain "hang" case.
+                def _heartbeat() -> None:
+                    while True:
+                        time.sleep(0.05)
+                        agent_text("heartbeat")
+
+                threading.Thread(target=_heartbeat, daemon=True).start()
+                continue
             if "hang" in text:
                 hung_request_id = req_id
                 continue

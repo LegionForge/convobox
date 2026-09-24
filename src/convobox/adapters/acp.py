@@ -89,6 +89,28 @@ confirmed, not just schema-read:
   broken `approve` mode) rather than silently downgrading to `plan` or
   silently upgrading to full trust -- either would violate what the user
   actually configured without telling them.
+- **`session/prompt` uses a stall-based timeout, not a flat one
+  (2026-09-23)** -- live-caught the same night PR #417's live-Kilo battery
+  first ran unattended: Inception's API returned a server-side error for
+  every `session/prompt` call, but kilo took 25-77s to report it, well
+  past the flat 30s timeout every other request also used (see
+  docs/field-notes/2026-09-22-kilo-inception-apierror-masked-by-a-flat-
+  30s-acp-timeout.md). A flat cap on `session/prompt` is the wrong shape
+  either way: `send_text()`'s own docstring already documents that this
+  call resolves only once the WHOLE turn completes, and a real turn
+  (multi-tool-call edits, test runs) can legitimately run past any fixed
+  cap while actively streaming `session/update` notifications the whole
+  time. `_wait_with_stall_detection` resets its clock on every inbound
+  JSON-RPC message (response, notification, or server request) and only
+  gives up after `_PROMPT_STALL_TIMEOUT_S` of true silence -- the same
+  30s that already proved itself catching a genuinely hung backend,
+  without killing a long but actively-progressing one. `_PROMPT_MAX_
+  TIMEOUT_S` is a generous absolute backstop so a pathological
+  keepalive-forever backend still can't hang a turn permanently. Quick
+  control calls (`initialize`, `session/new`, `session/set_config_option`,
+  `session/set_mode`) keep a flat, short `_CONTROL_TIMEOUT_S` -- they're
+  single local round trips with no legitimate reason to run long, so
+  failing fast on them is strictly better than waiting.
 
 Transport: JSON-RPC multiplexes requests/responses and notifications on one
 bidirectional pipe, similar to codex.py. A background reader task routes
@@ -115,6 +137,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
@@ -128,7 +151,20 @@ from convobox.adapters.base import (
 logger = logging.getLogger(__name__)
 
 _STREAM_LIMIT = 10 * 1024 * 1024
-_RESPONSE_TIMEOUT_S = 30.0
+# Quick, single-round-trip control calls (initialize, session/new,
+# session/set_config_option, session/set_mode) -- always ~2s in a healthy
+# process (live-verified repeatedly in the 2026-09-22 field note's own
+# probes), so a short flat timeout fails fast on a broken handshake.
+_CONTROL_TIMEOUT_S = 15.0
+# session/prompt only: how much SILENCE (no session/update notification, no
+# final response) is tolerated before giving up -- not total turn duration.
+# See this module's own docstring, "session/prompt uses a stall-based
+# timeout" bullet, for why a flat cap is the wrong shape here.
+_PROMPT_STALL_TIMEOUT_S = 30.0
+# session/prompt only: absolute backstop regardless of activity, so a
+# pathological backend emitting empty keepalives forever still can't hang
+# a turn permanently.
+_PROMPT_MAX_TIMEOUT_S = 300.0
 
 
 def _resolve_command(command: Sequence[str] | None, backend: str = "opencode") -> list[str]:
@@ -197,7 +233,8 @@ class ACPAdapter(BackendAdapter):
                 default session picked "openai/gpt-5.6-terra" while this
                 machine's real working model is "inception/mercury-2");
                 prompting against it doesn't error, it just never resolves
-                until _RESPONSE_TIMEOUT_S elapses. Leave unset to accept
+                -- see _PROMPT_STALL_TIMEOUT_S/_PROMPT_MAX_TIMEOUT_S below
+                for how long that can take to surface. Leave unset to accept
                 the session's own default (today's original behavior,
                 works if that default happens to be valid for your
                 account).
@@ -215,6 +252,10 @@ class ACPAdapter(BackendAdapter):
         self._busy = False
         self._request_seq = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        # Bumped on every inbound JSON-RPC message (_read_loop) -- the
+        # stall clock session/prompt waits on, see
+        # _wait_with_stall_detection.
+        self._last_activity: float = time.monotonic()
         self._events: asyncio.Queue[BackendEvent | object] = asyncio.Queue()
         # Tracks the in-flight session/prompt round trip so its own
         # completion can clear is_busy()/emit DONE without blocking the
@@ -255,10 +296,14 @@ class ACPAdapter(BackendAdapter):
         try:
             # Live-verified 2026-09-06: session/prompt takes a content-block
             # array, not a bare "text" string -- see this module's own
-            # docstring.
+            # docstring. stall_aware=True: see the docstring's own
+            # "session/prompt uses a stall-based timeout" bullet -- this is
+            # the one request that can legitimately run past a short flat
+            # cap while actively streaming.
             await self._request(
                 "session/prompt",
                 {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]},
+                stall_aware=True,
             )
             event = BackendEvent(type=BackendEventType.DONE)
         except asyncio.CancelledError:
@@ -531,6 +576,13 @@ class ACPAdapter(BackendAdapter):
                     logger.warning(f"Failed to decode ACP line: {e}")
                     continue
 
+                # Any successfully-parsed inbound message counts as proof
+                # of life for the stall clock session/prompt waits on (see
+                # _wait_with_stall_detection) -- a response, a notification
+                # (streaming text/tool-call progress), or a server request
+                # all mean the backend is actively communicating, not hung.
+                self._last_activity = time.monotonic()
+
                 # Route responses to pending requests. future.done() is
                 # checked before touching it in both branches (live-caught
                 # 2026-09-09): asyncio.wait_for's own timeout path cancels
@@ -612,10 +664,10 @@ class ACPAdapter(BackendAdapter):
             # busy meant is_busy() stayed True forever after the backend
             # died, routing the next utterance to send_interject() instead
             # of send_text() while believing a dead turn was still live.
-            # Losing the pending rejection meant a request awaiting
-            # _RESPONSE_TIMEOUT_S (30s) had no way to learn the backend
-            # was already gone -- it just sat there for the full 30s
-            # before timing out on its own, and if the caller was
+            # Losing the pending rejection meant a request awaiting its own
+            # timeout had no way to learn the backend was already gone --
+            # it just sat there for the full timeout before giving up on
+            # its own, and if the caller was
             # _await_prompt (session/prompt itself), the resulting ERROR
             # event usually arrived too late to reach anyone: events()
             # had already returned on the _EOF pushed here, and
@@ -724,8 +776,20 @@ class ACPAdapter(BackendAdapter):
         self,
         method: str,
         params: dict[str, Any] | None = None,
+        *,
+        stall_aware: bool = False,
     ) -> dict[str, Any]:
-        """Send a JSON-RPC request and wait for the response."""
+        """Send a JSON-RPC request and wait for the response.
+
+        stall_aware=True (session/prompt only -- see this module's own
+        "session/prompt uses a stall-based timeout" docstring bullet):
+        waits past _CONTROL_TIMEOUT_S as long as the backend keeps
+        sending SOMETHING (a response, a notification, a server request),
+        only giving up after _PROMPT_STALL_TIMEOUT_S of true silence,
+        bounded by the absolute _PROMPT_MAX_TIMEOUT_S backstop. Every
+        other call here is a quick, single round trip with no legitimate
+        reason to run long, so it keeps the flat _CONTROL_TIMEOUT_S.
+        """
         request_id = self._request_seq
         self._request_seq += 1
 
@@ -742,9 +806,11 @@ class ACPAdapter(BackendAdapter):
 
         try:
             await self._write(payload)
-            return await asyncio.wait_for(future, timeout=_RESPONSE_TIMEOUT_S)
+            if stall_aware:
+                return await self._wait_with_stall_detection(future, method)
+            return await asyncio.wait_for(future, timeout=_CONTROL_TIMEOUT_S)
         except TimeoutError:
-            raise RuntimeError(f"ACP request {method} timed out after {_RESPONSE_TIMEOUT_S}s")
+            raise RuntimeError(f"ACP request {method} timed out after {_CONTROL_TIMEOUT_S}s")
         finally:
             # Not just in the TimeoutError branch above -- live-caught
             # 2026-09-09: a write failure (_write raising, e.g. a broken
@@ -756,6 +822,41 @@ class ACPAdapter(BackendAdapter):
             # and removed every pending entry by the time this runs (the
             # backend died while this exact request was in flight).
             self._pending.pop(request_id, None)
+
+    async def _wait_with_stall_detection(
+        self, future: asyncio.Future[dict[str, Any]], method: str
+    ) -> dict[str, Any]:
+        """Wait for `future`, giving up only after _PROMPT_STALL_TIMEOUT_S
+        of true silence rather than a flat cap on total duration -- see
+        _request()'s own docstring. Polls in short slices so the stall
+        clock (_last_activity, bumped by _read_loop on every inbound
+        message) can be re-checked; asyncio.shield keeps each slice's own
+        timeout from cancelling `future` itself, so the SAME future is
+        re-awaited slice to slice rather than replaced. Raises RuntimeError
+        directly (not TimeoutError) so this bypasses _request()'s own
+        generic "timed out after _CONTROL_TIMEOUT_S" handling and carries
+        its own, more specific message instead.
+        """
+        start = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - start
+            remaining = _PROMPT_MAX_TIMEOUT_S - elapsed
+            if remaining <= 0:
+                future.cancel()
+                raise RuntimeError(
+                    f"ACP request {method} exceeded the absolute "
+                    f"{_PROMPT_MAX_TIMEOUT_S}s limit"
+                )
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=min(1.0, remaining))
+            except TimeoutError:
+                silence = time.monotonic() - self._last_activity
+                if silence >= _PROMPT_STALL_TIMEOUT_S:
+                    future.cancel()
+                    raise RuntimeError(
+                        f"ACP request {method} stalled -- no activity for "
+                        f"{_PROMPT_STALL_TIMEOUT_S}s (running {elapsed:.1f}s total)"
+                    )
 
     async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a JSON-RPC notification (no "id", no response expected).
