@@ -885,12 +885,33 @@ def test_create_backend_adapter_codex() -> None:
     assert adapter._command == ["my-codex"]
 
 
-def test_create_backend_adapter_codex_defaults() -> None:
-    adapter = create_backend_adapter(BackendConfig(name="codex"))
-    assert isinstance(adapter, CodexAdapter)
+def test_create_backend_adapter_codex_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This test's win32 branch previously asserted `shutil.which` resolves
+    # "codex" to a real `codex.cmd` on the machine actually running pytest --
+    # true only for an npm-global install (creates a .cmd shim on Windows),
+    # false for OpenAI's native Windows installer (ships codex.exe only, no
+    # .cmd). Never caught in CI (the full suite only runs on ubuntu-latest;
+    # Windows-matrix CI jobs cover two other, narrower test files -- see
+    # ci.yml's process-kill-matrix job), so it silently depended on however
+    # codex happened to be installed on whichever Windows dev machine ran it
+    # locally. `shutil.which` is mocked here instead, matching
+    # test_codex_adapter_resolves_windows_cmd_shim's pattern, so the
+    # assertion is about _resolve_command()'s own fallback logic, not this
+    # machine's install method.
     if sys.platform == "win32":
+        import convobox.adapters.codex as codex_mod
+
+        monkeypatch.setattr(
+            codex_mod.shutil,
+            "which",
+            lambda name: f"C:/bin/{name}" if name == "codex.cmd" else None,
+        )
+        adapter = create_backend_adapter(BackendConfig(name="codex"))
+        assert isinstance(adapter, CodexAdapter)
         assert adapter._command[0].endswith("codex.cmd")
     else:
+        adapter = create_backend_adapter(BackendConfig(name="codex"))
+        assert isinstance(adapter, CodexAdapter)
         assert adapter._command == ["codex"]
 
 
