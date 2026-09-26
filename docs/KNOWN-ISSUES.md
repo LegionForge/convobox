@@ -2429,6 +2429,23 @@ bug above) rather than reference an environment variable. A cold-start
 retry may also be needed the first time a server starts. Full write-up:
 `docs/field-notes/2026-08-11-permission-model-validation-claude-codex-opencode.md`.
 
+**Reconfirmed, 2026-09-24 (Windows/Helios, opencode 1.18.32 -- 17 patch
+releases past this entry's last live check on 1.18.15):** the core
+symptom is unchanged. A fresh `opencode serve` instance, with a real,
+already-authenticated OpenAI OAuth credential present (`opencode auth
+list` shows it), still omits `openai` entirely from both `GET
+/api/provider` and `GET /api/model` -- confirmed via direct HTTP GET
+against both endpoints, no prompt sent, no LLM call made, zero cost.
+`/api/model`'s full catalog (47 models) is Zen/Inception/Ollama-only;
+not one `gpt-*`/`openai/*` entry appears despite the OAuth credential
+being present and valid per `opencode auth list`. Zen's own billing
+suspension from the 2026-08-11 finding (`HTTP 402` on `opencode/
+hy3-free`) was NOT re-tested this pass. Still not filed upstream. Not
+re-verifying the deeper mechanism (the `ModelUnavailableError` server
+log, the workaround's continued validity) this pass -- this was a
+cheap, zero-cost "is the headline symptom still true on a much newer
+version" check, not a full re-run of the original investigation.
+
 ---
 
 ### Codex `permission_mode: approve` has no working codex-cli mapping -- fails loudly by design, not just "unfixed"
