@@ -4,7 +4,7 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
-## [0.5.0] — TBD (drafted 2026-09-09, pending live UAT with Kilo Code before tagging)
+## [0.5.0] — 2026-09-28
 
 ### Added
 - **A new backend: ACP (Agent Client Protocol) over JSON-RPC-over-stdio,
@@ -142,6 +142,16 @@ minor versions carry feature and behavior changes.
   (`src/convobox/config.py`, matching the existing
   `detect_permission_conflict`/`detect_claude_code_approval_gap`
   pattern) and wired into all three consumers.
+- **ACP's `session/prompt` shared the same flat 30s timeout as quick
+  control calls** (`initialize`, `session/new`, etc.) -- so a backend
+  slow to report its own real failure lost that error behind a generic
+  "timed out after 30.0s" (live-observed: Kilo took 25-77s to surface a
+  genuine Inception `APIError`), and any healthy turn that legitimately
+  ran long (multi-tool-call edits, test runs) risked being killed
+  outright. Split into three timeouts: 15s for quick control calls, a
+  30s *stall* timeout for `session/prompt` that resets on any inbound
+  activity so an actively-streaming turn survives indefinitely, and a
+  300s absolute backstop regardless of activity.
 
 ### Also this cycle
 Extensive live UAT and R&D, documented in `docs/field-notes/` and
