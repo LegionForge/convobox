@@ -1061,7 +1061,10 @@ def load_config_lenient(
         kwargs: dict[str, Any] = {}
         for name, model_field in AppConfig.model_fields.items():
             section_raw = raw.get(name)
-            if section_raw is None:
+            # annotation is Optional in pydantic's FieldInfo typing; an
+            # unannotated field has nothing to validate against, so it
+            # takes its default like a missing section.
+            if section_raw is None or model_field.annotation is None:
                 kwargs[name] = model_field.get_default(call_default_factory=True)
                 continue
             try:
