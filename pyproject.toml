@@ -79,7 +79,7 @@ dev = [
     # PyPI at the time) added RUF022/G201/SIM102/PIE808/etc, breaking CI's
     # lint job on `main` while every local run passed. Re-verify against
     # the new version's diff before bumping this bound.
-    "ruff>=0.15,<0.17",
+    "ruff>=0.15,<0.18",
     "bandit>=1.9",
 ]
 # Acoustic echo cancellation (WebRTC APM, BSD-3). A separate extra, NOT
