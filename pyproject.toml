@@ -160,7 +160,7 @@ web = [
     # same way before raising further). Floor stays >=2.0 -- see the
     # 2026-09-06 fix this comment used to describe: mcp==1.0.0 doesn't
     # have the mcp.server.mcpserver module this file imports at all.
-    "mcp>=2.0,<2.3",
+    "mcp>=2.0,<2.4",
 ]
 # Post-hoc plotting for scripts/analyze_incident.py (saved
 # --capture-incidents / --aec-dump WAVs). Plotting only -- never imported
