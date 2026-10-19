@@ -10,6 +10,8 @@ src/convobox/adapters/claude_code.py's module docstring). Behavior is
 scripted by the incoming prompt text:
 
   contains "use a tool" -> tool_use + tool_result turn, then text + result
+  contains "folded"     -> nothing at all (the real CLI folds a send that lands
+                           mid-turn into the running turn: 3 sends -> 1 result)
   contains "hang"       -> emits one text, then no result until interrupted
   contains "fail"       -> result with is_error=true
   contains "die"        -> exits mid-turn without a result
@@ -41,6 +43,8 @@ def assistant(blocks: list[dict]) -> dict:
 
 
 def handle_prompt(text: str) -> None:
+    if "folded" in text:
+        return  # absorbed into the running turn: no output, no result of its own
     if "bigline" in text:
         emit({"type": "system", "subtype": "init", "padding": "x" * 100_000})
     if "die" in text:

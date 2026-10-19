@@ -201,6 +201,14 @@ _INTERACTIVE_APPROVAL_PERMISSION_MODE = "acceptEdits"
 # BackendEventType.ARTIFACT exists for.
 _ARTIFACT_TOOL_NAMES = frozenset({"Write", "Edit"})
 
+# How long to wait, after a result that leaves _pending > 0, for any turn
+# activity before concluding the leftover sends were folded into an earlier
+# turn and will never get a result of their own. Deliberately generous: when
+# the CLI really does run queued messages as separate turns, the next turn's
+# first assistant/user message can lag by a model-latency's worth, and a
+# false idle would let a queued interjection flush mid-turn.
+_IDLE_GRACE_S = 10.0
+
 # Flags this adapter's protocol handling depends on; appended to whatever
 # base command the config supplies, so a user command like
 # ["claude", "--model", "..."] composes cleanly with them.
@@ -334,6 +342,12 @@ class ClaudeCodeAdapter(BackendAdapter):
         # docstring), so N sends produce N result messages and busy must
         # hold until the last one lands.
         self._pending = 0
+        # Set when a result arrives but _pending is still > 0, cleared by
+        # any turn activity (see _IDLE_GRACE_S): the N-sends-N-results
+        # assumption above does NOT hold when sends land mid-turn and the
+        # CLI folds them into the running turn (live-probed 2026-10-18: 3
+        # sends -> 1 result), which would latch is_busy() True forever.
+        self._idle_deadline: float | None = None
         self._request_seq = 0
         # BackendEvent queue fed by _read_loop (stdout) AND
         # _handle_approval_connection (the hook TCP server) -- see module
@@ -799,6 +813,19 @@ class ClaudeCodeAdapter(BackendAdapter):
         self._pending = 0
 
     def is_busy(self) -> bool:
+        if (
+            self._pending > 0
+            and self._idle_deadline is not None
+            and time.monotonic() >= self._idle_deadline
+        ):
+            logger.warning(
+                "claude result arrived but %d send(s) never got their own result "
+                "and no turn activity followed for %.0fs -- the CLI folded them "
+                "into an earlier turn; treating the backend as idle",
+                self._pending, _IDLE_GRACE_S,
+            )
+            self._pending = 0
+            self._idle_deadline = None
         return self._pending > 0
 
     def background_jobs(self) -> Sequence[BackgroundJob]:
@@ -947,6 +974,11 @@ class ClaudeCodeAdapter(BackendAdapter):
     def _to_backend_events(self, outer: dict[str, Any]) -> list[BackendEvent]:
         msg_type = outer.get("type")
 
+        if msg_type in ("assistant", "user"):
+            # Real turn activity: the next turn (if any) has started, so
+            # the post-result idle countdown no longer applies.
+            self._idle_deadline = None
+
         if msg_type == "assistant":
             events: list[BackendEvent] = []
             for block in _content_blocks(outer):
@@ -992,6 +1024,9 @@ class ClaudeCodeAdapter(BackendAdapter):
             # send_hard_stop already accounted for by zeroing _pending
             # (hence the max()).
             self._pending = max(0, self._pending - 1)
+            self._idle_deadline = (
+                time.monotonic() + _IDLE_GRACE_S if self._pending > 0 else None
+            )
             if outer.get("is_error"):
                 return [
                     BackendEvent(
