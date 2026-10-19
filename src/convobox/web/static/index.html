@@ -28,6 +28,12 @@
     --assistant-bg: #f0f0f2;
     --tool-bg: #fff8e1;
     --error-fg: #b00020;
+    --act-listening: #00697a;
+    --act-capturing: #1b6e2a;
+    --act-busy: #8a5a00;
+    --act-speaking: #2e7d32;
+    --act-paused: #8e24aa;
+    --act-waiting: #b0006b;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -41,6 +47,12 @@
       --assistant-bg: #2a2a2a;
       --tool-bg: #3a3220;
       --error-fg: #ff6b6b;
+      --act-listening: #4dd0e1;
+      --act-capturing: #66e07a;
+      --act-busy: #ffca28;
+      --act-speaking: #81c784;
+      --act-paused: #ce93d8;
+      --act-waiting: #ff80ab;
     }
   }
   * { box-sizing: border-box; }
@@ -82,14 +94,35 @@
   #status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
   #status.connected::before { content: "\25cf"; color: #2e7d32; margin-right: 0.3rem; }
   #status.disconnected::before { content: "\25cf"; color: #c62828; margin-right: 0.3rem; }
-  /* The mic loop's own activity (listening/capturing/speaking/working/
-     waiting/paused) -- same vocabulary the TUI's status line already
-     used, now also broadcast to the web UI (see forward_status in
-     src/convobox/web/bridge.py). Text-only, no color coding -- these
-     aren't states that need an alarm color, just an at-a-glance label. */
-  #activity-status { font-size: 0.75rem; color: var(--dim); white-space: nowrap; }
+  /* The mic loop's own activity (listening/capturing/transcribing/
+     working/speaking/paused/waiting) -- same vocabulary the TUI's status
+     line already used, now also broadcast to the web UI (see
+     forward_status in src/convobox/web/bridge.py). Colors mirror the
+     TUI's _STATUS_COLOR (cyan listening, green capturing/speaking, amber
+     transcribing/working, magenta paused/waiting). Color is never the
+     only cue (WCAG 1.4.1): every state also keeps its text label plus an
+     aria-hidden icon, and the text colors are tuned per theme to clear
+     4.5:1 on the ribbon background. */
+  #activity-status {
+    font-size: 0.75rem; color: var(--dim); white-space: nowrap;
+    border: 1px solid currentColor; border-radius: 999px; padding: 0.1rem 0.6rem;
+  }
   #activity-status:empty { display: none; }
-  #activity-status.paused { color: #e0a030; font-weight: 600; }
+  #activity-status .act-icon { margin-right: 0.3em; display: inline-block; }
+  #activity-status .act-icon svg { vertical-align: -0.125em; }
+  #activity-status.listening { color: var(--act-listening); }
+  #activity-status.capturing { color: var(--act-capturing); font-weight: 600; }
+  #activity-status.transcribing, #activity-status.working { color: var(--act-busy); }
+  #activity-status.speaking { color: var(--act-speaking); }
+  #activity-status.paused { color: var(--act-paused); font-weight: 600; }
+  #activity-status.waiting { color: var(--act-waiting); font-weight: 700; }
+  @media (prefers-reduced-motion: no-preference) {
+    #activity-status.capturing .act-icon,
+    #activity-status.transcribing .act-icon,
+    #activity-status.working .act-icon,
+    #activity-status.waiting .act-icon { animation: act-pulse 1.2s ease-in-out infinite; }
+    @keyframes act-pulse { 50% { opacity: 0.35; } }
+  }
   .ribbon .spacer { flex: 1 1 auto; }
   .ribbon select {
     font-size: 0.8rem;
@@ -1593,6 +1626,42 @@ function artifactUrl(url) {
       : "Pause listening (hard-stops in-flight work); say the resume word to resume by voice instead";
   }
 
+  // Inline SVGs, not Unicode glyphs: the same shapes on every OS/browser
+  // and they inherit the state color via currentColor (color emoji
+  // ignore CSS color). Static constants only -- never built from data, so
+  // assigning them via innerHTML is safe. Decorative (the span is
+  // aria-hidden); the text label carries the state for screen readers.
+  const _SVG_OPEN =
+    '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'stroke-linejoin="round" focusable="false">';
+  const ACTIVITY_ICONS = {
+    // microphone
+    listening: _SVG_OPEN +
+      '<rect x="6" y="1.5" width="4" height="8" rx="2"/>' +
+      '<path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.5"/></svg>',
+    // record dot
+    capturing: _SVG_OPEN + '<circle cx="8" cy="8" r="5" fill="currentColor"/></svg>',
+    // text lines
+    transcribing: _SVG_OPEN + '<path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>',
+    // gear-like cog
+    working: _SVG_OPEN +
+      '<circle cx="8" cy="8" r="3"/>' +
+      '<path d="M8 1.5v2.5M8 12v2.5M1.5 8H4M12 8h2.5M3.4 3.4l1.8 1.8M10.8 10.8l1.8 1.8M12.6 3.4l-1.8 1.8M5.2 10.8l-1.8 1.8"/></svg>',
+    // speaker with sound waves
+    speaking: _SVG_OPEN +
+      '<path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/>' +
+      '<path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.5a6 6 0 0 1 0 9"/></svg>',
+    // pause bars
+    paused: _SVG_OPEN +
+      '<rect x="4" y="3" width="3" height="10" fill="currentColor"/>' +
+      '<rect x="9" y="3" width="3" height="10" fill="currentColor"/></svg>',
+    // attention: circled exclamation (the ball is in your court)
+    waiting: _SVG_OPEN +
+      '<circle cx="8" cy="8" r="6.5"/><path d="M8 4.5v4.5"/>' +
+      '<circle cx="8" cy="11.5" r="0.6" fill="currentColor"/></svg>',
+  };
+
   function renderActivityStatus(status, detail) {
     // detail is WorkingIndicator.current_activity (a tool name, or null
     // for "thinking, no tool call yet") -- only meaningful for "working",
@@ -1603,8 +1672,13 @@ function artifactUrl(url) {
     } else if (status === "working") {
       text = detail ? `working (${detail})` : "working (thinking)";
     }
-    activityStatusEl.textContent = text;
-    activityStatusEl.className = status === "paused" ? "paused" : "";
+    activityStatusEl.textContent = "";
+    const icon = document.createElement("span");
+    icon.className = "act-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = ACTIVITY_ICONS[status] || "";
+    activityStatusEl.append(icon, text);
+    activityStatusEl.className = status in ACTIVITY_ICONS ? status : "";
     setListeningButton(status === "paused");
   }
 
