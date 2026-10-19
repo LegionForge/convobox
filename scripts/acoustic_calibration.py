@@ -653,9 +653,11 @@ def run(args: argparse.Namespace) -> Path:
         print("note: config currently has audio.echo_cancellation=false; calibration will still test AEC")
     # Local wall-clock time, deliberately -- this names a directory an
     # operator will browse by hand right after a run, not a machine-
-    # readable log timestamp; tz-aware would just make the folder name
-    # harder to match against "when did I run this."
-    output_dir = Path(args.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005
+    # readable log timestamp. .astimezone() makes it tz-aware (local zone)
+    # without changing the formatted name, and satisfies DTZ005 on ruff
+    # 0.16 (rule on by default) and 0.17 (off by default, where a
+    # `# noqa: DTZ005` would itself be flagged as unused, RUF100).
+    output_dir = Path(args.output_dir) / datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=False)
     lock = _acquire_audio_lock()
     try:

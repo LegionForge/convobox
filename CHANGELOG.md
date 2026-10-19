@@ -4,6 +4,17 @@ All notable changes to ConvoBox are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project is pre-1.0, so
 minor versions carry feature and behavior changes.
 
+## [Unreleased]
+
+### Changed
+- **Web UI: the mic-loop activity status in the ribbon now has a color and an
+  icon per state** (listening, capturing, working, speaking, paused, waiting),
+  mirroring the TUI's status colors, in a pill outline. Icons are inline SVGs
+  (identical on every OS, tinted by the state color); the text label is kept
+  and colors are theme-tuned, so color is never the only cue. Pulse animation
+  is off under `prefers-reduced-motion`. Syntax-checked only; not yet viewed
+  live in a browser.
+
 ## [0.5.0] — 2026-09-28
 
 ### Added
