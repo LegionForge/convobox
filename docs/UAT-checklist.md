@@ -1566,3 +1566,42 @@ real connected browser tab (see `docs/ARTIFACT-PANE-SCOPE.md`'s
   no artifact opened yet. Ask "what's in the artifact pane?". Confirm a
   clear "nothing is currently shown" answer, not an error or a
   hallucinated file name.
+
+## 14. Web UI activity status: per-state color + icon (PR #433)
+
+Merged 2026-10-18. The ribbon's mic-loop status (`#activity-status` in
+`src/convobox/web/static/index.html`) now shows a pill with an inline-SVG
+icon and a per-state color mirroring the TUI's. **Nothing here has been
+viewed in a real browser yet** -- PR #433 was syntax-checked only
+(`node --check`) plus CI; the browser regression suite was skipped. Run
+against a real backend (codex for voice UAT per the usage-cost note, not
+claude-code), on a synced UAT checkout of `main`.
+
+Known, expected gaps (not failures): `transcribing` is styled but the web
+bridge never sends it (`scripts/run_convobox.py`'s status chain has no such
+branch), and the two kinds of `waiting` (approval vs "say continue") look
+identical because `waiting_hint` is not forwarded.
+
+- **[AS1] Each state is visible and distinct.** Drive the app through
+  listening (idle), capturing (speak), working (any backend turn; label
+  reads `working (thinking)` or `working (<tool>)`), speaking (spoken
+  reply), paused (pause button), waiting (a pending approval, or a tiered
+  reply holding more back). Confirm each shows its own icon + color and
+  that **listening vs. working is obvious at a glance** (the stated goal).
+- **[AS2] Light and dark mode.** Repeat [AS1] with the OS theme switched
+  both ways. Confirm the colored text is comfortably readable on the ribbon
+  background in each.
+- **[AS3] Icons render the same on Windows and macOS** (inline SVG, not
+  emoji): same shapes, tinted by the state color, no missing-glyph boxes.
+- **[AS4] Ribbon layout.** Narrow the window. Confirm the pill does not
+  push other ribbon controls off-screen or wrap awkwardly, including the
+  longest label (`working (<long tool name>)` and the paused-with-resume-word
+  text).
+- **[AS5] Reduced motion.** Turn on the OS "reduce motion" setting; confirm
+  the capturing/working/waiting icon pulse stops.
+- **[AS6] Color is not the only cue.** With the page in grayscale (or a
+  color-blindness simulation), confirm the text label and icon still tell
+  the states apart.
+- **[AS7] No regression to the listening button.** Pause by button and by
+  voice; confirm the Stop/Resume listening button label still tracks the
+  paused state (`renderActivityStatus` also drives `setListeningButton`).
