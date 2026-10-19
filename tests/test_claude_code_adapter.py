@@ -327,6 +327,40 @@ async def test_interject_queues_and_busy_holds_until_last_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_busy_clears_when_a_send_is_folded_into_an_earlier_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Live-probed 2026-10-18: 3 sends (the 2nd/3rd landing mid-turn) produced
+    # ONE result, so the send-minus-result counter stuck at 2 and the web
+    # ribbon showed "working (thinking)" forever. After a result, leftover
+    # pending with no further turn activity must age out to idle.
+    monkeypatch.setattr("convobox.adapters.claude_code._IDLE_GRACE_S", 0.3)
+    adapter = _adapter()
+    try:
+        await adapter.send_text("first")
+        await adapter.send_interject("folded into the first")
+        assert adapter.is_busy() is True
+
+        events = await _collect(adapter, 2)
+        assert [e.type for e in events] == [BackendEventType.TEXT, BackendEventType.DONE]
+        # Inside the grace window the leftover send still counts as busy --
+        # a genuine queued second turn must not be reported idle early.
+        assert adapter.is_busy() is True
+
+        await asyncio.sleep(0.5)
+        assert adapter.is_busy() is False
+        # And the adapter stays usable: the next ordinary turn works.
+        # (No is_busy() sample right after the send: the fake CLI answers
+        # with zero latency, so the result can already have landed.)
+        await adapter.send_text("after")
+        events = await _collect(adapter, 2)
+        assert events[-1].type == BackendEventType.DONE
+        assert adapter.is_busy() is False
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
 async def test_hard_stop_interrupts_and_process_stays_usable() -> None:
     adapter = _adapter()
     try:
