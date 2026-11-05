@@ -6,7 +6,31 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-05
+
+0.5.0 was tagged on 2026-09-28 but never reached PyPI: the publish job waited on
+the `pypi` environment's required-reviewer approval for 30 days and expired (the
+build and wheel smoke-test passed). This release carries 0.5.0's contents plus
+everything merged since; PyPI users move from 0.4.0 straight to 0.5.1.
+
+### Fixed
+- **claude-code: `is_busy()` could latch true forever when the CLI folds several
+  sends into one turn.** The adapter counted sends minus results; with sends
+  landing mid-turn the CLI returned one result, leaving the counter above zero, so
+  the web ribbon stayed on "working (thinking)" with nothing running. After a result
+  that leaves the counter above zero and no assistant or user activity for 10s, the
+  leftover is treated as folded and busy clears. Adapter and full test suites pass
+  against a fake CLI; **not live-verified against a running session.**
+- **The lenient config loader no longer trips newer mypy** on a field with no
+  annotation; such a field takes its default, like a missing section.
+
 ### Changed
+- **Dependency updates** (CI green on `main` at the release commit): `mcp` 2.0 to
+  2.2 (range now `>=2.0,<2.4`), `pyjwt` 2.13 to 2.15, `filelock` 3.29 to 4.2 (a
+  major version), `setuptools` 83 to 84, `opentelemetry-api` 1.44 to 1.45,
+  `certifi`, the `ruff` dev range, and several GitHub Actions. The bumps
+  themselves touched no source; the only code changes since 0.5.0 are the entries
+  in this section plus a ruff DTZ005 lint fix in `scripts/acoustic_calibration.py`.
 - **Web UI: the mic-loop activity status in the ribbon now has a color and an
   icon per state** (listening, capturing, working, speaking, paused, waiting),
   mirroring the TUI's status colors, in a pill outline. Icons are inline SVGs
