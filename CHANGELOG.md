@@ -6,6 +6,26 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+### Added
+- **Spoken summaries of long replies (opt-in: `interaction.summarize_long_responses`).**
+  A reply of `summary_min_words` (default 80) or more is summarized by one extra,
+  stateless `claude -p` call (every tool disabled, no session, settings and MCP
+  servers skipped, the text passed on stdin) and the summary is spoken first;
+  "continue" then speaks the full reply paragraph by paragraph, and the full text
+  is unchanged on screen. Two safeguards do not rely on the model: a summary that
+  omits a failure or error the reply reports is discarded (the reply is spoken
+  as it would be with summaries off), and a closing question to you is kept.
+  Any failure, timeout (`summary_timeout_s`, 8s) or missing `claude` also falls
+  back to the unsummarized behavior, and a stop phrase or a newer reply cancels
+  the model call. **Privacy:** the reply text is sent to your Claude account in
+  addition to your backend, a second service for Codex/OpenCode users, which is
+  why it is off by default. Measured against the real CLI: ~3.5-4.6s per
+  summary (about 10s without skipping settings/MCP startup), accurate on four
+  realistic replies including one reporting failures and one carrying an
+  embedded instruction, which it ignored. **Not verified:** an end-to-end
+  spoken session with a person, and the extra seconds of silence before the
+  summary starts.
+
 ## [0.5.1] — 2026-11-05
 
 0.5.0 was tagged on 2026-09-28 but never reached PyPI: the publish job waited on
@@ -23,6 +43,7 @@ everything merged since; PyPI users move from 0.4.0 straight to 0.5.1.
   against a fake CLI; **not live-verified against a running session.**
 - **The lenient config loader no longer trips newer mypy** on a field with no
   annotation; such a field takes its default, like a missing section.
+
 
 ### Changed
 - **Dependency updates** (CI green on `main` at the release commit): `mcp` 2.0 to
