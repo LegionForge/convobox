@@ -219,6 +219,16 @@ interaction:
                           # distinctive multi-word phrase: plain "yes" is
                           # deliberately rejected. Say "no" to deny; silence
                           # after approval_timeout_s (30s by default) denies.
+  # summarize_long_responses: true
+                          # Opt-in. A reply of summary_min_words (80) or more
+                          # is summarized by ONE extra stateless `claude -p`
+                          # call (no tools, ~4s) and the summary is spoken
+                          # first; say "continue" for the full reply. The
+                          # reply text goes to your Claude account in
+                          # addition to your backend -- for a Codex/OpenCode
+                          # backend that is a second service. Needs `claude`
+                          # on PATH and logged in. On any failure or timeout
+                          # the reply is spoken as it would be with this off.
 
 # ---------------------------------------------------------------------------
 # safeword -- spoken phrases that hard-stop the agent (checked before every
