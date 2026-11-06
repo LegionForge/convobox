@@ -11,6 +11,7 @@ from convobox.adapters.base import BackendAdapter, BackendEvent, BackendEventTyp
 from convobox.audio.playback import AudioPlayer
 from convobox.response_tiering import ResponseTierState
 from convobox.safeword.detector import SafewordDetector
+from convobox.summary import DEFAULT_MIN_WORDS, Summarizer, finalize_summary, word_count
 from convobox.tts.base import TTSEngine
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,8 @@ class Orchestrator:
         approval_gate: ApprovalWaitCanceler | None = None,
         kill_phrase: str | None = None,
         on_kill_phrase: Callable[[], None] | None = None,
+        summarizer: Summarizer | None = None,
+        summary_min_words: int = DEFAULT_MIN_WORDS,
     ) -> None:
         self._adapter = adapter
         self._safeword = safeword
@@ -207,8 +210,15 @@ class Orchestrator:
         # the CURRENT response only; a new TEXT event replaces it (see
         # ResponseTierState.start()'s own docstring for why: an old
         # response's remaining tiers are moot once a new one exists).
+        self._tier_responses = tier_responses
+        # Spoken summaries of long replies (convobox.summary): opt-in, and
+        # they reuse the tier state so "continue" speaks the full reply
+        # after the summary. The state therefore exists whenever either
+        # feature is on, but only tier_responses truncates a reply.
+        self._summarizer = summarizer
+        self._summary_min_words = summary_min_words
         self._tier_state: ResponseTierState | None = (
-            ResponseTierState() if tier_responses else None
+            ResponseTierState() if (tier_responses or summarizer is not None) else None
         )
         # Optional observer for every backend event (TEXT, TOOL_CALL,
         # TOOL_RESULT, DONE, ERROR -- the full stream, not just the TEXT
@@ -602,7 +612,21 @@ class Orchestrator:
         spoken = strip_code_for_speech(event.content)
         if not spoken:
             return
-        if self._tier_state is not None:
+        if (
+            self._summarizer is not None
+            and self._tier_state is not None
+            and word_count(spoken) >= self._summary_min_words
+        ):
+            # Drop the previous reply's held-back tiers NOW: the summary takes
+            # a few seconds, and "continue" must not speak a stale reply in
+            # that window.
+            self._tier_state.start("")
+            self._cancel_speak_task()
+            self._speak_task = asyncio.create_task(self._summarize_then_speak(spoken))
+            return
+        if self._tier_state is not None and not self._tier_responses:
+            self._tier_state.start("")  # summaries only: nothing held back
+        elif self._tier_state is not None:
             # Tier on the ALREADY-STRIPPED text, not the raw event content:
             # strip_code_for_speech already collapses 3+ newlines down to
             # exactly "\n\n" (_COLLAPSE_BLANK_RE), so its output's paragraph
@@ -682,6 +706,31 @@ class Orchestrator:
         self._cancel_speak_task()
         self._speak_task = asyncio.create_task(self._speak(chunk))
         return True
+
+    async def _summarize_then_speak(self, spoken: str) -> None:
+        """Speak a summary of a long reply, falling back to exactly what would
+        have been spoken without summaries (the first paragraph under
+        tier_responses, the whole reply otherwise) if none can be made. Runs
+        as the speak task, so a stop phrase or a newer reply cancels it --
+        including the model call itself."""
+        assert self._summarizer is not None and self._tier_state is not None  # nosec B101
+        summary: str | None = None
+        try:
+            summary = finalize_summary(await self._summarizer.summarize(spoken), spoken)
+        except Exception as exc:  # noqa: BLE001 -- a summary must never break the voice loop
+            logger.warning("summarizer failed (%s); speaking the reply instead", exc)
+        if summary:
+            logger.info(
+                "speaking a summary (%d words) of a %d-word reply",
+                word_count(summary), word_count(spoken),
+            )
+            text = self._tier_state.start_summarized(summary, spoken)
+        elif self._tier_responses:
+            text = self._tier_state.start(spoken)
+        else:
+            text = spoken
+        if text:
+            await self._speak(text)
 
     async def _speak(self, text: str) -> None:
         # SECURITY EXCEPTION: B101 (assert stripped under python -O) -- this is
