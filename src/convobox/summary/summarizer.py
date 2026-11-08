@@ -58,7 +58,6 @@ _FAILURE_RE = re.compile(
 class Summarizer(Protocol):
     async def summarize(self, text: str) -> str | None:
         """A short spoken summary of ``text``, or None if one can't be made."""
-        ...
 
 
 def word_count(text: str) -> int:
