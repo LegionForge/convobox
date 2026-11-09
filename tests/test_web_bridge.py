@@ -1129,7 +1129,7 @@ async def test_approval_request_broadcast_carries_the_phrase_hint_but_history_do
     )
     forwarder(BackendEvent(type=BackendEventType.APPROVAL_REQUEST, tool="Bash", tool_input="{}"))
     assert forwarder._writer_task is not None
-    await forwarder._writer_task
+    await asyncio.wait_for(forwarder._writer_task, timeout=5)
     await asyncio.sleep(0)
 
     payload = queue.get_nowait()
