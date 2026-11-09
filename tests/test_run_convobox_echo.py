@@ -636,3 +636,29 @@ def test_approval_is_trusted_when_recent_speech_was_unrelated() -> None:
     echo_filter = SpokenEchoFilter()
     echo_filter.note_spoken("I updated the readme and ran the tests")
     assert _heard("juliette papa charlie", echo_filter=echo_filter) is True
+
+
+def test_phrase_over_playback_is_ignored_then_a_clean_repeat_approves() -> None:
+    # The whole sequence the operator sees: the phrase lands on top of audio
+    # (could be the speakers) and is ignored, the request stays pending, and
+    # saying it again once it is quiet approves.
+    from convobox.approval import ApprovalDetector
+    from scripts.run_convobox import ApprovalPromptGate
+
+    gate = ApprovalPromptGate(ApprovalDetector(approval_phrase="juliette papa charlie"), 30.0)
+    gate.start_waiting(now=0.0)
+    echo_filter = SpokenEchoFilter()
+
+    over_audio = approval_heard_cleanly(
+        "juliette papa charlie", player_is_playing=True,
+        overlapped_playback=False, echo_filter=echo_filter,
+    )
+    assert gate.observe_transcript("juliette papa charlie", now=2.0, heard_cleanly=over_audio) == "ignored"
+    assert gate.is_waiting is True
+
+    quiet = approval_heard_cleanly(
+        "juliette papa charlie", player_is_playing=False,
+        overlapped_playback=False, echo_filter=echo_filter,
+    )
+    assert gate.observe_transcript("juliette papa charlie", now=6.0, heard_cleanly=quiet) == "approve"
+    assert gate.is_waiting is False
