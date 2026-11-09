@@ -13,14 +13,23 @@ minor versions carry feature and behavior changes.
   the phrase approved a tool call, including the speakers. An approve is now
   ignored, with the request left pending and its timeout NOT extended, when audio
   was playing, the utterance overlapped playback plus the grace window, or its words
-  match recent ConvoBox speech. Deny, explain and discuss are unaffected (refusing
-  is the safe direction), and the web Approve button is unchanged. In practice: say
-  the phrase once it is quiet; if it is ignored, the log and TUI say so. Unit-tested
-  and mutation-checked at the gate and the trust check; the live mic loop has no
-  test harness, so its wiring has only a source-level guard test. **Not tested with
-  a real voice or speakers.** This does not stop a TV or another person in the room
-  from saying the phrase while nothing is playing; the phrase is a shared secret
-  heard by an open mic, not a speaker check.
+  match what ConvoBox said in the last 8 seconds (at any length: one-word phrases
+  too). Deny, explain and discuss are unaffected (refusing is the safe direction),
+  and the web Approve button is unchanged. **What you will notice:** say the phrase
+  after the announcement has finished, with roughly a second of margin; if it is
+  ignored, the log and TUI say so, so wait a few seconds and say it again. Opus
+  review found and this fixes: a 30-second text-echo memory that could block every
+  genuine attempt until the request timed out, one- and two-word phrases skipping
+  the echo check, and loop wiring that most mutations survived (now one named
+  function plus an AST structure test). Unit-tested and mutation-checked (ten
+  mutations, all caught); the live mic loop has no behavioral test harness. **Not
+  tested with a real voice or speakers.** Known gaps: a TV or another person saying
+  the phrase while nothing is playing still approves (the phrase is a shared secret
+  heard by an open mic), audio ConvoBox did not play (an agent-run `say`, other
+  apps) is not covered, a voice-only operator gets no spoken feedback when an
+  approve is ignored, and the overlap estimate is made at transcript arrival, so a
+  long speech-to-text backlog can understate an overlap (the 8s text check backstops
+  it).
 
 ### Added
 - **Spoken summaries of long replies (opt-in: `interaction.summarize_long_responses`).**

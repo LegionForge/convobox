@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import inspect
+
 import pytest
 
 from convobox.adapters.base import BackendEvent, BackendEventType
@@ -510,20 +513,57 @@ def test_explain_works_even_when_not_heard_cleanly() -> None:
     assert gate.is_waiting is True
 
 
-def test_the_mic_loop_passes_the_audio_trust_check_to_the_gate() -> None:
-    # The live loop has no test harness, so this is a wiring guard, not a
-    # behavioral test: the approval call must pass heard_cleanly from
-    # approval_heard_cleanly, and an "ignored" outcome must be handled before
-    # anything can act on the transcript. Deleting either would silently put
-    # the speakers back in charge of approvals.
-    import inspect
-
+def _approval_call_sites() -> tuple[int, list[tuple[ast.Call, list[ast.stmt], int]]]:
+    """(every `approval_gate.observe_transcript(...)` call anywhere in the
+    script, those that are the direct value of a statement as
+    (call, containing statement list, index))."""
     import scripts.run_convobox as module
 
-    source = inspect.getsource(module)
-    call = source.index("approval_gate.observe_transcript(\n")
-    window = source[call : call + 3500]
-    assert "heard_cleanly=approval_heard_cleanly(" in window
-    assert "player_is_playing=player.is_playing()" in window
-    assert "echo_filter=echo_filter" in window
-    assert window.index('approval_outcome == "ignored"') < window.index('approval_outcome == "explain"')
+    tree = ast.parse(inspect.getsource(module))
+
+    def is_gate_call(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "observe_transcript"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "approval_gate"
+        )
+
+    total = sum(1 for node in ast.walk(tree) if is_gate_call(node))
+    direct: list[tuple[ast.Call, list[ast.stmt], int]] = []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            for index, stmt in enumerate(stmts):
+                value = getattr(stmt, "value", None)
+                if isinstance(stmt, ast.Assign | ast.Expr) and is_gate_call(value):
+                    direct.append((value, stmts, index))
+    return total, direct
+
+
+def test_the_mic_loop_has_exactly_one_voice_approval_call_and_it_checks_the_audio() -> None:
+    # The live loop has no test harness, so this is a structural guard (AST,
+    # so reformatting can't break it and a second unguarded call can't hide):
+    # every voice approval call passes heard_cleanly from the single named
+    # audio-trust function, and the very next statement turns an "ignored"
+    # outcome into a `continue` before anything can act on the transcript.
+    total, sites = _approval_call_sites()
+    assert total == 1 and len(sites) == 1  # no second, unguarded call anywhere
+    call, stmts, index = sites[0]
+    keywords = {kw.arg: kw.value for kw in call.keywords}
+    trust = keywords.get("heard_cleanly")
+    assert isinstance(trust, ast.Call) and isinstance(trust.func, ast.Name)
+    assert trust.func.id == "approval_utterance_heard_cleanly"
+    trust_kwargs = {kw.arg for kw in trust.keywords}
+    assert {"result", "player", "echo_filter", "min_silence_ms", "grace_s"} <= trust_kwargs
+    # The SAME filter the TTS recorder feeds, not a fresh (empty) one.
+    echo_value = next(kw.value for kw in trust.keywords if kw.arg == "echo_filter")
+    assert isinstance(echo_value, ast.Name) and echo_value.id == "echo_filter"
+    assert isinstance(stmts[index], ast.Assign)  # `approval_outcome = ...`
+    guard = stmts[index + 1]
+    assert isinstance(guard, ast.If)
+    assert 'ignored' in ast.unparse(guard.test)
+    assert isinstance(guard.body[-1], ast.Continue)

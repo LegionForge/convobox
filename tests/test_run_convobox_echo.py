@@ -13,6 +13,7 @@ from scripts.run_convobox import (
     EchoTailGuard,
     MutePlayer,
     approval_heard_cleanly,
+    approval_utterance_heard_cleanly,
     token_overlap_ratio,
     utterance_overlapped_playback,
 )
@@ -662,3 +663,74 @@ def test_phrase_over_playback_is_ignored_then_a_clean_repeat_approves() -> None:
     )
     assert gate.observe_transcript("juliette papa charlie", now=6.0, heard_cleanly=quiet) == "approve"
     assert gate.is_waiting is False
+
+
+# --- the narrow recent-speech window (review of #447) ---
+
+
+def test_a_one_word_phrase_is_refused_when_it_was_just_spoken() -> None:
+    # Short phrases skip SpokenEchoFilter.is_echo (MIN_TOKENS), so they used to
+    # be protected by timing alone.
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("Run: touch nightingale", now=100.0)
+    assert approval_heard_cleanly(
+        "nightingale", player_is_playing=False, overlapped_playback=False,
+        echo_filter=echo_filter, now=103.0,
+    ) is False
+
+
+def test_earlier_speech_does_not_block_a_genuine_approval_for_the_whole_window() -> None:
+    # is_echo remembers 30s; with a 30s approval timeout an agent sentence
+    # sharing words with the phrase could block every attempt. 8s cannot.
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("I will run the tests now and then deploy it", now=100.0)
+    assert approval_heard_cleanly(
+        "run the tests", player_is_playing=False, overlapped_playback=False,
+        echo_filter=echo_filter, now=105.0,
+    ) is False
+    assert approval_heard_cleanly(
+        "run the tests", player_is_playing=False, overlapped_playback=False,
+        echo_filter=echo_filter, now=112.0,
+    ) is True
+
+
+class _Player:
+    def __init__(self, playing: bool = False, ended_at: float = 0.0) -> None:
+        self._playing = playing
+        self.playback_ended_at = ended_at
+
+    def is_playing(self) -> bool:
+        return self._playing
+
+
+def _result(duration_s: float = 1.0, latency_ms: float = 300.0) -> SimpleNamespace:
+    return SimpleNamespace(duration_s=duration_s, latency_ms=latency_ms)
+
+
+def _utterance(player: _Player, now: float = 200.0, **kw: object) -> bool:
+    args: dict[str, object] = {
+        "result": _result(), "player": player, "echo_filter": SpokenEchoFilter(),
+        "min_silence_ms": 500, "grace_s": 0.3, "now": now,
+    }
+    args.update(kw)
+    return approval_utterance_heard_cleanly("juliette papa charlie", **args)  # type: ignore[arg-type]
+
+
+def test_utterance_check_refuses_while_the_player_is_playing() -> None:
+    assert _utterance(_Player(playing=True, ended_at=0.0)) is False
+
+
+def test_utterance_check_refuses_an_utterance_that_started_before_playback_ended() -> None:
+    # Capture started at now - 0.3 - 0.5 - 1.0 = 198.2, before playback ended at 199.
+    assert _utterance(_Player(ended_at=199.0)) is False
+
+
+def test_utterance_check_trusts_a_clearly_later_utterance() -> None:
+    assert _utterance(_Player(ended_at=150.0)) is True
+
+
+def test_utterance_check_uses_the_grace_window_it_is_given() -> None:
+    # Capture started at 198.2; playback ended 197.9 so grace 0.3 covers it.
+    player = _Player(ended_at=197.9)
+    assert _utterance(player, grace_s=0.3) is False
+    assert _utterance(player, grace_s=0.0) is True
