@@ -447,6 +447,20 @@ class InteractionConfig(BaseModel):
     # not yet live-UAT-tuned against a real "did that feel laggy or
     # naggy" pass.
     continue_timeout_s: float = 2.5
+    # Spoken summaries of long replies (convobox.summary). Off by default.
+    # When on, a reply of at least summary_min_words is summarized by ONE
+    # extra, stateless `claude -p` call (no tools, no session) and the
+    # summary is spoken first; "continue" then speaks the full reply. This
+    # sends the reply text to your Claude account in addition to your
+    # backend -- for a Codex/OpenCode backend that is a second service. On
+    # any failure or timeout the reply is spoken exactly as it would have
+    # been with this off. Needs the `claude` CLI on PATH, logged in.
+    summarize_long_responses: bool = False
+    summary_min_words: int = Field(default=80, ge=20)
+    summary_model: str = Field(default="haiku", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
+    # The call takes ~4s measured; the cap is for a slow network, not a
+    # normal run.
+    summary_timeout_s: float = Field(default=8.0, gt=0, le=60)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): the voice
     # phrase that gates a pending destructive-action tool call/command.
     # None (default) leaves voice approval OFF -- existing sessions behave

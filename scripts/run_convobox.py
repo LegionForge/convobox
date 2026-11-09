@@ -96,6 +96,7 @@ from convobox.safeword.detector import SafewordDetector
 from convobox.startup import _resolve_convobox_version, startup_announcement
 from convobox.stt.base import STTEngine, TranscriptResult
 from convobox.stt.corrections import TranscriptCorrector
+from convobox.summary import ClaudeCliSummarizer
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, TuiStatus, render_conversation_frame
@@ -2202,12 +2203,33 @@ async def run(args: argparse.Namespace) -> None:
         if web_forwarder is not None:
             web_forwarder(event)
 
+    summarizer = None
+    if config.interaction.summarize_long_responses:
+        claude_path = shutil.which("claude")
+        if claude_path is None:
+            log.warning(
+                "interaction.summarize_long_responses is on but the `claude` CLI is not on "
+                "PATH; long replies will be spoken unsummarized"
+            )
+        else:
+            summarizer = ClaudeCliSummarizer(
+                command=claude_path,
+                model=config.interaction.summary_model,
+                timeout_s=config.interaction.summary_timeout_s,
+            )
+            log.info(
+                "spoken summaries on: replies of %d+ words are also sent to a one-shot "
+                "`claude` call (model %s) to be summarized",
+                config.interaction.summary_min_words, config.interaction.summary_model,
+            )
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
         tts=tts,
         player=player,
         on_event=_dispatch_event,
+        summarizer=summarizer,
+        summary_min_words=config.interaction.summary_min_words,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
         approval_gate=approval_gate,
@@ -2784,6 +2806,9 @@ async def run(args: argparse.Namespace) -> None:
                     if gate_action == "pause":
                         player.stop()
                         tts.stop()
+                        # Before the backend RPC below: a pending spoken summary
+                        # must not start talking after the pause.
+                        orchestrator.cancel_pending_speech()
                         # Captured BEFORE send_hard_stop() -- every
                         # adapter's own send_hard_stop() unconditionally
                         # clears is_busy() regardless of whether a tool
