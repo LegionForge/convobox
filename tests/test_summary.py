@@ -514,7 +514,8 @@ def test_finalize_is_fast_on_pathological_input() -> None:
         ("The suite is red after my change.", "Suite updated."),
         ("It regressed in the parser.", "Parser touched."),
         ("The build can’t find the module.", "Build looked at."),
-        ("It didn’t pass: nothing but errors.", "All set."),
+        ("The output was nothing but errors.", "All set."),  # 'nothing but' is not a negation
+        ("It didn’t pass.", "All set."),
     ],
 )
 def test_guard_catches_more_phrasings(source: str, summary: str) -> None:

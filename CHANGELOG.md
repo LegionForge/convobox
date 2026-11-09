@@ -27,10 +27,11 @@ minor versions carry feature and behavior changes.
   why it is off by default. Measured against the real CLI: ~3.5-4.6s per
   summary (about 10s without skipping settings/MCP startup), accurate on four
   realistic replies including one reporting failures and one carrying an
-  embedded instruction, which it ignored. Reviewed adversarially by Opus; its
+  embedded instruction, which it ignored. Reviewed adversarially by Opus twice; its
   findings (a summary could be spoken after a stop; weak failure and question
   guards; tiering-off mismatch; unvalidated model/timeout; prompt-marker
-  breakout) are fixed with tests. **Not verified:** an end-to-end
+  breakout; a stale-summary race and a slow guard regex found in the second
+  pass) are fixed with tests. **Not verified:** an end-to-end
   spoken session with a person, and the extra seconds of silence before the
   summary starts.
 
