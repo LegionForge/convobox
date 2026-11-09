@@ -1487,6 +1487,14 @@ function artifactUrl(url) {
     }
 
     if (kind === "approval_request") {
+      if (ev.approval_hint) {
+        // The spoken announcement never says the approval phrase; it is
+        // shown here instead. textContent, as everywhere in this renderer.
+        const hint = document.createElement("div");
+        hint.className = "approval-note";
+        hint.textContent = ev.approval_hint;
+        bubble.appendChild(hint);
+      }
       if (pendingApprovalActions) {
         disableApprovalActions(pendingApprovalActions, "Superseded by a newer request.");
       }

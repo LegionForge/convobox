@@ -406,3 +406,39 @@ async def test_deny_pending_approval_tolerates_no_web_forwarder() -> None:
     orchestrator = _FakeOrchestrator(has_pending=True)
     await _deny_pending_approval_before_text_exit(orchestrator, gate, None)
     assert gate.is_waiting is False
+
+
+def test_claude_code_approval_event_shows_the_phrase_on_screen() -> None:
+    # The phrase is never spoken, so the screen is the only place the
+    # operator is reminded of it -- and Claude Code's events carry no
+    # `content`, which used to mean no banner at all.
+    gate = _gate()
+    state = ConversationTuiState()
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(
+            BackendEventType.APPROVAL_REQUEST,
+            tool="Write",
+            tool_input='{"file_path": "config.yaml"}',
+        ),
+        "cobalt night and gale",
+        gate,
+    )
+    assert state.warning is not None
+    assert "cobalt night and gale" in state.warning
+    assert "config.yaml" in state.warning
+
+
+def test_approval_banner_without_a_phrase_says_it_will_be_denied() -> None:
+    gate = _gate()
+    state = ConversationTuiState()
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(BackendEventType.APPROVAL_REQUEST, tool="Bash", tool_input='{"command": "ls"}'),
+        None,
+        gate,
+    )
+    assert state.warning is not None
+    assert "will be denied" in state.warning
