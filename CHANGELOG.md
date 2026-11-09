@@ -6,6 +6,22 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+### Security
+- **An approval phrase heard while ConvoBox's own audio is playing is no longer
+  accepted.** The approval gate sat before the overlap and echo gates (so a prompt
+  answer isn't mistaken for echo), which meant anything the mic heard that matched
+  the phrase approved a tool call, including the speakers. An approve is now
+  ignored, with the request left pending and its timeout NOT extended, when audio
+  was playing, the utterance overlapped playback plus the grace window, or its words
+  match recent ConvoBox speech. Deny, explain and discuss are unaffected (refusing
+  is the safe direction), and the web Approve button is unchanged. In practice: say
+  the phrase once it is quiet; if it is ignored, the log and TUI say so. Unit-tested
+  and mutation-checked at the gate and the trust check; the live mic loop has no
+  test harness, so its wiring has only a source-level guard test. **Not tested with
+  a real voice or speakers.** This does not stop a TV or another person in the room
+  from saying the phrase while nothing is playing; the phrase is a shared secret
+  heard by an open mic, not a speaker check.
+
 ### Added
 - **Spoken summaries of long replies (opt-in: `interaction.summarize_long_responses`).**
   A reply of `summary_min_words` (default 80) or more is summarized by one extra,

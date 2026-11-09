@@ -12,6 +12,7 @@ from scripts.run_convobox import (
     EchoAwarePlayer,
     EchoTailGuard,
     MutePlayer,
+    approval_heard_cleanly,
     token_overlap_ratio,
     utterance_overlapped_playback,
 )
@@ -599,3 +600,39 @@ def test_tail_guard_tail_is_capped() -> None:
     now = 1000.0
     g.set_echo_profile(attenuation_db=0.0, ceiling_db=30.0, delay_s=10.0, now=now)
     assert g._tail_len <= EchoTailGuard.CAP_S + 1e-9
+
+
+# --- approval_heard_cleanly: the machine's own speaker must not grant a tool call ---
+
+
+def _heard(transcript: str = "juliette papa charlie", **kw: object) -> bool:
+    args: dict[str, object] = {
+        "player_is_playing": False, "overlapped_playback": False,
+        "echo_filter": SpokenEchoFilter(),
+    }
+    args.update(kw)
+    return approval_heard_cleanly(transcript, **args)  # type: ignore[arg-type]
+
+
+def test_approval_is_trusted_when_nothing_was_playing() -> None:
+    assert _heard() is True
+
+
+def test_approval_is_not_trusted_while_audio_is_playing() -> None:
+    assert _heard(player_is_playing=True) is False
+
+
+def test_approval_is_not_trusted_when_the_utterance_overlapped_playback() -> None:
+    assert _heard(overlapped_playback=True) is False
+
+
+def test_approval_is_not_trusted_when_it_matches_recent_speech() -> None:
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("the build finished and juliette papa charlie was mentioned")
+    assert _heard("juliette papa charlie", echo_filter=echo_filter) is False
+
+
+def test_approval_is_trusted_when_recent_speech_was_unrelated() -> None:
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("I updated the readme and ran the tests")
+    assert _heard("juliette papa charlie", echo_filter=echo_filter) is True

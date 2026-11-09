@@ -468,3 +468,62 @@ def test_a_long_command_cannot_push_the_phrase_off_the_banner() -> None:
     assert len(state.warning) < 1200
     frame = "\n".join(render_conversation_frame(state, 100, 40, 0.0))
     assert "cobalt night and gale" in frame
+
+
+# --- an approve is never granted on audio that may be ConvoBox's own ---
+
+
+def test_an_approve_heard_over_playback_is_ignored_and_the_request_stays_pending() -> None:
+    gate = _gate(timeout_s=10.0)
+    gate.start_waiting(now=0.0)
+    assert gate.observe_transcript("nightingale", now=5.0, heard_cleanly=False) == "ignored"
+    assert gate.is_waiting is True
+
+
+def test_an_ignored_approve_does_not_extend_the_wait() -> None:
+    # An echo must not be able to keep a request open past its timeout.
+    gate = _gate(timeout_s=10.0)
+    gate.start_waiting(now=0.0)
+    gate.observe_transcript("nightingale", now=9.0, heard_cleanly=False)
+    assert gate.observe_timeout(now=10.5) == "deny"
+
+
+def test_a_clean_approve_still_approves() -> None:
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    assert gate.observe_transcript("nightingale", now=1.0, heard_cleanly=True) == "approve"
+    assert gate.is_waiting is False
+
+
+def test_deny_works_even_when_not_heard_cleanly() -> None:
+    # Refusing is always the safe direction: an echoed "no" may deny.
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    assert gate.observe_transcript("no", now=1.0, heard_cleanly=False) == "deny"
+    assert gate.is_waiting is False
+
+
+def test_explain_works_even_when_not_heard_cleanly() -> None:
+    gate = _gate()
+    gate.start_waiting(now=0.0)
+    assert gate.observe_transcript("explain", now=1.0, heard_cleanly=False) == "explain"
+    assert gate.is_waiting is True
+
+
+def test_the_mic_loop_passes_the_audio_trust_check_to_the_gate() -> None:
+    # The live loop has no test harness, so this is a wiring guard, not a
+    # behavioral test: the approval call must pass heard_cleanly from
+    # approval_heard_cleanly, and an "ignored" outcome must be handled before
+    # anything can act on the transcript. Deleting either would silently put
+    # the speakers back in charge of approvals.
+    import inspect
+
+    import scripts.run_convobox as module
+
+    source = inspect.getsource(module)
+    call = source.index("approval_gate.observe_transcript(\n")
+    window = source[call : call + 3500]
+    assert "heard_cleanly=approval_heard_cleanly(" in window
+    assert "player_is_playing=player.is_playing()" in window
+    assert "echo_filter=echo_filter" in window
+    assert window.index('approval_outcome == "ignored"') < window.index('approval_outcome == "explain"')
