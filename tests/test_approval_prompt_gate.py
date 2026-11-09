@@ -406,3 +406,65 @@ async def test_deny_pending_approval_tolerates_no_web_forwarder() -> None:
     orchestrator = _FakeOrchestrator(has_pending=True)
     await _deny_pending_approval_before_text_exit(orchestrator, gate, None)
     assert gate.is_waiting is False
+
+
+def test_claude_code_approval_event_shows_the_phrase_on_screen() -> None:
+    # The phrase is never spoken, so the screen is the only place the
+    # operator is reminded of it -- and Claude Code's events carry no
+    # `content`, which used to mean no banner at all.
+    gate = _gate()
+    state = ConversationTuiState()
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(
+            BackendEventType.APPROVAL_REQUEST,
+            tool="Write",
+            tool_input='{"file_path": "config.yaml"}',
+        ),
+        "cobalt night and gale",
+        gate,
+    )
+    assert state.warning is not None
+    assert "cobalt night and gale" in state.warning
+    assert "config.yaml" in state.warning
+
+
+def test_approval_banner_without_a_phrase_says_it_will_be_denied() -> None:
+    gate = _gate()
+    state = ConversationTuiState()
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(BackendEventType.APPROVAL_REQUEST, tool="Bash", tool_input='{"command": "ls"}'),
+        None,
+        gate,
+    )
+    assert state.warning is not None
+    assert "will be denied" in state.warning
+
+
+def test_a_long_command_cannot_push_the_phrase_off_the_banner() -> None:
+    # The phrase is shown only on screen, and the TUI truncates the frame from
+    # the bottom: the instruction comes first and the description is capped.
+    from convobox.tui import render_conversation_frame
+
+    gate = _gate()
+    state = ConversationTuiState()
+    heredoc = "\n".join(f"echo line {i}" for i in range(300))
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(
+            BackendEventType.APPROVAL_REQUEST,
+            tool="Bash",
+            tool_input='{"command": "' + heredoc.replace("\n", "\\n") + '"}',
+        ),
+        "cobalt night and gale",
+        gate,
+    )
+    assert state.warning is not None
+    assert state.warning.startswith("Say 'cobalt night and gale'")
+    assert len(state.warning) < 1200
+    frame = "\n".join(render_conversation_frame(state, 100, 40, 0.0))
+    assert "cobalt night and gale" in frame

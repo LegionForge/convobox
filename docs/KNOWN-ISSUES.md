@@ -425,7 +425,7 @@ disconnect.
 
 **Symptom.** Ask either backend (in `--text` mode, `permission_mode: approve`)
 to write a file: the approval prompt fires correctly
-(`Approval needed to run Write. Say <phrase> to approve...` for claude-code;
+(`Approval needed to run Write. Say your approval phrase to approve...` for claude-code;
 `item/fileChange/requestApproval` for codex), then **exactly 120 seconds of
 silence**, then `backend still busy after 120s; giving up the wait` and the
 process exits. No file is ever created, on either backend, confirmed twice

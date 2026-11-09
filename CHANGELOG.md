@@ -6,7 +6,79 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+### Added
+- **Spoken summaries of long replies (opt-in: `interaction.summarize_long_responses`).**
+  A reply of `summary_min_words` (default 80) or more is summarized by one extra,
+  stateless `claude -p` call (every tool disabled, no session, settings and MCP
+  servers skipped, the text passed on stdin) and the summary is spoken first;
+  "continue" then speaks the full reply (paragraph by paragraph with
+  `tier_responses`, otherwise at once), and the full text is unchanged on screen.
+  Two safeguards do not rely on the model: a summary that does not report a
+  failure the reply reports (errors, "cannot", "denied", warnings, a few
+  non-English words; a negated "no errors" does not count either way) is
+  discarded and the reply is spoken as it would be with summaries off, and every
+  question the reply puts to you is kept, wherever it sits, appended verbatim
+  when the summary lacks it (a rephrased question may therefore be asked twice).
+  Any failure, timeout (`summary_timeout_s`, 8s) or missing `claude` also falls
+  back to the unsummarized behavior. A stop, pause or kill phrase cancels the
+  pending summary BEFORE the backend stop RPC, and a new command or newer reply
+  also cancels it, so a summary is never spoken after a stop or goes stale. **Privacy:** the reply text is sent to your Claude account in
+  addition to your backend, a second service for Codex/OpenCode users, which is
+  why it is off by default. Measured against the real CLI: ~3.5-4.6s per
+  summary (about 10s without skipping settings/MCP startup), accurate on four
+  realistic replies including one reporting failures and one carrying an
+  embedded instruction, which it ignored. Reviewed adversarially by Opus twice; its
+  findings (a summary could be spoken after a stop; weak failure and question
+  guards; tiering-off mismatch; unvalidated model/timeout; prompt-marker
+  breakout; a stale-summary race and a slow guard regex found in the second
+  pass) are fixed with tests. **Not verified:** an end-to-end
+  spoken session with a person, and the extra seconds of silence before the
+  summary starts.
+
+### Security
+- **The approval phrase is no longer spoken aloud.** The spoken announcement now
+  says "Say your approval phrase to approve, or say no to deny"; the operator is
+  assumed to know the phrase. With speakers and echo cancellation off (the
+  default), the mic can hear the announcement, and a phrase read out by the
+  machine could be transcribed back as the approval. The phrase is now shown on
+  screen with the request instead: in the TUI and log for every backend (Claude
+  Code's request previously had no banner at all) and as a hint on the web
+  approval prompt (the hint itself is live only and not stored in history). The
+  banner is cleared when the request is resolved by any route, and shows the phrase
+  first so a long command can't push it off screen. The phrase still appears in the
+  log file (the banner is logged) and, when you say it, in the transcript history;
+  that is unchanged for spoken approvals. Unit-tested, with the
+  speech and banner changes mutation-checked; **not tested with a real voice or
+  speakers.** This removes the announcement as a source of the phrase, not the
+  general echo/overlap exposure: approval transcripts are still checked before the
+  echo filter, which is a separate change.
+
+## [0.5.1] — 2026-11-05
+
+0.5.0 was tagged on 2026-09-28 but never reached PyPI: the publish job waited on
+the `pypi` environment's required-reviewer approval for 30 days and expired (the
+build and wheel smoke-test passed). This release carries 0.5.0's contents plus
+everything merged since; PyPI users move from 0.4.0 straight to 0.5.1.
+
+### Fixed
+- **claude-code: `is_busy()` could latch true forever when the CLI folds several
+  sends into one turn.** The adapter counted sends minus results; with sends
+  landing mid-turn the CLI returned one result, leaving the counter above zero, so
+  the web ribbon stayed on "working (thinking)" with nothing running. After a result
+  that leaves the counter above zero and no assistant or user activity for 10s, the
+  leftover is treated as folded and busy clears. Adapter and full test suites pass
+  against a fake CLI; **not live-verified against a running session.**
+- **The lenient config loader no longer trips newer mypy** on a field with no
+  annotation; such a field takes its default, like a missing section.
+
+
 ### Changed
+- **Dependency updates** (CI green on `main` at the release commit): `mcp` 2.0 to
+  2.2 (range now `>=2.0,<2.4`), `pyjwt` 2.13 to 2.15, `filelock` 3.29 to 4.2 (a
+  major version), `setuptools` 83 to 84, `opentelemetry-api` 1.44 to 1.45,
+  `certifi`, the `ruff` dev range, and several GitHub Actions. The bumps
+  themselves touched no source; the only code changes since 0.5.0 are the entries
+  in this section plus a ruff DTZ005 lint fix in `scripts/acoustic_calibration.py`.
 - **Web UI: the mic-loop activity status in the ribbon now has a color and an
   icon per state** (listening, capturing, working, speaking, paused, waiting),
   mirroring the TUI's status colors, in a pill outline. Icons are inline SVGs

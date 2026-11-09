@@ -52,6 +52,15 @@ class ResponseTierState:
         self._revealed = 1 if self._tiers else 0
         return self._tiers[0] if self._tiers else ""
 
+    def start_summarized(self, summary: str, full_text: str, split: bool = True) -> str:
+        """New response, spoken as a summary first. The summary is tier 0 and
+        the full text follows, so "continue" speaks the complete reply: one
+        paragraph per step when ``split`` (tier_responses on), otherwise the
+        whole reply in one go. Returns the summary (what to speak now)."""
+        self._tiers = [summary, *(split_tiers(full_text) if split else [full_text])]
+        self._revealed = 1
+        return summary
+
     def has_more(self) -> bool:
         return self._revealed < len(self._tiers)
 

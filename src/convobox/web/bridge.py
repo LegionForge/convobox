@@ -58,8 +58,12 @@ class WebEventForwarder:
         session_id: str,
         history: HistoryDB | None,
         broadcaster: EventBroadcaster | None,
+        approval_phrase: str | None = None,
     ) -> None:
         self._session_id = session_id
+        # Shown on the live approval prompt only (never persisted to history,
+        # never spoken): the spoken announcement doesn't say the phrase.
+        self._approval_phrase = approval_phrase
         self._history = history
         self._broadcaster = broadcaster
         # See _broadcast()'s own comment for why this set exists.
@@ -119,6 +123,12 @@ class WebEventForwarder:
         # value), matching every existing consumer of that column.
         payload = event_to_dict(event)
         payload["type"] = event_type_name
+        if event.type == BackendEventType.APPROVAL_REQUEST:
+            payload["approval_hint"] = (
+                f"Say \u201c{self._approval_phrase}\u201d to approve, or say no to deny."
+                if self._approval_phrase
+                else "No approval phrase is configured; this request will be denied."
+            )
         self._broadcast(payload)
 
     def forward_transcript(self, text: str) -> None:

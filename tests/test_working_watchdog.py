@@ -497,3 +497,58 @@ async def test_continue_wait_does_not_restart_on_every_idle_tick(
     )
 
     assert not continue_gate.is_waiting
+
+
+# --- the approval banner shows the approval phrase (which is never spoken),
+# so it must not outlive the request ---
+
+
+@pytest.mark.asyncio
+async def test_approval_banner_is_cleared_once_the_gate_stops_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A web-button approve/deny, a stop or a kill calls gate.cancel_wait() and
+    # never touches the TUI; the banner must still go away.
+    from convobox.tui import ConversationTuiState
+
+    tui_state = ConversationTuiState()
+    tui_state.warning = "Say 'cobalt night and gale' to approve."
+    approval_gate = ApprovalPromptGate(detector=None, timeout_s=60.0)  # type: ignore[arg-type]
+    approval_gate.start_waiting(time.monotonic())
+    approval_gate.cancel_wait()
+
+    await _run_ticks(
+        monkeypatch,
+        lambda: _working_watchdog(
+            FakeAdapter(busy=False), FakePlayer(playing=False), WorkingIndicator(),
+            FakeOrchestrator(), QueuedInterjection(),
+            tui_state=tui_state, approval_gate=approval_gate,
+        ),
+        n=1,
+    )
+
+    assert tui_state.warning is None
+
+
+@pytest.mark.asyncio
+async def test_approval_banner_stays_while_the_request_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from convobox.tui import ConversationTuiState
+
+    tui_state = ConversationTuiState()
+    tui_state.warning = "Say 'cobalt night and gale' to approve."
+    approval_gate = ApprovalPromptGate(detector=None, timeout_s=60.0)  # type: ignore[arg-type]
+    approval_gate.start_waiting(time.monotonic())
+
+    await _run_ticks(
+        monkeypatch,
+        lambda: _working_watchdog(
+            FakeAdapter(busy=True), FakePlayer(playing=False), WorkingIndicator(),
+            FakeOrchestrator(), QueuedInterjection(),
+            tui_state=tui_state, approval_gate=approval_gate,
+        ),
+        n=2,
+    )
+
+    assert tui_state.warning == "Say 'cobalt night and gale' to approve."

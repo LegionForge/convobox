@@ -96,6 +96,7 @@ from convobox.safeword.detector import SafewordDetector
 from convobox.startup import _resolve_convobox_version, startup_announcement
 from convobox.stt.base import STTEngine, TranscriptResult
 from convobox.stt.corrections import TranscriptCorrector
+from convobox.summary import ClaudeCliSummarizer
 from convobox.tts.base import TTSEngine
 from convobox.tts.factory import DEFAULT_VOICES_DIR, create_tts_engine
 from convobox.tui import ConversationTuiState, TuiStatus, render_conversation_frame
@@ -1209,6 +1210,14 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
             silently_busy = busy and not playing
             tui_state.heartbeat_elapsed_s = indicator.silent_busy_s if silently_busy else None
             tui_state.current_activity = indicator.current_activity if silently_busy else None
+            # The approval banner (it shows the approval phrase) must not
+            # outlive the request: the gate stops waiting on every
+            # resolution path (voice, web buttons, stop/kill, timeout), so
+            # it is the one place that catches them all.
+            if tui_state.warning is not None and not (
+                approval_gate is not None and approval_gate.is_waiting
+            ):
+                tui_state.warning = None
         if elapsed is not None:
             activity_tag = (
                 f"[TOOL {indicator.current_activity}]" if indicator.current_activity else "[THINKING]"
@@ -1391,6 +1400,20 @@ def _render_approval_explanation(
         return _render_approval_explanation_verbose(content, tool, tool_input)
 
 
+_BANNER_DESCRIPTION_MAX_CHARS = 800
+
+
+def approval_prompt_instruction(approval_phrase: str | None) -> str:
+    """The on-screen instruction line for a pending approval. This is where
+    the approval phrase is shown: it is deliberately never spoken."""
+    if approval_phrase:
+        return (
+            f"Say '{approval_phrase}' to approve. Say 'no' to deny. "
+            "Silence denies the request."
+        )
+    return "No interactive approval phrase is configured; this request will be denied."
+
+
 def _on_backend_event(
     tui_state: ConversationTuiState | None,
     last_spoken_response: LastSpokenResponse,
@@ -1446,26 +1469,28 @@ def _on_backend_event(
                     approval_explanation_mode
                 ),
             )
-        # event.content is a verbose, log/TUI-oriented description -- only
-        # Codex's adapter populates it today (_describe_approval_request);
-        # Claude Code's hook-based APPROVAL_REQUEST carries its info in
-        # tool/tool_input instead (see Orchestrator's own spoken
-        # announcement, render_approval_request_for_speech, which handles
-        # that shape). Gated on content being truthy so Claude Code's
-        # events just skip the banner gracefully rather than showing an
-        # empty one -- a real gap (no visual banner for Claude Code yet),
-        # not a crash risk.
-        if event.content:
-            instruction = (
-                f"\n\nSay '{approval_phrase}' to approve. Say 'no' to deny. "
-                "Silence denies the request."
-                if approval_phrase
-                else "\n\nNo interactive approval phrase is configured; this request will be denied."
+        # The approval phrase is NEVER spoken (see Orchestrator's
+        # render_approval_request_for_speech): it is shown here instead,
+        # for every backend. event.content is a verbose description only
+        # Codex's adapter fills in (_describe_approval_request); Claude
+        # Code's hook-based request carries its detail in tool/tool_input,
+        # so the banner falls back to the tool plus its plain explanation.
+        description = event.content or (
+            f"Approval needed to run {event.tool or 'a tool'}.\n\n"
+            + _render_approval_explanation(
+                None, event.tool, event.tool_input, approval_explanation_mode
             )
-            warning = event.content + instruction
-            log.warning("%s", warning)
-            if tui_state is not None:
-                tui_state.warning = warning
+        )
+        # Instruction FIRST and the description capped: the TUI truncates
+        # the frame from the bottom, and a long command must not push the
+        # phrase (now shown only on screen) out of view.
+        if len(description) > _BANNER_DESCRIPTION_MAX_CHARS:
+            description = description[:_BANNER_DESCRIPTION_MAX_CHARS].rstrip() + " ... (truncated)"
+        warning = approval_prompt_instruction(approval_phrase) + "\n\n" + description
+        log.warning("%s", warning)
+        if tui_state is not None:
+            tui_state.warning = warning
+            if event.content:
                 tui_state.full_detail = event.content
         return
     if event.type == BackendEventType.ERROR:
@@ -2083,6 +2108,7 @@ async def run(args: argparse.Namespace) -> None:
             new_session_id(),
             history=web_app_history if config.web.history_tracking_enabled else None,
             broadcaster=web_broadcaster,
+            approval_phrase=config.interaction.approval_phrase,
         )
         approval_bridge = WebApprovalBridge()
         listening_bridge = WebListeningBridge()
@@ -2202,12 +2228,33 @@ async def run(args: argparse.Namespace) -> None:
         if web_forwarder is not None:
             web_forwarder(event)
 
+    summarizer = None
+    if config.interaction.summarize_long_responses:
+        claude_path = shutil.which("claude")
+        if claude_path is None:
+            log.warning(
+                "interaction.summarize_long_responses is on but the `claude` CLI is not on "
+                "PATH; long replies will be spoken unsummarized"
+            )
+        else:
+            summarizer = ClaudeCliSummarizer(
+                command=claude_path,
+                model=config.interaction.summary_model,
+                timeout_s=config.interaction.summary_timeout_s,
+            )
+            log.info(
+                "spoken summaries on: replies of %d+ words are also sent to a one-shot "
+                "`claude` call (model %s) to be summarized",
+                config.interaction.summary_min_words, config.interaction.summary_model,
+            )
     orchestrator = Orchestrator(
         adapter=adapter,
         safeword=safeword,
         tts=tts,
         player=player,
         on_event=_dispatch_event,
+        summarizer=summarizer,
+        summary_min_words=config.interaction.summary_min_words,
         tier_responses=config.interaction.tier_responses,
         approval_phrase=config.interaction.approval_phrase,
         approval_gate=approval_gate,
@@ -2784,6 +2831,9 @@ async def run(args: argparse.Namespace) -> None:
                     if gate_action == "pause":
                         player.stop()
                         tts.stop()
+                        # Before the backend RPC below: a pending spoken summary
+                        # must not start talking after the pause.
+                        orchestrator.cancel_pending_speech()
                         # Captured BEFORE send_hard_stop() -- every
                         # adapter's own send_hard_stop() unconditionally
                         # clears is_busy() regardless of whether a tool
