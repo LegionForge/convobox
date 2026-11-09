@@ -517,9 +517,7 @@ def _approval_call_sites() -> tuple[int, list[tuple[ast.Call, list[ast.stmt], in
     """(every `approval_gate.observe_transcript(...)` call anywhere in the
     script, those that are the direct value of a statement as
     (call, containing statement list, index))."""
-    import scripts.run_convobox as module
-
-    tree = ast.parse(inspect.getsource(module))
+    tree = ast.parse(inspect.getsource(inspect.getmodule(ApprovalPromptGate)))
 
     def is_gate_call(node: ast.AST) -> bool:
         return (
