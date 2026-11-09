@@ -1450,25 +1450,21 @@ def test_render_question_handles_malformed_input() -> None:
 # claude_code.py) ---
 
 
-def test_render_approval_request_speaks_tool_and_phrase() -> None:
+def test_render_approval_request_speaks_the_tool_but_never_the_phrase() -> None:
     # Deliberately does NOT read tool_input/command content aloud (an
     # earlier version did) -- commands can be long, misleading out of
     # context, or contain sensitive values. The TUI/log warning carries
     # the actual detail; speech only announces the high-stakes state.
-    spoken = render_approval_request_for_speech("Bash", "alpha bravo delta")
-    assert spoken == "Approval needed to run Bash. Say alpha bravo delta to approve, or say no to deny."
+    spoken = render_approval_request_for_speech("Bash")
+    assert spoken == "Approval needed to run Bash. Say your approval phrase to approve, or say no to deny."
+    # The mic can hear the speakers: a phrase spoken aloud can be transcribed
+    # back as the approval, so it must never be in the announcement.
+    assert "alpha" not in spoken
 
 
 def test_render_approval_request_without_a_tool_name_says_a_tool() -> None:
-    spoken = render_approval_request_for_speech(None, "alpha bravo delta")
+    spoken = render_approval_request_for_speech(None)
     assert spoken.startswith("Approval needed to run a tool.")
-
-
-def test_render_approval_request_without_a_phrase_uses_a_generic_fallback() -> None:
-    # Shouldn't normally happen (ApprovalDetector requires a phrase to
-    # construct) but must still produce a sensible sentence, not crash.
-    spoken = render_approval_request_for_speech("Bash", None)
-    assert spoken == "Approval needed to run Bash. Say your approval phrase to approve, or say no to deny."
 
 
 @pytest.mark.asyncio
@@ -1488,8 +1484,12 @@ async def test_approval_request_event_is_announced_via_tts() -> None:
 
     assert len(tts.synthesized) == 1
     assert tts.synthesized[0] == (
-        "Approval needed to run Bash. Say alpha bravo delta to approve, or say no to deny."
+        "Approval needed to run Bash. Say your approval phrase to approve, or say no to deny."
     )
+    # End to end through the real event path: the configured phrase is never
+    # synthesized, whatever else the announcement says.
+    for word in ("alpha", "bravo", "delta"):
+        assert word not in tts.synthesized[0].lower()
     # The command itself is never read aloud -- see the function's own docstring.
     assert "rm -rf" not in tts.synthesized[0]
     assert len(player.played) == 1
