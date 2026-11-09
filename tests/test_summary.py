@@ -349,9 +349,9 @@ def test_an_unrelated_question_in_the_summary_does_not_hide_the_real_one() -> No
 
 
 def test_finalize_caps_how_many_questions_it_appends() -> None:
-    source = "A? B? C? D?"
+    source = "A? B? C? D? E?"
     out = finalize_summary("Done.", source)
-    assert out == "Done. C? D?"
+    assert out == "Done. C? D? E?"
 
 
 def test_continue_speaks_the_whole_reply_at_once_when_tiering_is_off() -> None:
@@ -462,3 +462,66 @@ async def test_a_new_command_drops_a_summary_that_has_not_started_speaking() -> 
     await asyncio.sleep(0.4)
     assert tts.synthesized == []
     assert orch._adapter.sent_text + orch._adapter.sent_interject == ["now run the linter"]
+
+
+# --- second Opus review -----------------------------------------------------
+
+
+async def test_a_cancelled_summary_finishing_late_cannot_clear_the_newer_ones_state() -> None:
+    """The first summary's cleanup awaits (a real subprocess wait); it finishes
+    after the second summary has started and must not make the second look
+    'not pending' -- a new command would then be followed by a stale summary."""
+
+    class SlowCleanup:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def summarize(self, text: str) -> str | None:
+            self.calls += 1
+            if self.calls == 1:
+                try:
+                    await asyncio.sleep(5)
+                finally:
+                    await asyncio.sleep(0.2)  # like `await proc.wait()` after kill()
+                return "First."
+            await asyncio.sleep(1)
+            return "Second summary."
+
+    orch, tts = make_orch(SlowCleanup())  # type: ignore[arg-type]
+    orch._on_event(text_event(LONG))
+    await asyncio.sleep(0.05)
+    orch._on_event(text_event(LONG))  # cancels the first; its cleanup is still running
+    await asyncio.sleep(0.4)  # first's cleanup has now finished
+    assert orch._summary_in_flight()  # the second is still pending
+    await orch.handle_transcript("now run the linter")
+    await asyncio.sleep(1.2)
+    assert tts.synthesized == []  # the stale second summary was dropped by the new command
+
+
+def test_finalize_is_fast_on_pathological_input() -> None:
+    import time
+
+    start = time.monotonic()
+    finalize_summary("ok", ")" * 40_000 + " " + "'" * 40_000 + " done")
+    assert time.monotonic() - start < 0.5  # was quadratic: seconds, blocking stop phrases
+
+
+@pytest.mark.parametrize(
+    "source,summary",
+    [
+        ("The tests are no longer working.", "Tests updated."),
+        ("I couldn't start the server.", "Server started."),
+        ("The suite is red after my change.", "Suite updated."),
+        ("It regressed in the parser.", "Parser touched."),
+        ("The build can’t find the module.", "Build looked at."),
+        ("It didn’t pass: nothing but errors.", "All set."),
+    ],
+)
+def test_guard_catches_more_phrasings(source: str, summary: str) -> None:
+    assert finalize_summary(summary, source) is None
+
+
+def test_the_question_that_matters_survives_rhetorical_ones() -> None:
+    source = "Should I drop the prod users table? Why did this break? A bad index. What changed? The deploy."
+    out = finalize_summary("Looked into it.", source)
+    assert out is not None and "Should I drop the prod users table?" in out

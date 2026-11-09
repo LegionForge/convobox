@@ -217,7 +217,7 @@ class Orchestrator:
         # feature is on, but only tier_responses truncates a reply.
         self._summarizer = summarizer
         self._summary_min_words = summary_min_words
-        self._summary_pending = False  # a summary call is in flight, nothing spoken yet
+        self._summary_task: asyncio.Task[None] | None = None  # the summary call in flight
         self._tier_state: ResponseTierState | None = (
             ResponseTierState() if (tier_responses or summarizer is not None) else None
         )
@@ -278,7 +278,7 @@ class Orchestrator:
         # The user is giving a new command: a summary of the previous reply
         # that hasn't started speaking yet would arrive stale, mid-command.
         # (The full text is still on screen.)
-        if self._summary_pending:
+        if self._summary_in_flight():
             self._cancel_speak_task()
 
         # Sends wait (best-effort, bounded) for the event subscription the
@@ -308,6 +308,14 @@ class Orchestrator:
         if self._speak_task is not None:
             self._speak_task.cancel()
             self._speak_task = None
+
+    def _summary_in_flight(self) -> bool:
+        """A summary call is running and nothing has been spoken from it yet.
+        Compared by task identity, not a bare flag: a cancelled earlier summary
+        finishes its cleanup AFTER the next one has started, and must not be
+        able to clear the newer one's state."""
+        task = self._summary_task
+        return task is not None and not task.done() and task is self._speak_task
 
     def cancel_pending_speech(self) -> None:
         """Public form of _cancel_speak_task() for stop paths outside this
@@ -734,13 +742,15 @@ class Orchestrator:
         including the model call itself."""
         assert self._summarizer is not None and self._tier_state is not None  # nosec B101
         summary: str | None = None
-        self._summary_pending = True
+        me = asyncio.current_task()
+        self._summary_task = me
         try:
             summary = finalize_summary(await self._summarizer.summarize(spoken), spoken)
         except Exception as exc:  # noqa: BLE001 -- a summary must never break the voice loop
             logger.warning("summarizer failed (%s); speaking the reply instead", exc)
         finally:
-            self._summary_pending = False
+            if self._summary_task is me:
+                self._summary_task = None
         if summary:
             logger.info(
                 "speaking a summary (%d words) of a %d-word reply",

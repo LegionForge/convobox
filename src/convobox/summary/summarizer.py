@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_WORDS = 80
 MAX_SUMMARY_CHARS = 600
 MAX_INPUT_CHARS = 12_000
-_MAX_QUESTION_CHARS = 300
+_MAX_QUESTION_CHARS = 600
 
 _PROMPT = (
     "Summarize the assistant message between the markers in at most two short "
@@ -53,6 +53,9 @@ _FAILURE_TERMS = (
     r"fail(?:s|ed|ing|ure|ures)?|error|errors|exception|exceptions|traceback|"
     r"crash(?:ed|es)?|cannot|can't|unable|denied|rejected|refused|declined|blocked|"
     r"aborted|timed out|time out|timeout|warning|warnings|broken|panic(?:ked)?|"
+    r"couldn't|could not|doesn't work|does not work|isn't (?:working|starting|running)|"
+    r"is not (?:working|starting|running)|no longer (?:work|working|run|running|start|starting)|"
+    r"regress(?:ed|es|ion|ions)|(?:is|are) red|went red|"
     r"did not (?:pass|work|succeed|complete)|didn't (?:pass|work|succeed|complete)|"
     r"not (?:pass|passing|work|working|succeed|succeeded)|"
     # A few common non-English words; the guard is a net, not a classifier.
@@ -63,12 +66,12 @@ _FAILURE_RE = re.compile(rf"\b(?:{_FAILURE_TERMS})\b", re.IGNORECASE)
 # report a failure, so it must neither satisfy the guard (in the summary) nor
 # trigger it (in the source).
 _NEGATED_FAILURE_RE = re.compile(
-    rf"\b(?:no|nothing|none|without|zero|never|nor)\s+(?:\w+\s+)?(?:{_FAILURE_TERMS})\b",
+    rf"\b(?:no|nothing|none|without|zero|never|nor)\s+(?!but\b)(?:\w+\s+)?(?:{_FAILURE_TERMS})\b",
     re.IGNORECASE,
 )
-_QUOTE_TAIL_RE = re.compile(r"[\"')\]`*_]+$")
+_QUOTE_TAIL_CHARS = "\"')]`*_"
 _MARKER_RE = re.compile(r"<<<\s*MESSAGE|MESSAGE\s*>>>")
-_MAX_APPENDED_QUESTIONS = 2
+_MAX_APPENDED_QUESTIONS = 3
 
 
 class Summarizer(Protocol):
@@ -81,6 +84,7 @@ def word_count(text: str) -> int:
 
 
 def _has_failure(text: str) -> bool:
+    text = text.replace("\u2019", "'").replace("\u2018", "'")  # curly apostrophes: can\u2019t
     return _FAILURE_RE.search(_NEGATED_FAILURE_RE.sub(" ", text)) is not None
 
 
@@ -91,13 +95,13 @@ def _questions(source: str) -> list[str]:
     found = []
     for sentence in _SENTENCE_SPLIT_RE.split(source.strip()):
         sentence = sentence.strip()
-        if _QUOTE_TAIL_RE.sub("", sentence).endswith("?") and len(sentence) <= _MAX_QUESTION_CHARS:
+        if len(sentence) <= _MAX_QUESTION_CHARS and sentence.rstrip(_QUOTE_TAIL_CHARS).endswith("?"):
             found.append(sentence)
     return found
 
 
 def _norm(text: str) -> str:
-    return " ".join(_QUOTE_TAIL_RE.sub("", text).lower().split())
+    return " ".join(text.rstrip(_QUOTE_TAIL_CHARS).lower().split())
 
 
 def _cap(text: str, limit: int) -> str:
