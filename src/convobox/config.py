@@ -457,10 +457,10 @@ class InteractionConfig(BaseModel):
     # been with this off. Needs the `claude` CLI on PATH, logged in.
     summarize_long_responses: bool = False
     summary_min_words: int = Field(default=80, ge=20)
-    summary_model: str = "haiku"
+    summary_model: str = Field(default="haiku", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
     # The call takes ~4s measured; the cap is for a slow network, not a
     # normal run.
-    summary_timeout_s: float = Field(default=8.0, gt=0)
+    summary_timeout_s: float = Field(default=8.0, gt=0, le=60)
     # Phase 3 (docs/DESIGN-0.3.0-interaction-and-safety.md): the voice
     # phrase that gates a pending destructive-action tool call/command.
     # None (default) leaves voice approval OFF -- existing sessions behave

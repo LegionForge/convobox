@@ -217,6 +217,7 @@ class Orchestrator:
         # feature is on, but only tier_responses truncates a reply.
         self._summarizer = summarizer
         self._summary_min_words = summary_min_words
+        self._summary_pending = False  # a summary call is in flight, nothing spoken yet
         self._tier_state: ResponseTierState | None = (
             ResponseTierState() if (tier_responses or summarizer is not None) else None
         )
@@ -274,6 +275,12 @@ class Orchestrator:
         if not transcript.strip():
             return
 
+        # The user is giving a new command: a summary of the previous reply
+        # that hasn't started speaking yet would arrive stale, mid-command.
+        # (The full text is still on screen.)
+        if self._summary_pending:
+            self._cancel_speak_task()
+
         # Sends wait (best-effort, bounded) for the event subscription the
         # loop above just started to actually be established: events a
         # backend emits before its stream is subscribed can be lost
@@ -301,6 +308,12 @@ class Orchestrator:
         if self._speak_task is not None:
             self._speak_task.cancel()
             self._speak_task = None
+
+    def cancel_pending_speech(self) -> None:
+        """Public form of _cancel_speak_task() for stop paths outside this
+        class (the runner's pause branch): drops in-flight and not-yet-started
+        speech, including a pending summary call."""
+        self._cancel_speak_task()
 
     async def _speak_after_delay(self, text: str, delay_s: float) -> None:
         await asyncio.sleep(delay_s)
@@ -387,6 +400,11 @@ class Orchestrator:
             self._player.stop()
         if self._tts is not None:
             self._tts.stop()
+        # Before the RPC round trip, not after (stop_event_loop() below also
+        # cancels it, but only once send_hard_stop() returns): a summary call
+        # finishing inside that window would otherwise start speaking AFTER
+        # the stop.
+        self._cancel_speak_task()
         await self._adapter.send_hard_stop()
         await self.stop_event_loop()
         if self._approval_gate is not None:
@@ -441,6 +459,7 @@ class Orchestrator:
             self._player.stop()
         if self._tts is not None:
             self._tts.stop()
+        self._cancel_speak_task()  # see hard_stop(): never speak after a stop
         await self._adapter.force_kill()
         await self.stop_event_loop()
         if self._approval_gate is not None:
@@ -715,16 +734,21 @@ class Orchestrator:
         including the model call itself."""
         assert self._summarizer is not None and self._tier_state is not None  # nosec B101
         summary: str | None = None
+        self._summary_pending = True
         try:
             summary = finalize_summary(await self._summarizer.summarize(spoken), spoken)
         except Exception as exc:  # noqa: BLE001 -- a summary must never break the voice loop
             logger.warning("summarizer failed (%s); speaking the reply instead", exc)
+        finally:
+            self._summary_pending = False
         if summary:
             logger.info(
                 "speaking a summary (%d words) of a %d-word reply",
                 word_count(summary), word_count(spoken),
             )
-            text = self._tier_state.start_summarized(summary, spoken)
+            text = self._tier_state.start_summarized(
+                summary, spoken, split=self._tier_responses
+            )
         elif self._tier_responses:
             text = self._tier_state.start(spoken)
         else:

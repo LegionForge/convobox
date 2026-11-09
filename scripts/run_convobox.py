@@ -2806,6 +2806,9 @@ async def run(args: argparse.Namespace) -> None:
                     if gate_action == "pause":
                         player.stop()
                         tts.stop()
+                        # Before the backend RPC below: a pending spoken summary
+                        # must not start talking after the pause.
+                        orchestrator.cancel_pending_speech()
                         # Captured BEFORE send_hard_stop() -- every
                         # adapter's own send_hard_stop() unconditionally
                         # clears is_busy() regardless of whether a tool

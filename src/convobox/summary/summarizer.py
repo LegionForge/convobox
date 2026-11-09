@@ -10,8 +10,8 @@ Two safeguards do not depend on the model behaving:
 - ``finalize_summary`` refuses (returns None) when the source mentions a
   failure or error and the summary does not, so a summary can never be the
   thing that hides one. The caller then falls back to the unsummarized path.
-- A closing question to the user is appended verbatim when the summary
-  dropped it: an unanswered question deadlocks the turn, and rephrasing it
+- Every question the reply puts to the user is appended verbatim when the
+  summary dropped it: an unanswered question deadlocks the turn, and rephrasing it
   is a way to lose its meaning.
 
 The reply being summarized is untrusted model output, so the summarizer
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_WORDS = 80
 MAX_SUMMARY_CHARS = 600
 MAX_INPUT_CHARS = 12_000
-_MAX_TAIL_QUESTION_CHARS = 300
+_MAX_QUESTION_CHARS = 300
 
 _PROMPT = (
     "Summarize the assistant message between the markers in at most two short "
@@ -47,12 +47,28 @@ _PROMPT = (
     "<<<MESSAGE\n{text}\nMESSAGE>>>\n"
 )
 
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|(?<=[.!?][\"')\]`*_])\s+")
 _WORD_RE = re.compile(r"\S+")
-_FAILURE_RE = re.compile(
-    r"\b(fail(?:s|ed|ing|ure|ures)?|error|errors|exception|traceback|crash(?:ed|es)?)\b",
+_FAILURE_TERMS = (
+    r"fail(?:s|ed|ing|ure|ures)?|error|errors|exception|exceptions|traceback|"
+    r"crash(?:ed|es)?|cannot|can't|unable|denied|rejected|refused|declined|blocked|"
+    r"aborted|timed out|time out|timeout|warning|warnings|broken|panic(?:ked)?|"
+    r"did not (?:pass|work|succeed|complete)|didn't (?:pass|work|succeed|complete)|"
+    r"not (?:pass|passing|work|working|succeed|succeeded)|"
+    # A few common non-English words; the guard is a net, not a classifier.
+    r"fall[oó]|fallo|fallos|erreur|[ée]chec|fehler|fehlgeschlagen|errore|fallito"
+)
+_FAILURE_RE = re.compile(rf"\b(?:{_FAILURE_TERMS})\b", re.IGNORECASE)
+# "no errors", "nothing failed", "without warnings": a negated mention does not
+# report a failure, so it must neither satisfy the guard (in the summary) nor
+# trigger it (in the source).
+_NEGATED_FAILURE_RE = re.compile(
+    rf"\b(?:no|nothing|none|without|zero|never|nor)\s+(?:\w+\s+)?(?:{_FAILURE_TERMS})\b",
     re.IGNORECASE,
 )
+_QUOTE_TAIL_RE = re.compile(r"[\"')\]`*_]+$")
+_MARKER_RE = re.compile(r"<<<\s*MESSAGE|MESSAGE\s*>>>")
+_MAX_APPENDED_QUESTIONS = 2
 
 
 class Summarizer(Protocol):
@@ -64,12 +80,24 @@ def word_count(text: str) -> int:
     return len(_WORD_RE.findall(text))
 
 
-def _tail_question(source: str) -> str | None:
-    sentences = _SENTENCE_SPLIT_RE.split(source.strip())
-    last = sentences[-1].strip() if sentences else ""
-    if last.endswith("?") and len(last) <= _MAX_TAIL_QUESTION_CHARS:
-        return last
-    return None
+def _has_failure(text: str) -> bool:
+    return _FAILURE_RE.search(_NEGATED_FAILURE_RE.sub(" ", text)) is not None
+
+
+def _questions(source: str) -> list[str]:
+    """Every sentence of ``source`` that asks something, in order. A question
+    anywhere in a reply can be what the agent is waiting on, not just the last
+    sentence."""
+    found = []
+    for sentence in _SENTENCE_SPLIT_RE.split(source.strip()):
+        sentence = sentence.strip()
+        if _QUOTE_TAIL_RE.sub("", sentence).endswith("?") and len(sentence) <= _MAX_QUESTION_CHARS:
+            found.append(sentence)
+    return found
+
+
+def _norm(text: str) -> str:
+    return " ".join(_QUOTE_TAIL_RE.sub("", text).lower().split())
 
 
 def _cap(text: str, limit: int) -> str:
@@ -91,12 +119,16 @@ def finalize_summary(raw: str | None, source: str) -> str | None:
     summary = _cap(" ".join(raw.split()), MAX_SUMMARY_CHARS)
     if not summary:
         return None
-    if _FAILURE_RE.search(source) and not _FAILURE_RE.search(summary):
+    if _has_failure(source) and not _has_failure(summary):
         logger.info("summary dropped: source reports a failure the summary omits")
         return None
-    question = _tail_question(source)
-    already_asks = summary.endswith("?")  # the summary put its own question to the user
-    if question and not already_asks and " ".join(question.lower().split()) not in summary.lower():
+    # Every question the reply puts to the user is kept: an unheard question
+    # deadlocks the turn. A question the summary already contains verbatim is
+    # not repeated; a rephrased one is appended anyway, because being asked
+    # twice is a nuisance and a dropped question is a hang.
+    lowered = _norm(summary)
+    missing = [q for q in _questions(source) if _norm(q) not in lowered]
+    for question in missing[-_MAX_APPENDED_QUESTIONS:]:
         summary = f"{summary} {question}"
     return summary
 
@@ -128,15 +160,23 @@ class ClaudeCliSummarizer:
         ]
 
     async def summarize(self, text: str) -> str | None:
-        prompt = _PROMPT.format(text=text[:MAX_INPUT_CHARS]).encode()
+        # The message sits between markers; one that contains the marker text
+        # could close the block early, so the markers are defanged first.
+        body = _MARKER_RE.sub("[marker]", text[:MAX_INPUT_CHARS])
+        prompt = _PROMPT.format(text=body).encode()
+        # A fresh private directory per call: no project CLAUDE.md is found,
+        # and nothing another local user could plant in a shared temp dir.
+        with tempfile.TemporaryDirectory(prefix="convobox-summary-") as workdir:
+            return await self._run(prompt, workdir)
+
+    async def _run(self, prompt: bytes, workdir: str) -> str | None:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self._argv(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                # A neutral directory, so no project CLAUDE.md is discovered.
-                cwd=tempfile.gettempdir(),
+                cwd=workdir,
             )
         except OSError as exc:
             logger.warning("summary unavailable: could not start %r: %s", self._command, exc)
