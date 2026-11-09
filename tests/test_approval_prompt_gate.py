@@ -442,3 +442,29 @@ def test_approval_banner_without_a_phrase_says_it_will_be_denied() -> None:
     )
     assert state.warning is not None
     assert "will be denied" in state.warning
+
+
+def test_a_long_command_cannot_push_the_phrase_off_the_banner() -> None:
+    # The phrase is shown only on screen, and the TUI truncates the frame from
+    # the bottom: the instruction comes first and the description is capped.
+    from convobox.tui import render_conversation_frame
+
+    gate = _gate()
+    state = ConversationTuiState()
+    heredoc = "\n".join(f"echo line {i}" for i in range(300))
+    _on_backend_event(
+        state,
+        LastSpokenResponse(),
+        BackendEvent(
+            BackendEventType.APPROVAL_REQUEST,
+            tool="Bash",
+            tool_input='{"command": "' + heredoc.replace("\n", "\\n") + '"}',
+        ),
+        "cobalt night and gale",
+        gate,
+    )
+    assert state.warning is not None
+    assert state.warning.startswith("Say 'cobalt night and gale'")
+    assert len(state.warning) < 1200
+    frame = "\n".join(render_conversation_frame(state, 100, 40, 0.0))
+    assert "cobalt night and gale" in frame

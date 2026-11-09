@@ -43,7 +43,11 @@ minor versions carry feature and behavior changes.
   machine could be transcribed back as the approval. The phrase is now shown on
   screen with the request instead: in the TUI and log for every backend (Claude
   Code's request previously had no banner at all) and as a hint on the web
-  approval prompt (live only, never written to history). Unit-tested, with the
+  approval prompt (the hint itself is live only and not stored in history). The
+  banner is cleared when the request is resolved by any route, and shows the phrase
+  first so a long command can't push it off screen. The phrase still appears in the
+  log file (the banner is logged) and, when you say it, in the transcript history;
+  that is unchanged for spoken approvals. Unit-tested, with the
   speech and banner changes mutation-checked; **not tested with a real voice or
   speakers.** This removes the announcement as a source of the phrase, not the
   general echo/overlap exposure: approval transcripts are still checked before the

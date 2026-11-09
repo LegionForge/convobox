@@ -1210,6 +1210,14 @@ async def _working_watchdog(  # type: ignore[no-untyped-def]
             silently_busy = busy and not playing
             tui_state.heartbeat_elapsed_s = indicator.silent_busy_s if silently_busy else None
             tui_state.current_activity = indicator.current_activity if silently_busy else None
+            # The approval banner (it shows the approval phrase) must not
+            # outlive the request: the gate stops waiting on every
+            # resolution path (voice, web buttons, stop/kill, timeout), so
+            # it is the one place that catches them all.
+            if tui_state.warning is not None and not (
+                approval_gate is not None and approval_gate.is_waiting
+            ):
+                tui_state.warning = None
         if elapsed is not None:
             activity_tag = (
                 f"[TOOL {indicator.current_activity}]" if indicator.current_activity else "[THINKING]"
@@ -1392,15 +1400,18 @@ def _render_approval_explanation(
         return _render_approval_explanation_verbose(content, tool, tool_input)
 
 
+_BANNER_DESCRIPTION_MAX_CHARS = 800
+
+
 def approval_prompt_instruction(approval_phrase: str | None) -> str:
     """The on-screen instruction line for a pending approval. This is where
     the approval phrase is shown: it is deliberately never spoken."""
     if approval_phrase:
         return (
-            f"\n\nSay '{approval_phrase}' to approve. Say 'no' to deny. "
+            f"Say '{approval_phrase}' to approve. Say 'no' to deny. "
             "Silence denies the request."
         )
-    return "\n\nNo interactive approval phrase is configured; this request will be denied."
+    return "No interactive approval phrase is configured; this request will be denied."
 
 
 def _on_backend_event(
@@ -1470,7 +1481,12 @@ def _on_backend_event(
                 None, event.tool, event.tool_input, approval_explanation_mode
             )
         )
-        warning = description + approval_prompt_instruction(approval_phrase)
+        # Instruction FIRST and the description capped: the TUI truncates
+        # the frame from the bottom, and a long command must not push the
+        # phrase (now shown only on screen) out of view.
+        if len(description) > _BANNER_DESCRIPTION_MAX_CHARS:
+            description = description[:_BANNER_DESCRIPTION_MAX_CHARS].rstrip() + " ... (truncated)"
+        warning = approval_prompt_instruction(approval_phrase) + "\n\n" + description
         log.warning("%s", warning)
         if tui_state is not None:
             tui_state.warning = warning
