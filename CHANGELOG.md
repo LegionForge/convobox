@@ -35,6 +35,24 @@ minor versions carry feature and behavior changes.
   spoken session with a person, and the extra seconds of silence before the
   summary starts.
 
+### Security
+- **The approval phrase is no longer spoken aloud.** The spoken announcement now
+  says "Say your approval phrase to approve, or say no to deny"; the operator is
+  assumed to know the phrase. With speakers and echo cancellation off (the
+  default), the mic can hear the announcement, and a phrase read out by the
+  machine could be transcribed back as the approval. The phrase is now shown on
+  screen with the request instead: in the TUI and log for every backend (Claude
+  Code's request previously had no banner at all) and as a hint on the web
+  approval prompt (the hint itself is live only and not stored in history). The
+  banner is cleared when the request is resolved by any route, and shows the phrase
+  first so a long command can't push it off screen. The phrase still appears in the
+  log file (the banner is logged) and, when you say it, in the transcript history;
+  that is unchanged for spoken approvals. Unit-tested, with the
+  speech and banner changes mutation-checked; **not tested with a real voice or
+  speakers.** This removes the announcement as a source of the phrase, not the
+  general echo/overlap exposure: approval transcripts are still checked before the
+  echo filter, which is a separate change.
+
 ## [0.5.1] — 2026-11-05
 
 0.5.0 was tagged on 2026-09-28 but never reached PyPI: the publish job waited on

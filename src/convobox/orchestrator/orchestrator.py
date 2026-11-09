@@ -133,25 +133,24 @@ def render_question_for_speech(tool_input: str | None) -> str | None:
     return "The agent is asking: " + " ".join(parts)
 
 
-def render_approval_request_for_speech(tool: str | None, approval_phrase: str | None) -> str:
+def render_approval_request_for_speech(tool: str | None) -> str:
     """Spoken announcement for a pending BackendEventType.APPROVAL_REQUEST
     (Phase 3, docs/DESIGN-0.3.0-interaction-and-safety.md).
 
-    Deliberately does NOT read the command/file path aloud (an earlier
-    version of this function did, via tool_input) -- commands can be
+    Deliberately does NOT say the approval phrase aloud: the mic can hear
+    the speakers (echo cancellation is off by default), and a phrase spoken
+    by the machine can be transcribed back as the approval. The operator
+    chose the phrase and is assumed to know it; it is shown on screen (TUI,
+    log and web UI) with the request instead.
+
+    Also does NOT read the command/file path aloud -- commands can be
     long, misleading out of context, or contain sensitive values; the
     TUI/log warning (see run_convobox.py's _on_backend_event) shows the
-    exact request, speech only announces the high-stakes state, WHICH
-    tool it's for, and the operator-controlled vocabulary needed to
-    resolve it. ``approval_phrase`` is None when interactive approvals
-    are enabled but no phrase is configured (shouldn't normally happen --
-    ApprovalDetector requires one to construct -- but this must still
-    produce a safe, sensible sentence rather than crashing on a caller
-    bug).
+    exact request, speech only announces the high-stakes state and WHICH
+    tool it's for.
     """
     name = tool or "a tool"
-    phrase = approval_phrase or "your approval phrase"
-    return f"Approval needed to run {name}. Say {phrase} to approve, or say no to deny."
+    return f"Approval needed to run {name}. Say your approval phrase to approve, or say no to deny."
 
 
 class ApprovalWaitCanceler(Protocol):
@@ -609,9 +608,7 @@ class Orchestrator:
             # (commands can be long/sensitive/misleading out of context);
             # the TUI/log warning (run_convobox.py's _on_backend_event)
             # carries the actual detail.
-            approval_announcement = render_approval_request_for_speech(
-                event.tool, self._approval_phrase
-            )
+            approval_announcement = render_approval_request_for_speech(event.tool)
             logger.info("%s", approval_announcement)
             if self._tts is not None and self._player is not None:
                 self._cancel_speak_task()

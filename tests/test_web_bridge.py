@@ -1113,3 +1113,48 @@ async def test_text_bridge_forwards_the_corrected_text_to_history() -> None:
     await bridge.submit("test the bargain detection")
 
     assert forwarder.forwarded == ["test the barge-in detection"]
+
+
+@pytest.mark.asyncio
+async def test_approval_request_broadcast_carries_the_phrase_hint_but_history_does_not(
+    db: HistoryDB,
+) -> None:
+    # The phrase is never spoken, so the live prompt is where the operator
+    # sees it. It must not be persisted to the history database.
+    session_id = new_session_id()
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(
+        session_id, history=db, broadcaster=broadcaster, approval_phrase="cobalt night and gale"
+    )
+    forwarder(BackendEvent(type=BackendEventType.APPROVAL_REQUEST, tool="Bash", tool_input="{}"))
+    assert forwarder._writer_task is not None
+    await asyncio.wait_for(forwarder._writer_task, timeout=5)
+    await asyncio.sleep(0)
+
+    payload = queue.get_nowait()
+    assert payload["type"] == "approval_request"
+    assert "cobalt night and gale" in payload["approval_hint"]
+    assert "cobalt night and gale" not in json.dumps(db.get_session_events(session_id))
+
+
+@pytest.mark.asyncio
+async def test_approval_request_without_a_phrase_says_it_will_be_denied() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(new_session_id(), history=None, broadcaster=broadcaster)
+    forwarder(BackendEvent(type=BackendEventType.APPROVAL_REQUEST, tool="Bash"))
+    await asyncio.sleep(0)
+    assert "will be denied" in queue.get_nowait()["approval_hint"]
+
+
+@pytest.mark.asyncio
+async def test_non_approval_events_have_no_approval_hint() -> None:
+    broadcaster = EventBroadcaster()
+    queue = broadcaster.subscribe()
+    forwarder = WebEventForwarder(
+        new_session_id(), history=None, broadcaster=broadcaster, approval_phrase="cobalt night and gale"
+    )
+    forwarder(BackendEvent(type=BackendEventType.TEXT, content="hi"))
+    await asyncio.sleep(0)
+    assert "approval_hint" not in queue.get_nowait()
