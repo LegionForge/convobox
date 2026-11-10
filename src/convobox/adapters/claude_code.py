@@ -154,7 +154,7 @@ import logging
 import os
 import secrets
 import shlex
-import subprocess
+import subprocess  # nosec B404 - only list2cmdline (quoting); nothing is spawned here
 import sys
 import tempfile
 import time
