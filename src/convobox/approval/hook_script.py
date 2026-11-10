@@ -33,10 +33,18 @@ a timeout waiting for the voice decision (silence must never be treated
 as approval -- the same invariant ApprovalPromptGate's own timeout-denies
 contract enforces on the other end of this channel). A stuck or silent
 hook must never fail OPEN into "the tool call just runs anyway".
+
+Launched as ``python -I <this file>``, never ``-m convobox...``: ``-m``
+puts the working directory first on sys.path, so a ``convobox/`` folder (or
+a stdlib-named file) in an untrusted project would run in place of this
+hook. ``-I`` also ignores PYTHON* variables and the user site directory, and
+``-S`` skips site-packages ``.pth`` files and ``sitecustomize`` (which an
+editable install points at the source tree).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -148,10 +156,19 @@ def _request_decision(
 
 
 def main() -> None:
-    raw_stdin = sys.stdin.read()
-    output = decide(raw_stdin, dict(os.environ))
-    sys.stdout.write(json.dumps(output))
-    sys.stdout.flush()
+    # Claude Code treats exit 0 with JSON as the decision, exit 2 as a
+    # blocking error, and ANY other non-zero exit (an uncaught exception
+    # exits 1) as a non-blocking error: the tool call then RUNS. So every
+    # failure here must end in exit 2, never in a traceback.
+    try:
+        raw_stdin = sys.stdin.read()
+        output = decide(raw_stdin, dict(os.environ))
+        sys.stdout.write(json.dumps(output))
+        sys.stdout.flush()
+    except BaseException as exc:  # noqa: BLE001 - fail closed on anything
+        with contextlib.suppress(Exception):
+            sys.stderr.write(f"ConvoBox hook failed ({type(exc).__name__}); denying\n")
+        sys.exit(2)
     sys.exit(0)
 
 

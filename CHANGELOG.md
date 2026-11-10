@@ -36,6 +36,20 @@ minor versions carry feature and behavior changes.
   summary starts.
 
 ### Security
+- **The approval hook can no longer be hijacked by the project it gates, and a
+  crash now blocks instead of allowing.** The hook used to start as
+  `python -m convobox.approval.hook_script` from the project directory, which
+  put that directory first on the import path: a `convobox/` folder (or a file
+  named like a standard-library module) in an untrusted repo ran instead of the
+  hook, as the user. It now runs as `python -I -S <file>`, which ignores the
+  working directory, `PYTHON*` variables, the user site, and site-packages
+  `.pth` files and `sitecustomize` (an editable install points those at the
+  source tree). The hook command is shell-quoted, and its Claude Code
+  `timeout` (150 s) now outlasts the hook's own 125 s of waiting. Separately, an
+  uncaught error in the hook exited 1, which Claude Code treats as a
+  non-blocking error, so the tool call ran; every failure now exits 2 (blocking).
+  Still open: if the Python interpreter itself is gone (a rebuilt or moved venv),
+  the shell's exit 127 is non-blocking too.
 - **The approval phrase is no longer spoken aloud.** The spoken announcement now
   says "Say your approval phrase to approve, or say no to deny"; the operator is
   assumed to know the phrase. With speakers and echo cancellation off (the
