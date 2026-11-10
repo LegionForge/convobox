@@ -154,7 +154,7 @@ import logging
 import os
 import secrets
 import shlex
-import subprocess  # nosec B404 - only list2cmdline (quoting); nothing is spawned here
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
@@ -177,7 +177,7 @@ from convobox.approval import hook_script
 _HOOK_SCRIPT_PATH = Path(hook_script.__file__).resolve()
 # Claude Code kills a hook at its timeout and treats that as a non-blocking
 # error (the tool would run), so it must outlast the hook's own connect and
-# decision waits. Seconds.
+# decision waits. Seconds. (subprocess is imported only for list2cmdline.)
 _HOOK_TIMEOUT_S = 150
 
 
