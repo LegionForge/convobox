@@ -91,7 +91,10 @@ async def test_ensure_settings_file_wires_the_hook_via_module_invocation() -> No
         pre_tool_use = data["hooks"]["PreToolUse"][0]
         hook = pre_tool_use["hooks"][0]
         assert hook["type"] == "command"
-        assert "-m convobox.approval.hook_script" in hook["command"]
+        # Isolated mode, by file path: `-m` would import from the project's cwd.
+        assert " -I " in hook["command"]
+        assert " -m " not in hook["command"]
+        assert "hook_script.py" in hook["command"]
         assert sys.executable in hook["command"]
         assert "matcher" not in pre_tool_use
         assert flags == ["--settings", str(path)]

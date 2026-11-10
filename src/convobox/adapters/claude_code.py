@@ -169,6 +169,10 @@ from convobox.adapters.base import (
     JobState,
     readline_with_stall_diagnostic,
 )
+from convobox.approval import hook_script
+
+# The hook runs by file path under `python -I` (see hook_script's docstring).
+_HOOK_SCRIPT_PATH = Path(hook_script.__file__).resolve()
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +480,7 @@ class ClaudeCodeAdapter(BackendAdapter):
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": f'"{sys.executable}" -m convobox.approval.hook_script',
+                                "command": f'"{sys.executable}" -I "{_HOOK_SCRIPT_PATH}"',
                             }
                         ]
                     }
