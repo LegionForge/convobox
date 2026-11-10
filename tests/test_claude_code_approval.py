@@ -92,7 +92,8 @@ async def test_ensure_settings_file_wires_the_hook_via_module_invocation() -> No
         hook = pre_tool_use["hooks"][0]
         assert hook["type"] == "command"
         # Isolated mode, by file path: `-m` would import from the project's cwd.
-        assert " -I " in hook["command"]
+        assert " -I -S " in hook["command"]
+        assert hook["timeout"] > 125  # outlasts connect (5s) + decision (120s) waits
         assert " -m " not in hook["command"]
         assert "hook_script.py" in hook["command"]
         assert sys.executable in hook["command"]

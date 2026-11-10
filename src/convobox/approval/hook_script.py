@@ -37,7 +37,9 @@ hook must never fail OPEN into "the tool call just runs anyway".
 Launched as ``python -I <this file>``, never ``-m convobox...``: ``-m``
 puts the working directory first on sys.path, so a ``convobox/`` folder (or
 a stdlib-named file) in an untrusted project would run in place of this
-hook. ``-I`` also ignores PYTHON* variables and the user site directory.
+hook. ``-I`` also ignores PYTHON* variables and the user site directory, and
+``-S`` skips site-packages ``.pth`` files and ``sitecustomize`` (which an
+editable install points at the source tree).
 """
 
 from __future__ import annotations

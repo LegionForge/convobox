@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from convobox.adapters.claude_code import hook_command
 from convobox.approval import hook_script
 
 _ENV = {
@@ -268,7 +269,8 @@ def test_a_planted_convobox_package_in_the_cwd_is_never_imported(tmp_path: Path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"open({str(marker)!r}, 'w').write('x')\n")
     proc = subprocess.run(
-        [sys.executable, "-I", hook_script.__file__],
+        hook_command(),
+        shell=True,
         input=json.dumps({"tool_name": "Bash", "tool_input": {}}),
         capture_output=True,
         text=True,
@@ -338,6 +340,23 @@ def test_main_exits_2_even_for_non_exception_interrupts(
 
     monkeypatch.setattr(hook_script, "decide", interrupted)
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
-    with pytest.raises(SystemExit) as exc_info:
+    # Catch both so a regression fails this test instead of aborting pytest.
+    with pytest.raises((SystemExit, KeyboardInterrupt, MemoryError)) as exc_info:
         hook_script.main()
+    assert exc_info.type is SystemExit
     assert exc_info.value.code == 2
+
+
+def test_hook_command_survives_shell_metacharacters_in_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shlex
+
+    from convobox.adapters import claude_code
+
+    odd = Path("/tmp/it's $HOME `x` \"q\"/python")
+    monkeypatch.setattr(claude_code.sys, "executable", str(odd))
+    monkeypatch.setattr(claude_code.sys, "platform", "linux")
+    argv = shlex.split(claude_code.hook_command())
+    assert argv[0] == str(odd)
+    assert argv[1:3] == ["-I", "-S"]

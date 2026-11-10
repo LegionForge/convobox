@@ -153,6 +153,8 @@ import json
 import logging
 import os
 import secrets
+import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -171,8 +173,26 @@ from convobox.adapters.base import (
 )
 from convobox.approval import hook_script
 
-# The hook runs by file path under `python -I` (see hook_script's docstring).
+# The hook runs by file path under `python -I -S` (see hook_script's docstring).
 _HOOK_SCRIPT_PATH = Path(hook_script.__file__).resolve()
+# Claude Code kills a hook at its timeout and treats that as a non-blocking
+# error (the tool would run), so it must outlast the hook's own connect and
+# decision waits. Seconds.
+_HOOK_TIMEOUT_S = 150
+
+
+def hook_command() -> str:
+    """The shell command Claude Code runs as the PreToolUse hook.
+
+    ``-I`` ignores the working directory, PYTHON* variables and the user site;
+    ``-S`` also skips site-packages ``.pth`` files and ``sitecustomize``, which
+    ``-I`` alone still runs (an editable install puts the source tree on the
+    path). The hook is stdlib-only, so it needs neither.
+    """
+    argv = [sys.executable, "-I", "-S", str(_HOOK_SCRIPT_PATH)]
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 logger = logging.getLogger(__name__)
 
@@ -480,7 +500,8 @@ class ClaudeCodeAdapter(BackendAdapter):
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": f'"{sys.executable}" -I "{_HOOK_SCRIPT_PATH}"',
+                                "command": hook_command(),
+                                "timeout": _HOOK_TIMEOUT_S,
                             }
                         ]
                     }
