@@ -526,3 +526,48 @@ def test_the_question_that_matters_survives_rhetorical_ones() -> None:
     source = "Should I drop the prod users table? Why did this break? A bad index. What changed? The deploy."
     out = finalize_summary("Looked into it.", source)
     assert out is not None and "Should I drop the prod users table?" in out
+
+
+# --- failure guard: general statements are not failure reports --------------
+# Live UAT 2026-11-11: a hash-map explanation ("You can't simply empty a slot",
+# "collisions can't be precomputed") lost its summary to the guard.
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "You can't simply empty a slot, or a later lookup stops early.",
+        "A random seed means collisions can't be precomputed.",
+        "If you've probed farther, the key can't be further along.",
+        "One cannot resize in place without rehashing.",
+    ],
+)
+def test_general_cannot_statements_do_not_trigger_the_guard(source: str) -> None:
+    assert finalize_summary("It explains collisions.", source) == "It explains collisions."
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "The build can't find the module.",
+        "I can't reach the remote.",
+        "The file can't be found.",
+        "The config cannot be loaded.",
+        "I cannot reach the remote; the push was rejected.",
+    ],
+)
+def test_reports_of_cannot_still_trigger_the_guard(source: str) -> None:
+    assert finalize_summary("Looked at it.", source) is None
+
+
+def test_a_summary_that_mentions_the_failure_still_satisfies_the_guard() -> None:
+    out = finalize_summary("It can't find the module.", "The build can't find the module.")
+    assert out == "It can't find the module."
+
+
+def test_dropped_summary_log_names_the_triggering_term(caplog) -> None:
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="convobox.summary.summarizer"):
+        finalize_summary("Fine.", "The deploy failed.")
+    assert "'failed'" in caplog.text
