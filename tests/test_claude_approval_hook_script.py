@@ -5,9 +5,12 @@ import io
 import json
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from convobox.adapters.claude_code import hook_command
 from convobox.approval import hook_script
 
 _ENV = {
@@ -225,7 +228,7 @@ def test_main_reads_stdin_and_writes_the_decision_to_stdout() -> None:
     # PreToolUse hook. No approval env vars set -> fails closed without
     # needing a real socket, so this stays fast and deterministic.
     proc = subprocess.run(
-        [sys.executable, "-m", "convobox.approval.hook_script"],
+        [sys.executable, "-I", hook_script.__file__],
         input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
         capture_output=True,
         text=True,
@@ -254,3 +257,106 @@ def test_main_body_reads_stdin_writes_stdout_and_exits_zero(
     assert exc_info.value.code == 0
     output = json.loads(capsys.readouterr().out)
     assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_planted_convobox_package_in_the_cwd_is_never_imported(tmp_path: Path) -> None:
+    # An untrusted project can ship ./convobox/ or a stdlib-named file. Run
+    # the hook the way the adapter does, from that directory, and check the
+    # planted code never executes.
+    marker = tmp_path / "pwned"
+    for name in ("convobox/__init__.py", "convobox/approval/__init__.py", "json.py", "socket.py"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    proc = subprocess.run(
+        hook_command(),
+        shell=True,
+        input=json.dumps({"tool_name": "Bash", "tool_input": {}}),
+        capture_output=True,
+        text=True,
+        env={},
+        cwd=tmp_path,
+        timeout=10,
+        check=False,
+    )
+    assert not marker.exists()
+    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_the_planted_package_does_run_under_the_old_module_invocation(tmp_path: Path) -> None:
+    # Proves the test above can fail: with `-m`, the cwd shadows the package.
+    marker = tmp_path / "pwned"
+    for name in ("convobox/__init__.py", "convobox/approval/__init__.py"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    subprocess.run(
+        [sys.executable, "-m", "convobox.approval.hook_script"],
+        input="{}",
+        capture_output=True,
+        text=True,
+        env={},
+        cwd=tmp_path,
+        timeout=10,
+        check=False,
+    )
+    assert marker.exists()
+
+
+def test_main_exits_2_when_the_decision_code_crashes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Any non-zero exit other than 2 is a NON-blocking error in Claude Code:
+    # the tool would run. A crash must therefore exit 2, not 1.
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(hook_script, "decide", boom)
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    with pytest.raises(SystemExit) as exc_info:
+        hook_script.main()
+    assert exc_info.value.code == 2
+    assert "denying" in capsys.readouterr().err
+
+
+def test_main_exits_2_on_unreadable_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Broken:
+        def read(self) -> str:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+    monkeypatch.setattr("sys.stdin", _Broken())
+    with pytest.raises(SystemExit) as exc_info:
+        hook_script.main()
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(0), MemoryError()])
+def test_main_exits_2_even_for_non_exception_interrupts(
+    monkeypatch: pytest.MonkeyPatch, exc: BaseException
+) -> None:
+    # A stray SystemExit(0) from deep inside must not read as "allowed".
+    def interrupted(*_args: Any, **_kwargs: Any) -> None:
+        raise exc
+
+    monkeypatch.setattr(hook_script, "decide", interrupted)
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    # Catch both so a regression fails this test instead of aborting pytest.
+    with pytest.raises((SystemExit, KeyboardInterrupt, MemoryError)) as exc_info:
+        hook_script.main()
+    assert exc_info.type is SystemExit
+    assert exc_info.value.code == 2
+
+
+def test_hook_command_survives_shell_metacharacters_in_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shlex
+
+    from convobox.adapters import claude_code
+
+    odd = Path("/tmp/it's $HOME `x` \"q\"/python")
+    monkeypatch.setattr(claude_code.sys, "executable", str(odd))
+    monkeypatch.setattr(claude_code.sys, "platform", "linux")
+    argv = shlex.split(claude_code.hook_command())
+    assert argv[0] == str(odd)
+    assert argv[1:3] == ["-I", "-S"]
