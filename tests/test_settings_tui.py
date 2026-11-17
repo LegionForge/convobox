@@ -3051,3 +3051,25 @@ def test_run_tui_installs_and_restores_sigwinch_handler(
 
     assert len(draw_calls) >= 2  # the loop's own draw() + at least one resize-triggered draw
     assert signal.getsignal(signal.SIGWINCH) == original_handler
+
+
+def test_interaction_section_exposes_spoken_summary_fields() -> None:
+    # The spoken-summary keys were config-file-only; a user could not turn
+    # them on or off from the Settings TUI or the web Settings page (which
+    # is built from this same field list).
+    interaction = next(s for s in settings_tui.SECTION_SPECS if s.key == "interaction")
+    toggle = next((f for f in interaction.fields if f.key == "summarize_long_responses"), None)
+    assert toggle is not None
+    assert toggle.kind == "bool"
+    # The privacy tradeoff must be visible where the switch is.
+    assert "PRIVACY" in toggle.help_text
+    assert "Claude account" in toggle.help_text
+    min_words = next((f for f in interaction.fields if f.key == "summary_min_words"), None)
+    assert min_words is not None
+    assert min_words.kind == "int"
+    assert interaction.restart_required is True
+
+
+def test_validate_config_rejects_summary_min_words_below_the_floor() -> None:
+    report = validate_config(_make_config(**{"interaction.summary_min_words": 5}))
+    assert any("summary_min_words" in e for e in report.errors)
