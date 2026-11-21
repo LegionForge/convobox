@@ -750,8 +750,8 @@ class Orchestrator:
                 self._summary_task = None
         if summary:
             logger.info(
-                "speaking a summary (%d words) of a %d-word reply",
-                word_count(summary), word_count(spoken),
+                "speaking a summary (%d words) of a %d-word reply: %s",
+                word_count(summary), word_count(spoken), summary,
             )
             text = self._tier_state.start_summarized(
                 summary, spoken, split=self._tier_responses

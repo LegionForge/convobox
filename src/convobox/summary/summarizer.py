@@ -69,7 +69,21 @@ _NEGATED_FAILURE_RE = re.compile(
     rf"\b(?:no|nothing|none|without|zero|never|nor)\s+(?!but\b)(?:\w+\s+)?(?:{_FAILURE_TERMS})\b",
     re.IGNORECASE,
 )
-_QUOTE_TAIL_CHARS = "\"')]`*_"
+# General statements, not reports: "You can't simply empty a slot", "collisions
+# can't be precomputed". Live UAT 2026-11-11: a plain hash-map explanation lost its
+# summary to this. Only the SOURCE side is exempted -- a summary that mentions a
+# failure still satisfies the guard either way. "can't be <found/opened/...>" stays
+# a report ("the file can't be found"), as does "The build can't find the module".
+_REPORT_PARTICIPLES = (
+    "found|located|opened|read|reached|loaded|resolved|accessed|started|created|"
+    "written|applied|built|run|completed|parsed|connected|installed|imported"
+)
+_GENERIC_MODAL_RE = re.compile(
+    rf"\b(?:you|one)\s+(?:can't|cannot)\b"
+    rf"|\b(?:can't|cannot)\s+be\s+(?!(?:{_REPORT_PARTICIPLES})\b)\w+",
+    re.IGNORECASE,
+)
+_QUOTE_TAIL_CHARS ="\"')]`*_"
 _MARKER_RE = re.compile(r"<<<\s*MESSAGE|MESSAGE\s*>>>")
 _MAX_APPENDED_QUESTIONS = 3
 
@@ -83,9 +97,19 @@ def word_count(text: str) -> int:
     return len(_WORD_RE.findall(text))
 
 
-def _has_failure(text: str) -> bool:
+def _failure_match(text: str, *, source: bool = False) -> str | None:
+    """The first failure term in ``text`` (negated mentions excluded, and for a
+    source also general "you can't ..." statements), or None."""
     text = text.replace("\u2019", "'").replace("\u2018", "'")  # curly apostrophes: can\u2019t
-    return _FAILURE_RE.search(_NEGATED_FAILURE_RE.sub(" ", text)) is not None
+    text = _NEGATED_FAILURE_RE.sub(" ", text)
+    if source:
+        text = _GENERIC_MODAL_RE.sub(" ", text)
+    m = _FAILURE_RE.search(text)
+    return m.group(0) if m else None
+
+
+def _has_failure(text: str, *, source: bool = False) -> bool:
+    return _failure_match(text, source=source) is not None
 
 
 def _questions(source: str) -> list[str]:
@@ -123,8 +147,9 @@ def finalize_summary(raw: str | None, source: str) -> str | None:
     summary = _cap(" ".join(raw.split()), MAX_SUMMARY_CHARS)
     if not summary:
         return None
-    if _has_failure(source) and not _has_failure(summary):
-        logger.info("summary dropped: source reports a failure the summary omits")
+    reported = _failure_match(source, source=True)
+    if reported and not _has_failure(summary):
+        logger.info("summary dropped: source reports a failure (%r) the summary omits", reported)
         return None
     # Every question the reply puts to the user is kept: an unheard question
     # deadlocks the turn. A question the summary already contains verbatim is
