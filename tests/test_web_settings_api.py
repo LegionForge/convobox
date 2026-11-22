@@ -441,3 +441,16 @@ def test_schema_exposes_spoken_summary_fields_on_the_web_page(client: TestClient
     assert "PRIVACY" in fields["summarize_long_responses"]["help_text"]
     assert fields["summary_min_words"]["kind"] == "int"
     assert values["interaction"]["summarize_long_responses"] is False
+
+
+def test_hotwords_help_warns_about_recitation_and_the_approval_phrase(client: TestClient) -> None:
+    # Live UAT 2026-11-21: Whisper emitted the hotwords list as a transcript.
+    # The advice shown to operators must not tell them to list the approval
+    # phrase in order (it used to), and must say to shuffle.
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    stt_section = next(s for s in response.json()["sections"] if s["key"] == "stt")
+    help_text = next(f for f in stt_section["fields"] if f["key"] == "hotwords")["help_text"]
+    assert "SHUFFLE" in help_text
+    assert "approval phrase" in help_text
+    assert "Put your resume word, safeword phrases, and approval phrase" not in help_text
