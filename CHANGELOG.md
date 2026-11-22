@@ -7,6 +7,20 @@ minor versions carry feature and behavior changes.
 ## [Unreleased]
 
 ### Security
+- **A transcript that cannot be a person speaking no longer approves a tool call.**
+  Whisper hallucinates on short or noise-like audio, and with `stt.hotwords` set it
+  tends to hallucinate the hotwords themselves (live UAT 2026-11-21:
+  `'stop brake eject mayday listening'`, `'brake'` x14; reproduced offline with
+  synthetic noise). Because many setups put the approval phrase in `hotwords`, a
+  recitation of that list could contain it. An approve is now refused, left pending
+  exactly like an echo-ignored approve (timeout NOT extended), when the transcript
+  has more words than the audio's duration allows (over 7 words/s) or contains 4+
+  consecutive words in `hotwords` order. Approve only: stop and kill phrases are
+  untouched. Unit-tested and mutation-checked (six mutations, all caught). **Not
+  tested with a real voice.** Known gaps: a hallucination that produces the phrase
+  at a plausible pace outside the hotwords order still passes, and the speaking-rate
+  check uses the audio's duration, which may include padding (so it errs permissive).
+  Shuffling the hotwords so the approval words are not adjacent is still advisable.
 - **An approval phrase heard while ConvoBox's own audio is playing is no longer
   accepted.** The approval gate sat before the overlap and echo gates (so a prompt
   answer isn't mistaken for echo), which meant anything the mic heard that matched
