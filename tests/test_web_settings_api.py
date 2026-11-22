@@ -430,3 +430,14 @@ def test_test_endpoint_returns_500_when_a_probe_raises(
     assert "tts test failed" in detail
     assert "RuntimeError" in detail
     assert "no audio device found" in detail
+
+
+def test_schema_exposes_spoken_summary_fields_on_the_web_page(client: TestClient) -> None:
+    values = client.get("/api/settings").json()["values"]
+    response = client.post("/api/settings/schema", json={"values": values})
+    interaction_section = next(s for s in response.json()["sections"] if s["key"] == "interaction")
+    fields = {f["key"]: f for f in interaction_section["fields"]}
+    assert fields["summarize_long_responses"]["kind"] == "bool"
+    assert "PRIVACY" in fields["summarize_long_responses"]["help_text"]
+    assert fields["summary_min_words"]["kind"] == "int"
+    assert values["interaction"]["summarize_long_responses"] is False
