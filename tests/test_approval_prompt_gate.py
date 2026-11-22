@@ -557,6 +557,11 @@ def test_the_mic_loop_has_exactly_one_voice_approval_call_and_it_checks_the_audi
     assert trust.func.id == "approval_utterance_heard_cleanly"
     trust_kwargs = {kw.arg for kw in trust.keywords}
     assert {"result", "player", "echo_filter", "min_silence_ms", "grace_s"} <= trust_kwargs
+    # The plausibility guard needs the real STT hotwords, or its recitation
+    # rule silently does nothing in the live loop.
+    assert "hotwords" in trust_kwargs
+    hotwords_arg = next(kw.value for kw in trust.keywords if kw.arg == "hotwords")
+    assert ast.unparse(hotwords_arg) == "config.stt.hotwords"
     # The SAME filter the TTS recorder feeds, not a fresh (empty) one.
     echo_value = next(kw.value for kw in trust.keywords if kw.arg == "echo_filter")
     assert isinstance(echo_value, ast.Name) and echo_value.id == "echo_filter"

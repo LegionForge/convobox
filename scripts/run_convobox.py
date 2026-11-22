@@ -86,6 +86,7 @@ from convobox.config import (
     resolve_config_path,
     write_aec_estimate,
 )
+from convobox.confirmword.plausibility import implausible_approval_reason
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
@@ -1137,12 +1138,22 @@ def approval_utterance_heard_cleanly(
     echo_filter: SpokenEchoFilter,
     min_silence_ms: int,
     grace_s: float,
+    hotwords: str | None = None,
     now: float | None = None,
 ) -> bool:
     """The mic loop's single entry point for the audio-trust check on a
     spoken approval: derives playback overlap from the transcription result
-    and the player, then applies approval_heard_cleanly."""
+    and the player, then applies approval_heard_cleanly -- and refuses a
+    transcript that cannot be a person speaking (words faster than speech, or
+    a recitation of the STT hotwords; see convobox.confirmword.plausibility).
+    Approve only: the safeword path never goes through here."""
     now = time.monotonic() if now is None else now
+    if implausible_approval_reason(
+        text,
+        result.duration_s,  # type: ignore[attr-defined]
+        hotwords,
+    ):
+        return False
     return approval_heard_cleanly(
         text,
         player_is_playing=player.is_playing(),  # type: ignore[attr-defined]
@@ -3034,14 +3045,20 @@ async def run(args: argparse.Namespace) -> None:
                                 echo_filter=echo_filter,
                                 min_silence_ms=config.vad.min_silence_ms,
                                 grace_s=next_overlap_grace_s,
+                                hotwords=config.stt.hotwords,
                             ),
                         )
                         if approval_outcome == "ignored":
+                            why = implausible_approval_reason(
+                                text, result.duration_s, config.stt.hotwords
+                            )
                             log.warning(
-                                "approval phrase NOT accepted: heard while ConvoBox audio was "
-                                "playing or just after, or it matches what ConvoBox just said "
-                                "-- request still pending; wait a few seconds and say it "
-                                "again: %r", text,
+                                "approval phrase NOT accepted: %s -- request still pending; "
+                                "wait a few seconds and say it again: %r",
+                                why
+                                or "heard while ConvoBox audio was playing or just after, "
+                                "or it matches what ConvoBox just said",
+                                text,
                             )
                             if tui_state is not None:
                                 tui_state.add_turn(
