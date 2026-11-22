@@ -216,10 +216,14 @@ class STTConfig(BaseModel):
     # word (a configured resume_word) was repeatedly hallucinated as unrelated
     # fluent sentences ("We'll see you on the other side.", Cyrillic text)
     # rather than being misheard as something similar -- the well-documented
-    # Whisper failure mode on short/low-signal clips. Operators should
-    # include their resume_word, safeword.hard_stop_phrases, and
-    # interaction.approval_phrase here (space-separated) to bias toward the
-    # exact short phrases most likely to hit this failure mode. Deliberately
+    # Whisper failure mode on short/low-signal clips. Operators may include
+    # their resume_word and safeword.hard_stop_phrases here (space-separated)
+    # to bias toward the exact short phrases most likely to hit this failure
+    # mode. CAUTION (live UAT 2026-11-21, reproduced offline): on noise Whisper
+    # can emit this list itself as the transcript ('stop brake eject mayday
+    # listening'). So keep it short, shuffle it, and prefer NOT to include
+    # interaction.approval_phrase; if you do, keep its words apart and out of
+    # order so a recited list cannot contain the phrase. Deliberately
     # not auto-derived from those configs: STTConfig has no dependency on
     # InteractionConfig/SafewordConfig today, and hotwords is a real-word
     # accuracy nudge, not a safety mechanism -- the safeword/resume-word
