@@ -52,6 +52,7 @@ from settings_tui import (  # type: ignore[import-not-found]
 from convobox.config import (
     AppConfig,
     detect_acp_approve_unsupported,
+    detect_approval_phrase_in_hotwords,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
     detect_working_dir_not_git,
@@ -87,6 +88,10 @@ def static_config_findings(config: AppConfig, problems: list[str]) -> list[Findi
     not_git = detect_working_dir_not_git(config.backend)
     if not_git:
         findings.append(Finding("backend.working_dir", "warn", not_git))
+
+    hotword_phrase = detect_approval_phrase_in_hotwords(config.stt, config.interaction)
+    if hotword_phrase:
+        findings.append(Finding("stt.hotwords", "warn", hotword_phrase))
 
     return findings
 

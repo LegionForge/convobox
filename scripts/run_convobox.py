@@ -79,6 +79,7 @@ from convobox.audio.incident_capture import IncidentCapture
 from convobox.audio.playback import AudioPlayer
 from convobox.config import (
     detect_acp_approve_unsupported,
+    detect_approval_phrase_in_hotwords,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
     detect_working_dir_not_git,
@@ -1954,6 +1955,9 @@ async def run(args: argparse.Namespace) -> None:
     if args.permission_mode is not None:
         config.backend.permission_mode = args.permission_mode
     _check_backend_permission_mode(config.backend, config.interaction)
+    hotword_phrase = detect_approval_phrase_in_hotwords(config.stt, config.interaction)
+    if hotword_phrase is not None:
+        log.warning("%s", hotword_phrase)
     if args.working_dir is not None:
         config.backend.working_dir = args.working_dir
     _check_backend_working_dir(config.backend)

@@ -904,6 +904,44 @@ def detect_working_dir_not_git(backend: BackendConfig) -> str | None:
     )
 
 
+def detect_approval_phrase_in_hotwords(
+    stt: STTConfig, interaction: InteractionConfig
+) -> str | None:
+    """Return a warning if ``stt.hotwords`` would be accepted as
+    ``interaction.approval_phrase`` (the phrase sits in the list as
+    consecutive words), else None.
+
+    Why (live UAT 2026-11-21, docs/field-notes/2026-11-21-hotword-list-is-
+    recited-on-noise.md): on noise or unclear audio Whisper can emit the
+    hotwords list itself as the transcript. If the approval phrase is in
+    that list, a recited list IS the approval phrase, and the approval check
+    would accept it from noise. A recitation-length guard on the approve path
+    cannot cover a phrase shorter than its minimum run, so this is the
+    earlier, cheaper defence: do not let the list contain the phrase.
+
+    Asks the real ApprovalDetector ("would this exact text, if transcribed,
+    approve?") rather than re-implementing its normalization and fuzzy
+    matching, so the two cannot drift.
+
+    A WARNING, not an error: existing configs may have it, listing the phrase
+    does help recognition, and the fix (shuffle the phrase's words apart, or
+    drop them) is the operator's call. Same posture as
+    detect_working_dir_not_git.
+    """
+    if not stt.hotwords or not interaction.approval_phrase:
+        return None
+    if ApprovalDetector(interaction.approval_phrase).check(stt.hotwords) != "approve":
+        return None
+    return (
+        "stt.hotwords would be accepted as interaction.approval_phrase: the "
+        "phrase appears in the list as consecutive words in order. On noise "
+        "Whisper can recite the hotwords list as the transcript, which would "
+        "then read as the approval phrase. Shuffle the list so the phrase's "
+        "words are apart and out of order, or remove them (see docs/"
+        "field-notes/2026-11-21-hotword-list-is-recited-on-noise.md)."
+    )
+
+
 class WebConfig(BaseModel):
     # Off by default -- the web UI (docs/WEB-UI-ARCHITECTURE.md) is opt-in,
     # same posture as everything else security/privacy-relevant in this
