@@ -9,13 +9,14 @@ untouched (last test).
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
 
+import convobox.safeword.detector as safeword_detector
 from convobox.approval import ApprovalDetector
 from convobox.confirmword.plausibility import implausible_approval_reason
-from convobox.safeword.detector import SafewordDetector
 from scripts.run_convobox import ApprovalPromptGate, approval_utterance_heard_cleanly
 
 HOTWORDS = "stop brake eject mayday listening resume alpha bravo delta halt abort"
@@ -179,14 +180,16 @@ def test_deny_is_never_blocked_by_the_guard() -> None:
 
 
 def test_stop_phrases_are_never_subject_to_the_plausibility_guard() -> None:
-    safeword = SafewordDetector(
+    safeword = safeword_detector.SafewordDetector(
         ["stop stop stop", "brake brake brake", "eject eject eject"]
     )
     # Fast, looped, hotword-shaped transcripts still trigger the stop path.
     assert safeword.check(" ".join(["brake"] * 60)) is not None
     assert safeword.check("stop stop stop stop stop stop stop stop") is not None
     assert safeword.check("eject eject eject") is not None
-    # And the module the guard lives in is not imported by the safeword package.
-    import convobox.safeword.detector as sw
-
-    assert "plausibility" not in (sw.__doc__ or "") + repr(vars(sw).keys())
+    # And the stop module never references the guard: a stop must never be
+    # blockable by it. (Checks the module source, not just its attribute names,
+    # so an aliased or inline call would also be caught.)
+    source = inspect.getsource(safeword_detector)
+    assert "implausible_approval_reason" not in source
+    assert "plausibility" not in source
