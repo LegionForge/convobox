@@ -156,3 +156,41 @@ package still imported without error (an empty namespace package), and
 `uv sync --extra aec` kept reporting success afterward. Nothing
 surfaced until `--web` actually tried to construct an `EchoCanceller`,
 hours later.*
+
+## 15. Import each module one way per file
+
+Import every module once, at the top of the file, in one style:
+
+- Default: `from x import name`.
+- If code needs the module object itself — to monkeypatch an attribute
+  (`monkeypatch.setattr(mod, "_CONST", ...)`), or to inspect it — import
+  the module once at the top (`import x as x_mod`) and reach the names
+  through it (`x_mod.Name`). Do not *also* `from x import Name` in the
+  same file.
+- No function-local `import x` for a module the file already imports.
+  Function-local imports are for a stated reason only (a heavy dependency
+  loaded lazily, a circular import) and get a one-line comment saying so.
+- Why the module style for patch targets: `monkeypatch.setattr` on a
+  module attribute does not reach a name already bound by
+  `from x import name`, so the test would silently patch nothing.
+
+To check a file you touched, run the AST scan sketched here (modules
+imported both ways in one file):
+
+```python
+import ast, sys
+t = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+plain = {a.name for n in ast.walk(t) if isinstance(n, ast.Import) for a in n.names}
+frm = {n.module for n in ast.walk(t) if isinstance(n, ast.ImportFrom) and n.module and not n.level}
+print(sorted(plain & frm))
+```
+
+*Incident (PR #447, 2026-11-22): `tests/test_approval_plausibility.py`
+imported `convobox.safeword.detector` at the top (`from ... import
+SafewordDetector`) and again inside one test (`import ... as sw`) to
+inspect the module. The code-quality bot flagged it, and because `main`
+requires conversation resolution the thread blocked the merge until a
+fix commit landed. Same class of flag fixed earlier in
+`tests/test_approval_prompt_gate.py` (commit 785bca8). Existing files
+that predate this rule (seven test files as of 2026-11-22) are not
+rewritten wholesale; convert a file when you are already editing it.*
