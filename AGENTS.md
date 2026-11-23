@@ -168,11 +168,16 @@ Import every module once, at the top of the file, in one style:
   through it (`x_mod.Name`). Do not *also* `from x import Name` in the
   same file.
 - No function-local `import x` for a module the file already imports.
-  Function-local imports are for a stated reason only (a heavy dependency
-  loaded lazily, a circular import) and get a one-line comment saying so.
-- Why the module style for patch targets: `monkeypatch.setattr` on a
-  module attribute does not reach a name already bound by
-  `from x import name`, so the test would silently patch nothing.
+  Function-local imports (Ruff `PLC0415`, about 200 existing sites) are for
+  a stated reason (a heavy dependency loaded lazily, a circular import)
+  and new ones get a one-line comment saying so.
+- Patching: `monkeypatch.setattr(mod, "X", fake)` replaces the name in
+  `mod`'s own namespace, so code *inside* `mod` sees the fake however the
+  test imported anything. It does **not** reach another module that did
+  `from mod import X` (that module holds its own binding), so patch the
+  namespace where the name is looked up. Mixing import styles in a test
+  file does not by itself make a patch miss; this rule is about
+  consistency and the bot flag, not correctness.
 
 To check a file you touched, run the AST scan sketched here (modules
 imported both ways in one file):
@@ -190,7 +195,10 @@ imported `convobox.safeword.detector` at the top (`from ... import
 SafewordDetector`) and again inside one test (`import ... as sw`) to
 inspect the module. The code-quality bot flagged it, and because `main`
 requires conversation resolution the thread blocked the merge until a
-fix commit landed. Same class of flag fixed earlier in
-`tests/test_approval_prompt_gate.py` (commit 785bca8). Existing files
-that predate this rule (seven test files as of 2026-11-22) are not
-rewritten wholesale; convert a file when you are already editing it.*
+fix commit landed. The same flag had been raised and fixed earlier on
+the same PR in `tests/test_approval_prompt_gate.py` (commit 785bca8, which
+used `inspect.getmodule(Class)` to get the module without a second
+import, a third acceptable fix). Existing code that predates this rule
+(seven test files with mixed imports and about 200 function-local imports
+as of 2026-11-22) is not rewritten wholesale; convert a file when you are
+already editing it.*
