@@ -19,6 +19,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCAN_DIRS = ("src", "scripts", "tests")
+_SKIP_PARTS = frozenset({"build", "dist", "node_modules", "site-packages"})
 
 _LEGACY = frozenset(
     {
@@ -33,13 +34,16 @@ _LEGACY = frozenset(
 )
 
 
-def mixed_import_modules(source: str) -> list[str]:
+def mixed_import_modules(source: str | bytes, filename: str = "<source>") -> list[str]:
     """Modules imported both as ``import m`` and as ``from m import x``.
 
-    Absolute imports only (relative ``from . import x`` is a different case).
+    Matches CodeQL's py/import-and-import-from by exact module name, so
+    ``import a`` + ``from a.b import x`` is flagged by neither. Absolute imports
+    only: a relative ``from . import x`` is skipped (the repo has none in src/;
+    CodeQL would resolve it, so a future one is a known gap).
     Function-local imports count: that is where the pattern usually hides.
     """
-    tree = ast.parse(source)
+    tree = ast.parse(source, filename=filename)
     plain = {
         a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
     }
@@ -55,9 +59,14 @@ def _offenders() -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     for scan_dir in _SCAN_DIRS:
         for path in sorted((_ROOT / scan_dir).rglob("*.py")):
-            if ".venv" in path.parts:
+            rel = path.relative_to(_ROOT)
+            if _SKIP_PARTS & set(rel.parts) or any(
+                p.startswith(".") for p in rel.parts
+            ):
                 continue
-            mixed = mixed_import_modules(path.read_text(encoding="utf-8"))
+            # bytes + filename: ast handles encoding cookies and BOMs, and a
+            # syntax error names the file instead of "<unknown>".
+            mixed = mixed_import_modules(path.read_bytes(), filename=str(rel))
             if mixed:
                 found[path.relative_to(_ROOT).as_posix()] = mixed
     return found
@@ -75,6 +84,11 @@ def _offenders() -> dict[str, list[str]]:
         ("from os import path\nfrom os import sep\n", []),
         ("import a.b\nfrom a import b\n", []),  # different dotted names
         ("import x\nfrom . import x\n", []),  # relative imports are out of scope
+        ("import a\nfrom a.b import x\n", []),  # exact module name, like CodeQL
+        (
+            "from a import X\nif TYPE_CHECKING:\n    import a as m\n",
+            ["a"],
+        ),  # a TYPE_CHECKING block still counts
     ],
 )
 def test_detector_finds_exactly_the_mixed_case(
