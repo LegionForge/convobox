@@ -908,8 +908,8 @@ def detect_approval_phrase_in_hotwords(
     stt: STTConfig, interaction: InteractionConfig
 ) -> str | None:
     """Return a warning if ``stt.hotwords`` would be accepted as
-    ``interaction.approval_phrase`` (the phrase sits in the list as
-    consecutive words), else None.
+    ``interaction.approval_phrase`` (exactly, or as a close STT-noise variant
+    the fuzzy matcher still approves), else None.
 
     Why (live UAT 2026-11-21, docs/field-notes/2026-11-21-hotword-list-is-
     recited-on-noise.md): on noise or unclear audio Whisper can emit the
@@ -927,18 +927,23 @@ def detect_approval_phrase_in_hotwords(
     does help recognition, and the fix (shuffle the phrase's words apart, or
     drop them) is the operator's call. Same posture as
     detect_working_dir_not_git.
+
+    Known gap: this tests the list exactly as written. A real recitation can
+    drop or change words, so a scattered list that stays quiet here is lower
+    risk, not safe. Re-run convobox-doctor after editing the list to confirm.
     """
     if not stt.hotwords or not interaction.approval_phrase:
         return None
     if ApprovalDetector(interaction.approval_phrase).check(stt.hotwords) != "approve":
         return None
     return (
-        "stt.hotwords would be accepted as interaction.approval_phrase: the "
-        "phrase appears in the list as consecutive words in order. On noise "
-        "Whisper can recite the hotwords list as the transcript, which would "
-        "then read as the approval phrase. Shuffle the list so the phrase's "
-        "words are apart and out of order, or remove them (see docs/"
-        "field-notes/2026-11-21-hotword-list-is-recited-on-noise.md)."
+        "stt.hotwords would be accepted as interaction.approval_phrase "
+        "(exactly, or as a close variant of it). On noise Whisper can recite "
+        "the hotwords list as the transcript, which would then read as the "
+        "approval phrase. Move the phrase's words well apart and out of "
+        "order, or remove them, then re-run convobox-doctor to confirm this "
+        "warning is gone (see docs/field-notes/"
+        "2026-11-21-hotword-list-is-recited-on-noise.md)."
     )
 
 

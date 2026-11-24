@@ -77,7 +77,8 @@ def test_punctuation_and_case_do_not_hide_the_phrase() -> None:
 
 
 def test_the_check_agrees_with_the_real_detector_on_the_same_text() -> None:
-    # The function must not be a second opinion that can drift: whatever it
+    # Pins the contract (it delegates to the real detector, so this guards
+    # against someone later swapping in their own matching): whatever it
     # flags, the real detector approves, and the reverse.
     for text in (IN_ORDER, SHUFFLED, "alpha bravo", "bravo delta alpha"):
         config = _cfg(text)
@@ -96,7 +97,8 @@ def test_doctor_reports_it_as_a_warning_not_a_failure() -> None:
 
 
 def test_doctor_is_quiet_for_a_shuffled_list() -> None:
-    assert doctor.static_config_findings(_cfg(SHUFFLED), []) == []
+    findings = doctor.static_config_findings(_cfg(SHUFFLED), [])
+    assert [f for f in findings if f.check == "stt.hotwords"] == []
 
 
 def test_settings_validation_warns_but_does_not_error() -> None:
