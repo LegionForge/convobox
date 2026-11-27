@@ -39,7 +39,7 @@
   <rect x="425" y="112" width="150" height="22" rx="11" class="pill"/>
   <text x="500" y="127" text-anchor="middle" class="pill-text">✅ Tested live</text>
   <text x="500" y="156" text-anchor="middle" class="note">🔒 Voice-gated approval</text>
-  <text x="500" y="172" text-anchor="middle" class="note">(new): PreToolUse hook, or</text>
+  <text x="500" y="172" text-anchor="middle" class="note">PreToolUse hook in approve mode;</text>
   <text x="500" y="188" text-anchor="middle" class="note">read-only plan mode by default.</text>
 
   <!-- Codex -->
@@ -48,9 +48,9 @@
   <text x="820" y="100" text-anchor="middle" class="subtitle">app-server (JSON-RPC)</text>
   <rect x="745" y="112" width="150" height="22" rx="11" class="pill"/>
   <text x="820" y="127" text-anchor="middle" class="pill-text">✅ Tested live</text>
-  <text x="820" y="156" text-anchor="middle" class="note">Real per-call approval</text>
-  <text x="820" y="172" text-anchor="middle" class="note">channel — auto-declined</text>
-  <text x="820" y="188" text-anchor="middle" class="note">today; voice-wiring not yet built.</text>
+  <text x="820" y="156" text-anchor="middle" class="note">approve mode refused at</text>
+  <text x="820" y="172" text-anchor="middle" class="note">startup (upstream codex-cli</text>
+  <text x="820" y="188" text-anchor="middle" class="note">gap); use plan or permissive.</text>
 
   <text x="500" y="310" text-anchor="middle" class="caption" font-size="12.5">Platform: Windows 11, macOS, and Linux all voice-validated live (see docs/field-notes/).</text>
 </svg>

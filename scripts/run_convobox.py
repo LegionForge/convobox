@@ -3395,7 +3395,7 @@ def main() -> None:
         "--permission-mode", default=None,
         choices=("plan", "approve", "permissive"),
         help="how much the coding agent may do; overrides backend.permission_mode. "
-        "plan=read-only (safe); approve=writes require voice approval (codex only); "
+        "plan=read-only (safe); approve=writes require voice approval (claude-code only; codex refuses it); "
         "permissive=writes without asking. See docs/DESIGN-backend-sandboxing.md.",
     )
     parser.add_argument(

@@ -156,3 +156,49 @@ package still imported without error (an empty namespace package), and
 `uv sync --extra aec` kept reporting success afterward. Nothing
 surfaced until `--web` actually tried to construct an `EchoCanceller`,
 hours later.*
+
+## 15. Import each module one way per file
+
+Import every module once, at the top of the file, in one style:
+
+- Default: `from x import name`.
+- If code needs the module object itself — to monkeypatch an attribute
+  (`monkeypatch.setattr(mod, "_CONST", ...)`), or to inspect it — import
+  the module once at the top (`import x as x_mod`) and reach the names
+  through it (`x_mod.Name`). Do not *also* `from x import Name` in the
+  same file.
+- No function-local `import x` for a module the file already imports.
+  Function-local imports (Ruff `PLC0415`, about 200 existing sites) are for
+  a stated reason (a heavy dependency loaded lazily, a circular import)
+  and new ones get a one-line comment saying so.
+- Patching: `monkeypatch.setattr(mod, "X", fake)` replaces the name in
+  `mod`'s own namespace, so code *inside* `mod` sees the fake however the
+  test imported anything. It does **not** reach another module that did
+  `from mod import X` (that module holds its own binding), so patch the
+  namespace where the name is looked up. Mixing import styles in a test
+  file does not by itself make a patch miss; this rule is about
+  consistency and the bot flag, not correctness.
+
+To check a file you touched, run the AST scan sketched here (modules
+imported both ways in one file):
+
+```python
+import ast, sys
+t = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+plain = {a.name for n in ast.walk(t) if isinstance(n, ast.Import) for a in n.names}
+frm = {n.module for n in ast.walk(t) if isinstance(n, ast.ImportFrom) and n.module and not n.level}
+print(sorted(plain & frm))
+```
+
+*Incident (PR #447, 2026-11-22): `tests/test_approval_plausibility.py`
+imported `convobox.safeword.detector` at the top (`from ... import
+SafewordDetector`) and again inside one test (`import ... as sw`) to
+inspect the module. The code-quality bot flagged it, and because `main`
+requires conversation resolution the thread blocked the merge until a
+fix commit landed. The same flag had been raised and fixed earlier on
+the same PR in `tests/test_approval_prompt_gate.py` (commit 785bca8, which
+used `inspect.getmodule(Class)` to get the module without a second
+import, a third acceptable fix). Existing code that predates this rule
+(seven test files with mixed imports and about 200 function-local imports
+as of 2026-11-22) is not rewritten wholesale; convert a file when you are
+already editing it.*

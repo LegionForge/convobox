@@ -101,7 +101,7 @@
   <!-- Row C: TTS + speakers -->
   <g class="box box-output"><rect x="300" y="352" width="200" height="62" rx="10"/></g>
   <text x="400" y="378" text-anchor="middle" class="label">TTS</text>
-  <text x="400" y="396" text-anchor="middle" class="sublabel">Piper, stripped of code/diffs</text>
+  <text x="400" y="396" text-anchor="middle" class="sublabel">Kokoro (Piper opt-in), prose only</text>
 
   <g class="box box-output"><rect x="540" y="352" width="200" height="62" rx="10"/></g>
   <text x="640" y="378" text-anchor="middle" class="label">Speakers</text>
