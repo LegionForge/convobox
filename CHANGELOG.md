@@ -7,6 +7,15 @@ minor versions carry feature and behavior changes.
 ## [Unreleased]
 
 ### Added
+- **Warning when `stt.hotwords` would be accepted as the approval phrase.**
+  On noise Whisper can recite the hotwords list as the transcript (live UAT
+  2026-11-21); if the approval phrase sits in the list as consecutive words, a
+  recited list reads as an approval. `convobox-doctor`, the settings screen and
+  startup now warn (not error) when the real `ApprovalDetector` would approve the
+  hotwords text itself, exactly or as a close variant. Fix: move the phrase's
+  words well apart and out of order, or drop them, then re-run the doctor.
+  Unit- and wiring-tested; not live-verified. See
+  `docs/field-notes/2026-11-21-hotword-list-is-recited-on-noise.md`.
 - **Spoken summaries of long replies (opt-in: `interaction.summarize_long_responses`).**
   A reply of `summary_min_words` (default 80) or more is summarized by one extra,
   stateless `claude -p` call (every tool disabled, no session, settings and MCP

@@ -904,6 +904,49 @@ def detect_working_dir_not_git(backend: BackendConfig) -> str | None:
     )
 
 
+def detect_approval_phrase_in_hotwords(
+    stt: STTConfig, interaction: InteractionConfig
+) -> str | None:
+    """Return a warning if ``stt.hotwords`` would be accepted as
+    ``interaction.approval_phrase`` (exactly, or as a close STT-noise variant
+    the fuzzy matcher still approves), else None.
+
+    Why (live UAT 2026-11-21, docs/field-notes/2026-11-21-hotword-list-is-
+    recited-on-noise.md): on noise or unclear audio Whisper can emit the
+    hotwords list itself as the transcript. If the approval phrase is in
+    that list, a recited list IS the approval phrase, and the approval check
+    would accept it from noise. A recitation-length guard on the approve path
+    cannot cover a phrase shorter than its minimum run, so this is the
+    earlier, cheaper defence: do not let the list contain the phrase.
+
+    Asks the real ApprovalDetector ("would this exact text, if transcribed,
+    approve?") rather than re-implementing its normalization and fuzzy
+    matching, so the two cannot drift.
+
+    A WARNING, not an error: existing configs may have it, listing the phrase
+    does help recognition, and the fix (shuffle the phrase's words apart, or
+    drop them) is the operator's call. Same posture as
+    detect_working_dir_not_git.
+
+    Known gap: this tests the list exactly as written. A real recitation can
+    drop or change words, so a scattered list that stays quiet here is lower
+    risk, not safe. Re-run convobox-doctor after editing the list to confirm.
+    """
+    if not stt.hotwords or not interaction.approval_phrase:
+        return None
+    if ApprovalDetector(interaction.approval_phrase).check(stt.hotwords) != "approve":
+        return None
+    return (
+        "stt.hotwords would be accepted as interaction.approval_phrase "
+        "(exactly, or as a close variant of it). On noise Whisper can recite "
+        "the hotwords list as the transcript, which would then read as the "
+        "approval phrase. Move the phrase's words well apart and out of "
+        "order, or remove them, then re-run convobox-doctor to confirm this "
+        "warning is gone (see docs/field-notes/"
+        "2026-11-21-hotword-list-is-recited-on-noise.md)."
+    )
+
+
 class WebConfig(BaseModel):
     # Off by default -- the web UI (docs/WEB-UI-ARCHITECTURE.md) is opt-in,
     # same posture as everything else security/privacy-relevant in this
