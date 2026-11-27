@@ -6,6 +6,45 @@ minor versions carry feature and behavior changes.
 
 ## [Unreleased]
 
+### Security
+- **A transcript that cannot be a person speaking no longer approves a tool call.**
+  Whisper hallucinates on short or noise-like audio, and with `stt.hotwords` set it
+  tends to hallucinate the hotwords themselves (live UAT 2026-11-21:
+  `'stop brake eject mayday listening'`, `'brake'` x14; reproduced offline with
+  synthetic noise). Because many setups put the approval phrase in `hotwords`, a
+  recitation of that list could contain it. An approve is now refused, left pending
+  exactly like an echo-ignored approve (timeout NOT extended), when the transcript
+  has more words than the audio's duration allows (over 7 words/s) or contains 4+
+  consecutive words in `hotwords` order. Approve only: stop and kill phrases are
+  untouched. Unit-tested and mutation-checked (six mutations, all caught). **Not
+  tested with a real voice.** Known gaps: a hallucination that produces the phrase
+  at a plausible pace outside the hotwords order still passes, and the speaking-rate
+  check uses the audio's duration, which may include padding (so it errs permissive).
+  Shuffling the hotwords so the approval words are not adjacent is still advisable.
+- **An approval phrase heard while ConvoBox's own audio is playing is no longer
+  accepted.** The approval gate sat before the overlap and echo gates (so a prompt
+  answer isn't mistaken for echo), which meant anything the mic heard that matched
+  the phrase approved a tool call, including the speakers. An approve is now
+  ignored, with the request left pending and its timeout NOT extended, when audio
+  was playing, the utterance overlapped playback plus the grace window, or its words
+  match what ConvoBox said in the last 8 seconds (at any length: one-word phrases
+  too). Deny, explain and discuss are unaffected (refusing is the safe direction),
+  and the web Approve button is unchanged. **What you will notice:** say the phrase
+  after the announcement has finished, with roughly a second of margin; if it is
+  ignored, the log and TUI say so, so wait a few seconds and say it again. Opus
+  review found and this fixes: a 30-second text-echo memory that could block every
+  genuine attempt until the request timed out, one- and two-word phrases skipping
+  the echo check, and loop wiring that most mutations survived (now one named
+  function plus an AST structure test). Unit-tested and mutation-checked (ten
+  mutations, all caught); the live mic loop has no behavioral test harness. **Not
+  tested with a real voice or speakers.** Known gaps: a TV or another person saying
+  the phrase while nothing is playing still approves (the phrase is a shared secret
+  heard by an open mic), audio ConvoBox did not play (an agent-run `say`, other
+  apps) is not covered, a voice-only operator gets no spoken feedback when an
+  approve is ignored, and the overlap estimate is made at transcript arrival, so a
+  long speech-to-text backlog can understate an overlap (the 8s text check backstops
+  it).
+
 ### Added
 - **Warning when `stt.hotwords` would be accepted as the approval phrase.**
   On noise Whisper can recite the hotwords list as the transcript (live UAT

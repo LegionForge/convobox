@@ -87,6 +87,7 @@ from convobox.config import (
     resolve_config_path,
     write_aec_estimate,
 )
+from convobox.confirmword.plausibility import implausible_approval_reason
 from convobox.interrupt_presets import resolve_preset
 from convobox.listening_pause import PauseListeningDetector
 from convobox.orchestrator.orchestrator import Orchestrator, strip_code_for_speech
@@ -752,8 +753,8 @@ class ApprovalPromptGate:
         return None
 
     def observe_transcript(
-        self, transcript: str, now: float
-    ) -> Literal["approve", "deny", "explain", "discuss"] | None:
+        self, transcript: str, now: float, heard_cleanly: bool = True
+    ) -> Literal["approve", "deny", "explain", "discuss", "ignored"] | None:
         """Call for every utterance while is_waiting (caller checks
         is_waiting first). "approve"/"deny" end the wait. "explain"/"discuss"
         both keep waiting and reset the clock (see class docstring, point
@@ -766,6 +767,16 @@ class ApprovalPromptGate:
         """
         outcome = self._detector.check(transcript)
         if outcome == "approve":
+            if not heard_cleanly:
+                # The approval phrase arrived while ConvoBox's own audio was
+                # playing or still echoing (or matches what it just said), so
+                # it may be the speakers, not the operator. Approval is the
+                # one outcome that must never rest on audio like that: the
+                # request stays pending, and the wait clock is NOT reset (an
+                # echo must not be able to extend the window either). Deny,
+                # explain and discuss need no such check -- refusing is
+                # always the safe direction.
+                return "ignored"
             self._waiting_since = None
             return "approve"
         if outcome == "deny":
@@ -894,6 +905,25 @@ class SpokenEchoFilter:
         tokens = _norm_tokens(text)
         if tokens:
             self._spoken.append((time.monotonic() if now is None else now, tokens))
+
+    def matches_recent(
+        self, transcript: str, within_s: float, now: float | None = None
+    ) -> bool:
+        """Do this transcript's words match what ConvoBox said in the last
+        ``within_s`` seconds? Unlike is_echo(), a short transcript counts (no
+        MIN_TOKENS floor) and the window is narrow: used to refuse an
+        *approve*, where wrongly refusing costs a repeat after a few seconds
+        but wrongly accepting grants a tool call."""
+        tokens = _norm_tokens(transcript)
+        if not tokens:
+            return False
+        now = time.monotonic() if now is None else now
+        for spoken_at, spoken_tokens in self._spoken:
+            if now - spoken_at > within_s:
+                continue
+            if len(tokens & spoken_tokens) / len(tokens) >= self.OVERLAP_THRESHOLD:
+                return True
+        return False
 
     def is_echo(self, transcript: str, now: float | None = None) -> bool:
         tokens = _norm_tokens(transcript)
@@ -1066,6 +1096,79 @@ def utterance_overlapped_playback(
     """
     capture_started_at = now - stt_latency_ms / 1000 - min_silence_ms / 1000 - duration_s
     return capture_started_at < playback_ended_at + grace_s
+
+
+# How far back ConvoBox's own speech can be the source of an approval-phrase
+# match. Wider than the reverb tail because speech-to-text can lag behind the
+# audio (the overlap estimate is made at transcript arrival), narrower than
+# SpokenEchoFilter.MAX_AGE_S (30s) so ordinary earlier speech cannot block a
+# genuine approval for the whole approval window.
+APPROVAL_ECHO_WINDOW_S = 8.0
+
+
+def approval_heard_cleanly(
+    transcript: str,
+    *,
+    player_is_playing: bool,
+    overlapped_playback: bool,
+    echo_filter: SpokenEchoFilter,
+    now: float | None = None,
+) -> bool:
+    """May this transcript be trusted as the OPERATOR's voice, for approval?
+
+    False when audio was playing, the utterance overlapped playback (plus the
+    grace window), or its words match what ConvoBox said in the last
+    APPROVAL_ECHO_WINDOW_S seconds (at any length: a one-word phrase is
+    checked too). Used only to refuse an *approve*; the approval gate sits
+    before the general overlap and echo gates so a prompt answer is not
+    mistaken for echo, which is right for deny/explain but not for approve:
+    the machine's own speaker must not be able to grant a tool call.
+    """
+    return not (
+        player_is_playing
+        or overlapped_playback
+        or echo_filter.matches_recent(transcript, APPROVAL_ECHO_WINDOW_S, now)
+    )
+
+
+def approval_utterance_heard_cleanly(
+    text: str,
+    *,
+    result: object,
+    player: object,
+    echo_filter: SpokenEchoFilter,
+    min_silence_ms: int,
+    grace_s: float,
+    hotwords: str | None = None,
+    now: float | None = None,
+) -> bool:
+    """The mic loop's single entry point for the audio-trust check on a
+    spoken approval: derives playback overlap from the transcription result
+    and the player, then applies approval_heard_cleanly -- and refuses a
+    transcript that cannot be a person speaking (words faster than speech, or
+    a recitation of the STT hotwords; see convobox.confirmword.plausibility).
+    Approve only: the safeword path never goes through here."""
+    now = time.monotonic() if now is None else now
+    if implausible_approval_reason(
+        text,
+        result.duration_s,  # type: ignore[attr-defined]
+        hotwords,
+    ):
+        return False
+    return approval_heard_cleanly(
+        text,
+        player_is_playing=player.is_playing(),  # type: ignore[attr-defined]
+        overlapped_playback=utterance_overlapped_playback(
+            now=now,
+            duration_s=result.duration_s,  # type: ignore[attr-defined]
+            stt_latency_ms=result.latency_ms,  # type: ignore[attr-defined]
+            min_silence_ms=min_silence_ms,
+            playback_ended_at=player.playback_ended_at,  # type: ignore[attr-defined]
+            grace_s=grace_s,
+        ),
+        echo_filter=echo_filter,
+        now=now,
+    )
 
 
 def _resolve_device(cli_device: str | None, config_device: str | None) -> str | int | None:
@@ -2936,7 +3039,39 @@ async def run(args: argparse.Namespace) -> None:
                     # 0s delay since nothing is resuming here to self-barge-in
                     # on.
                     if approval_gate is not None and approval_gate.is_waiting:
-                        approval_outcome = approval_gate.observe_transcript(text, time.monotonic())
+                        approval_outcome = approval_gate.observe_transcript(
+                            text,
+                            time.monotonic(),
+                            heard_cleanly=approval_utterance_heard_cleanly(
+                                text,
+                                result=result,
+                                player=player,
+                                echo_filter=echo_filter,
+                                min_silence_ms=config.vad.min_silence_ms,
+                                grace_s=next_overlap_grace_s,
+                                hotwords=config.stt.hotwords,
+                            ),
+                        )
+                        if approval_outcome == "ignored":
+                            why = implausible_approval_reason(
+                                text, result.duration_s, config.stt.hotwords
+                            )
+                            log.warning(
+                                "approval phrase NOT accepted: %s -- request still pending; "
+                                "wait a few seconds and say it again: %r",
+                                why
+                                or "heard while ConvoBox audio was playing or just after, "
+                                "or it matches what ConvoBox just said",
+                                text,
+                            )
+                            if tui_state is not None:
+                                tui_state.add_turn(
+                                    "system",
+                                    "approval phrase ignored: heard during or just after "
+                                    "audio, or it matches what was just said (it could be an "
+                                    "echo). Wait a few seconds and say it again.",
+                                )
+                            continue
                         if approval_outcome == "explain":
                             explanation = approval_gate.pending_explanation or (
                                 "No further detail is available for this request."

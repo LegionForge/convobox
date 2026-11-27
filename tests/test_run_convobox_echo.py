@@ -12,6 +12,8 @@ from scripts.run_convobox import (
     EchoAwarePlayer,
     EchoTailGuard,
     MutePlayer,
+    approval_heard_cleanly,
+    approval_utterance_heard_cleanly,
     token_overlap_ratio,
     utterance_overlapped_playback,
 )
@@ -599,3 +601,136 @@ def test_tail_guard_tail_is_capped() -> None:
     now = 1000.0
     g.set_echo_profile(attenuation_db=0.0, ceiling_db=30.0, delay_s=10.0, now=now)
     assert g._tail_len <= EchoTailGuard.CAP_S + 1e-9
+
+
+# --- approval_heard_cleanly: the machine's own speaker must not grant a tool call ---
+
+
+def _heard(transcript: str = "juliette papa charlie", **kw: object) -> bool:
+    args: dict[str, object] = {
+        "player_is_playing": False, "overlapped_playback": False,
+        "echo_filter": SpokenEchoFilter(),
+    }
+    args.update(kw)
+    return approval_heard_cleanly(transcript, **args)  # type: ignore[arg-type]
+
+
+def test_approval_is_trusted_when_nothing_was_playing() -> None:
+    assert _heard() is True
+
+
+def test_approval_is_not_trusted_while_audio_is_playing() -> None:
+    assert _heard(player_is_playing=True) is False
+
+
+def test_approval_is_not_trusted_when_the_utterance_overlapped_playback() -> None:
+    assert _heard(overlapped_playback=True) is False
+
+
+def test_approval_is_not_trusted_when_it_matches_recent_speech() -> None:
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("the build finished and juliette papa charlie was mentioned")
+    assert _heard("juliette papa charlie", echo_filter=echo_filter) is False
+
+
+def test_approval_is_trusted_when_recent_speech_was_unrelated() -> None:
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("I updated the readme and ran the tests")
+    assert _heard("juliette papa charlie", echo_filter=echo_filter) is True
+
+
+def test_phrase_over_playback_is_ignored_then_a_clean_repeat_approves() -> None:
+    # The whole sequence the operator sees: the phrase lands on top of audio
+    # (could be the speakers) and is ignored, the request stays pending, and
+    # saying it again once it is quiet approves.
+    from convobox.approval import ApprovalDetector
+    from scripts.run_convobox import ApprovalPromptGate
+
+    gate = ApprovalPromptGate(ApprovalDetector(approval_phrase="juliette papa charlie"), 30.0)
+    gate.start_waiting(now=0.0)
+    echo_filter = SpokenEchoFilter()
+
+    over_audio = approval_heard_cleanly(
+        "juliette papa charlie", player_is_playing=True,
+        overlapped_playback=False, echo_filter=echo_filter,
+    )
+    assert gate.observe_transcript("juliette papa charlie", now=2.0, heard_cleanly=over_audio) == "ignored"
+    assert gate.is_waiting is True
+
+    quiet = approval_heard_cleanly(
+        "juliette papa charlie", player_is_playing=False,
+        overlapped_playback=False, echo_filter=echo_filter,
+    )
+    assert gate.observe_transcript("juliette papa charlie", now=6.0, heard_cleanly=quiet) == "approve"
+    assert gate.is_waiting is False
+
+
+# --- the narrow recent-speech window (review of #447) ---
+
+
+def test_a_one_word_phrase_is_refused_when_it_was_just_spoken() -> None:
+    # Short phrases skip SpokenEchoFilter.is_echo (MIN_TOKENS), so they used to
+    # be protected by timing alone.
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("Run: touch nightingale", now=100.0)
+    assert approval_heard_cleanly(
+        "nightingale", player_is_playing=False, overlapped_playback=False,
+        echo_filter=echo_filter, now=103.0,
+    ) is False
+
+
+def test_earlier_speech_does_not_block_a_genuine_approval_for_the_whole_window() -> None:
+    # is_echo remembers 30s; with a 30s approval timeout an agent sentence
+    # sharing words with the phrase could block every attempt. 8s cannot.
+    echo_filter = SpokenEchoFilter()
+    echo_filter.note_spoken("I will run the tests now and then deploy it", now=100.0)
+    assert approval_heard_cleanly(
+        "run the tests", player_is_playing=False, overlapped_playback=False,
+        echo_filter=echo_filter, now=105.0,
+    ) is False
+    assert approval_heard_cleanly(
+        "run the tests", player_is_playing=False, overlapped_playback=False,
+        echo_filter=echo_filter, now=112.0,
+    ) is True
+
+
+class _Player:
+    def __init__(self, playing: bool = False, ended_at: float = 0.0) -> None:
+        self._playing = playing
+        self.playback_ended_at = ended_at
+
+    def is_playing(self) -> bool:
+        return self._playing
+
+
+def _result(duration_s: float = 1.0, latency_ms: float = 300.0) -> SimpleNamespace:
+    return SimpleNamespace(duration_s=duration_s, latency_ms=latency_ms)
+
+
+def _utterance(player: _Player, now: float = 200.0, **kw: object) -> bool:
+    args: dict[str, object] = {
+        "result": _result(), "player": player, "echo_filter": SpokenEchoFilter(),
+        "min_silence_ms": 500, "grace_s": 0.3, "now": now,
+    }
+    args.update(kw)
+    return approval_utterance_heard_cleanly("juliette papa charlie", **args)  # type: ignore[arg-type]
+
+
+def test_utterance_check_refuses_while_the_player_is_playing() -> None:
+    assert _utterance(_Player(playing=True, ended_at=0.0)) is False
+
+
+def test_utterance_check_refuses_an_utterance_that_started_before_playback_ended() -> None:
+    # Capture started at now - 0.3 - 0.5 - 1.0 = 198.2, before playback ended at 199.
+    assert _utterance(_Player(ended_at=199.0)) is False
+
+
+def test_utterance_check_trusts_a_clearly_later_utterance() -> None:
+    assert _utterance(_Player(ended_at=150.0)) is True
+
+
+def test_utterance_check_uses_the_grace_window_it_is_given() -> None:
+    # Capture started at 198.2; playback ended 197.9 so grace 0.3 covers it.
+    player = _Player(ended_at=197.9)
+    assert _utterance(player, grace_s=0.3) is False
+    assert _utterance(player, grace_s=0.0) is True
