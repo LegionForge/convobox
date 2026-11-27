@@ -171,6 +171,25 @@ _APPROVAL_DENY_PAYLOADS: dict[str, dict[str, Any]] = {
     "execCommandApproval": {"decision": "denied"},
     "applyPatchApproval": {"decision": "denied"},
     "item/permissions/requestApproval": {"permissions": {}},
+    # MCP elicitation (e.g. an MCP server asking for access to an app).
+    # Response schema (codex-cli 0.163.0 `generate-json-schema`,
+    # McpServerElicitationRequestResponse): `action` is REQUIRED, one of
+    # accept|decline|cancel. Before this entry the generic fallback below
+    # replied {"decision": "decline"} -- no `action` at all, so the reply
+    # was schema-invalid and the user was never prompted.
+    "mcpServer/elicitation/request": {"action": "decline"},
+}
+
+# What an operator "approve" sends, per method. Absent = {"decision":
+# "accept"} (the two current command/file approval methods).
+#
+# For elicitation, accept is ONLY ever offered for a permission-only form
+# (empty requestedSchema.properties, see _elicitation_needs_answers): the
+# protocol carries the approval in `action`, with an empty answer object.
+# Schema-verified against codex-cli 0.163.0 only -- NOT live-verified
+# against a real MCP server.
+_APPROVAL_ACCEPT_PAYLOADS: dict[str, dict[str, Any]] = {
+    "mcpServer/elicitation/request": {"action": "accept", "content": {}},
 }
 
 # These are the two current app-server approval methods whose approve and
@@ -182,8 +201,28 @@ _INTERACTIVE_APPROVAL_METHODS = frozenset(
     {
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
+        # Interactive only for permission-only forms -- see
+        # _elicitation_needs_answers; a form that needs typed answers can't
+        # be answered by a yes/no and stays declined.
+        "mcpServer/elicitation/request",
     }
 )
+
+
+def _elicitation_needs_answers(params: object) -> bool:
+    """True unless this is provably a permission-only form-mode request.
+
+    Fail-closed: anything unexpected (URL mode, missing/odd schema, any
+    declared property) counts as "needs answers", because ConvoBox has no
+    way to collect structured input and must never invent it.
+    """
+    if not isinstance(params, dict) or params.get("mode") != "form":
+        return True
+    schema = params.get("requestedSchema")
+    if not isinstance(schema, dict):
+        return True
+    properties = schema.get("properties")
+    return not (isinstance(properties, dict) and not properties)
 
 _EOF = object()
 
@@ -600,7 +639,11 @@ class CodexAdapter(BackendAdapter):
             return False
         request_id, method = pending
         deny_payload = _APPROVAL_DENY_PAYLOADS[method]
-        payload = {"decision": "accept"} if approved else deny_payload
+        payload = (
+            _APPROVAL_ACCEPT_PAYLOADS.get(method, {"decision": "accept"})
+            if approved
+            else deny_payload
+        )
         await self._write({"jsonrpc": "2.0", "id": request_id, "result": payload})
         self._pending_approval = None
         return True
@@ -939,7 +982,14 @@ class CodexAdapter(BackendAdapter):
         method = msg.get("method", "")
         payload = _APPROVAL_DENY_PAYLOADS.get(method)
         if payload is not None:
-            if method in _INTERACTIVE_APPROVAL_METHODS and self._interactive_approvals:
+            if (
+                method in _INTERACTIVE_APPROVAL_METHODS
+                and self._interactive_approvals
+                and not (
+                    method == "mcpServer/elicitation/request"
+                    and _elicitation_needs_answers(msg.get("params"))
+                )
+            ):
                 request_id = msg.get("id")
                 if not isinstance(request_id, int):
                     logger.warning("codex approval request had a non-integer id; declining")
@@ -1122,6 +1172,15 @@ class _RpcError(RuntimeError):
 def _describe_approval_request(method: str, params: object) -> str:
     """Render the action Codex asked to perform for the local approval UI."""
     data = params if isinstance(params, dict) else {}
+    if method == "mcpServer/elicitation/request":
+        lines = ["APPROVAL REQUIRED — MCP SERVER REQUEST"]
+        message = data.get("message")
+        server = data.get("serverName")
+        if isinstance(message, str) and message.strip():
+            lines.extend(("", f"Request: {message}"))
+        if isinstance(server, str) and server.strip():
+            lines.extend(("", f"MCP server: {server}"))
+        return "\n".join(lines)
     label = (
         "COMMAND EXECUTION"
         if method == "item/commandExecution/requestApproval"

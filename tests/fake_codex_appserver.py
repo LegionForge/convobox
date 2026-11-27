@@ -60,6 +60,11 @@ Turn behavior is scripted by the prompt text:
   contains "needs legacy exec approval" -> same, but the legacy
                             execCommandApproval method name
   contains "needs legacy patch approval" -> same, but applyPatchApproval
+  contains "needs mcp permission elicitation" / "needs mcp form elicitation"
+                          -> mcpServer/elicitation/request (permission-only
+                            form with no properties / form that needs typed
+                            answers); response is {"action", "content"},
+                            echoed back as "<action> content=<content>"
   contains "needs permissions approval" -> item/permissions/requestApproval
                             (different response shape -- no "decision" key,
                             a "permissions" object instead); echoes that back
@@ -219,6 +224,29 @@ def main() -> None:
                     "params": {"threadId": THREAD_ID, "turnId": turn_id},
                 })
                 continue
+            if "needs mcp permission elicitation" in text or "needs mcp form elicitation" in text:
+                # MCP elicitation (codex-cli 0.163.0 mcpServer/elicitation/
+                # request): permission-only form (no properties) vs a form
+                # that needs typed answers. Response is {"action": ...}.
+                pending_approval_turn = turn_id
+                approval_req_id += 1
+                properties = (
+                    {"name": {"type": "string"}} if "needs mcp form elicitation" in text else {}
+                )
+                emit({
+                    "jsonrpc": "2.0",
+                    "id": approval_req_id,
+                    "method": "mcpServer/elicitation/request",
+                    "params": {
+                        "serverName": "fake-mcp",
+                        "threadId": THREAD_ID,
+                        "turnId": turn_id,
+                        "mode": "form",
+                        "message": "Allow Fake App access?",
+                        "requestedSchema": {"type": "object", "properties": properties},
+                    },
+                })
+                continue
             if "needs permissions approval" in text:
                 pending_approval_turn = turn_id
                 approval_req_id += 1
@@ -352,6 +380,9 @@ def main() -> None:
             result = msg.get("result") or {}
             if "decision" in result:
                 answer = result["decision"]
+            elif "action" in result:
+                # MCP elicitation: echo the action and the answer object.
+                answer = f"{result['action']} content={result.get('content')!r}"
             else:
                 answer = result.get("permissions")
             if pending_approval_turn is not None:

@@ -729,6 +729,93 @@ async def test_permissions_approval_grants_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_elicitation_without_interactive_mode_declines_with_required_action() -> None:
+    # Bug found 2026-10-16 (JP's Mac control logs): mcpServer/elicitation/
+    # request fell into the generic fallback, whose {"decision": "decline"}
+    # has no `action` -- schema-invalid against codex-cli 0.163.0's
+    # McpServerElicitationRequestResponse (action REQUIRED).
+    adapter = _adapter()
+    try:
+        await adapter.send_text("this needs mcp permission elicitation")
+        events = await _collect(adapter, 2)
+        assert events[0].content == "approval decision was: decline content=None"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_interactive_mcp_permission_elicitation_waits_and_can_approve() -> None:
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs mcp permission elicitation")
+        event = (await _collect(adapter, 1))[0]
+        assert event.type == BackendEventType.APPROVAL_REQUEST
+        assert event.content is not None
+        assert "MCP SERVER REQUEST" in event.content
+        assert "Allow Fake App access?" in event.content
+        assert "{" not in event.content  # no raw JSON in the operator-facing text
+        assert adapter.is_busy() is True
+        assert await adapter.resolve_pending_approval(True) is True
+        events = await _collect(adapter, 2)
+        assert events[0].content == "approval decision was: accept content={}"
+        assert events[1].type == BackendEventType.DONE
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_interactive_mcp_permission_elicitation_can_be_denied() -> None:
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs mcp permission elicitation")
+        assert (await _collect(adapter, 1))[0].type == BackendEventType.APPROVAL_REQUEST
+        assert await adapter.resolve_pending_approval(False) is True
+        events = await _collect(adapter, 2)
+        assert events[0].content == "approval decision was: decline content=None"
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.asyncio
+async def test_mcp_elicitation_needing_typed_answers_is_declined_not_surfaced() -> None:
+    # A yes/no cannot supply structured answers, and ConvoBox must never
+    # invent them: such a form stays fail-closed even in interactive mode.
+    adapter = _adapter()
+    try:
+        adapter.set_interactive_approvals(True)
+        await adapter.send_text("this needs mcp form elicitation")
+        events = await _collect(adapter, 2)
+        assert events[0].type == BackendEventType.TEXT
+        assert events[0].content == "approval decision was: decline content=None"
+        assert await adapter.resolve_pending_approval(True) is False
+    finally:
+        await _shutdown(adapter)
+
+
+@pytest.mark.parametrize(
+    ("params", "needs_answers"),
+    [
+        ({"mode": "form", "requestedSchema": {"type": "object", "properties": {}}}, False),
+        ({"mode": "form", "requestedSchema": {"type": "object", "properties": {"a": {}}}}, True),
+        ({"mode": "url", "url": "https://example.com", "elicitationId": "x"}, True),
+        ({"mode": "form"}, True),
+        ({"mode": "form", "requestedSchema": True}, True),
+        ({"mode": "form", "requestedSchema": {"type": "object"}}, True),
+        ({"requestedSchema": {"type": "object", "properties": {}}}, True),
+        (None, True),
+        ("garbage", True),
+    ],
+)
+def test_elicitation_needs_answers_is_fail_closed(params, needs_answers) -> None:
+    import convobox.adapters.codex as mod
+
+    assert mod._elicitation_needs_answers(params) is needs_answers
+
+
+@pytest.mark.asyncio
 async def test_non_integer_approval_id_is_declined_not_operator_facing() -> None:
     # _answer_server_request's defensive guard: an approval request whose
     # id isn't an int can't be answered later (resolve_pending_approval
