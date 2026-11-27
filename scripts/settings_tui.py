@@ -56,6 +56,7 @@ from convobox.config import (
     TTSConfig,
     TTSProfileConfig,
     detect_acp_approve_unsupported,
+    detect_approval_phrase_in_hotwords,
     detect_claude_code_approval_gap,
     detect_permission_conflict,
     detect_working_dir_not_git,
@@ -1264,6 +1265,9 @@ def validate_config(config: AppConfig) -> ValidationReport:
     not_git = detect_working_dir_not_git(config.backend)
     if not_git is not None:
         report.warnings.append(not_git)
+    hotword_phrase = detect_approval_phrase_in_hotwords(config.stt, config.interaction)
+    if hotword_phrase is not None:
+        report.warnings.append(hotword_phrase)
     if (
         config.backend.name == "opencode"
         and config.backend.model is not None
