@@ -647,10 +647,10 @@ class BackendConfig(BaseModel):
     #   plan       - read-only; the agent investigates but cannot write or
     #                run commands (the safe default).
     #   approve    - the agent may act, but every write/command requires
-    #                voice approval (the approval_phrase gate). Real on both
-    #                Codex (its app-server has a native per-call approval
-    #                channel this adapter answers directly) and Claude Code
-    #                (headless mode has no NATIVE per-call channel, so this
+    #                voice approval (the approval_phrase gate). Claude Code
+    #                only: Codex refuses to start under approve (no codex-cli
+    #                approval_policy both starts and escalates a write; see
+    #                docs/KNOWN-ISSUES.md). Claude Code (headless mode has no NATIVE per-call channel, so this
     #                adapter builds one: a PreToolUse hook + a local IPC
     #                channel -- see claude_code.py's module docstring for
     #                the mechanism and its live verification).
