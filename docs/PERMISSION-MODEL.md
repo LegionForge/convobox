@@ -36,7 +36,7 @@ it is spelled out here.
 | Mode | Claude Code | Codex | OpenCode |
 |---|---|---|---|
 | `plan` | `--permission-mode plan` | `-c approval_policy=never`<br>`-c sandbox_mode=read-only` | *not applicable* |
-| `approve` | `acceptEdits` **+** a ConvoBox-built `PreToolUse` hook and local IPC channel | `-c approval_policy=untrusted`<br>`-c sandbox_mode=workspace-write` | *not applicable* |
+| `approve` | `acceptEdits` **+** a ConvoBox-built `PreToolUse` hook and local IPC channel | **refused at startup** (upstream codex-cli gap; see below) | *not applicable* |
 | `permissive` | `bypassPermissions` | `-c approval_policy=never`<br>`-c sandbox_mode=workspace-write` | *not applicable* |
 
 **Claude Code** has no native per-tool-call approval channel in headless
@@ -48,8 +48,14 @@ and its live verification.
 **Codex** injects its overrides as `-c key=value` at spawn, which take
 precedence over the user's own `~/.codex/config.toml` — so the posture is
 ConvoBox's decision, not inherited from the user's Codex configuration. Codex
-does have a real native approval channel (`execCommandApproval` /
-`applyPatchApproval`), which `approve` mode drives.
+**does not support `approve` mode today**: live-verified 2026-09-02 against
+codex-cli 0.152.1 that no `approval_policy` value both starts successfully and
+escalates a write to an approval. `untrusted` is rejected at spawn, and
+`on-request`/`on-failure` silently let the write through. ConvoBox therefore
+refuses to start with `approve` on Codex (a clear startup error, not a silent
+bypass). Use `plan` (read-only) or `permissive`. See
+[KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the full writeup and to check whether
+it has since been resolved.
 
 **OpenCode has no tool-call approval concept at all.** Its permissions are
 fixed by wherever `opencode serve` was launched, and ConvoBox does not pass

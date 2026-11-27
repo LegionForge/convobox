@@ -135,7 +135,7 @@ in-browser editor (same validate/save/backup contract as
 Quit button. See [docs/WEB-UI-USAGE.md](docs/WEB-UI-USAGE.md) for the
 full picture, including its no-auth loopback-only security model.
 
-**Still under construction as of 0.4.0.** The core flows above are
+**Still under construction as of 0.5.1.** The core flows above are
 live-verified and working, but this is the newest, least-hardened part
 of ConvoBox — expect rough edges (e.g. the artifact pane's opencode/codex
 support isn't wired up yet) while it gets the same live-UAT scrutiny the
@@ -148,7 +148,7 @@ voice pipeline has already been through. See
 
 **Supported today:**
 
-<img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, new voice-gated approval), Codex (app-server JSON-RPC, tested live, real approval channel not yet voice-wired). Windows 11, macOS, and Linux all voice-validated live (see docs/field-notes/).">
+<img src="docs/media/backends.svg" alt="Supported CLI agents at a glance: OpenCode (HTTP+SSE, tested live, no tool-call approval concept), Claude Code (stream-json subprocess, tested live, voice-gated approval in approve mode), Codex (app-server JSON-RPC, tested live, approve mode refused at startup: upstream codex-cli gap). Windows 11, macOS, and Linux all voice-validated live (see docs/field-notes/).">
 
 | Component | Status | Detail |
 |---|---|---|
@@ -181,7 +181,7 @@ log.
 `permission_mode: plan` — read, explore, and explain only, no edits and no
 commands — because a headless agent has no way to answer a permission
 prompt at runtime. `approve` lets it act but gates each risky call on a
-spoken approval phrase. `permissive` removes every check, so only use it in
+spoken approval phrase (Claude Code only: Codex and ACP refuse `approve` at startup). `permissive` removes every check, so only use it in
 a context you'd trust an unsupervised agent with: voice input can be
 misheard. Full per-backend behavior, and the two gotchas that bite people,
 in [docs/PERMISSION-MODEL.md](docs/PERMISSION-MODEL.md).
@@ -279,10 +279,10 @@ coding-agent CLI already fits into how you work.
 
 ## Status
 
-**0.4.0 — the first packaged release, on PyPI as `legionforge-convobox`.**
+**0.5.1 — current release, on PyPI as `legionforge-convobox`** (0.4.0 was the first packaged release; 0.5.0 was tagged but never published).
 All three backend adapters run the full voice loop including
 tool use; the support matrix above is the current picture of what's
-validated where. Linux parity and remaining macOS validation are on the
+validated where. Remaining Linux and macOS validation items are on the
 roadmap ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 The voice pipeline is the hardened part. The web UI is the newest and

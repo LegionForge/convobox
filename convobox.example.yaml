@@ -215,7 +215,8 @@ interaction:
                           # -- no extra files needed. Pick from the TUI/web
                           # Settings picker instead of typing this by hand.
   # approval_phrase: cobalt night and gale
-                          # Opt-in Codex command/file approvals. Use a
+                          # Opt-in voice approval for Claude Code (permission_mode: approve;
+                          # Codex refuses approve mode). Use a
                           # distinctive multi-word phrase: plain "yes" is
                           # deliberately rejected. Say "no" to deny; silence
                           # after approval_timeout_s (30s by default) denies.
